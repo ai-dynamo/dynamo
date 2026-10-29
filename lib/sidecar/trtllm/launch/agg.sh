@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment (default: 0)"
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
-            echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 50051)"
+            echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 30001)"
             echo "  TRTLLM_CONTEXT_LENGTH   Model context length, applied to both the engine and the"
             echo "                          sidecar (default: 4096; unset when --max_seq_len is given)"
             exit 0
@@ -75,7 +75,7 @@ trtllm_exit_trap() {
 trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
-TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
+TRTLLM_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_GRPC_PORT:-30001}")
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a

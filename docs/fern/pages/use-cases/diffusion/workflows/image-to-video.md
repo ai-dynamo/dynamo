@@ -21,6 +21,10 @@ Image-to-video (I2V) uses the same `/v1/videos` endpoint as [text-to-video](text
 | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | Default model |
 | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | Dual-expert MoE ([model card](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers)) |
 
+For experimental Cosmos3 Nano reference conditioning, use the
+[Cosmos3 example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md),
+which specifies its model revision, runtime requirements, and guardrail settings.
+
 To run a non-default model, pass `--model` to the launch script:
 
 ```bash
@@ -58,9 +62,12 @@ curl -s http://localhost:8000/v1/videos \
 ```
 
 The `input_reference` field accepts:
+
 - **HTTP/HTTPS URL**: `"https://example.com/image.png"`
 - **Base64 data URI**: `"data:image/png;base64,iVBORw0KGgo..."`
-- **Local file path**: `"/path/to/image.png"` or `"file:///path/to/image.png"`
+
+Worker-local paths and `file://` URLs are rejected. To use a client-local image,
+encode it as a data URI before sending the request, as the Cosmos3 example does.
 
 ## Request Parameters (`nvext`)
 

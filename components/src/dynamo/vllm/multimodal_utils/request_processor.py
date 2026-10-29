@@ -300,6 +300,44 @@ class MissingMultimodalHandoffError(ValueError):
     """Prefill did not provide metadata required by multimodal decode."""
 
 
+class MultimodalTransferError(RuntimeError):
+    """Processed multimodal inputs could not reach the selected worker."""
+
+    def __init__(
+        self,
+        transport: str,
+        detail: str,
+        *,
+        guidance: str | None = None,
+    ) -> None:
+        self.transport = transport
+        if guidance is None and transport == "shm":
+            guidance = (
+                "The frontend and worker must share /dev/shm when "
+                "DYNAMO_MM_TRANSFER=shm; use DYNAMO_MM_TRANSFER=nixl for "
+                "separate pods or nodes."
+            )
+        elif guidance is None:
+            guidance = "Verify NIXL connectivity between the frontend and worker."
+        super().__init__(
+            f"Multimodal {transport.upper()} transfer failed: {detail}. {guidance}"
+        )
+
+
+def _advertised_mm_transfer(
+    request: dict[str, Any],
+) -> Optional[tuple[dict[str, Any], str, Any]]:
+    """Return the first non-null processed-input transfer advertised."""
+    extra_args = request.get("extra_args") or {}
+    shm_metadata = extra_args.get("mm_kwargs_shm")
+    if shm_metadata is not None:
+        return extra_args, "shm", shm_metadata
+    nixl_metadata = extra_args.get("mm_kwargs_nixl")
+    if nixl_metadata is not None:
+        return extra_args, "nixl", nixl_metadata
+    return None
+
+
 class VllmMultimodalRequestProcessor:
     """Translate Dynamo multimodal requests into vLLM engine inputs."""
 
@@ -688,29 +726,37 @@ class VllmMultimodalRequestProcessor:
     async def try_receive_mm_kwargs(
         self, request: dict[str, Any]
     ) -> Optional[dict[str, Any]]:
-        """Build a pre-rendered vLLM input from frontend SHM/NIXL metadata."""
-        extra_args = request.get("extra_args") or {}
-        shm_meta_raw = extra_args.get("mm_kwargs_shm")
-        nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
+        """Build a pre-rendered vLLM input from frontend SHM/NIXL metadata.
+
+        Returns ``None`` only when the request has no transfer metadata. Once a
+        transfer is advertised, failing closed prevents a multimodal request
+        from silently reaching the engine as text-only.
+        """
+        advertised_transfer = _advertised_mm_transfer(request)
+        if advertised_transfer is None:
+            return None
+        extra_args, transport, metadata_raw = advertised_transfer
+
         try:
-            if shm_meta_raw:
-                shm_metadata = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
+            if transport == "shm":
+                shm_metadata = MmKwargsShmTransferMetadata.model_validate(metadata_raw)
                 return await self._receive_mm_kwargs(
                     extra_args, "shm", MmKwargsShmReceiver(), shm_metadata
                 )
 
-            if nixl_meta_raw:
-                nixl_metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-                if self._mm_kwargs_receiver is None:
-                    self._mm_kwargs_receiver = MmKwargsNixlReceiver()
-                return await self._receive_mm_kwargs(
-                    extra_args, "nixl", self._mm_kwargs_receiver, nixl_metadata
-                )
-        except Exception:
-            logger.exception(
-                "Multimodal transfer setup failed; falling back to raw media"
+            nixl_metadata = MmKwargsTransferMetadata.model_validate(metadata_raw)
+            if self._mm_kwargs_receiver is None:
+                self._mm_kwargs_receiver = MmKwargsNixlReceiver()
+            return await self._receive_mm_kwargs(
+                extra_args, "nixl", self._mm_kwargs_receiver, nixl_metadata
             )
-        return None
+        except MultimodalTransferError:
+            raise
+        except Exception as exc:
+            logger.exception("%s multimodal transfer setup failed", transport)
+            raise MultimodalTransferError(
+                transport, "metadata validation or receiver initialization failed"
+            ) from exc
 
     async def _receive_mm_kwargs(
         self,
@@ -718,7 +764,7 @@ class VllmMultimodalRequestProcessor:
         transport: str,
         receiver: MmKwargsReceiver,
         metadata: MmKwargsShmTransferMetadata | MmKwargsTransferMetadata,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any]:
         color = "magenta" if transport == "nixl" else "cyan"
         rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
         try:
@@ -743,16 +789,16 @@ class VllmMultimodalRequestProcessor:
             )
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not mm_hashes or not mm_placeholders or not expanded_token_ids:
-                logger.warning(
-                    "%s multimodal transfer metadata is incomplete; falling back",
-                    transport,
+                raise MultimodalTransferError(
+                    transport, "transfer metadata is incomplete"
                 )
-                return None
 
             results = await receiver.receive(metadata)
             pickled_items = results.get("__pickled_kwargs_item__")
             if not pickled_items:
-                return None
+                raise MultimodalTransferError(
+                    transport, "the receiver returned no multimodal items"
+                )
 
             kwargs_items = []
             for payload in pickled_items:
@@ -761,21 +807,18 @@ class VllmMultimodalRequestProcessor:
                 # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
                 item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
-                    logger.warning(
-                        "%s transfer produced %s instead of MultiModalKwargsItem",
+                    raise MultimodalTransferError(
                         transport,
-                        type(item).__name__,
+                        "the receiver produced "
+                        f"{type(item).__name__} instead of MultiModalKwargsItem",
                     )
-                    return None
                 kwargs_items.append(item)
 
             if not (len(kwargs_items) == len(mm_hashes) == len(mm_placeholders)):
-                logger.warning(
-                    "%s multimodal transfer item/hash/placeholder counts differ; "
-                    "falling back",
+                raise MultimodalTransferError(
                     transport,
+                    "item, hash, and placeholder counts differ",
                 )
-                return None
 
             # Explicitly forwarded hashes mean the frontend built exact routing.
             # Mark those hashes so KV-event normalization is enabled. Transport
@@ -812,9 +855,13 @@ class VllmMultimodalRequestProcessor:
                         exc_info=True,
                     )
             return engine_input
-        except Exception:
-            logger.exception("%s multimodal transfer failed; falling back", transport)
-            return None
+        except MultimodalTransferError:
+            raise
+        except Exception as exc:
+            logger.exception("%s multimodal transfer failed", transport)
+            raise MultimodalTransferError(
+                transport, "the worker could not receive the processed inputs"
+            ) from exc
         finally:
             _nvtx.end_range(rng)
 
@@ -950,7 +997,15 @@ class VllmMultimodalRequestProcessor:
                     "expanded_prompt_token_ids"
                 ]
         elif mode == DisaggregationMode.AGGREGATED:
-            pre_rendered = await self.try_receive_mm_kwargs(request)
+            transfer_error: MultimodalTransferError | None = None
+            try:
+                pre_rendered = await self.try_receive_mm_kwargs(request)
+            except MultimodalTransferError as exc:
+                transfer_error = exc
+                if request.get("multi_modal_data") is None:
+                    logger.error("%s No raw-media fallback is available.", exc)
+                    raise
+                logger.warning("%s Falling back to raw media.", exc)
             if pre_rendered is None:
                 multi_modal_data = await self.extract_multimodal_data(
                     request,
@@ -958,18 +1013,36 @@ class VllmMultimodalRequestProcessor:
                     context,
                     mm_processor_kwargs,
                 )
+                if transfer_error is not None and not multi_modal_data:
+                    logger.error(
+                        "%s Raw-media fallback produced no multimodal input.",
+                        transfer_error,
+                    )
+                    raise transfer_error
         else:
             # P/D prefill still needs the raw media object after generation to
             # construct model-specific decode metadata. The transferred
             # pre-rendered input intentionally remains an aggregated-only fast
             # path until that handoff can be derived from vLLM's processed
             # feature data.
+            advertised_transfer = _advertised_mm_transfer(request)
             multi_modal_data = await self.extract_multimodal_data(
                 request,
                 request_id,
                 context,
                 mm_processor_kwargs,
             )
+            if advertised_transfer is not None and not multi_modal_data:
+                _, transport, _ = advertised_transfer
+                raise MultimodalTransferError(
+                    transport,
+                    "P/D prefill requires usable raw media to construct "
+                    "decode handoff metadata",
+                    guidance=(
+                        "Set DYNAMO_DISABLE_NIXL_MM=1 on the frontend so raw "
+                        "media is forwarded."
+                    ),
+                )
 
         return PreparedMultimodalInput(
             request=request_for_prompt,

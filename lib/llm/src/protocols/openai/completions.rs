@@ -19,6 +19,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 mod aggregator;
@@ -30,7 +31,6 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
@@ -67,10 +67,39 @@ pub struct NvCreateCompletionRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = CompletionResponseSchema)]
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Schema-only import for the wholly re-exported async-openai response type.
+/// Resolve this explicit slot with the version-pinned OpenAPI composer; it is
+/// not a claim that an arbitrary object is the completion response contract.
+struct CompletionResponseSchema;
+
+impl utoipa::PartialSchema for CompletionResponseSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        utoipa::openapi::schema::ObjectBuilder::new()
+            .extensions(Some(
+                [(
+                    "x-dynamo-schema-import",
+                    serde_json::json!({
+                        "crate": "async-openai",
+                        "type": "CreateCompletionResponse"
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            ))
+            .into()
+    }
+}
+
+impl ToSchema for CompletionResponseSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        "async_openai.CreateCompletionResponse".into()
+    }
 }
 
 impl ContentProvider for dynamo_protocols::types::Choice {
@@ -202,6 +231,20 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
 
     fn get_best_of(&self) -> Option<u8> {
         self.inner.best_of
+    }
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -483,6 +526,19 @@ impl ValidateRequest for NvCreateCompletionRequest {
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
+        validate_metadata_upload_single_choice(
+            get_prompt_batch_size(&self.inner.prompt)
+                * self
+                    .inner
+                    .n
+                    .unwrap_or(1)
+                    .max(self.inner.best_of.unwrap_or(1)) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
+            self.nvext.as_ref(),
+        )?;
         // none for stream
         // none for stream_options
         validate::validate_logprobs(self.inner.logprobs)?;
@@ -614,6 +670,31 @@ mod tests {
             .expect("Failed to extract output options");
 
         assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_empty_logit_bias_map_extracts_as_none() {
+        // `logit_bias: {}` is a no-op request. It must normalize to `None` so
+        // it serializes as `null` and stays safe for N-2 workers that predate
+        // the field (a `{}` would reach their sampling-options filter and
+        // fail on the unknown key).
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "logit_bias": {}
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("empty logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("empty logit_bias extraction failed");
+
+        assert!(
+            sampling_options.logit_bias.is_none(),
+            "an empty logit_bias map must extract as None, got {:?}",
+            sampling_options.logit_bias
+        );
     }
 
     #[test]

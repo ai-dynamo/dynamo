@@ -37,7 +37,7 @@ jobs:
   # ============================================================================
   config:
     name: Config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
@@ -65,6 +65,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
+      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -462,6 +463,11 @@ jobs:
 
   # ============================================================================
   # TEST JOBS
+  # Whole-job placement uses mean successful main-branch runtimes from
+  # 2026-10-07 17:10 through 2026-10-14 17:10 UTC (141 runs). Per full run:
+  # 1-GPU east/west: 169.5/168.3 min; 2-GPU: 78.1/70.7 min.
+  # The sole 4-GPU job stays west (21.9 min). These are cumulative job
+  # times, not pipeline wall time; historical selectors did not identify region.
   # ============================================================================
 
   sidecar-vllm-test:
@@ -478,6 +484,7 @@ jobs:
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["{0}","amd64","v2","us-east-1"]', matrix.gpu_count == 2 && 'gpu-2' || 'gpu-1') }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -502,6 +509,7 @@ jobs:
       framework: sglang
       test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["{0}","amd64","v2","{1}"]', matrix.gpu_count == 2 && 'gpu-2' || 'gpu-1', matrix.gpu_count == 2 && 'us-east-1' || 'us-west-2') }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -522,6 +530,7 @@ jobs:
       framework: trtllm
       test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
@@ -542,6 +551,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -567,6 +577,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -585,6 +596,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner_labels: '["gpu-4","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -609,6 +621,9 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
+      # prod-tester-amd-v2 does not start the MinIO service, so the MinIO artifact
+      # tests run in vllm-test instead. Re-enable once the CPU runner hook template starts MinIO.
+      minio_service: false
     secrets: inherit
 
   sglang-test:
@@ -621,6 +636,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -646,6 +662,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -664,6 +681,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -689,6 +707,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -745,6 +764,7 @@ jobs:
   #     test_suite_name: triton
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
+  #     amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
@@ -784,7 +804,10 @@ jobs:
   vllm-test-xpu:
     name: vllm-xpu
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    # XPU is not validated on release branches.
+    if: >-
+      !startsWith(github.ref_name, 'release/') &&
+      (github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true')
     uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
@@ -1010,6 +1033,8 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
+  # Serialize checkpoint lifecycles through cleanup: each Snapshot install
+  # reserves resources on the same GPU nodes until its namespace is deleted.
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
     needs: [operator]
@@ -1043,8 +1068,12 @@ jobs:
 
   deploy-operator-checkpoint-sglang:
     name: SGLang Snapshot Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [operator, deploy-cleanup-checkpoint-vllm]
+    if: |
+      always() && !cancelled() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.operator.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-vllm.result == 'success'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1072,10 +1101,17 @@ jobs:
         model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
         model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  # Check both cleanups so a failed vLLM cleanup cannot be bypassed when
+  # the blocked SGLang lifecycle only runs its no-op cleanup.
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM Snapshot Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [operator, deploy-cleanup-checkpoint-vllm, deploy-cleanup-checkpoint-sglang]
+    if: |
+      always() && !cancelled() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.operator.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-vllm.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1156,6 +1192,7 @@ jobs:
     name: SGLang Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-sglang]
     if: |
+      always() && !cancelled() &&
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1205,6 +1242,7 @@ jobs:
     name: TRTLLM Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-trtllm]
     if: |
+      always() && !cancelled() &&
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1579,7 +1617,7 @@ jobs:
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - deploy-operator
       - deploy-test-vllm

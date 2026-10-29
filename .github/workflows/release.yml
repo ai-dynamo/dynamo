@@ -5,9 +5,9 @@ name: Release Pipeline
 
 # workflow_dispatch is capped at 10 inputs by GitHub (this block has 9).
 # on_demand/release_version are workflow_call-only: the sole on-demand entry
-# point is stage-release-rc.yml. The ops gate and the manual approval gate live
-# HERE (authorize/approval jobs), so they bind every caller; stage-release-rc.yml
-# repeats only the ops gate, as a fast-fail before its long ECR wait.
+# point is stage-release-rc.yml. The ops gate lives HERE (authorize job), so it
+# binds every caller; stage-release-rc.yml repeats it as a fast-fail before its
+# long ECR wait.
 on:
   workflow_dispatch:
     inputs:
@@ -40,7 +40,7 @@ on:
         type: string
         default: all
       wheels:
-        description: 'Wheel subset to stage (all|none|csv of ai-dynamo,ai-dynamo-runtime,kvbm).'
+        description: 'Wheel subset to stage (all|none|csv of ai-dynamo,ai-dynamo-runtime).'
         required: false
         type: string
         default: all
@@ -71,6 +71,10 @@ on:
         type: boolean
         default: false
       slack_thread_ts:
+        required: false
+        type: string
+        default: ''
+      dev_date_utc:
         required: false
         type: string
         default: ''
@@ -118,6 +122,10 @@ on:
         type: string
         default: ''
       frontend_build_result:
+        required: false
+        type: string
+        default: ''
+      sidecar_build_result:
         required: false
         type: string
         default: ''
@@ -218,29 +226,9 @@ jobs:
       - name: Gate mode
         run: echo "ops gate applied=${{ !(inputs.nightly && github.event_name == 'schedule') }} (only scheduled nightly is exempt)"
 
-  # APPROVAL GATE — operator runs also require a manual-release-approval reviewer.
-  # Dynamic environment: empty (no gate) on the nightly path so unattended runs are
-  # not blocked. Enforced by the environment's required-reviewers rule; no secrets
-  # here, so its environment scope is independent of the RELEASE_APP secrets.
-  approval:
-    name: Approval gate
-    needs: [authorize]
-    runs-on: prod-default-small-v2
-    environment: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && 'manual-release-approval' || '' }}
-    permissions:
-      contents: read
-    steps:
-      - name: Record approval
-        env:
-          SHA: ${{ inputs.commit_sha }}
-          VER: ${{ inputs.release_version }}
-          RC: ${{ inputs.rc_number }}
-          ACTOR: ${{ github.actor }}
-        run: echo "Release gate cleared for ${VER:-<branch-derived>} rc.${RC} @ ${SHA} by ${ACTOR}"
-
   prepare-release:
     name: Prepare Release
-    needs: [approval]
+    needs: [authorize]
     runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}
@@ -291,7 +279,7 @@ jobs:
             done
           }
           validate_subset containers "${CONTAINER_SUBSET:-all}" "vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,sidecar"
-          validate_subset wheels "${WHEEL_SUBSET:-all}" "ai-dynamo,ai-dynamo-runtime,kvbm"
+          validate_subset wheels "${WHEEL_SUBSET:-all}" "ai-dynamo,ai-dynamo-runtime"
           validate_subset helm "${HELM_SUBSET:-all}" "platform"
           if [[ ! "${CRATE_SUBSET:-all}" =~ ^[A-Za-z0-9_,-]*$ ]]; then
             echo "Error: crate subset may only contain [A-Za-z0-9_-] names separated by commas (got '${CRATE_SUBSET}')"
@@ -359,6 +347,7 @@ jobs:
         id: rc_tag
         env:
           INPUT_RC_NUMBER: ${{ inputs.rc_number }}
+          INPUT_DEV_DATE_UTC: ${{ inputs.dev_date_utc }}
           VERSION: ${{ steps.extract.outputs.version }}
           COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
           NIGHTLY: ${{ steps.extract.outputs.nightly }}
@@ -385,7 +374,13 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            DATE_UTC=$(date -u +%Y%m%d)
+            # nightly-ci stamps the wheels at build time and passes that date in, so
+            # a run that crosses UTC midnight still publishes one consistent version.
+            DATE_UTC="${INPUT_DEV_DATE_UTC:-$(date -u +%Y%m%d)}"
+            if [[ ! "${DATE_UTC}" =~ ^[0-9]{8}$ ]]; then
+              echo "Error: nightly date '${DATE_UTC}' is not YYYYMMDD"
+              exit 1
+            fi
             SHORT_SHA="${COMMIT_SHA:0:7}"
             # No `nightly-` prefix on the tag: the NGC repo name itself carries
             # the `-nightly` suffix (e.g. vllm-runtime-nightly), so the tag stays
@@ -529,6 +524,7 @@ jobs:
       OPERATOR_BUILD_RESULT: ${{ inputs.operator_build_result }}
       PLANNER_BUILD_RESULT: ${{ inputs.planner_build_result }}
       FRONTEND_BUILD_RESULT: ${{ inputs.frontend_build_result }}
+      SIDECAR_BUILD_RESULT: ${{ inputs.sidecar_build_result }}
       VLLM_EFA_BUILD_RESULT: ${{ inputs.vllm_efa_build_result }}
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
@@ -694,7 +690,7 @@ jobs:
 
           # Copy only the selected container subset; nightly/rc default to the full
           # set (SUBSET=all). Tokens: <fw>-runtime (bare + -cuda13 alias),
-          # <fw>-efa, frontend, operator, planner.
+          # <fw>-efa, frontend, operator, planner, sidecar.
           SUBSET="${CONTAINER_SUBSET:-all}"
           want() {
             [ "${SUBSET}" = "all" ] && return 0
@@ -812,7 +808,7 @@ jobs:
               copy_image "${SOURCE}" "${TARGET}" "dynamo-sidecar:${NGC_VERSION_TAG}" || true
             fi
           else
-            # Optional nightly images — operator, planner, frontend and the
+            # Optional nightly images — operator, planner, frontend, sidecar and the
             # three runtime EFA variants — are built by THIS
             # nightly run (ordering-only needs of the release, deliberately
             # outside its success gate) and staged fail-soft: a build flake
@@ -880,6 +876,12 @@ jobs:
                 "${NGC_BASE}/dynamo-frontend-nightly:${NGC_VERSION_TAG}" \
                 "${NGC_BASE}/dynamo-frontend:nightly" "dynamo-frontend:nightly"; then FRONTEND_STAGED=true; fi
 
+            SIDECAR_STAGED=false
+            if want sidecar && stage_optional "dynamo-sidecar-nightly:${NGC_VERSION_TAG}" "${SIDECAR_BUILD_RESULT}" \
+                "${ECR_BASE}:${COMMIT_SHA}-dynamo-sidecar${NIGHTLY_TAG_SUFFIX}" \
+                "${NGC_BASE}/dynamo-sidecar-nightly:${NGC_VERSION_TAG}" \
+                "${NGC_BASE}/dynamo-sidecar:nightly" "dynamo-sidecar:nightly"; then SIDECAR_STAGED=true; fi
+
             # EFA variants live in the runtime -nightly repos under a -efa tag
             # suffix, mirroring the RC convention (vllm-runtime:<ver>-efa).
             VLLM_EFA_STAGED=false
@@ -907,6 +909,7 @@ jobs:
           echo "operator_staged=${OPERATOR_STAGED:-}" >> $GITHUB_OUTPUT
           echo "planner_staged=${PLANNER_STAGED:-}" >> $GITHUB_OUTPUT
           echo "frontend_staged=${FRONTEND_STAGED:-}" >> $GITHUB_OUTPUT
+          echo "sidecar_staged=${SIDECAR_STAGED:-}" >> $GITHUB_OUTPUT
           echo "vllm_efa_staged=${VLLM_EFA_STAGED:-}" >> $GITHUB_OUTPUT
           echo "sglang_efa_staged=${SGLANG_EFA_STAGED:-}" >> $GITHUB_OUTPUT
           echo "trtllm_efa_staged=${TRTLLM_EFA_STAGED:-}" >> $GITHUB_OUTPUT
@@ -1201,6 +1204,7 @@ jobs:
           OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
           PLANNER_STAGED: ${{ steps.copy_images.outputs.planner_staged }}
           FRONTEND_STAGED: ${{ steps.copy_images.outputs.frontend_staged }}
+          SIDECAR_STAGED: ${{ steps.copy_images.outputs.sidecar_staged }}
           VLLM_EFA_STAGED: ${{ steps.copy_images.outputs.vllm_efa_staged }}
           SGLANG_EFA_STAGED: ${{ steps.copy_images.outputs.sglang_efa_staged }}
           TRTLLM_EFA_STAGED: ${{ steps.copy_images.outputs.trtllm_efa_staged }}
@@ -1244,7 +1248,7 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             _note() { [[ "$1" == "true" ]] && echo "" || echo " — **NOT staged this run** (see copy-step warnings)"; }
             OP_NOTE=$(_note "${OPERATOR_STAGED}");   PL_NOTE=$(_note "${PLANNER_STAGED}")
-            FE_NOTE=$(_note "${FRONTEND_STAGED}")
+            FE_NOTE=$(_note "${FRONTEND_STAGED}");   SC_NOTE=$(_note "${SIDECAR_STAGED}")
             VE_NOTE=$(_note "${VLLM_EFA_STAGED}");   SE_NOTE=$(_note "${SGLANG_EFA_STAGED}")
             TE_NOTE=$(_note "${TRTLLM_EFA_STAGED}")
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -1252,6 +1256,7 @@ jobs:
             echo "- \`kubernetes-operator-nightly:${NGC_VERSION_TAG}\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner-nightly:${NGC_VERSION_TAG}\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend-nightly:${NGC_VERSION_TAG}\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-sidecar-nightly:${NGC_VERSION_TAG}\`${SC_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`vllm-runtime-nightly:${NGC_VERSION_TAG}-efa\`${VE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`sglang-runtime-nightly:${NGC_VERSION_TAG}-efa\`${SE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime-nightly:${NGC_VERSION_TAG}-efa\`${TE_NOTE}" >> $GITHUB_STEP_SUMMARY
@@ -1269,6 +1274,7 @@ jobs:
             echo "- \`kubernetes-operator:nightly\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner:nightly\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:nightly\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-sidecar:nightly\`${SC_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Helm charts (staged fail-soft, dual-pushed to NGC ChartMuseum + OCI):" >> $GITHUB_STEP_SUMMARY
             if [[ -n "${NIGHTLY_STAGED_HELM}" ]]; then
@@ -1376,15 +1382,13 @@ jobs:
             | tar -x -C "${STAGE}/amd64" \
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
-                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
-                'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
+                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl'
 
           echo "Exporting arm64 filesystem from ${ECR_IMAGE}..."
           crane export --platform=linux/arm64 "${ECR_IMAGE}" - \
             | tar -x -C "${STAGE}/arm64" \
                 --wildcards \
-                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
-                'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
+                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl'
 
           OUT="${STAGE}/upload"
           mkdir -p "${OUT}"
@@ -1416,8 +1420,7 @@ jobs:
           UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
         run: |
           set -uo pipefail
-          # Report-only inventory of which selected wheels were extracted. Never fails
-          # (kvbm is built conditionally, so 'all' may legitimately omit it).
+          # Report-only inventory of which selected wheels were extracted. Never fails.
           WSUB="${WHEEL_SUBSET:-all}"
           want_wheel() {
             [ "${WSUB}" = "all" ] && return 0
@@ -1428,7 +1431,6 @@ jobs:
           ENTRIES=(
             "ai-dynamo|ai_dynamo-*-py3-none-any.whl"
             "ai-dynamo-runtime|ai_dynamo_runtime-*.whl"
-            "kvbm|kvbm-*.whl"
           )
 
           {
@@ -1474,8 +1476,7 @@ jobs:
           set -euo pipefail
 
           # Catches UTC-midnight drift between the build-time version stamp and
-          # prepare-release's wheel_version. Every wheel that will be uploaded must agree,
-          # including kvbm (optional: built conditionally, so it is checked only if present).
+          # prepare-release's wheel_version. Every wheel that will be uploaded must agree.
           WSUB="${WHEEL_SUBSET:-all}"
           want_wheel() {
             [ "${WSUB}" = "all" ] && return 0
@@ -1485,7 +1486,6 @@ jobs:
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
-          KVBM_WHEELS=("${UPLOAD_DIR}"/kvbm-*.whl)
           shopt -u nullglob
 
           CHECK=()
@@ -1497,7 +1497,6 @@ jobs:
             [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -gt 0 ] || { echo "::error::Missing ai_dynamo_runtime wheel in ${UPLOAD_DIR}"; exit 1; }
             CHECK+=("${AI_DYNAMO_RUNTIME_WHEELS[@]}")
           fi
-          if want_wheel kvbm; then CHECK+=("${KVBM_WHEELS[@]}"); fi
           if [ ${#CHECK[@]} -eq 0 ]; then
             echo "No selected wheels to verify."
             exit 0
@@ -1573,7 +1572,6 @@ jobs:
               case "${WHEEL_FILENAME}" in
                 ai_dynamo_runtime-*) WTOK=ai-dynamo-runtime ;;
                 ai_dynamo-*)         WTOK=ai-dynamo ;;
-                kvbm-*)              WTOK=kvbm ;;
                 *)                   WTOK="" ;;
               esac
               case ",${WHEEL_SUBSET}," in *,"${WTOK}",*) ;; *) echo "skip ${WHEEL_FILENAME} (not selected)"; continue ;; esac
@@ -1896,17 +1894,16 @@ jobs:
     # Every SELECTED stage must succeed (a 'none' subset skips the stage and
     # counts as satisfied), so GitLab is never told to scan or promote something
     # that failed to stage. A failed rc is repaired by re-staging at a new rc
-    # round. On-demand also requires crates to have FULLY staged: stage-crates is
+    # round. Crates never gate the trigger (nightly or on-demand): stage-crates is
     # continue-on-error (its job result is masked as success), so crates_status
-    # is the authoritative signal. Nightly crates stay fail-soft (not gated).
+    # is the authoritative signal; a partial/failed crate stage only warns in the
+    # trigger step below.
     # !cancelled() overrides the implicit needs-success().
     needs: [prepare-release, release-publish, stage-wheels-artifactory, stage-crates-artifactory]
     if: >-
       ${{ !cancelled() && needs.prepare-release.result == 'success' && inputs.skip_gitlab_pipeline != true &&
           (needs.release-publish.result == 'success' || (inputs.containers == 'none' && inputs.helm == 'none')) &&
-          (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none') &&
-          (needs.prepare-release.outputs.on_demand != 'true' || inputs.crates == 'none' || inputs.crates == '' ||
-           needs.stage-crates-artifactory.outputs.crates_status == 'success') }}
+          (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none') }}
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
@@ -1994,6 +1991,13 @@ jobs:
             # publish); RELEASE_TYPE=ondemand (no hyphen) matches dynamo.yml's rules.
             PIPELINE_TYPE="security"
             RELEASE_TYPE="ondemand"
+            # Crates do not gate an on-demand trigger. If they did not FULLY stage,
+            # GitLab still runs; STAGED_CRATES/ARTIFACTS reflect only what staged, so
+            # re-stage the rest (rc_round X.1, X.2, ...) and re-run the crate
+            # scan/registration before publishing crates.
+            if [ "${CRATE_SUBSET:-none}" != "none" ] && [ "${CRATES_STATUS}" != "success" ]; then
+              echo "::warning::Crate staging ${CRATES_STATUS:-unknown} (staged=[${STAGED_CRATES:-none}]); triggering GitLab anyway. Re-stage crates, then re-run the crate scan/registration before publishing them."
+            fi
             # Coarse ARTIFACTS list keyed on what ACTUALLY staged (like nightly),
             # not on what was requested: GitLab must never scan or promote a type
             # that did not land. The job-level gate already requires every
@@ -2013,6 +2017,8 @@ jobs:
                      "crate:${CRATE_SUBSET:-none}:${STAGED_CRATES}" \
                      "helm:${HELM_SUBSET:-all}:${STAGED_HELM}"; do
               IFS=':' read -r KIND SEL GOT <<<"${P}"
+              # Crates never block the trigger (see the warning above).
+              [ "${KIND}" = "crate" ] && continue
               if [ "${SEL}" != "none" ] && [ -z "${GOT}" ]; then MISSING="${MISSING} ${KIND}"; fi
             done
             if [ -n "${MISSING}" ]; then
@@ -2179,7 +2185,7 @@ jobs:
       needs.release-publish.result == 'success' &&
       needs.prepare-release.outputs.nightly != 'true' &&
       needs.prepare-release.outputs.on_demand != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - name: Checkout at source commit

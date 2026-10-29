@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """CPU-only end-to-end coverage for the public Dynamo-stack CLI."""
 
@@ -14,14 +13,8 @@ from typing import Any
 
 import pytest
 import yaml
-
-pytest.importorskip(
-    "aisimulate.config.cli",
-    reason="AISimulate is an optional Dynamo simulation dependency",
-)
-
-from aisimulate.config.cli import CorePredictionConfig  # noqa: E402
-from aisimulate.config.common import split_config_sections  # noqa: E402
+from aisimulate.config.cli import CorePredictionConfig
+from aisimulate.config.common import split_config_sections
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and

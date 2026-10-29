@@ -4,7 +4,7 @@
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="library/golang"
-ARG BASE_IMAGE_TAG="1.26.8"
+ARG BASE_IMAGE_TAG="1.27.3"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -30,7 +30,7 @@ COPY . .
 FROM base AS linter
 
 # Install golangci-lint using go install (builds with current Go version)
-RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 # Run linting
 RUN golangci-lint run --timeout=5m
@@ -204,7 +204,7 @@ COPY --from=sources_collect /sources.zip /sources.zip
 
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v4.1.5
+FROM nvcr.io/nvidia/distroless/go:v4.1.7
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .

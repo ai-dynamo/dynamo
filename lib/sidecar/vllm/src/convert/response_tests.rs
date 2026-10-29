@@ -77,6 +77,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
                 pb::CandidateTokenInfo::default(),
             ],
         };
+        let expected = has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]}));
         let first = state
             .convert(pb::GenerateResponse {
                 prompt_info: Some(prompt),
@@ -84,9 +85,11 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             })
             .unwrap();
         if has_output {
+            // The first output carries them, so a frontend stop string that
+            // ends the stream before vLLM's terminal cannot drop them.
             let first = first.unwrap();
             assert!(first.finish_reason.is_none());
-            assert!(first.engine_data.is_none());
+            assert_eq!(first.engine_data, expected);
         } else {
             assert!(first.is_none());
         }
@@ -101,7 +104,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .num_output_tokens = 1 + u32::from(has_output);
         let result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
-        assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
+        assert_eq!(result.engine_data, if has_output { None } else { expected });
     }
 }
 
@@ -147,7 +150,7 @@ fn negative_infinity_logprobs_are_normalized() {
 }
 
 #[test]
-fn missing_outputs_and_buffered_text_preserve_native_semantics() {
+fn only_token_ids_are_forwarded() {
     let mut request = request();
     request.output_options = Default::default();
     let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -157,19 +160,21 @@ fn missing_outputs_and_buffered_text_preserve_native_semantics() {
             .unwrap()
             .is_none()
     );
+    // The fixture output carries vLLM text (" token"); only its IDs are kept.
     let first = state
         .convert(sequence_response(false, false, None))
         .unwrap()
         .unwrap();
-    assert_eq!(first.text.as_deref(), Some(" token"));
+    assert_eq!(first.token_ids, [42]);
+    assert!(first.text.is_none());
     let mut response = sequence_response(true, false, None);
     let output = response.outputs.as_mut().unwrap();
     output.token_ids = vec![43, 44];
     output.num_tokens = 2;
-    output.text = String::new();
     output.finish_info.as_mut().unwrap().num_output_tokens = 3;
     let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert_eq!(terminal.token_ids, [43, 44]);
+    assert!(terminal.text.is_none());
 }
 
 #[test]
@@ -381,47 +386,99 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
 
 #[test]
 fn empty_chunks_and_delta_tokens_preserve_terminal_usage() {
-    let request = minimal_request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-    assert!(
-        state
-            .convert(pb::GenerateResponse {
-                outputs: Some(pb::SequenceOutput::default()),
-                ..Default::default()
-            })
+    // Old servers omit cached usage; explicit zero from new servers is meaningful.
+    for cached in [None, Some(0), Some(2)] {
+        let request = minimal_request();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+        assert!(
+            state
+                .convert(pb::GenerateResponse {
+                    outputs: Some(pb::SequenceOutput::default()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        let first = state
+            .convert(sequence_response(false, false, None))
             .unwrap()
-            .is_none()
-    );
-    let first = state
-        .convert(sequence_response(false, false, None))
-        .unwrap()
-        .unwrap();
-    assert_eq!(first.token_ids, vec![42]);
-    assert!(first.completion_usage.is_none());
-    let mut response = sequence_response(true, false, None);
-    let output = response.outputs.as_mut().unwrap();
-    output.token_ids = vec![43, 44];
-    output.num_tokens = 2;
-    output.finish_info.as_mut().unwrap().num_output_tokens = 3;
-    let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.token_ids, vec![43, 44]);
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
-    assert!(terminal.disaggregated_params.is_none());
-    let usage = terminal.completion_usage.unwrap();
-    assert_eq!(
-        (
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.total_tokens
-        ),
-        (3, 3, 6)
-    );
+            .unwrap();
+        assert_eq!(first.token_ids, vec![42]);
+        assert!(first.completion_usage.is_none());
+        let mut response = sequence_response(true, false, None);
+        let output = response.outputs.as_mut().unwrap();
+        output.token_ids = vec![43, 44];
+        output.num_tokens = 2;
+        output.finish_info.as_mut().unwrap().num_output_tokens = 3;
+        output.finish_info.as_mut().unwrap().num_cached_tokens = cached;
+        let terminal = state.convert(response).unwrap().unwrap();
+        assert_eq!(terminal.token_ids, vec![43, 44]);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert!(terminal.disaggregated_params.is_none());
+        let usage = terminal.completion_usage.unwrap();
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            cached
+        );
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (3, 3, 6)
+        );
 
-    let decode = ResponseState::new(&request, DisaggregationMode::Decode)
-        .convert(sequence_response(true, false, None))
-        .unwrap()
-        .unwrap();
-    assert!(decode.disaggregated_params.is_none());
+        let decode = ResponseState::new(&request, DisaggregationMode::Decode)
+            .convert(sequence_response(true, false, None))
+            .unwrap()
+            .unwrap();
+        assert!(decode.disaggregated_params.is_none());
+    }
+}
+
+#[test]
+fn decode_reports_prefill_cached_tokens_instead_of_transferred_kv() {
+    for prefill_cached in [None, Some(0), Some(2)] {
+        let mut request = minimal_request();
+        request.prefill_result = Some(PrefillResult {
+            prompt_tokens_details: prefill_cached.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens),
+                ..Default::default()
+            }),
+            ..decode_request().prefill_result.unwrap()
+        });
+        let mut response = sequence_response(true, false, None);
+        // The decode engine counts the whole transferred prompt as cached.
+        response
+            .outputs
+            .as_mut()
+            .unwrap()
+            .finish_info
+            .as_mut()
+            .unwrap()
+            .num_cached_tokens = Some(3);
+        let mut state = ResponseState::new(&request, DisaggregationMode::Decode);
+        // Client cancellation reports usage without a terminal from vLLM.
+        assert_eq!(
+            state
+                .completion_usage(0, None)
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+        let terminal = state.convert(response).unwrap().unwrap();
+        assert_eq!(
+            terminal
+                .completion_usage
+                .unwrap()
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            prefill_cached
+        );
+    }
 }
 
 #[test]
@@ -524,14 +581,16 @@ fn prefill_terminal_has_zero_completion_usage() {
         FinishReason::Cancelled,
     ] {
         let mut response = terminal_response(reason.clone());
-        response
+        let finish = response
             .outputs
             .as_mut()
             .unwrap()
             .finish_info
             .as_mut()
-            .unwrap()
-            .kv_transfer_params = Some(
+            .unwrap();
+        // The frontend hands this count to decode through PrefillResult.
+        finish.num_cached_tokens = Some(2);
+        finish.kv_transfer_params = Some(
             json_to_struct_v14(
                 json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}),
                 KV_TRANSFER_PARAMS,
@@ -552,6 +611,12 @@ fn prefill_terminal_has_zero_completion_usage() {
                 usage.total_tokens
             ),
             (3, 0, 3)
+        );
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(2)
         );
         assert_eq!(terminal.finish_reason, Some(reason.clone()));
         if reason == FinishReason::Cancelled {

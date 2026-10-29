@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
+import gc
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
@@ -39,7 +42,11 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.topology import (
+    TopologyConfig,
+    apply_topology_config,
+    read_topology_config,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -61,6 +68,7 @@ from .args import (
     configure_rl_logprobs_mode,
     parse_args_with_model_fetch,
 )
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -108,6 +116,26 @@ TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
 )
 
 
+async def close_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import close_configured_artifact_runtime as close
+
+    await close()
+
+
+async def initialize_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import (
+        initialize_configured_artifact_runtime as initialize,
+    )
+
+    await initialize()
+
+
+async def _close_worker_resources(
+    state_agent_lifecycle: StateAgentLifecycle,
+) -> None:
+    await state_agent_lifecycle.close()
+
+
 def uses_modelexpress_load_format(config: Config) -> bool:
     return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
 
@@ -137,6 +165,24 @@ def publish_vllm_structural_tag_reasoning_policy(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
     )
+
+
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -170,6 +216,8 @@ async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
+    if config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(config.artifact_router_profile)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -231,8 +279,15 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
+
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()
+
+    async def close_worker_resources() -> None:
+        await _close_worker_resources(state_agent_lifecycle)
+
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -252,26 +307,34 @@ async def worker(argv: list[str] | None = None) -> None:
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=state_agent_lifecycle.close,
+        pre_shutdown_callback=close_worker_resources,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    factory = WorkerFactory(
-        setup_vllm_engine_fn=setup_vllm_engine,
-        setup_kv_event_publisher_fn=setup_kv_event_publisher,
-        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
-        register_vllm_model_fn=register_vllm_model,
-        setup_fpm_relay_fn=setup_fpm_relay,
-        setup_metrics_collection_fn=setup_metrics_collection,
-        state_agent_lifecycle=state_agent_lifecycle,
-    )
-    await factory.create(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
-    )
+    try:
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=setup_vllm_engine,
+            setup_kv_event_publisher_fn=setup_kv_event_publisher,
+            setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
+            register_vllm_model_fn=register_vllm_model,
+            setup_fpm_relay_fn=setup_fpm_relay,
+            setup_metrics_collection_fn=setup_metrics_collection,
+            state_agent_lifecycle=state_agent_lifecycle,
+        )
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+    finally:
+        try:
+            await close_worker_resources()
+        finally:
+            # Accepted generations can finalize after the pre-shutdown hook.
+            if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+                await close_configured_artifact_runtime()
 
     logger.debug("Worker function completed, exiting...")
 
@@ -534,6 +597,16 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+@functools.cache
+def _worker_topology_config() -> TopologyConfig:
+    """Read this worker's topology once.
+
+    The KV state-agent attachment and every model registration then publish the
+    same island, and a later read cannot wait on or exit for a changed file.
+    """
+    return read_topology_config()
+
+
 async def setup_kv_state_attachment_owner(
     config: Config,
     generate_endpoint: Endpoint,
@@ -544,6 +617,7 @@ async def setup_kv_state_attachment_owner(
         generate_endpoint,
         vllm_config,
         _resolve_image_token_id(config, vllm_config),
+        topology_domains=_worker_topology_config().topology_domains,
     )
 
 
@@ -685,6 +759,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -817,6 +892,32 @@ def setup_vllm_engine(
     )
 
 
+_gc_frozen_after_init = False
+
+
+def maybe_freeze_gc_after_init(enabled: bool) -> None:
+    """Freeze this process's GC heap once, before the model is registered.
+
+    vLLM calls ``freeze_gc_heap()`` in EngineCore, each GPU worker and its own
+    API server. Dynamo replaces the API server with this process, which holds
+    the engine client, tokenizer and config (~1M tracked objects), so without
+    a freeze every gen2 collection re-walks them on the request loop. Runs at
+    most once per process: the collect blocks, and the frontend only routes
+    here after ``register_model`` returns.
+    """
+    global _gc_frozen_after_init
+    if not enabled or _gc_frozen_after_init:
+        return
+    start = time.perf_counter()
+    freeze_gc_heap()
+    _gc_frozen_after_init = True
+    logger.info(
+        "Froze %d GC-tracked objects in the worker process after init (%.0f ms)",
+        gc.get_freeze_count(),
+        (time.perf_counter() - start) * 1000,
+    )
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -938,12 +1039,14 @@ async def register_vllm_model(
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     # Set topology and KV transfer policy for topology-aware routing
-    apply_topology_config(runtime_config)
+    apply_topology_config(runtime_config, _worker_topology_config())
 
     # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )
+
+    maybe_freeze_gc_after_init(config.freeze_gc_after_init)
 
     await register_model(
         model_input,
