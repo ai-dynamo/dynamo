@@ -674,6 +674,7 @@ class DGDRRunOutputAdapter:
                     phase=terminal.phase if terminal else RunPhase.RUNNING,
                     round_no=round_no,
                     evaluated=evaluated,
+                    pareto_front=len(ordered) if self._is_pareto else 0,
                     candidates=candidates,
                     message=terminal.message if terminal else "",
                     error=terminal.error if terminal else "",

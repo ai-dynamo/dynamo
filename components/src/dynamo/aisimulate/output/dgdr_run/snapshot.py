@@ -111,6 +111,7 @@ class DGDRRunSnapshot:
     candidates: tuple[SnapshotCandidate, ...] = ()
     message: str = ""
     error: str = ""
+    pareto_front: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         run: dict[str, Any] = {
@@ -121,11 +122,14 @@ class DGDRRunSnapshot:
             run["message"] = self.message
         if self.error:
             run["error"] = self.error
+        progress: dict[str, Any] = {"round": self.round_no, "evaluated": self.evaluated}
+        if self.pareto_front:
+            progress["paretoFront"] = self.pareto_front
         return {
             "schemaVersion": SCHEMA_VERSION,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "run": run,
-            "progress": {"round": self.round_no, "evaluated": self.evaluated},
+            "progress": progress,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
 
