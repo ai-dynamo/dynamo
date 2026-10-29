@@ -1,16 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression coverage for the direct Sweeper-to-DGD materializer."""
-
 from __future__ import annotations
 
-import sys
-
 import pytest
-
-if not (3, 11) <= sys.version_info < (3, 14):
-    pytest.skip("AISimulate requires Python 3.11–3.13", allow_module_level=True)
 
 from dynamo.aisimulate.output.dgd.renderers.direct import (
     materializer as materializer_module,

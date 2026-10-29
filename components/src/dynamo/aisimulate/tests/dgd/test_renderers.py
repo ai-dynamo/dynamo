@@ -12,10 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-
-if not (3, 11) <= sys.version_info < (3, 14):
-    pytest.skip("AISimulate requires Python 3.11–3.13", allow_module_level=True)
-
 from aisimulate.generator.request.schema import ModelFacts
 from aisimulate.sweeper.config import Workload
 

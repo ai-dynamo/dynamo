@@ -1,19 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from pydantic import ValidationError
-
-if not (3, 11) <= sys.version_info < (3, 14):
-    pytest.skip("AISimulate requires Python 3.11–3.13", allow_module_level=True)
-
 from aisimulate.output_adapter import validate_output_adapter
 from aisimulate.sweeper.result import SweepResult
+from pydantic import ValidationError
 
 from dynamo.aisimulate.output.dgd import adapter as adapter_module
 from dynamo.aisimulate.output.dgd.adapter import DGDOutputConfig, create_adapter
