@@ -191,13 +191,13 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </ParamField>
 
 <ParamField path="--enable-multimodal" type="boolean" default="false">
-  Enable multimodal LLM request processing (vision-language models). For diffusion modalities (video/image generation), use `--modality` instead; `--enable-multimodal` cannot be combined with diffusion modalities.
+  Enable multimodal LLM request processing (vision-language models and models with audio support). For diffusion modalities (video/image generation), use `--modality` instead; `--enable-multimodal` cannot be combined with diffusion modalities.
 
   Environment variable: `DYN_TRTLLM_ENABLE_MULTIMODAL`
 </ParamField>
 
 <ParamField path="--modality" type="string" default="text">
-  Modality of the served model. For multimodal LLM serving (vision-language), prefer `--enable-multimodal`; use `--modality` to select diffusion model types.
+  Modality of the served model. For multimodal LLM serving (vision-language or audio input), prefer `--enable-multimodal`; use `--modality` to select diffusion model types.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>text</Badge> <Badge intent="note" minimal>multimodal</Badge> <Badge intent="note" minimal>video_diffusion</Badge> <Badge intent="note" minimal>image_diffusion</Badge></span>
 
