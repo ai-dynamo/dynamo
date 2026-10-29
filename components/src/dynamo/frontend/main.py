@@ -415,83 +415,90 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
+    # Held so the task is not garbage-collected mid-await, and so `async_main`
+    # can join it below. `create_task` alone returns a handle the event loop
+    # only weakly references: dropping it let the loop close while the teardown
+    # was still awaiting, which silently cancelled the very drain this awaits
+    # for.
+    shutdown_task: list[asyncio.Task] = []
+
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        if not shutdown_task:
+            shutdown_task.append(asyncio.create_task(graceful_shutdown(runtime)))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    # Shared with the backends so a worker's advertised config is built from the
-    # same flags and semantics. --router-mode always has a default here, so this
-    # never returns None.
-    router_config = build_router_config(config)
-
-    metrics_prefix = (
-        config.metrics_prefix
-        if config.metrics_prefix is not None and config.metrics_prefix.strip()
-        else None
-    )
-    kwargs: dict[str, Any] = {
-        "http_host": config.http_host,
-        "http_port": config.http_port,
-        "batch_gateway_url": config.batch_gateway_url,
-        "kv_cache_block_size": config.kv_cache_block_size,
-        "router_config": router_config,
-        "migration_limit": config.migration_limit,
-        "metrics_prefix": metrics_prefix,
-        "enable_anthropic_api": config.enable_anthropic_api,
-        "strip_anthropic_preamble": config.strip_anthropic_preamble,
-        "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
-        "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
-        "reasoning_field_name": config.reasoning_field_name,
-        "tokenizer_backend": config.tokenizer_backend,
-        "tokenizer_fallback": config.tokenizer_fallback,
-    }
-    if config.migration_max_seq_len is not None:
-        kwargs["migration_max_seq_len"] = config.migration_max_seq_len
-
-    if config.model_name:
-        kwargs["model_name"] = config.model_name
-    if config.model_path:
-        kwargs["model_path"] = config.model_path
-    if config.tls_cert_path:
-        kwargs["tls_cert_path"] = config.tls_cert_path
-    if config.tls_key_path:
-        kwargs["tls_key_path"] = config.tls_key_path
-    if config.tls_client_ca_cert_path:
-        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
-    if config.namespace:
-        kwargs["namespace"] = config.namespace
-    if config.namespace_prefix:
-        kwargs["namespace_prefix"] = config.namespace_prefix
-    if config.kserve_grpc_server and config.grpc_metrics_port:
-        kwargs["http_metrics_port"] = config.grpc_metrics_port
-
-    if config.chat_processor == "vllm":
-        assert (
-            vllm_flags is not None
-        ), "vllm_flags is required when chat processor is vllm"
-        chat_engine_factory = setup_engine_factory(
-            config, vllm_flags
-        ).chat_engine_factory
-        kwargs["chat_engine_factory"] = chat_engine_factory
-    elif config.chat_processor == "sglang":
-        chat_engine_factory = setup_sglang_engine_factory(
-            config, sglang_flags
-        ).chat_engine_factory
-        kwargs["chat_engine_factory"] = chat_engine_factory
-
-    if config.router_prefill_load_model == "ais":
-        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
-
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
-    engine = await make_engine(runtime, e)
-    frontend_route_extensions = load_frontend_route_extensions(
-        config.frontend_route_extensions
-    )
-
     try:
+        os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+        # Shared with the backends so a worker's advertised config is built from the
+        # same flags and semantics. --router-mode always has a default here, so this
+        # never returns None.
+        router_config = build_router_config(config)
+
+        metrics_prefix = (
+            config.metrics_prefix
+            if config.metrics_prefix is not None and config.metrics_prefix.strip()
+            else None
+        )
+        kwargs: dict[str, Any] = {
+            "http_host": config.http_host,
+            "http_port": config.http_port,
+            "batch_gateway_url": config.batch_gateway_url,
+            "kv_cache_block_size": config.kv_cache_block_size,
+            "router_config": router_config,
+            "migration_limit": config.migration_limit,
+            "metrics_prefix": metrics_prefix,
+            "enable_anthropic_api": config.enable_anthropic_api,
+            "strip_anthropic_preamble": config.strip_anthropic_preamble,
+            "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
+            "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+            "reasoning_field_name": config.reasoning_field_name,
+            "tokenizer_backend": config.tokenizer_backend,
+            "tokenizer_fallback": config.tokenizer_fallback,
+        }
+        if config.migration_max_seq_len is not None:
+            kwargs["migration_max_seq_len"] = config.migration_max_seq_len
+
+        if config.model_name:
+            kwargs["model_name"] = config.model_name
+        if config.model_path:
+            kwargs["model_path"] = config.model_path
+        if config.tls_cert_path:
+            kwargs["tls_cert_path"] = config.tls_cert_path
+        if config.tls_key_path:
+            kwargs["tls_key_path"] = config.tls_key_path
+        if config.tls_client_ca_cert_path:
+            kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
+        if config.namespace:
+            kwargs["namespace"] = config.namespace
+        if config.namespace_prefix:
+            kwargs["namespace_prefix"] = config.namespace_prefix
+        if config.kserve_grpc_server and config.grpc_metrics_port:
+            kwargs["http_metrics_port"] = config.grpc_metrics_port
+
+        if config.chat_processor == "vllm":
+            assert (
+                vllm_flags is not None
+            ), "vllm_flags is required when chat processor is vllm"
+            chat_engine_factory = setup_engine_factory(
+                config, vllm_flags
+            ).chat_engine_factory
+            kwargs["chat_engine_factory"] = chat_engine_factory
+        elif config.chat_processor == "sglang":
+            chat_engine_factory = setup_sglang_engine_factory(
+                config, sglang_flags
+            ).chat_engine_factory
+            kwargs["chat_engine_factory"] = chat_engine_factory
+
+        if config.router_prefill_load_model == "ais":
+            kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
+
+        e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+        engine = await make_engine(runtime, e)
+        frontend_route_extensions = load_frontend_route_extensions(
+            config.frontend_route_extensions
+        )
         if config.interactive:
             await run_input(runtime, "text", engine)
         elif config.kserve_grpc_server:
@@ -499,16 +506,47 @@ async def async_main():
         else:
             await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
-        pass
+        # Phase 1 cancels the serving task as soon as the signal lands, so this
+        # is the normal shutdown path, not an error.
+        if not shutdown_task:
+            raise
+    finally:
+        serving_error = sys.exc_info()[1]
+        # Join the teardown before returning. `run_input` is cancelled the
+        # instant Phase 1 fires, so without this the loop closes first and the
+        # drain is cancelled partway through.
+        if shutdown_task:
+            cancelled = False
+            while not shutdown_task[0].done():
+                try:
+                    await asyncio.wait(shutdown_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            try:
+                shutdown_task[0].result()
+            except asyncio.exceptions.CancelledError:
+                if serving_error is None:
+                    raise
+            except Exception:
+                if serving_error is None and not cancelled:
+                    raise
+                logger.exception("Frontend shutdown failed; preserving serving error")
+            if cancelled and serving_error is None:
+                raise asyncio.CancelledError
 
 
 async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
+    Awaits the teardown rather than only starting it: ``shutdown()`` merely
+    spawns the three-phase sequence, so returning here lets the interpreter
+    exit before in-flight requests drain and before the transports are torn
+    down.
+
     Args:
         runtime: The DistributedRuntime instance to shut down.
     """
-    runtime.shutdown()
+    await runtime.shutdown_and_wait()
 
 
 def main() -> None:

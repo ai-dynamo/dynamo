@@ -29,6 +29,7 @@ use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::system_health::ReadinessHold;
 use dynamo_runtime::telemetry::LifecycleOperationRole;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::worker::{EXIT_CODE_SHUTDOWN_TIMEOUT, graceful_shutdown_timeout};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -508,8 +509,7 @@ impl Worker {
     ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
     ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
-    ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
-    ///      request-plane drain and transport teardown.
+    ///   5. Drain and close the owned runtime within the same shutdown deadline.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -593,51 +593,63 @@ impl Worker {
         drt: Option<DistributedRuntime>,
         shutdown_token: CancellationToken,
     ) -> Result<(), DynamoError> {
-        // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
-        // once a signal arrives, the orchestrator + cleanup must finish
-        // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
-        // grace-period sleep, which is a fixed wait rather than a hang
-        // risk), otherwise we exit(911). Healthy long-running workers
-        // never hit this — the timer only starts after `shutdown_token`
-        // is cancelled.
-        let outcome = {
-            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
+        let owns_runtime = drt.is_none();
+        let deadline = std::sync::OnceLock::new();
+        {
+            let inner_fut = async {
+                let outcome = self.run_inner(runtime.clone(), drt, &shutdown_token).await;
+                runtime.mark_shutting_down();
+                self.cleanup_once().await;
+                if owns_runtime {
+                    // Normal completion/startup failure has no signal deadline.
+                    // Signal-driven cleanup must spend only what remains.
+                    let deadline = *deadline
+                        .get_or_init(|| tokio::time::Instant::now() + graceful_shutdown_timeout());
+                    let shutdown = runtime
+                        .shutdown_with_budget(
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                        .await
+                        .map_err(|error| {
+                            err(ErrorType::Backend(BackendError::Unknown), error.to_string())
+                        });
+                    outcome.and(shutdown)
+                } else {
+                    outcome
+                }
+            };
             tokio::pin!(inner_fut);
 
             tokio::select! {
-                result = &mut inner_fut => result,
+                biased;
                 _ = shutdown_token.cancelled() => {
                     runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
-                    let deadline = shutdown_deadline(timeout, grace);
+                    let budget = shutdown_deadline(timeout, grace);
+                    let expires = *deadline.get_or_init(|| tokio::time::Instant::now() + budget);
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s ({}s timeout + {:.2}s grace)",
-                        deadline.as_secs(),
+                        budget.as_secs(),
                         timeout.as_secs(),
                         grace,
                     );
-                    match tokio::time::timeout(deadline, &mut inner_fut).await {
+                    match tokio::time::timeout_at(expires, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
-                                "Graceful shutdown exceeded {}s; force-exiting with code 911. \
+                                "Graceful shutdown exceeded {}s; force-exiting with code {}. \
                                  Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
-                                deadline.as_secs()
+                                budget.as_secs(),
+                                EXIT_CODE_SHUTDOWN_TIMEOUT,
                             );
-                            std::process::exit(911);
+                            std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
                         }
                     }
                 }
+                result = &mut inner_fut => result,
             }
-        };
-
-        // Final safety net: guarantee engine.cleanup() runs if start()
-        // succeeded. No-op if cleanup already ran via the orchestrator.
-        runtime.mark_shutting_down();
-        self.cleanup_once().await;
-
-        outcome
+        }
     }
 
     /// Connect with per-worker transport settings, start the engine, and serve
@@ -1484,35 +1496,6 @@ fn drain_timeout_secs() -> f64 {
             }
         },
     }
-}
-
-/// Read the post-signal shutdown deadline from
-/// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
-/// On expiry the worker hard-exits with code 911 — same contract as the
-/// upstream `worker.execute` flow we bypass. Defaults are imported from
-/// `dynamo_runtime::worker` so a default change there propagates here
-/// without manual sync.
-fn graceful_shutdown_timeout() -> Duration {
-    use dynamo_runtime::config::environment_names::worker as env_worker;
-    use dynamo_runtime::worker::{
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
-    };
-
-    let default = if cfg!(debug_assertions) {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-    } else {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-    };
-
-    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
-    let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
-    Duration::from_secs(secs)
-}
-
-fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
@@ -3010,6 +2993,7 @@ mod tests {
         start_should_fail: bool,
         start_calls: AtomicUsize,
         cleanup_calls: Arc<AtomicUsize>,
+        cleanup_delay: Duration,
     }
 
     impl StateMockEngine {
@@ -3019,6 +3003,7 @@ mod tests {
                 start_should_fail,
                 start_calls: AtomicUsize::new(0),
                 cleanup_calls: cleanup_calls.clone(),
+                cleanup_delay: Duration::ZERO,
             });
             (eng, cleanup_calls)
         }
@@ -3053,6 +3038,7 @@ mod tests {
         }
 
         async fn cleanup(&self) -> Result<(), DynamoError> {
+            tokio::time::sleep(self.cleanup_delay).await;
             self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3060,6 +3046,49 @@ mod tests {
 
     fn worker_with(engine: Arc<dyn LLMEngine>) -> Worker {
         Worker::new(engine, WorkerConfig::default())
+    }
+
+    #[tokio::test]
+    async fn owned_runtime_teardown_spends_only_the_remaining_signal_budget() {
+        // Four seconds of engine cleanup leave six of the ten-second budget.
+        // With a stuck request, runtime draining gets three, not a fresh five.
+        temp_env::async_with_vars(
+            [
+                ("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Some("10")),
+                (GRACE_PERIOD_ENV, Some("0")),
+                ("DYN_SYSTEM_PORT", None),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let drt = DistributedRuntime::new(
+                    runtime.clone(),
+                    dynamo_runtime::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .unwrap();
+                let _request = drt.register_graceful_task();
+                let (mut engine, cleanup_calls) = StateMockEngine::new(false);
+                Arc::get_mut(&mut engine).unwrap().cleanup_delay = Duration::from_secs(4);
+                let mut worker = worker_with(engine);
+                worker.start_engine(0).await.unwrap();
+                let shutdown = CancellationToken::new();
+                shutdown.cancel();
+                tokio::time::pause();
+                let origin = tokio::time::Instant::now();
+                worker
+                    .run_with_shutdown(runtime.clone(), None, shutdown)
+                    .await
+                    .unwrap();
+                assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+                assert!(runtime.primary_token().is_cancelled());
+                assert!(
+                    (Duration::from_secs(7)..Duration::from_secs(8)).contains(&origin.elapsed()),
+                    "shutdown took {:?}",
+                    origin.elapsed()
+                );
+            },
+        )
+        .await;
     }
 
     /// Prefill worker — the drain loop only runs for prefill (the framework
@@ -3118,7 +3147,11 @@ mod tests {
                         .await
                         .expect("pending runtime connection is cancelled");
                     if signal {
-                        result.expect("SIGTERM before engine start exits cleanly");
+                        // Cancellation of an in-flight grant leaves its outcome
+                        // unknown: no lease ID was received to revoke safely.
+                        let error = result.unwrap_err();
+                        assert_eq!(error.error_type(), ErrorType::Backend(BackendError::Unknown));
+                        assert!(error.to_string().contains("without reporting cleanup completion"));
                     } else {
                         assert_eq!(
                             result.unwrap_err().error_type(),
@@ -3127,7 +3160,10 @@ mod tests {
                     }
                     assert_eq!(engine.start_calls.load(Ordering::SeqCst), 0);
                     assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
-                    runtime.shutdown();
+                    assert!(
+                        runtime.primary_token().is_cancelled(),
+                        "owned runtime teardown must finish before the worker returns"
+                    );
                 }
             },
         )
@@ -3430,50 +3466,6 @@ mod tests {
         assert_eq!(
             stamped[crate::engine::HEALTH_CHECK_KEY],
             serde_json::json!(true)
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // graceful_shutdown_timeout env-var parsing
-    // -------------------------------------------------------------------
-
-    fn expected_default_timeout_secs() -> u64 {
-        if cfg!(debug_assertions) {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-        } else {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-        }
-    }
-
-    #[test]
-    fn shutdown_timeout_default_when_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(None, expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_parses_valid_value() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
-            42
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_falls_back_to_default_on_parse_error() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_treats_empty_as_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
         );
     }
 
