@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.controller.enabled .Values.rbac.create }}
+{{- /*
+The rules come from files/controller-role.yaml, which make manifests in
+deploy/global-discovery-mcs generates from the +kubebuilder:rbac markers.
+Do not add rules here; change the markers and regenerate.
+*/}}
+{{- $role := required "files/controller-role.yaml is missing; run make manifests in deploy/global-discovery-mcs" (.Files.Get "files/controller-role.yaml") | fromYaml }}
+{{- if or (hasKey $role "Error") (not $role.rules) }}
+{{- fail (printf "files/controller-role.yaml is not a ClusterRole with rules: %v" ($role.Error | default "no rules")) }}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+rules:
+  {{- toYaml $role.rules | nindent 2 }}
+{{- end }}

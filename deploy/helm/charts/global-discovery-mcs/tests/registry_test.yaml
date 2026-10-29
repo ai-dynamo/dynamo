@@ -1,0 +1,418 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# mcs-registry: flags from values, the Service, probes, TLS and the optional
+# objects. Flag names and defaults: deploy/global-discovery-mcs/internal/config.
+
+suite: registry
+templates:
+  - templates/registry/deployment.yaml
+  - templates/registry/service.yaml
+  - templates/registry/serviceaccount.yaml
+  - templates/registry/poddisruptionbudget.yaml
+  - templates/registry/servicemonitor.yaml
+release:
+  name: mcs
+  namespace: mcs-system
+set:
+  registry.enabled: true
+  controller.enabled: false
+
+tests:
+  - it: renders the default flags, which match the binary defaults
+    template: templates/registry/deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - isAPIVersion:
+          of: apps/v1
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/global-discovery-mcs:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value:
+            - /mcs-registry
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - --grpc-listen-address=:9090
+            - --http-listen-address=:8080
+            - --admin-listen-address=:9091
+            - --store=memory
+            - --refresh-interval=2s
+            - --lease-eval-interval=1s
+            - --clusterset-discovery-interval=30s
+            - --lease-skew=2s
+            - --retention=24h
+            - --compaction-interval=10m
+            - --bookmark-interval=5s
+            - --watch-history=10000
+            - --watch-queue-size=1024
+            - --max-watchers=5000
+            - --max-message-bytes=4194304
+            - --shutdown-drain=5s
+            - --shutdown-timeout=25s
+            - --otel-enabled=false
+            - --log-level=info
+      - notExists:
+          path: spec.template.spec.containers[0].env
+      - notExists:
+          path: spec.template.spec.volumes
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 45
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mcs-registry
+
+  - it: renders every flag from values with the DynamoDB store
+    template: templates/registry/deployment.yaml
+    set:
+      image.tag: 0.2.0
+      registry.replicas: 3
+      registry.store: dynamodb
+      registry.dynamodb.table: mcs-prod
+      registry.dynamodb.endpoint: http://dynamodb-local:8000
+      registry.region: us-east-1
+      registry.refreshInterval: 3s
+      registry.leaseEvalInterval: 500ms
+      registry.clustersetDiscoveryInterval: 1m
+      registry.leaseSkew: 5s
+      registry.retention: 48h
+      registry.compactionInterval: 30m
+      registry.watch.bookmarkInterval: 10s
+      registry.watch.history: 20000
+      registry.watch.queueSize: 2048
+      registry.watch.maxWatchers: 10000
+      registry.maxMessageBytes: 8388608
+      registry.advertiseEndpoints:
+        - region: us-east-1
+          grpcUrl: https://mcs.us-east-1.example.internal
+          primary: true
+        - region: us-west-2
+          grpcUrl: https://mcs.us-west-2.example.internal
+      registry.shutdownDrain: 10s
+      registry.shutdownTimeout: 20s
+      registry.otel.enabled: true
+      registry.logLevel: debug
+      registry.ports.grpc: 50051
+      registry.ports.http: 8081
+      registry.ports.admin: 9100
+      registry.extraArgs:
+        - --lease-skew=3s
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/global-discovery-mcs:0.2.0
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - --grpc-listen-address=:50051
+            - --http-listen-address=:8081
+            - --admin-listen-address=:9100
+            - --region=us-east-1
+            - --store=dynamodb
+            - --dynamodb-table=mcs-prod
+            - --dynamodb-endpoint=http://dynamodb-local:8000
+            - --refresh-interval=3s
+            - --lease-eval-interval=500ms
+            - --clusterset-discovery-interval=1m
+            - --lease-skew=5s
+            - --retention=48h
+            - --compaction-interval=30m
+            - --bookmark-interval=10s
+            - --watch-history=20000
+            - --watch-queue-size=2048
+            - --max-watchers=10000
+            - --max-message-bytes=8388608
+            - '--advertise-endpoints=[{"grpcUrl":"https://mcs.us-east-1.example.internal","primary":true,"region":"us-east-1"},{"grpcUrl":"https://mcs.us-west-2.example.internal","region":"us-west-2"}]'
+            - --shutdown-drain=10s
+            - --shutdown-timeout=20s
+            - --otel-enabled=true
+            - --log-level=debug
+            - --lease-skew=3s
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: grpc
+            containerPort: 50051
+            protocol: TCP
+
+  - it: omits the DynamoDB flags with the memory store
+    template: templates/registry/deployment.yaml
+    set:
+      registry.dynamodb.endpoint: http://dynamodb-local:8000
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --dynamodb-table=global-discovery-mcs
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --dynamodb-endpoint=http://dynamodb-local:8000
+
+  - it: mounts the TLS Secret and passes the key pair
+    template: templates/registry/deployment.yaml
+    set:
+      registry.tls.secretName: mcs-registry-tls
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --tls-cert-file=/etc/mcs-registry/tls/tls.crt
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --tls-key-file=/etc/mcs-registry/tls/tls.key
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tls
+            mountPath: /etc/mcs-registry/tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tls
+            secret:
+              secretName: mcs-registry-tls
+
+  - it: probes the admin listener
+    template: templates/registry/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          value:
+            path: /readyz
+            port: admin
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+          value:
+            path: /healthz
+            port: admin
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 5
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: admin
+            containerPort: 9091
+            protocol: TCP
+
+  - it: passes extra env, volumes and pod placement through
+    template: templates/registry/deployment.yaml
+    set:
+      imagePullSecrets:
+        - name: ngc-secret
+      registry.extraEnv:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel-collector:4317
+      registry.extraVolumes:
+        - name: scratch
+          emptyDir: {}
+      registry.extraVolumeMounts:
+        - name: scratch
+          mountPath: /scratch
+      registry.nodeSelector:
+        node-role: control
+      registry.tolerations:
+        - key: dedicated
+          operator: Exists
+          effect: NoSchedule
+      registry.priorityClassName: system-cluster-critical
+      registry.podAnnotations:
+        example.com/scrape: "true"
+      registry.podLabels:
+        team: router
+        app.kubernetes.io/component: overridden
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: scratch
+              emptyDir: {}
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: scratch
+              mountPath: /scratch
+      - equal:
+          path: spec.template.spec.imagePullSecrets
+          value:
+            - name: ngc-secret
+      - equal:
+          path: spec.template.spec.nodeSelector
+          value:
+            node-role: control
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: system-cluster-critical
+      - equal:
+          path: spec.template.metadata.annotations
+          value:
+            example.com/scrape: "true"
+      - equal:
+          path: spec.template.metadata.labels.team
+          value: router
+      # Pod labels never override the selector labels.
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: registry
+
+  # values.schema.json refuses it; the template check in
+  # global-discovery-mcs.registry.validate covers --skip-schema-validation.
+  - it: refuses several replicas of the memory store
+    template: templates/registry/deployment.yaml
+    set:
+      registry.replicas: 2
+    asserts:
+      - failedTemplate:
+          errorPattern: registry.replicas
+
+  - it: runs several replicas of the DynamoDB store
+    template: templates/registry/deployment.yaml
+    set:
+      registry.replicas: 3
+      registry.store: dynamodb
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: exposes gRPC, HTTP and admin on the Service
+    template: templates/registry/service.yaml
+    set:
+      registry.service.type: LoadBalancer
+      registry.service.annotations:
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: mcs-registry
+      - equal:
+          path: spec.type
+          value: LoadBalancer
+      - equal:
+          path: metadata.annotations["service.beta.kubernetes.io/aws-load-balancer-scheme"]
+          value: internal
+      - equal:
+          path: spec.ports
+          value:
+            - name: grpc
+              port: 9090
+              targetPort: grpc
+              protocol: TCP
+            - name: http
+              port: 8080
+              targetPort: http
+              protocol: TCP
+            - name: admin
+              port: 9091
+              targetPort: admin
+              protocol: TCP
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: global-discovery-mcs
+            app.kubernetes.io/instance: mcs
+            app.kubernetes.io/component: registry
+
+  - it: annotates the ServiceAccount for IRSA
+    template: templates/registry/serviceaccount.yaml
+    set:
+      registry.serviceAccount.annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mcs-registry
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.annotations["eks.amazonaws.com/role-arn"]
+          value: arn:aws:iam::123456789012:role/mcs-registry
+      - equal:
+          path: automountServiceAccountToken
+          value: false
+
+  - it: uses an existing ServiceAccount
+    set:
+      registry.serviceAccount.create: false
+      registry.serviceAccount.name: mcs-registry-irsa
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/registry/serviceaccount.yaml
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mcs-registry-irsa
+        template: templates/registry/deployment.yaml
+
+  - it: renders the PodDisruptionBudget with minAvailable
+    template: templates/registry/poddisruptionbudget.yaml
+    set:
+      registry.podDisruptionBudget.enabled: true
+    asserts:
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+      - notExists:
+          path: spec.maxUnavailable
+
+  - it: prefers maxUnavailable in the PodDisruptionBudget
+    template: templates/registry/poddisruptionbudget.yaml
+    set:
+      registry.podDisruptionBudget.enabled: true
+      registry.podDisruptionBudget.maxUnavailable: 1
+    asserts:
+      - equal:
+          path: spec.maxUnavailable
+          value: 1
+      - notExists:
+          path: spec.minAvailable
+
+  - it: renders no PodDisruptionBudget or ServiceMonitor by default
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/registry/poddisruptionbudget.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/registry/servicemonitor.yaml
+
+  - it: scrapes the admin port with the ServiceMonitor
+    template: templates/registry/servicemonitor.yaml
+    set:
+      registry.metrics.serviceMonitor.enabled: true
+      registry.metrics.serviceMonitor.labels:
+        release: kube-prometheus-stack
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+      - equal:
+          path: spec.endpoints
+          value:
+            - port: admin
+              path: /metrics
+              scheme: http
+              interval: 30s
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: registry

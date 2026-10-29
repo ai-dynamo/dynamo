@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 3 in the hub, applied in namespace gr: two stand-in Global Router
+# replicas, the Service global-router with the named port grpc that the
+# Global Discovery Service reads (--router-port-name), and its ServiceExport.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-router
+  labels:
+    app: global-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: global-router
+  template:
+    metadata:
+      labels:
+        app: global-router
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: httpd
+          image: __BUSYBOX_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - mkdir -p /www && echo "$HOSTNAME" > /www/index.html && exec httpd -f -p 8080 -h /www
+          ports:
+            - name: grpc
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /index.html
+              port: grpc
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-router
+spec:
+  selector:
+    app: global-router
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+---
+apiVersion: multicluster.x-k8s.io/v1beta1
+kind: ServiceExport
+metadata:
+  name: global-router

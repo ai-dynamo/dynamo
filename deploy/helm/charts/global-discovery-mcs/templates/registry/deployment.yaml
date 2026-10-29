@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.registry.enabled }}
+{{- include "global-discovery-mcs.registry.validate" . }}
+{{- $r := .Values.registry }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "global-discovery-mcs.registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "registry") | nindent 4 }}
+spec:
+  replicas: {{ $r.replicas | int }}
+  selector:
+    matchLabels:
+      {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "registry") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $selector := include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "registry") | fromYaml }}
+        {{- toYaml (merge $selector ($r.podLabels | default dict)) | nindent 8 }}
+      {{- with $r.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "global-discovery-mcs.registry.serviceAccountName" . }}
+      automountServiceAccountToken: {{ $r.automountServiceAccountToken }}
+      # The registry reports not ready for --shutdown-drain, then stops its
+      # servers within --shutdown-timeout; the grace period covers both.
+      terminationGracePeriodSeconds: {{ $r.terminationGracePeriodSeconds | int }}
+      {{- with $r.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mcs-registry
+          image: {{ include "global-discovery-mcs.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /mcs-registry
+          # Every flag also reads MCS_<FLAG_NAME> from the environment; a flag
+          # on the command line wins, so values here override extraEnv.
+          args:
+            - {{ printf "--grpc-listen-address=:%d" ($r.ports.grpc | int) | quote }}
+            - {{ printf "--http-listen-address=:%d" ($r.ports.http | int) | quote }}
+            - {{ printf "--admin-listen-address=:%d" ($r.ports.admin | int) | quote }}
+            {{- with $r.region }}
+            - {{ printf "--region=%s" . | quote }}
+            {{- end }}
+            - {{ printf "--store=%s" $r.store | quote }}
+            {{- if eq $r.store "dynamodb" }}
+            - {{ printf "--dynamodb-table=%s" $r.dynamodb.table | quote }}
+            {{- with $r.dynamodb.endpoint }}
+            - {{ printf "--dynamodb-endpoint=%s" . | quote }}
+            {{- end }}
+            {{- end }}
+            - {{ printf "--refresh-interval=%s" $r.refreshInterval | quote }}
+            - {{ printf "--lease-eval-interval=%s" $r.leaseEvalInterval | quote }}
+            - {{ printf "--clusterset-discovery-interval=%s" $r.clustersetDiscoveryInterval | quote }}
+            - {{ printf "--lease-skew=%s" $r.leaseSkew | quote }}
+            - {{ printf "--retention=%s" $r.retention | quote }}
+            - {{ printf "--compaction-interval=%s" $r.compactionInterval | quote }}
+            - {{ printf "--bookmark-interval=%s" $r.watch.bookmarkInterval | quote }}
+            - {{ printf "--watch-history=%d" ($r.watch.history | int64) | quote }}
+            - {{ printf "--watch-queue-size=%d" ($r.watch.queueSize | int64) | quote }}
+            - {{ printf "--max-watchers=%d" ($r.watch.maxWatchers | int64) | quote }}
+            - {{ printf "--max-message-bytes=%d" ($r.maxMessageBytes | int64) | quote }}
+            {{- with $r.advertiseEndpoints }}
+            - {{ printf "--advertise-endpoints=%s" (toJson .) | quote }}
+            {{- end }}
+            {{- if $r.tls.secretName }}
+            - {{ printf "--tls-cert-file=%s/tls.crt" (include "global-discovery-mcs.registry.tlsDir" .) | quote }}
+            - {{ printf "--tls-key-file=%s/tls.key" (include "global-discovery-mcs.registry.tlsDir" .) | quote }}
+            {{- end }}
+            - {{ printf "--shutdown-drain=%s" $r.shutdownDrain | quote }}
+            - {{ printf "--shutdown-timeout=%s" $r.shutdownTimeout | quote }}
+            - {{ printf "--otel-enabled=%t" $r.otel.enabled | quote }}
+            - {{ printf "--log-level=%s" $r.logLevel | quote }}
+            {{- range $r.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- with $r.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ $r.ports.grpc | int }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ $r.ports.http | int }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ $r.ports.admin | int }}
+              protocol: TCP
+          # /readyz needs a store ping, one completed refresh of every
+          # clusterset and a view younger than three refresh intervals.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            {{- with $r.readinessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            {{- with $r.livenessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $r.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $r.tls.secretName $r.extraVolumeMounts }}
+          volumeMounts:
+            {{- if $r.tls.secretName }}
+            - name: tls
+              mountPath: {{ include "global-discovery-mcs.registry.tlsDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- with $r.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or $r.tls.secretName $r.extraVolumes }}
+      volumes:
+        {{- if $r.tls.secretName }}
+        - name: tls
+          secret:
+            secretName: {{ $r.tls.secretName }}
+        {{- end }}
+        {{- with $r.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with $r.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

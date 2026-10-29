@@ -1,0 +1,307 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Multi-Cluster Services (KEP-1645) for the Dynamo Global Router: the
+# mcs-registry server, the per-cluster mcs-controller and the CRDs they use.
+# Flags, defaults and behaviour are documented in deploy/global-discovery-mcs
+# (README.md, docs/mcs-controller.md); the values below map onto those flags.
+
+# -- Override the chart name in the `app.kubernetes.io/name` label.
+nameOverride: ""
+# -- Prefix of the resource names: the components are `<prefix>-registry` and `<prefix>-controller`. Empty uses `mcs`, so the Deployments are `mcs-registry` and `mcs-controller`.
+fullnameOverride: ""
+
+image:
+  # -- Image holding `/mcs-registry` (the entrypoint), `/mcs-controller` and `/mcs-admin`, built from deploy/global-discovery-mcs/Dockerfile.
+  repository: nvcr.io/nvidia/ai-dynamo/global-discovery-mcs
+  # -- Image tag. Empty uses the chart appVersion.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets of the registry and controller pods, for example `[{name: ngc-secret}]`.
+imagePullSecrets: []
+
+# -- Pod security context of both components. The image runs as the distroless nonroot user 65532.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context of both components.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+rbac:
+  # -- Create the controller ClusterRole (rendered from files/controller-role.yaml), its ClusterRoleBinding and the leader election Role and RoleBinding.
+  create: true
+
+crds:
+  # -- Render the ServiceExport and ServiceImport CRDs (sigs.k8s.io/mcs-api v0.5.2) and the KEP-2149 ClusterProperty CRD. Set false when Karmada or another MCS implementation already serves them.
+  install: true
+  # -- Annotate the CRDs with `helm.sh/resource-policy: keep`, so that `helm uninstall` and `crds.install=false` leave them, and every ServiceExport and ServiceImport, in place.
+  keep: true
+
+registry:
+  # -- Deploy mcs-registry. Usually enabled in the registry clusters only.
+  enabled: false
+  # -- Registry replicas. `store: memory` keeps the state in the replica's memory and requires exactly one replica (the chart refuses more); scale out with `store: dynamodb`.
+  replicas: 1
+  # -- Store backend: `memory` or `dynamodb` (`--store`).
+  store: memory
+  dynamodb:
+    # -- DynamoDB table (`--dynamodb-table`); create it with `mcs-admin create-table`.
+    table: global-discovery-mcs
+    # -- DynamoDB endpoint override, for dynamodb-local (`--dynamodb-endpoint`). Empty uses the AWS endpoint of the region.
+    endpoint: ""
+  # -- Region reported by GetServerInfo and used by the DynamoDB store (`--region`). Empty uses `$AWS_REGION`, which IRSA and EKS Pod Identity inject.
+  region: ""
+  # -- Full reload of each clusterset from the store (`--refresh-interval`).
+  refreshInterval: 2s
+  # -- Lease evaluation without a store read (`--lease-eval-interval`).
+  leaseEvalInterval: 1s
+  # -- Listing of the store's clustersets (`--clusterset-discovery-interval`).
+  clustersetDiscoveryInterval: 30s
+  # -- Clock skew allowance before a lease expires, 0s to 1m (`--lease-skew`).
+  leaseSkew: 2s
+  # -- How long the records of an expired cluster are kept, at least 5m (`--retention`).
+  retention: 24h
+  # -- Interval of the retention cleanup (`--compaction-interval`).
+  compactionInterval: 10m
+  watch:
+    # -- Interval of watch bookmarks, 1s to 5m (`--bookmark-interval`). Keep it below the idle timeout of any load balancer in front of the registry.
+    bookmarkInterval: 5s
+    # -- Events kept per clusterset for resume (`--watch-history`).
+    history: 10000
+    # -- Per-watcher queue; an overflowing watcher is re-snapshotted (`--watch-queue-size`).
+    queueSize: 1024
+    # -- Concurrent watch streams per replica (`--max-watchers`).
+    maxWatchers: 5000
+  # -- gRPC message size limit in bytes, at least 1 MiB (`--max-message-bytes`).
+  maxMessageBytes: 4194304
+  # -- Endpoints returned by GetServerInfo as client fallbacks (`--advertise-endpoints`), each `{region, grpcUrl, httpUrl, primary}`; at most one primary.
+  advertiseEndpoints: []
+  tls:
+    # -- Name of an existing `kubernetes.io/tls` Secret (keys `tls.crt`, `tls.key`) that enables TLS on the gRPC and REST listeners (`--tls-cert-file`, `--tls-key-file`). Empty serves plaintext (h2c). The registry reads the key pair at startup; restart it after a rotation.
+    secretName: ""
+  # -- Time reported not ready before the replica stops serving (`--shutdown-drain`).
+  shutdownDrain: 5s
+  # -- Graceful stop of the gRPC and REST servers (`--shutdown-timeout`).
+  shutdownTimeout: 25s
+  # -- Pod termination grace period in seconds. Keep it above `shutdownDrain` plus `shutdownTimeout`.
+  terminationGracePeriodSeconds: 45
+  # -- Log level: `debug`, `info`, `warn` or `error` (`--log-level`).
+  logLevel: info
+  otel:
+    # -- OTLP tracing (`--otel-enabled`), configured by `OTEL_*` variables in `registry.extraEnv`.
+    enabled: false
+  ports:
+    # -- gRPC port (`--grpc-listen-address`), on the container and the Service.
+    grpc: 9090
+    # -- REST gateway port (`--http-listen-address`), on the container and the Service.
+    http: 8080
+    # -- Admin port (`--admin-listen-address`): `/metrics`, `/healthz`, `/readyz` and `/debug/pprof`, on the container and the Service.
+    admin: 9091
+  service:
+    # -- Service type. The registry has no authentication: expose it only on private networks (for example an internal NLB).
+    type: ClusterIP
+    # -- Service annotations, for example the AWS Load Balancer Controller's.
+    annotations: {}
+  serviceAccount:
+    # -- Create the registry ServiceAccount.
+    create: true
+    # -- ServiceAccount name. Empty uses `<fullname>-registry`.
+    name: ""
+    # -- ServiceAccount annotations, for example `eks.amazonaws.com/role-arn` for IRSA (see deploy/global-discovery-mcs/docs/iam.md).
+    annotations: {}
+  # -- Mount the Kubernetes API token into the registry pods. The registry does not call the Kubernetes API; IRSA and EKS Pod Identity mount their own token.
+  automountServiceAccountToken: false
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the registry.
+    enabled: false
+    # -- Minimum available registry pods, a number or a percentage. Ignored when `maxUnavailable` is set.
+    minAvailable: 1
+    # -- (int) Maximum unavailable registry pods, a number or a percentage; set it instead of `minAvailable`.
+    maxUnavailable: null
+  metrics:
+    serviceMonitor:
+      # -- Create a prometheus-operator ServiceMonitor that scrapes `/metrics` on the admin port.
+      enabled: false
+      # -- Scrape interval.
+      interval: 30s
+      # -- Extra ServiceMonitor labels, for example the `release` label a Prometheus selects.
+      labels: {}
+  readinessProbe:
+    # -- Readiness probe period against `/readyz` on the admin port (store ping and a fresh view).
+    periodSeconds: 5
+    # -- Readiness probe timeout.
+    timeoutSeconds: 3
+    # -- Readiness probe failure threshold.
+    failureThreshold: 3
+  livenessProbe:
+    # -- Liveness probe period against `/healthz` on the admin port.
+    periodSeconds: 10
+    # -- Liveness probe timeout.
+    timeoutSeconds: 3
+    # -- Liveness probe failure threshold.
+    failureThreshold: 3
+  # -- Extra registry arguments, appended after the chart's flags.
+  extraArgs: []
+  # -- Extra registry environment variables (EnvVar objects), for example `OTEL_*` or `AWS_*`. The chart passes its values as flags, which win over the `MCS_*` fallbacks.
+  extraEnv: []
+  # -- Extra registry pod volumes.
+  extraVolumes: []
+  # -- Extra registry container volume mounts.
+  extraVolumeMounts: []
+  # -- Registry container resources.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+  # -- Registry pod node selector.
+  nodeSelector: {}
+  # -- Registry pod tolerations.
+  tolerations: []
+  # -- Registry pod affinity.
+  affinity: {}
+  # -- Registry pod topology spread constraints.
+  topologySpreadConstraints: []
+  # -- Registry pod priority class.
+  priorityClassName: ""
+  # -- Registry pod annotations.
+  podAnnotations: {}
+  # -- Registry pod labels.
+  podLabels: {}
+
+controller:
+  # -- Deploy mcs-controller. One installation runs in every member cluster.
+  enabled: true
+  # -- Controller replicas. Only the leader writes to the registry and applies imports; more than one replica requires `leaderElect`.
+  replicas: 2
+  # -- Registry URLs in failover order, all `https://` or all `http://` (one `--registry-url` each), for example `--set 'controller.registryUrls={https://mcs.example.internal:9090}'`. Empty uses the registry Service of this release when `registry.enabled`.
+  registryUrls: []
+  # -- Permit `http://` registry URLs (`--registry-allow-insecure-http`).
+  registryAllowInsecureHttp: false
+  registryTlsCa:
+    # -- ConfigMap holding the PEM bundle of the CAs that sign the registry certificates, mounted for `--registry-tls-ca-file`. Empty with `secretName` empty uses the system roots.
+    configMapName: ""
+    # -- Secret holding the CA bundle, instead of `configMapName`.
+    secretName: ""
+    # -- Key of the CA bundle in the ConfigMap or Secret.
+    key: ca.crt
+  # -- Clusterset name, a DNS label (`--clusterset-id`). Empty reads the ClusterProperty `clusterset.k8s.io`.
+  clustersetId: ""
+  # -- Cluster id, a DNS label unique in the clusterset (`--cluster-id`). Empty reads the ClusterProperty `cluster.clusterset.k8s.io`.
+  clusterId: ""
+  # -- Where the ids come from: `auto` (flags win, else ClusterProperty), `flags` or `clusterproperty` (`--cluster-identity-source`).
+  clusterIdentitySource: auto
+  # -- Region of this cluster (`--region`). Empty uses the most common `topology.kubernetes.io/region` node label.
+  region: ""
+  # -- Labels of the cluster registration (`--cluster-labels`).
+  clusterLabels: {}
+  # -- Cluster lease TTL, 10s to 5m; heartbeats run every TTL/3 (`--lease-ttl`).
+  leaseTtl: 30s
+  # -- Namespaces exported from and imported into (`--watch-namespaces`). Empty watches every namespace.
+  watchNamespaces: []
+  # -- Create missing import namespaces (`--create-namespaces`).
+  createNamespaces: false
+  # -- Take over ServiceImports of other implementations (`--adopt-unmanaged-imports`).
+  adoptUnmanagedImports: false
+  # -- Write the ClusterProperty objects of the resolved identity (`--write-cluster-properties`).
+  writeClusterProperties: false
+  # -- Deregister the cluster on stop, deleting its exports in the registry (`--deregister-on-shutdown`). Leave it off for restarts and upgrades.
+  deregisterOnShutdown: false
+  # -- Endpoints per imported EndpointSlice, 1 to 1000 (`--endpoints-per-slice`).
+  endpointsPerSlice: 100
+  # -- Workers per controller (`--max-concurrent-reconciles`).
+  maxConcurrentReconciles: 4
+  # -- Leader election (`--leader-elect`) with a Lease in the release namespace (`POD_NAMESPACE`); required for more than one replica.
+  leaderElect: true
+  otel:
+    # -- OTLP tracing (`--otel-enabled`), configured by `OTEL_*` variables in `controller.extraEnv`.
+    enabled: false
+  log:
+    # -- Log level: `debug`, `info`, `error`, `panic` or an integer verbosity (`--zap-log-level`). Empty keeps the controller-runtime default.
+    level: info
+    # -- Log encoder: `json` or `console` (`--zap-encoder`). Empty keeps the controller-runtime default.
+    encoder: json
+    # -- Level at and above which stack traces are logged: `info`, `error` or `panic` (`--zap-stacktrace-level`). Empty keeps the controller-runtime default.
+    stacktraceLevel: error
+    # -- Time encoding: `epoch`, `millis`, `nano`, `iso8601`, `rfc3339` or `rfc3339nano` (`--zap-time-encoding`). Empty keeps the controller-runtime default.
+    timeEncoding: rfc3339
+    # -- Development logging defaults (`--zap-devel`).
+    development: false
+  # -- Health probe port serving `/healthz` and `/readyz` (`--health-probe-bind-address`).
+  healthProbePort: 8081
+  metrics:
+    # -- Serve `/metrics` (`--metrics-bind-address`) and create the metrics Service. False passes `--metrics-bind-address=0`.
+    enabled: true
+    # -- Metrics port, on the container and the metrics Service.
+    port: 8080
+    serviceMonitor:
+      # -- Create a prometheus-operator ServiceMonitor for the metrics Service.
+      enabled: false
+      # -- Scrape interval.
+      interval: 30s
+      # -- Extra ServiceMonitor labels, for example the `release` label a Prometheus selects.
+      labels: {}
+  # -- Pod termination grace period in seconds.
+  terminationGracePeriodSeconds: 30
+  serviceAccount:
+    # -- Create the controller ServiceAccount.
+    create: true
+    # -- ServiceAccount name. Empty uses `<fullname>-controller`.
+    name: ""
+    # -- ServiceAccount annotations.
+    annotations: {}
+  readinessProbe:
+    # -- Readiness probe period against `/readyz` (registry connected and, on the leader, the cluster registered).
+    periodSeconds: 10
+    # -- Readiness probe timeout.
+    timeoutSeconds: 3
+    # -- Readiness probe failure threshold.
+    failureThreshold: 3
+  livenessProbe:
+    # -- Liveness probe period against `/healthz`.
+    periodSeconds: 20
+    # -- Liveness probe timeout.
+    timeoutSeconds: 3
+    # -- Liveness probe failure threshold.
+    failureThreshold: 3
+  # -- Extra controller arguments, appended after the chart's flags.
+  extraArgs: []
+  # -- Extra controller environment variables (EnvVar objects), for example `OTEL_*`.
+  extraEnv: []
+  # -- Extra controller pod volumes.
+  extraVolumes: []
+  # -- Extra controller container volume mounts.
+  extraVolumeMounts: []
+  # -- Controller container resources.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  # -- Controller pod node selector.
+  nodeSelector: {}
+  # -- Controller pod tolerations.
+  tolerations: []
+  # -- Controller pod affinity.
+  affinity: {}
+  # -- Controller pod topology spread constraints.
+  topologySpreadConstraints: []
+  # -- Controller pod priority class.
+  priorityClassName: ""
+  # -- Controller pod annotations.
+  podAnnotations: {}
+  # -- Controller pod labels.
+  podLabels: {}
