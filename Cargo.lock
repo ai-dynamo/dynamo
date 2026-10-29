@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610240000000082"
+version = "0.13.0-dev.202610280000000086"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa3e351f2964f97c386e270dc1ef46e771b72542d5015d638a25f3b4eef34ccd"
+checksum = "2149f65333729153bc6f89b30b2adca4cd58c7ddcc6f9ed6ce0a07cdf66f1cba"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -847,6 +847,7 @@ dependencies = [
  "matchit 0.8.4",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -2476,6 +2477,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-client"
+version = "1.7.0"
+dependencies = [
+ "axum 0.8.4",
+ "dynamo-global-common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-service"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-frontend"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-router"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-global-view-receiver"
+version = "1.7.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
@@ -2604,6 +2659,7 @@ dependencies = [
  "llm-tokenizer",
  "lru",
  "memfile",
+ "mime",
  "minijinja",
  "mockito",
  "modelexpress-client",
@@ -2764,14 +2820,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.7"
+version = "10.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+checksum = "1e1888c34549d90094c35f9960b071c259bd051e6a3b89458b17eee4def0a139"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
  "dynamo-protocols",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2788,9 +2845,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.35"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561fd41706eeccdad858e90702f736a35020d7c3761c5c6e7dbb47a83bf1a59f"
+checksum = "705005ac5414c4dc7327f8f868c56ae85bc247c71dfd250ab95fc1aa9622e72d"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2806,9 +2863,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.2.0"
+version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2825,9 +2882,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.3"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+checksum = "a9e6a7ebe51c63049c4088131c3e8bfe5687fafb699e659fda20728b34e4dc31"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2869,6 +2926,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.4",
+ "base64 0.22.1",
  "bincode 1.3.3",
  "blake3",
  "bytes",
@@ -2943,6 +3001,7 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
 ]
 
@@ -5947,6 +6006,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6078,6 +6154,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -9458,6 +9535,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10380,6 +10468,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
+name = "ucx-rs"
+version = "0.1.0+ucx.1.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0f69840ad9bf0a2dddb056c1fcc847ea8de16cce0d29dee6a4d164049598b45"
+dependencies = [
+ "flate2",
+ "sha2 0.10.9",
+ "tar",
+]
+
+[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10688,6 +10787,61 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "velo"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bs58",
+ "bytes",
+ "dashmap",
+ "derive-getters",
+ "derive_builder",
+ "flume",
+ "futures",
+ "nix 0.31.3",
+ "offset-allocator",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "socket2 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ucx-rs",
+ "uuid",
+ "velo-ext",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "velo-ext"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c340505e9a3330467664d4ca09ff74b41365d6be3ddca4d6f4046a7c526edfaa"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "flume",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "version-compare"
@@ -11498,6 +11652,16 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
 
 [[package]]
 name = "xmlparser"
