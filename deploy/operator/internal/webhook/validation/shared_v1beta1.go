@@ -169,6 +169,27 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	groveStrategyChanged              bool
 }
 
+// validateComponentEngineGroupSpec validates the creation contract independently of its workload provider.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) validateComponentEngineGroupSpec(
+	spec *nvidiacomv1beta1.ComponentEngineGroupSpec,
+	fldPath *field.Path,
+	hasRootOverride bool,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// A workload override cannot bypass the resolved immutable launch profile.
+	if hasRootOverride {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Group workload overrides cannot bypass the resolved launch profile"))
+	}
+
+	// Creation requires a positive explicit seed, not a runtime infer-size convention.
+	if spec.InitialSize < 1 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("initialSize"), spec.InitialSize, "must be positive"))
+	}
+	return allErrs
+}
+
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
 // Options are supplied by the owning resource.
 //
