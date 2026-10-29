@@ -33,6 +33,7 @@ jobs:
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
+      sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-image-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -147,7 +149,6 @@ jobs:
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
-      - sidecar-trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
       - triton-build
@@ -166,6 +167,9 @@ jobs:
       - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          if [[ '${{ needs.changed-files.outputs.sidecar_trtllm_image }}' == 'true' ]]; then
+            test '${{ needs.sidecar-trtllm-nightly-image-test.result }}' = 'success'
+          fi
 
   deploy-status-check:
     runs-on: ubuntu-24.04
@@ -340,6 +344,14 @@ jobs:
 # ============================================================================
 # Sidecar
 # ============================================================================
+
+  sidecar-trtllm-nightly-image-test:
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar_trtllm_image == 'true'
+    uses: $/.github/workflows/shared-test-trtllm-nightly-image.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+    secrets: inherit
 
   sidecar-build:
     name: dynamo-sidecar
@@ -543,11 +555,6 @@ jobs:
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
-      # Drop this source overlay after the pinned TRT-LLM runtime image contains
-      # the upstream change.
-      extra_build_args: |
-        TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
-        TRTLLM_SOURCE_COMMIT=2d69a82634616aab31ba437368ea24c87afbcca0
     # actions: read lets the build download a prior run's baseline compliance
     # artifact to diff against (a reusable workflow's token can't exceed the
     # caller's). Missing -> the diff soft-degrades, build stays green.
@@ -933,27 +940,6 @@ jobs:
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  sidecar-trtllm-test:
-    name: sidecar-runtime
-    needs: [changed-files, trtllm-build, sidecar-build]
-    if: needs.changed-files.outputs.sidecar == 'true' && needs.changed-files.outputs.trtllm == 'true'
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      test_suite_name: trtllm
-      framework: trtllm
-      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
-      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      gpu_test_markers: pre_merge and sidecar and trtllm and gpu_1
-      gpu_test_timeout_minutes: 45
-      sidecar_backend: trtllm
-      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -2055,6 +2041,7 @@ jobs:
       - operator
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-image-test
       - planner-test
       - planner-copy-to-acr
       - frontend-build

@@ -404,6 +404,19 @@ async fn e2e_real_openengine_image() {
         usage.prompt_tokens, usage.completion_tokens
     );
 
+    if let Ok(path) = std::env::var("TRTLLM_E2E_RESULT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "token_ids": generated,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            }))
+            .expect("serialize image result"),
+        )
+        .expect("write image result");
+    }
+
     assert!(!generated.is_empty(), "expected image-conditioned output");
     assert!(
         usage.prompt_tokens > token_ids.len() as u32,
