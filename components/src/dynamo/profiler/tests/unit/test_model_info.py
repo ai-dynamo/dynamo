@@ -323,3 +323,21 @@ def test_model_weight_size_from_hub_estimates_without_checkpoint_sizes(
     _patch_hub(monkeypatch, tmp_path, files, index=index, parameters={"BF16": 3 * MIB})
 
     assert get_model_weight_size_from_hub("test/model") == 6
+
+
+@pytest.mark.parametrize("error_name", ["ConnectError", "ReadTimeout"])
+def test_model_weight_size_from_hub_estimates_on_index_transport_error(
+    monkeypatch, tmp_path, error_name
+) -> None:
+    """huggingface_hub 1.x raises httpx transport errors, which are not OSError."""
+    httpx = pytest.importorskip("httpx")
+    error = getattr(httpx, error_name)("index download failed")
+    _patch_hub(
+        monkeypatch,
+        tmp_path,
+        [("model-00001-of-00001.safetensors", 4 * MIB)],
+        index=error,
+        parameters={"BF16": 3 * MIB},
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 6

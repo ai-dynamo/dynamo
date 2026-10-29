@@ -22,6 +22,12 @@ except ImportError:
         pass
 
     _load_model_config_from_model_path = None
+
+try:
+    # huggingface_hub 1.x raises httpx network errors, which are not OSError.
+    from httpx import HTTPError as HTTPXError
+except ImportError:  # Older huggingface_hub raises requests errors (OSError).
+    HTTPXError = OSError
 logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
@@ -134,8 +140,8 @@ def _select_hub_checkpoint_files(model_name: str, info, token: Optional[str]) ->
                 )
                 with open(index_path) as f:
                     indexed = set(json.load(f)["weight_map"].values())
-            except (OSError, ValueError, KeyError) as e:
-                # Gated repos list their files but refuse the download.
+            except (OSError, ValueError, KeyError, HTTPXError) as e:
+                # Gated repos refuse the download; the network can fail.
                 logger.warning(
                     "Cannot read %s for %s: %s", SAFETENSORS_INDEX_NAME, model_name, e
                 )
