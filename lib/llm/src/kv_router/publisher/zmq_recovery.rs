@@ -154,6 +154,7 @@ fn fatal(error: impl Into<anyhow::Error>) -> RecoveryError {
 
 /// Caps both the live/replay merge buffer and one replay message.
 const MAX_REPLAY_BYTES: usize = 32 * 1024 * 1024;
+/// Only live batches that arrive ahead of replay wait in the merge buffer; a late reply never does.
 const MAX_PENDING_BATCHES: usize = 4096;
 const MAX_LIVE_DRAIN: usize = 4096;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -464,8 +465,9 @@ async fn recovery_session(
                 // A reply in an unknown format fails the same way on every attempt.
                 match decode_replay(multipart_message(message)).map_err(fatal)? {
                     ReplayFrame::Batch(sequence, payload) => {
-                        // A hole inside one reply is a transport drop; the next round re-requests it.
-                        is_reply_truncated |= replay_next.is_some_and(|next| next != sequence);
+                        // A hole inside one reply is a transport drop, and a reply that starts past the cursor
+                        // cannot apply yet; neither is buffered, and End confirms missing history or re-requests.
+                        is_reply_truncated |= replay_next.map_or(sequence > ingest.cursor.next(), |next| next != sequence);
                         replay_first.get_or_insert(sequence);
                         replay_next = Some(sequence.saturating_add(1));
                         if !is_reply_truncated {
@@ -833,17 +835,18 @@ mod socket_tests {
 
     #[tokio::test]
     async fn confirmed_missing_history_is_distinct_from_exhausted_retries() {
-        for (is_batch_sent, is_end_sent) in [(true, true), (true, false), (false, false)] {
+        for is_reply_sent in [true, false] {
             let mut f = Fixture::new(Duration::from_secs(1));
             let id = f.request(0).await;
-            if is_batch_sent {
-                f.send(&id, 500, payload(0)).await;
-            }
-            if is_end_sent {
+            if is_reply_sent {
+                // A late reply longer than the merge buffer, as from an engine whose buffer rolled over.
+                for sequence in 500..=500 + MAX_PENDING_BATCHES as i64 {
+                    f.send(&id, sequence, payload(0)).await;
+                }
                 f.send(&id, -1, vec![]).await;
             }
             let status = f.final_status().await;
-            if is_end_sent {
+            if is_reply_sent {
                 assert_eq!(
                     status,
                     KvStreamStatus::MissingHistory {
@@ -892,8 +895,12 @@ mod socket_tests {
         // Let replay expose the hole before its live counterpart arrives.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(f.live_events(0).await[0].event.event_id, 0);
-        assert_eq!(f.events().await[0].event.event_id, 1);
+        // The late reply was not buffered, so the rest is requested again once live fills the hole.
         f.send(&id, -1, vec![]).await;
+        let id = f.request(1).await;
+        f.send(&id, 1, payload(0)).await;
+        f.send(&id, -1, vec![]).await;
+        assert_eq!(f.events().await[0].event.event_id, 1);
         f.barrier().await;
         f.status(KvStreamStatus::Success).await;
     }
