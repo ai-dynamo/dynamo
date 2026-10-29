@@ -1,25 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
-use crate::kv_hints::KvHint;
+use crate::kv_hints::{KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache};
 use crate::protocols::{
-    DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
+    RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 use crate::services::overlap::MooncakeOverlapSummary;
 
-use super::input::PromptRequest;
+use super::input::{MmRoutingInfoRequest, PromptRequest};
 
 pub const DEFAULT_MODEL_NAME: &str = "default";
+
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
@@ -62,6 +66,10 @@ pub struct SelectionWorkerConfig {
     /// a router-hint source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// Derived from the fields above on first use; published configs are
+    /// replaced, never mutated.
+    #[serde(skip)]
+    pub kv_transfer_keys: WorkerKvTransferKeysCache,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
@@ -113,14 +121,20 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         if worker_type.is_empty() {
             return None;
         }
+        // A state-agent worker's blocks are served by its cache owner.
+        let is_source = self.kv_event_source_mode.as_deref() != Some("state_agent_v2");
         Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
                 .get(&dp_rank)
                 .map(String::as_str)
-                .filter(|endpoint| !endpoint.is_empty()),
+                .filter(|endpoint| is_source && !endpoint.is_empty()),
         })
+    }
+
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
     }
 }
 
@@ -224,6 +238,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
+            kv_transfer_keys: Default::default(),
         })
     }
 
@@ -417,14 +432,87 @@ impl WorkerCatalogRecord {
     }
 }
 
+/// Request bodies carry `PromptRequest`'s fields at the top level. `#[serde(flatten)]`
+/// would buffer the whole body through serde's `Content` first: every token id becomes a
+/// boxed `Content` value, and self-describing-only inputs (pythonize) fall back to untyped
+/// integer extraction. Each request type instead deserializes through a flat wire struct
+/// with the prompt fields inlined.
+macro_rules! inline_prompt_wire {
+    ($wire:ident => $target:ident {
+        $($(#[$meta:meta])* $field:ident: $ty:ty,)*
+    }) => {
+        #[derive(Deserialize)]
+        struct $wire {
+            $($(#[$meta])* $field: $ty,)*
+            token_ids: Option<Vec<u32>>,
+            mm_routing_info: Option<MmRoutingInfoRequest>,
+            block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+            block_hashes: Option<Vec<i64>>,
+            sequence_hashes: Option<Vec<i64>>,
+            isl_tokens: Option<usize>,
+            lora_name: Option<String>,
+            #[serde(default, rename = "cache_salt")]
+            cache_namespace: Option<String>,
+            #[serde(default, deserialize_with = "strict_bool")]
+            is_eagle: Option<bool>,
+        }
+
+        impl From<$wire> for $target {
+            fn from(wire: $wire) -> Self {
+                Self {
+                    $($field: wire.$field,)*
+                    prompt: PromptRequest {
+                        token_ids: wire.token_ids,
+                        mm_routing_info: wire.mm_routing_info,
+                        block_mm_infos: wire.block_mm_infos,
+                        block_hashes: wire.block_hashes,
+                        sequence_hashes: wire.sequence_hashes,
+                        isl_tokens: wire.isl_tokens,
+                        lora_name: wire.lora_name,
+                        cache_namespace: wire.cache_namespace,
+                        is_eagle: wire.is_eagle,
+                    },
+                }
+            }
+        }
+    };
+}
+
+/// A boolean or null, nothing else. A typed `bool` field would let pythonize coerce any
+/// truthy object, so `"is_eagle": "false"` would enable Eagle hashing.
+fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    struct StrictBool;
+
+    impl Visitor<'_> for StrictBool {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a boolean or null")
+        }
+
+        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StrictBool)
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(from = "SelectRequestWire")]
 pub struct SelectRequest {
-    #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_routing_group")]
     pub routing_group: String,
     pub selection_id: Option<String>,
-    #[serde(flatten)]
+    /// Inlined at the top level of the body.
     pub prompt: PromptRequest,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
@@ -436,7 +524,6 @@ pub struct SelectRequest {
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
-    #[serde(default)]
     pub routing_constraints: RoutingConstraints,
     /// Select from current scheduler state without queue admission.
     ///
@@ -447,9 +534,29 @@ pub struct SelectRequest {
     /// A `selection_id` still caches the booking inputs for a follow-up
     /// `create_reservation`. Ignored on `select_and_reserve`, which always
     /// books.
-    #[serde(default)]
     pub advisory: bool,
 }
+
+inline_prompt_wire!(SelectRequestWire => SelectRequest {
+    #[serde(default = "default_model_name")]
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    selection_id: Option<String>,
+    router_config_override: Option<RouterConfigOverride>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    session_id: Option<String>,
+    session_context: Option<SelectionSessionContext>,
+    affinity_target: Option<WorkerAffinityTarget>,
+    pinned_worker: Option<WorkerWithDpRank>,
+    allowed_worker_ids: Option<HashSet<WorkerId>>,
+    #[serde(default)]
+    routing_constraints: RoutingConstraints,
+    #[serde(default)]
+    advisory: bool,
+});
 
 impl SelectRequest {
     pub(super) fn take_session_context(&mut self) -> Option<SessionContext> {
@@ -458,13 +565,12 @@ impl SelectRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(from = "SelectAndReserveRequestWire")]
 pub struct SelectAndReserveRequest {
-    #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_routing_group")]
     pub routing_group: String,
     pub selection_id: Option<String>,
-    #[serde(flatten)]
+    /// Inlined at the top level of the body.
     pub prompt: PromptRequest,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
@@ -476,9 +582,27 @@ pub struct SelectAndReserveRequest {
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
-    #[serde(default)]
     pub routing_constraints: RoutingConstraints,
 }
+
+inline_prompt_wire!(SelectAndReserveRequestWire => SelectAndReserveRequest {
+    #[serde(default = "default_model_name")]
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    selection_id: Option<String>,
+    router_config_override: Option<RouterConfigOverride>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    session_id: Option<String>,
+    session_context: Option<SelectionSessionContext>,
+    affinity_target: Option<WorkerAffinityTarget>,
+    pinned_worker: Option<WorkerWithDpRank>,
+    allowed_worker_ids: Option<HashSet<WorkerId>>,
+    #[serde(default)]
+    routing_constraints: RoutingConstraints,
+});
 
 impl SelectAndReserveRequest {
     pub(super) fn take_session_context(&mut self) -> Option<SessionContext> {
@@ -553,10 +677,9 @@ fn resolve_session_context(
 /// self-contained with `worker_id`. The replay books exactly what `select` captured;
 /// request fields other than the ids and model/routing-group are ignored.
 #[derive(Debug, Deserialize)]
+#[serde(from = "ReservationRequestWire")]
 pub struct ReservationRequest {
-    #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_routing_group")]
     pub routing_group: String,
     /// The single booking id: the cache key to replay and the scheduler request
     /// id the booking lands under (the `selection_id` from the matching `select`).
@@ -565,7 +688,7 @@ pub struct ReservationRequest {
     /// without a cached select. Omit to replay the cached `selection_id`.
     pub worker_id: Option<WorkerId>,
     pub dp_rank: Option<DpRank>,
-    #[serde(flatten)]
+    /// Inlined at the top level of the body.
     pub prompt: PromptRequest,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
@@ -573,32 +696,60 @@ pub struct ReservationRequest {
     pub track_prefill_tokens: Option<bool>,
 }
 
+inline_prompt_wire!(ReservationRequestWire => ReservationRequest {
+    #[serde(default = "default_model_name")]
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    selection_id: String,
+    worker_id: Option<WorkerId>,
+    dp_rank: Option<DpRank>,
+    router_config_override: Option<RouterConfigOverride>,
+    expected_output_tokens: Option<u32>,
+    effective_prefill_tokens: Option<usize>,
+    track_prefill_tokens: Option<bool>,
+});
+
 #[derive(Debug, Deserialize)]
 pub struct OutputBlockRequest {
     pub decay_fraction: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(from = "PotentialLoadsRequestWire")]
 pub struct PotentialLoadsRequest {
-    #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(flatten)]
+    /// Inlined at the top level of the body.
     pub prompt: PromptRequest,
     pub router_config_override: Option<RouterConfigOverride>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct OverlapScoresRequest {
+inline_prompt_wire!(PotentialLoadsRequestWire => PotentialLoadsRequest {
     #[serde(default = "default_model_name")]
-    pub model_name: String,
+    model_name: String,
     #[serde(default = "default_routing_group")]
+    routing_group: String,
+    router_config_override: Option<RouterConfigOverride>,
+});
+
+#[derive(Debug, Deserialize)]
+#[serde(from = "OverlapScoresRequestWire")]
+pub struct OverlapScoresRequest {
+    pub model_name: String,
     pub routing_group: String,
-    #[serde(flatten)]
+    /// Inlined at the top level of the body.
     pub prompt: PromptRequest,
     pub router_config_override: Option<RouterConfigOverride>,
 }
+
+inline_prompt_wire!(OverlapScoresRequestWire => OverlapScoresRequest {
+    #[serde(default = "default_model_name")]
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    router_config_override: Option<RouterConfigOverride>,
+});
 
 #[derive(Debug, Serialize)]
 pub struct SelectResponse {

@@ -18,7 +18,9 @@ use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
+use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::policy_config::FullRankCounts;
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -67,6 +69,19 @@ pub(super) struct WorkerLoadSnapshot {
 impl WorkerLoadSnapshot {
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.active_tokens_at(decay_now)
+    }
+
+    fn projection(
+        &self,
+        decay_now: Instant,
+        additional_active_blocks: usize,
+    ) -> WorkerLoadProjection {
+        WorkerLoadProjection {
+            active_prefill_tokens: self.active_tokens(decay_now),
+            active_decode_blocks: self.active_blocks,
+            active_requests: self.active_requests,
+            additional_active_blocks,
+        }
     }
 
     pub(super) fn modeled_remaining_prefill_time_ms(
@@ -121,6 +136,10 @@ struct WorkerLoadTable {
     // IndexMap gives us the dense full-worker scan plus point lookup shape that was previously
     // hand-rolled as Vec<WorkerLoadSlot> + FxHashMap<WorkerWithDpRank, usize>.
     entries: IndexMap<WorkerWithDpRank, WorkerLoadSlot, FxBuildHasher>,
+    // Each entry's reported capacity, parallel to `entries` by index. Kept out of the load
+    // slot so the per-request scan streams the same bytes as before and reads capacity only
+    // when a pass judges busy thresholds.
+    capacities: Vec<WorkerCapacity>,
 }
 
 impl WorkerLoadTable {
@@ -134,10 +153,37 @@ impl WorkerLoadTable {
             .map(|(&worker, slot)| (worker, slot.snapshot()))
     }
 
+    /// Every entry with its position, so a caller can pair it with [`Self::capacity_at`].
+    fn iter_indexed(
+        &self,
+    ) -> impl Iterator<Item = (usize, WorkerWithDpRank, WorkerLoadSnapshot)> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, (&worker, slot))| (index, worker, slot.snapshot()))
+    }
+
+    #[inline]
+    fn capacity_at(&self, index: usize) -> WorkerCapacity {
+        self.capacities[index]
+    }
+
+    fn set_capacity(&mut self, worker: WorkerWithDpRank, capacity: WorkerCapacity) -> bool {
+        let Some(index) = self.entries.get_index_of(&worker) else {
+            return false;
+        };
+        self.capacities[index] = capacity;
+        true
+    }
+
     fn ensure_worker(&mut self, worker: WorkerWithDpRank) {
+        let before = self.entries.len();
         self.entries
             .entry(worker)
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
+        if self.entries.len() > before {
+            self.capacities.push(WorkerCapacity::default());
+        }
     }
 
     fn update(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) -> bool {
@@ -153,11 +199,15 @@ impl WorkerLoadTable {
             slot.replace(load);
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
+            self.capacities.push(WorkerCapacity::default());
         }
     }
 
     fn remove(&mut self, worker: WorkerWithDpRank) {
-        self.entries.swap_remove(&worker);
+        // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
+        if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
+            self.capacities.swap_remove(index);
+        }
     }
 }
 
@@ -245,6 +295,15 @@ impl PromptRegistry {
         self.cleanup_attempts.load(Ordering::Relaxed)
     }
 
+    /// Record the capacity a registered rank reports. Returns `false` for an unknown rank.
+    pub(super) fn set_worker_capacity(
+        &self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+    ) -> bool {
+        self.loads.write().set_capacity(worker, capacity)
+    }
+
     pub(super) fn apply_topology_change_without_cleanup(&self, change: &WorkerTopologyChange) {
         for removed in &change.removed {
             self.membership.remove_worker(removed.worker);
@@ -301,47 +360,91 @@ impl PromptRegistry {
         )
     }
 
+    /// Project every registered rank's load for one request into `projections`. With
+    /// `full_ranks`, the same pass also judges each rank's projection against the busy
+    /// thresholds it carries and counts the ranks without room per worker.
     pub(super) fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
-            WorkerLoadProjection {
-                active_prefill_tokens: load.active_tokens(decay_now),
-                active_decode_blocks: load.active_blocks,
-                active_requests: load.active_requests,
-                additional_active_blocks: query_len.saturating_sub(overlap_depth),
-            }
+            load.projection(decay_now, query_len.saturating_sub(overlap_depth))
         };
 
         // A reused map usually still holds the previous request's projection over the same
         // workers. Overwriting values in place avoids re-inserting every worker; any key-set
         // mismatch falls back to a rebuild. Equal lengths plus every worker found means the
         // key sets are equal because worker keys are unique.
-        if projections.len() == loads.len()
-            && loads.iter().all(|(worker, load)| {
+        let Some(full_ranks) = full_ranks else {
+            if projections.len() == loads.len()
+                && loads.iter().all(|(worker, load)| {
+                    projections
+                        .get_mut(&worker)
+                        .map(|projection| *projection = project(worker, load))
+                        .is_some()
+                })
+            {
+                return;
+            }
+
+            projections.clear();
+            projections.reserve(loads.len());
+            projections.extend(
+                loads
+                    .iter()
+                    .map(|(worker, load)| (worker, project(worker, load))),
+            );
+            return;
+        };
+
+        // The same two shapes, judging each rank as its projection is written.
+        if projections.len() == loads.len() {
+            let refreshed = loads.iter_indexed().all(|(index, worker, load)| {
                 projections
                     .get_mut(&worker)
-                    .map(|projection| *projection = project(worker, load))
+                    .map(|projection| {
+                        *projection = project(worker, load);
+                        full_ranks.record(worker, loads.capacity_at(index), projection);
+                    })
                     .is_some()
-            })
-        {
-            return;
+            });
+            if refreshed {
+                return;
+            }
+            // The in-place pass counted a prefix before the key sets diverged.
+            full_ranks.clear();
         }
 
         projections.clear();
         projections.reserve(loads.len());
-        projections.extend(
-            loads
-                .iter()
-                .map(|(worker, load)| (worker, project(worker, load))),
-        );
+        projections.extend(loads.iter_indexed().map(|(index, worker, load)| {
+            let projection = project(worker, load);
+            full_ranks.record(worker, loads.capacity_at(index), &projection);
+            (worker, projection)
+        }));
+    }
+
+    pub(super) fn record_full_worker_ranks_at(
+        &self,
+        decay_now: Instant,
+        full_ranks: &mut FullRankCounts,
+    ) {
+        full_ranks.clear();
+        let loads = self.loads.read();
+        for (index, worker, load) in loads.iter_indexed() {
+            full_ranks.record(
+                worker,
+                loads.capacity_at(index),
+                &load.projection(decay_now, 0),
+            );
+        }
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
@@ -663,16 +766,16 @@ mod tests {
 
         let fresh_projection = || {
             let mut projections = FxHashMap::default();
-            registry.project_worker_loads_into(Some(&query), decay_now, &mut projections);
+            registry.project_worker_loads_into(Some(&query), decay_now, &mut projections, None);
             projections
         };
         let mut reused = FxHashMap::default();
-        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused, None);
         assert_eq!(reused, fresh_projection());
 
         // Same worker set: values are refreshed in place.
         registry.replace_worker_load_state(worker_b, worker_load_snapshot(7));
-        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused, None);
         assert_eq!(reused[&worker_b].active_decode_blocks, 7);
         assert_eq!(reused, fresh_projection());
 
@@ -681,9 +784,91 @@ mod tests {
             added: vec![worker_c],
             removed: vec![RemovedWorkerState { worker: worker_a }],
         });
-        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused, None);
         assert!(!reused.contains_key(&worker_a));
         assert_eq!(reused, fresh_projection());
+    }
+
+    #[test]
+    fn projection_pass_counts_full_ranks_against_each_ranks_capacity() {
+        use crate::scheduling::BusyThresholds;
+
+        let worker_a = worker(1, 0);
+        let worker_b = worker(2, 0);
+        let worker_c = worker(3, 0);
+        let registry = PromptRegistry::new([worker_a, worker_b]);
+        let decay_now = Instant::now();
+        let limits = BusyThresholds {
+            decode_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        };
+        // Both ranks hold 7 blocks; only worker 1 reports the 8-block capacity that makes
+        // 7 blocks "full". An unknown rank cannot be given a capacity.
+        let capacity = WorkerCapacity::new(Some(100), Some(8));
+        assert!(registry.set_worker_capacity(worker_a, capacity));
+        assert!(!registry.set_worker_capacity(worker_c, capacity));
+        registry.replace_worker_load_state(worker_a, worker_load_snapshot(7));
+        registry.replace_worker_load_state(worker_b, worker_load_snapshot(7));
+
+        let mut projections = FxHashMap::default();
+        let mut full_ranks = FullRankCounts::default();
+        full_ranks.reset(limits);
+        registry.project_worker_loads_into(
+            None,
+            decay_now,
+            &mut projections,
+            Some(&mut full_ranks),
+        );
+        assert!(full_ranks.worker_is_full(1, 1));
+        assert!(
+            !full_ranks.worker_is_full(2, 1),
+            "unreported capacity is never full"
+        );
+        assert_eq!(projections[&worker_a].active_decode_blocks, 7);
+        let mut count_only = FullRankCounts::default();
+        count_only.reset(limits);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
+
+        // Worker 1 leaves and worker 3 arrives with the same capacity and load. The in-place
+        // pass counts a prefix before it notices the key sets diverged; the rebuild must count
+        // every rank exactly once.
+        registry.apply_topology_change_without_cleanup(&WorkerTopologyChange {
+            added: vec![worker_c],
+            removed: vec![RemovedWorkerState { worker: worker_a }],
+        });
+        assert!(registry.set_worker_capacity(worker_c, capacity));
+        registry.replace_worker_load_state(worker_c, worker_load_snapshot(7));
+        full_ranks.reset(limits);
+        registry.project_worker_loads_into(
+            None,
+            decay_now,
+            &mut projections,
+            Some(&mut full_ranks),
+        );
+        assert!(
+            !full_ranks.worker_is_full(1, 1),
+            "a removed worker leaves no count"
+        );
+        assert!(full_ranks.worker_is_full(3, 1));
+        assert!(!full_ranks.worker_is_full(3, 2), "one rank is counted once");
+        assert_eq!(projections.len(), 2);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
     }
 
     #[test]

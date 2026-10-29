@@ -19,6 +19,7 @@ from dynamo.common.configuration.groups.http_args import HttpConfigBase, from_en
 
 from .url_validator import (
     _MAX_REDIRECTS,
+    MediaSizeError,
     UrlValidationError,
     UrlValidationPolicy,
     describe_error_detail,
@@ -93,7 +94,7 @@ async def collect_capped(
     async for chunk in chunks:
         total += len(chunk)
         if max_bytes is not None and total > max_bytes:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"Media exceeds the {max_bytes} byte download limit: "
                 f"{describe_media_source(url)}"
             )

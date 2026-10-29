@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610160000000073"
+version = "0.13.0-dev.202610280000000086"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede3ff2e2fd29e1c53dc1656ef5e43d4c77c0841483fe37685d3d517566016b2"
+checksum = "2149f65333729153bc6f89b30b2adca4cd58c7ddcc6f9ed6ce0a07cdf66f1cba"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -841,6 +841,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -2179,6 +2180,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "lru",
+ "mime",
  "minijinja",
  "modelexpress-client",
  "modelexpress-common",
@@ -2279,14 +2281,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.7"
+version = "10.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+checksum = "1e1888c34549d90094c35f9960b071c259bd051e6a3b89458b17eee4def0a139"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
  "dynamo-protocols",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2303,11 +2306,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "561fd41706eeccdad858e90702f736a35020d7c3761c5c6e7dbb47a83bf1a59f"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -2320,9 +2324,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.2.0"
+version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2381,6 +2385,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bincode 1.3.3",
  "blake3",
  "bytes",
@@ -2445,14 +2450,27 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
 ]
 
 [[package]]
-name = "dynamo-tokenizers"
-version = "3.1.1"
+name = "dynamo-structural-tag"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "914bc0a92430a2fc39164e21a7849587de190e0fea824f56c5f8bb9f29413658"
+checksum = "c8d57353db2c855b6d8154bb67b752d95547ee33eda3ee55342c0625211bdaae"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dynamo-tokenizers"
+version = "3.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0088954e64cd5f8ff9db94d08d60f15caa4ec364391e37b15496cf926752528a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4781,6 +4799,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4897,6 +4932,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -7262,6 +7298,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8847,6 +8893,58 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "velo"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bs58",
+ "bytes",
+ "dashmap",
+ "derive-getters",
+ "derive_builder",
+ "flume",
+ "futures",
+ "nix 0.31.3",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "socket2 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "velo-ext",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "velo-ext"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c340505e9a3330467664d4ca09ff74b41365d6be3ddca4d6f4046a7c526edfaa"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "flume",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "version-compare"

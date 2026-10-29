@@ -352,15 +352,7 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where SGLang shipping no encoder passed every PR gate.
-RUN set -eu; \
-    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 
 # Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
 # image build if the runtime wheel was accidentally compiled without it.
