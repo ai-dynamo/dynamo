@@ -58,8 +58,9 @@ func resolveEngineGroupOperation(group *api.DynamoGraphDeploymentEngineGroup, st
 	operation.Phase = phase
 	operation.Verification = engineGroupVerificationToAPI(transition.Verification)
 	operation.Error = engineGroupFailureToAPI(transition.Failure)
+	operation.CommittedTopology = nil
 	observed := state.Membership.Observed.Transition
-	if observed != nil && state.Membership.Desired != nil &&
+	if engineGroupMembershipTargetIsCurrent(state) && observed != nil &&
 		observed.TransitionID == state.Membership.Desired.TransitionID &&
 		observed.ControlRevision == state.Membership.Desired.ControlRevision &&
 		observed.TargetDigest == state.Membership.Desired.TargetDigest {
@@ -90,13 +91,13 @@ func engineGroupOperationPhase(state domain.GroupStatus) api.EngineGroupOperatio
 	case domain.TransitionOutcomeCompleted:
 		return api.EngineGroupOperationPhaseCommitted
 	case domain.TransitionOutcomeBlocked:
-		if observed := state.Membership.Observed.Transition; observed != nil &&
+		if observed := state.Membership.Observed.Transition; engineGroupMembershipTargetIsCurrent(state) && observed != nil &&
 			observed.Phase == domain.MembershipTransitionPhaseUnknown {
 			return api.EngineGroupOperationPhaseUnknown
 		}
 		return api.EngineGroupOperationPhaseFailed
 	}
-	if state.Membership.Desired == nil {
+	if !engineGroupMembershipTargetIsCurrent(state) {
 		return api.EngineGroupOperationPhasePending
 	}
 	observed := state.Membership.Observed.Transition
@@ -118,6 +119,18 @@ func engineGroupOperationPhase(state domain.GroupStatus) api.EngineGroupOperatio
 	default:
 		return api.EngineGroupOperationPhaseUnknown
 	}
+}
+
+// engineGroupMembershipTargetIsCurrent binds retained membership evidence to this transition's exact preflight.
+// state.Transition must not be nil; durable preflight correlation is validated before projection.
+func engineGroupMembershipTargetIsCurrent(state domain.GroupStatus) bool {
+	target := state.Membership.Desired
+	if target == nil {
+		return false
+	}
+	preflight := state.Transition.TargetPreflight
+	return preflight.Evidence != nil && preflight.TransitionID == target.TransitionID &&
+		preflight.ControlRevision == target.ControlRevision && preflight.SubjectDigest == target.TargetDigest
 }
 
 // engineGroupOperationTarget projects only immutable plan identity, never current registry or Pod state.

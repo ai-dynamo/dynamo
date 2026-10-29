@@ -563,7 +563,9 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
                 "When > 0, enables migration after worker disconnects, response timeouts, "
-                "incomplete streams, and worker-local overload rejection."
+                "incomplete streams, and worker-local overload rejection. Also limits replacement "
+                "attempts over the lifetime of an explicit-commit PCM realtime transcription "
+                "session; unfinished audio is replayed to a compatible warm worker."
             ),
             arg_type=int,
         )
@@ -679,7 +681,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
         )
         add_argument(
             g,

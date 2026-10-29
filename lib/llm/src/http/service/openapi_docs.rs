@@ -383,7 +383,7 @@ fn configure_response_schemas(
         }
         let property = object
             .properties
-            .remove("reasoning_content")
+            .shift_remove("reasoning_content")
             .ok_or_else(|| format!("missing reasoning_content at {name}"))?;
         object
             .properties
@@ -1160,7 +1160,8 @@ mod tests {
                             else {
                                 panic!("expected response object at {name}");
                             };
-                            let property = object.properties.remove("reasoning_content").unwrap();
+                            let property =
+                                object.properties.shift_remove("reasoning_content").unwrap();
                             if change == "collision" {
                                 object
                                     .properties
