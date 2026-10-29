@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use dynamo_global_common::{Pool, PoolId};
+use dynamo_global_common::PoolId;
 
+use crate::Pool;
 use crate::placement::{headroom, place};
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, target};
 use crate::signals::PoolSignals;

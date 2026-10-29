@@ -7,7 +7,6 @@
 //! across process and relay restarts.
 
 use std::fmt;
-use url::Url;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -223,20 +222,4 @@ mod tests {
             serde_json::json!({"cluster_id": " ", "namespace": "dynamo", "dgd_name": "mocker-1"});
         assert!(serde_json::from_value::<PoolKey>(invalid).is_err());
     }
-}
-
-/// One pool as the Global Router sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pool {
-    pub id: PoolId,
-    /// The model the pool serves, as clients name it in requests.
-    pub model: String,
-    pub location: PoolLocation,
-    /// Frontends that accept forwarded requests. Each is the root of an
-    /// OpenAI-compatible HTTP API, for example `http://10.0.0.5:8000/`.
-    pub frontends: Vec<Url>,
-    /// The pool's Relay WAN gRPC endpoint, which streams the pool's load,
-    /// for example `http://10.0.0.6:50051`. `None` when the pool's load is
-    /// not followed.
-    pub relay: Option<Url>,
 }

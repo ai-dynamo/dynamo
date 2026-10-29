@@ -29,6 +29,6 @@ pub use discovery::{
     Capacity, Lease, LeaseError, PoolListing, PoolRegistration, PoolsResponse, RoutersResponse,
     address_identity,
 };
-pub use pool::{Pool, PoolId, PoolIdDeriver, PoolKey, PoolKeyError, PoolLocation, V1PoolIdDeriver};
+pub use pool::{PoolId, PoolIdDeriver, PoolKey, PoolKeyError, PoolLocation, V1PoolIdDeriver};
 pub use replicas::{RouterReplica, RouterReplicaEvent, RouterReplicaId};
 pub use watch::{Completeness, Snapshot, WatchEvent};

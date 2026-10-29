@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
-use dynamo_global_common::{Pool, PoolId};
+use dynamo_global_common::PoolId;
 use url::Url;
 
+use crate::Pool;
 use crate::load::InFlightTracker;
 
 /// What a selector may know about a request. Routing inputs such as the
@@ -168,7 +169,7 @@ impl<K: Eq + Hash> Cursors<K> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
+    use dynamo_global_common::PoolKey;
 
     use super::*;
 
@@ -177,18 +178,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn regional_pool(region: &str, dgd: &str, model: &str, frontends: &[&str]) -> Pool {
-        Pool {
-            id: V1PoolIdDeriver.derive(&PoolKey::new(region, "dynamo", dgd).unwrap()),
-            model: model.to_owned(),
-            location: PoolLocation {
-                region: region.to_owned(),
-                availability_zone: None,
-                cluster: None,
-                datacenter: None,
-            },
-            frontends: frontends.iter().map(|url| url.parse().unwrap()).collect(),
-            relay: None,
-        }
+        let key = PoolKey::new(region, "dynamo", dgd).unwrap();
+        let frontends = frontends.iter().map(|url| url.parse().unwrap()).collect();
+        Pool::new(&key, model, region, frontends)
     }
 
     fn picks(selector: &RoundRobinSelector, model: &str, candidates: &[&Pool]) -> String {

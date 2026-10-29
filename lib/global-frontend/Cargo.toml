@@ -16,9 +16,9 @@ name = "global-frontend"
 path = "src/main.rs"
 
 [dependencies]
-dynamo-global-common = { path = "../global-common" }
+dynamo-global-common = { workspace = true }
 dynamo-global-router = { path = "../global-router" }
-# For the KV DC Relay protocol and the session header. The block manager is
+# For the PoolRelay protocol and the session header. The block manager is
 # for workers; a frontend that only forwards requests never uses it.
 dynamo-llm = { path = "../llm", default-features = false }
 dynamo-runtime = { workspace = true }

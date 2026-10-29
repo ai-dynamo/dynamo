@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use dynamo_global_common::Pool;
+use dynamo_global_router::Pool;
 use tokio::sync::watch;
 
 /// Every pool a catalog knows about at one point in time.
@@ -62,23 +62,14 @@ impl PoolCatalog for StaticPoolCatalog {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
+    use dynamo_global_common::PoolKey;
 
     use super::*;
 
     pub(crate) fn pool(dgd: &str, model: &str, frontends: &[&str]) -> Pool {
-        Pool {
-            id: V1PoolIdDeriver.derive(&PoolKey::new("ohio", "dynamo", dgd).unwrap()),
-            model: model.to_owned(),
-            location: PoolLocation {
-                region: "us-east-2".to_owned(),
-                availability_zone: None,
-                cluster: None,
-                datacenter: None,
-            },
-            frontends: frontends.iter().map(|url| url.parse().unwrap()).collect(),
-            relay: None,
-        }
+        let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
+        let frontends = frontends.iter().map(|url| url.parse().unwrap()).collect();
+        Pool::new(&key, model, "us-east-2", frontends)
     }
 
     #[test]

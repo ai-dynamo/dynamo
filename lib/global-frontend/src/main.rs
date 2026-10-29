@@ -8,7 +8,7 @@
 //!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000
 //! ```
 //!
-//! With session affinity, each pool's load comes from its KV DC Relay:
+//! With session affinity, each pool's load comes from its PoolRelay:
 //!
 //! ```bash
 //! cargo run -p dynamo-global-frontend -- --port 8000 \
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
+use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
     Pool, PoolCatalog, PoolSelector, RoundRobinSelector, StaticPoolCatalog,
 };
@@ -58,9 +58,10 @@ struct Args {
     host: String,
     #[arg(long, default_value_t = 8000)]
     port: u16,
-    /// A pool as `<site>/<namespace>/<DGD name>=<model>@<frontend URL>`.
-    /// Separate several frontend URLs with commas,
-    /// and repeat the flag for each pool. The site is also the pool's region.
+    /// A pool as `<cluster>/<namespace>/<DGD name>=<model>@<frontend URL>`,
+    /// where the cluster is the ID the pool's PoolRelay runs with. Separate
+    /// several frontend URLs with commas, and repeat the flag for each pool.
+    /// The cluster also names the pool's region.
     #[arg(long = "pool", value_parser = parse_pool, required = true)]
     pools: Vec<Pool>,
     /// How long to wait for a pool frontend to accept a connection.
@@ -68,12 +69,12 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
-    /// The region this process runs in, named as `--pool` names sites.
+    /// The region this process runs in, named as `--pool` names clusters.
     /// `affinity` tries pools in it first.
     #[arg(long, required_if_eq("router_policy", "affinity"))]
     region: Option<String>,
-    /// A pool's KV DC Relay, which streams the pool's load, as
-    /// `<site>/<namespace>/<DGD name>=<URL>`. Repeat the flag for each pool;
+    /// A pool's PoolRelay, which streams the pool's load, as
+    /// `<cluster>/<namespace>/<DGD name>=<URL>`. Repeat the flag for each pool;
     /// each pool needs a Relay of its own, since a Relay reports the load of
     /// everything it watches as one.
     #[arg(long = "pool-relay", value_parser = parse_pool_relay)]
@@ -88,10 +89,12 @@ struct Args {
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
-    let [site, namespace, dgd] = key.split('/').collect::<Vec<_>>()[..] else {
-        return Err(format!("expected <site>/<namespace>/<DGD name>, got {key}"));
+    let [cluster, namespace, dgd] = key.split('/').collect::<Vec<_>>()[..] else {
+        return Err(format!(
+            "expected <cluster>/<namespace>/<DGD name>, got {key}"
+        ));
     };
-    PoolKey::new(site, namespace, dgd).map_err(|error| error.to_string())
+    PoolKey::new(cluster, namespace, dgd).map_err(|error| error.to_string())
 }
 
 fn parse_url(url: &str, what: &str) -> Result<Url, String> {
@@ -107,7 +110,7 @@ fn parse_url(url: &str, what: &str) -> Result<Url, String> {
 fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
     let (key, relay) = value
         .split_once('=')
-        .ok_or_else(|| format!("expected <site>/<namespace>/<DGD name>=<URL>, got {value}"))?;
+        .ok_or_else(|| format!("expected <cluster>/<namespace>/<DGD name>=<URL>, got {value}"))?;
     let relay = parse_url(relay, "pool relay")?;
     // The Relay client is built without TLS.
     if relay.scheme() != "http" {
@@ -135,8 +138,9 @@ fn attach_relays(pools: &mut [Pool], relays: &[(PoolKey, Url)]) -> Result<()> {
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
-    let shape =
-        || format!("expected <site>/<namespace>/<DGD name>=<model>@<URL>[,<URL>...], got {value}");
+    let shape = || {
+        format!("expected <cluster>/<namespace>/<DGD name>=<model>@<URL>[,<URL>...], got {value}")
+    };
     let (key, served) = value.split_once('=').ok_or_else(shape)?;
     let (model, frontends) = served.split_once('@').ok_or_else(shape)?;
     if model.trim().is_empty() {
@@ -147,18 +151,9 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
         .split(',')
         .map(|url| parse_url(url, "pool frontend"))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Pool {
-        id: V1PoolIdDeriver.derive(&key),
-        model: model.to_owned(),
-        location: PoolLocation {
-            region: key.site_id().to_owned(),
-            availability_zone: None,
-            cluster: None,
-            datacenter: None,
-        },
-        frontends,
-        relay: None,
-    })
+    // Until pools come from Global Discovery, which reports each pool's
+    // region, the cluster names it.
+    Ok(Pool::new(&key, model, key.cluster_id(), frontends))
 }
 
 #[tokio::main]
@@ -282,9 +277,9 @@ mod tests {
     #[test]
     fn rejects_missing_models_and_non_http_frontends() {
         for value in [
-            "site/ns/pool=@http://pool:8000",
-            "site/ns/pool=m@file:///tmp/pool",
-            "site/ns/pool=m@mailto:user@example.com",
+            "ohio/ns/pool=@http://pool:8000",
+            "ohio/ns/pool=m@file:///tmp/pool",
+            "ohio/ns/pool=m@mailto:user@example.com",
         ] {
             assert!(parse_pool(value).is_err(), "{value}");
         }

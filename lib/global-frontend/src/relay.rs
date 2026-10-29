@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pool load from each pool's KV DC Relay.
+//! Pool load from each pool's PoolRelay.
 //!
 //! Two tasks per pool follow its Relay: one subscribes to the serving-load
 //! stream and records the pool's requests in flight and how many it can run
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_global_common::PoolId;
 use dynamo_global_router::{LoadReport, PoolSignals};
-use dynamo_llm::kv_dc_relay::wan::grpc::protocol::{
+use dynamo_llm::pool_relay::wan::grpc::protocol::{
     KvEventRelayClient, KvPoolLoadUpdate, RELAY_CONTRACT_MARKER, ServingLoadUpdate,
     SubscribeKvPoolLoadRequest, SubscribeServingLoadRequest,
 };
@@ -273,7 +273,7 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_llm::kv_dc_relay::wan::grpc::protocol::{
+    use dynamo_llm::pool_relay::wan::grpc::protocol::{
         KvPoolLoadEntry, LoadView, ModelServingLoad, PoolDeploymentStatus, PoolServingLoad,
         RequestLifecycleStats,
     };

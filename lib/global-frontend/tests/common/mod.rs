@@ -12,7 +12,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing;
-use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
+use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Pool, PoolSelector, PoolSnapshot, RoundRobinSelector};
 use dynamo_global_router::InFlightTracker;
 use dynamo_llm::http::service::service_v2::HttpService;
@@ -108,18 +108,8 @@ pub async fn global_frontend_with(
 }
 
 pub fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
-    Pool {
-        id: V1PoolIdDeriver.derive(&PoolKey::new("ohio", "dynamo", dgd).unwrap()),
-        model: model.to_owned(),
-        location: PoolLocation {
-            region: "us-east-2".to_owned(),
-            availability_zone: None,
-            cluster: None,
-            datacenter: None,
-        },
-        frontends: vec![frontend.clone()],
-        relay: None,
-    }
+    let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
+    Pool::new(&key, model, "us-east-2", vec![frontend.clone()])
 }
 
 /// A pool frontend that records the headers of each chat request and answers

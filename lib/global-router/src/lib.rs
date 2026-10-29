@@ -12,11 +12,13 @@
 mod affinity;
 mod load;
 mod placement;
+mod pool;
 mod selector;
 mod signals;
 
 pub use affinity::AffinitySelector;
 pub use load::{InFlightGuard, InFlightTracker};
+pub use pool::Pool;
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };

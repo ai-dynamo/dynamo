@@ -8,7 +8,7 @@
 //! The Global Frontend does not tokenize or validate. The pool frontend
 //! handles a forwarded request exactly as it would one sent to it directly.
 //! Selectors that weigh pool load read it from `PoolSignals`, which
-//! [`follow_relays`] fills from each pool's KV DC Relay and
+//! [`follow_relays`] fills from each pool's PoolRelay and
 //! [`measure_round_trips`] from the round trip to each region.
 
 mod proxy;
@@ -21,5 +21,6 @@ pub use round_trip::measure_round_trips;
 
 mod catalog;
 pub use catalog::{PoolCatalog, PoolSnapshot, StaticPoolCatalog};
-pub use dynamo_global_common::Pool;
-pub use dynamo_global_router::{PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest};
+pub use dynamo_global_router::{
+    Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+};

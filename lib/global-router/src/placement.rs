@@ -8,8 +8,7 @@
 use std::cmp::Ordering;
 use std::time::Duration;
 
-use dynamo_global_common::Pool;
-
+use crate::Pool;
 use crate::selector::reachable;
 use crate::signals::PoolSignals;
 

@@ -13,14 +13,16 @@ description types live in `dynamo-global-common`.
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
-  --pool site-a/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
-  --pool site-b/dynamo/green=Qwen/Qwen3-0.6B@http://127.0.0.1:8002
+  --pool ohio/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
+  --pool oregon/dynamo/green=Qwen/Qwen3-0.6B@http://127.0.0.1:8002
 ```
 
-Each `--pool` uses `<site>/<namespace>/<DGD name>=<model>@<frontend URL>`.
+Each `--pool` uses `<cluster>/<namespace>/<DGD name>=<model>@<frontend URL>`,
+where the cluster is the ID the pool's PoolRelay runs with (`--cluster-id`).
 Repeat the flag for different pools. Comma-separated URLs after `@` configure
 multiple frontends for the same pool. Pool identities are derived from the
-site, namespace, and DGD name; duplicate identities are rejected.
+cluster, namespace, and DGD name; duplicate identities are rejected. Until pools
+come from Global Discovery, the cluster also names the pool's region.
 
 Every `POST /v1/...` request (chat completions, completions, Responses,
 embeddings, Anthropic messages, and so on) goes to the same route on the
@@ -56,17 +58,17 @@ room. The session's pin moves with it. Pins are per process and expire after
 `--session-idle-secs` (default 1800) without a request.
 
 `affinity` needs `--region`, this process's region named as `--pool` names
-sites. It reads each pool's load from the pool's KV DC Relay, given per pool
+clusters. It reads each pool's load from the pool's PoolRelay, given per pool
 over plain HTTP. Each pool needs a Relay of its own, since a Relay reports the
 load of everything it watches as one:
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
-  --router-policy affinity --region site-a \
-  --pool site-a/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
-  --pool site-b/dynamo/green=Qwen/Qwen3-0.6B@http://127.0.0.1:8002 \
-  --pool-relay site-a/dynamo/blue=http://127.0.0.1:50051 \
-  --pool-relay site-b/dynamo/green=http://127.0.0.1:50052
+  --router-policy affinity --region ohio \
+  --pool ohio/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
+  --pool oregon/dynamo/green=Qwen/Qwen3-0.6B@http://127.0.0.1:8002 \
+  --pool-relay ohio/dynamo/blue=http://127.0.0.1:50051 \
+  --pool-relay oregon/dynamo/green=http://127.0.0.1:50052
 ```
 
 A report counts for three of its Relay's report windows, so a reconnect or a

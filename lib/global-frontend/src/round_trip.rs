@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_global_common::{Pool, PoolId};
-use dynamo_global_router::PoolSignals;
+use dynamo_global_common::PoolId;
+use dynamo_global_router::{Pool, PoolSignals};
 use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
