@@ -67,15 +67,28 @@ name and deprecate the old one.
 length, block size) go in one `*_info` metric with value 1 and each parameter as a label,
 for example `dynamo_model_info{model, context_length, kv_cache_block_size}`.
 
-**A6. Series count.** Each distinct combination of label values is one time series, and
-each series costs memory in Prometheus. Multiply the number of values of every label:
-`model` (10 values) and `status` (3 values) make 30 series, so a counter with five small
-labels can still create hundreds. A histogram adds one series per bucket plus `+Inf`,
-`_sum`, and `_count`, so 10 buckets make 13 series per label combination. Write the total
-in the pull request. The count is per process; the cost in Prometheus is that number times
-the number of scraped processes. Python `prometheus_client` also exports a `_created` series
-for every counter and histogram label combination: count 2 series per counter combination
-and buckets + 4 per histogram combination.
+**A6. Series count.** Write two numbers in the pull request, each as a formula and as a
+number at a stated scale. Both are per process.
+
+- **Label combinations:** multiply the largest number of values that each label you declare
+  can reach. Name what drives each number: a fixed set (`status` has 3 values) or the
+  deployment's configuration (served models, LoRA adapters). Labels that the runtime adds
+  have one value per process; do not count them. Count every value a process can see over its
+  life: a series stays exported until code removes it, so models or adapters that come and go
+  accumulate.
+- **Series:** label combinations times the series per combination: 1 for a counter or gauge,
+  and buckets + 3 for a histogram (`+Inf`, `_sum`, and `_count`). Python `prometheus_client`
+  also exports a `_created` series, so count 2 per counter combination and buckets + 4 per
+  histogram combination. Each series costs memory in Prometheus, and the cost across the fleet
+  is this number times the number of scraped processes.
+
+For example, a histogram with 10 buckets and `model` as its only label has `models`
+combinations and `models x (10 + 3)` series: 130 per frontend at 10 models. A counter with
+`model` and a 3-value `status` has `models x 3` combinations, and as many series in Rust or Go.
+
+If a metric can reach more than 100 label combinations in one process, justify it in the pull
+request or use a log event or a trace instead (**L1**). A label whose values grow with the
+number of workers is not allowed (**L5**).
 
 **A7. Documentation.** Document the metric in the same pull request (**D1**, **D2**).
 
@@ -84,8 +97,8 @@ Write the answers as one block per metric in the pull request description:
 ```text
 Metric:   dynamo_frontend_prefill_queue_wait_seconds (histogram)
 Reader:   "Prefill queue wait p95" panel in the router dashboard; alert at 2 s
-Labels:   model (10 values)
-Series:   10 x (10 buckets + 3) = 130 per frontend
+Labels:   model (served models; 10 in the reference deployment)
+Series:   models combinations; models x (10 buckets + 3) = 130 series per frontend at 10 models
 Query?:   No. Existing stage_duration_seconds does not split out queue wait.
 Docs:     Added to the Metrics Catalog page
 ```
@@ -147,11 +160,12 @@ existing sentinel uses `unknown`, as the endpoint picker's `set_served_model` do
 different quantities, such as `kind` with the values `requests` and `bytes`, should be
 separate metrics. Static `*_info` metrics are the exception.
 
-**L5.** Do not add per-worker labels (`worker_id`, `dp_rank`) to a new metric unless an
-autoscaler or the router needs them. A per-worker series must stop being exported when its
-worker is gone, as `lib/llm/src/discovery/worker_monitor.rs` does with
-`remove_label_values`. This rule is about labels that you declare. The `worker_id` that the
-Rust runtime adds to a process's own metrics identifies that process and is not affected.
+**L5.** Do not declare a label whose values grow with the number of workers, such as
+`worker_id` or `dp_rank` on a frontend, router, or planner metric: every such process would
+then hold series for the whole fleet. Export a per-worker value from the worker's own
+metrics instead, where the `worker_id` that the runtime adds identifies the worker; that
+label has one value per process and is not affected by this rule. On a worker's own metrics,
+add a `dp_rank` label only when an autoscaler or the router needs per-rank values.
 
 **L6.** Pre-create the expected values of bounded labels (such as `status` and `endpoint`)
 at startup, so that `rate()` and `absent()` alerts work from the first scrape. Create the
@@ -327,5 +341,6 @@ metric that repeats one of their defects must follow the rules.
 | `dynamo_component_kv_cache_hit_rate` | R2 |
 | `dynamo_operator_resources_total` | N4 |
 
-Other existing names in `prometheus_names.rs` and elsewhere also break these rules. They
-are not precedents either.
+Other existing names in `prometheus_names.rs` and elsewhere also break these rules, such as
+the frontend's `dynamo_frontend_worker_*` gauges, which carry `worker_id` and `dp_rank`
+(**L5**). They are not precedents either.
