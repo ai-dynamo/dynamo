@@ -365,6 +365,7 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 	cases := []struct {
 		name          string
 		componentType v1beta1.ComponentType
+		backend       BackendFramework
 		restartPolicy *corev1.ContainerRestartPolicy
 		multinode     *v1beta1.MultinodeSpec
 		wantErrors    field.ErrorList
@@ -383,14 +384,23 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
 		},
 		{
-			name: "multinode worker", componentType: v1beta1.ComponentTypeWorker,
+			name: "multinode worker without role templates", componentType: v1beta1.ComponentTypeWorker,
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang")},
+			wantErrors: field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")},
+		},
+		{
+			name: "multinode worker with unsupported backend", componentType: v1beta1.ComponentTypeWorker, backend: BackendFrameworkTRTLLM,
+			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm")},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Construct a stored component that has not passed current admission")
+			backend := tc.backend
+			if backend == "" {
+				backend = BackendFrameworkVLLM
+			}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: tc.componentType, Multinode: tc.multinode,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -401,7 +411,7 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			original := component.DeepCopy()
 
 			t.Log("Reject rendering with the same typed field errors as admission")
-			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			pod, err := GenerateBasePodSpec(component, backend, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
 			require.Equal(t, tc.wantErrors.ToAggregate(), err)
 			require.Nil(t, pod)
 			require.Equal(t, original, component)
@@ -508,138 +518,219 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 	}
 }
 
-func TestSGLangMultinodeSidecarRendering(t *testing.T) {
-	for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
-		for _, roleTemplates := range []bool{false, true} {
-			for _, tc := range []struct {
-				workerRuntime        bool
-				engineProbesAndPorts bool
-			}{
-				{workerRuntime: false, engineProbesAndPorts: true},
-				{workerRuntime: true, engineProbesAndPorts: true},
-				{workerRuntime: false, engineProbesAndPorts: false},
-				{workerRuntime: true, engineProbesAndPorts: false},
-			} {
-				workerRuntime := tc.workerRuntime
-				for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
-					t.Run(fmt.Sprintf("%s/roles=%t/worker-runtime=%t/engine-probes-and-ports=%t/%s", provider, roleTemplates, workerRuntime, tc.engineProbesAndPorts, componentType), func(t *testing.T) {
-						t.Log("Declare a native engine with an unversioned image and independent runtime")
-						component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-							ComponentName: "engine", ComponentType: componentType,
-							Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-							PodTemplate: &corev1.PodTemplateSpec{
-								Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0", commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "generation"},
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{{
-										Name: "main", Image: "engine:custom",
-										Command:        []string{"python3", "-m", "sglang.launch_server"},
-										Args:           []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`},
-										Ports:          []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)}},
-										Env:            []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}},
-										StartupProbe:   &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}, FailureThreshold: 30},
-										ReadinessProbe: &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}},
-										LivenessProbe:  &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"check-engine"}}},
-									}},
-									InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: []string{"dynamo-sglang-sidecar"}, Args: []string{"--grpc-endpoint", "127.0.0.1:30001"}}},
-								},
-							},
-						}
-						if !tc.engineProbesAndPorts {
-							t.Log("Leave engine probes and ports unset in the authored templates")
-							engine := &component.PodTemplate.Spec.Containers[0]
-							engine.StartupProbe = nil
-							engine.ReadinessProbe = nil
-							engine.LivenessProbe = nil
-							engine.Ports = nil
-						}
-						if workerRuntime {
-							component.PodTemplate.Spec.Containers[0].Args = append(component.PodTemplate.Spec.Containers[0].Args, "--enable-dp-attention", "--dp-size", "2")
-						}
-						if roleTemplates {
-							for _, role := range []Role{RoleLeader, RoleWorker} {
-								template := component.PodTemplate.DeepCopy()
-								template.Spec.Containers[0].Command = []string{"python3", "-m", "sglang.launch_server"}
-								template.Spec.Containers[0].Args = []string{"--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"}
-								if role == RoleWorker && !workerRuntime {
-									template.Spec.InitContainers = template.Spec.InitContainers[:1]
-								}
-								component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: string(role), PodTemplate: template})
-							}
-							component.PodTemplate = nil
-						}
-						if !roleTemplates {
-							t.Log("Reject shared native-sidecar templates before rendering either role")
-							for _, role := range []Role{RoleLeader, RoleWorker} {
-								pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(2))
-								require.ErrorContains(t, err, "spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates")
-								require.Nil(t, pod)
-								dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: "sglang"}}
-								_, err = GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, role, provider, staticContainerGPUCount(2), GenerateBasePodSpecForControllerOptions{})
-								require.ErrorContains(t, err, "require complete leader and worker podTemplates")
-								_, err = buildCliqueForRole(cliqueParams{component: component, backendFramework: BackendFrameworkSGLang, r: ServiceRole{Role: role}})
-								require.ErrorContains(t, err, "require complete leader and worker podTemplates")
-							}
-							return
-						}
-						if provider == commonconsts.MultinodeDeploymentTypeGrove {
-							t.Log("Render the complete Grove group and retain concurrent startup")
-							dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "sglang", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()}}}
-							pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
-							require.NoError(t, err)
-							require.Len(t, pcs.Spec.Template.Cliques, 2)
-							for _, clique := range pcs.Spec.Template.Cliques {
-								require.Empty(t, clique.Spec.StartsAfter)
-								require.NotContains(t, envVarsToMap(clique.Spec.PodSpec.Containers[0].Env), "DYN_SYSTEM_ENABLED")
-								count := 2
-								if strings.HasSuffix(clique.Name, "-wkr") && !workerRuntime {
-									count = 1
-								}
-								require.Len(t, clique.Spec.PodSpec.InitContainers, count)
-							}
-						}
-						original := component.DeepCopy()
-						config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://nats:4222", ETCDAddress: "http://etcd:2379"}}
+// multinodeSidecarBackend describes how one native engine authors its explicit
+// multinode roles. args returns the launch for role; workerRuntime selects the
+// layout where every node serves requests or publishes KV events.
+type multinodeSidecarBackend struct {
+	framework        BackendFramework
+	engineImage      string
+	command          []string
+	args             func(role Role, workerRuntime bool) []string
+	engineEnv        []corev1.EnvVar
+	sidecarCommand   []string
+	compilationCache *v1beta1.CompilationCacheConfig
+}
 
-						t.Log("Render both roles through the common and DCD provider entry points")
-						for _, role := range []Role{RoleLeader, RoleWorker} {
-							pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(2))
-							require.NoError(t, err)
-							dcd := &v1beta1.DynamoComponentDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: "sglang"}}
-							childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(2), GenerateBasePodSpecForControllerOptions{})
-							require.NoError(t, err)
-							for _, rendered := range []*corev1.PodSpec{pod, childPod} {
-								engine := rendered.Containers[0]
-								require.Equal(t, "engine:custom", engine.Image)
-								require.NotContains(t, envVarsToMap(engine.Env), "DYN_SYSTEM_ENABLED")
-								require.NotContains(t, envVarsToMap(engine.Env), "NATS_SERVER")
-								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoRankEnvVar)
-								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoLeaderAddressEnvVar)
-								require.Equal(t, []string{"python3", "-m", "sglang.launch_server"}, engine.Command)
-								require.Equal(t, []string{"--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"}, engine.Args)
-								authored, err := EffectiveComponentForRole(original, role)
-								require.NoError(t, err)
-								main := GetMainContainer(authored)
-								require.Equal(t, main.StartupProbe, engine.StartupProbe)
-								require.Equal(t, main.ReadinessProbe, engine.ReadinessProbe)
-								require.Equal(t, main.LivenessProbe, engine.LivenessProbe)
-								require.Equal(t, main.Ports, engine.Ports)
-								if role == RoleLeader || workerRuntime {
-									require.Len(t, rendered.InitContainers, 2)
-									runtime := rendered.InitContainers[1]
-									require.Equal(t, "runtime", envVarsToMap(runtime.Env)["CONTAINER_NAME"])
-									require.Contains(t, envVarsToMap(runtime.Env), commonconsts.DynamoRankEnvVar)
-									require.Contains(t, envVarsToMap(runtime.Env), commonconsts.DynamoLeaderAddressEnvVar)
-									require.Equal(t, "nats://nats:4222", envVarsToMap(runtime.Env)["NATS_SERVER"])
-									require.Equal(t, "generation", envVarsToMap(runtime.Env)[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
-									require.NotNil(t, runtime.ReadinessProbe)
-								} else {
-									require.Len(t, rendered.InitContainers, 1)
-									require.Equal(t, "setup", rendered.InitContainers[0].Name)
+// multinodeSidecarBackends lists the engines whose native multinode roles the
+// operator admits, with the launch shape of their shipped examples.
+func multinodeSidecarBackends() []multinodeSidecarBackend {
+	return []multinodeSidecarBackend{
+		{
+			framework:      BackendFrameworkSGLang,
+			engineImage:    "engine:custom",
+			command:        []string{"python3", "-m", "sglang.launch_server"},
+			engineEnv:      []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}},
+			sidecarCommand: []string{"dynamo-sglang-sidecar"},
+			args: func(_ Role, workerRuntime bool) []string {
+				args := []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`, "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"}
+				if workerRuntime {
+					args = append(args, "--enable-dp-attention", "--dp-size", "2")
+				}
+				return args
+			},
+		},
+		{
+			framework:        BackendFrameworkVLLM,
+			engineImage:      "vllm/vllm-openai:custom",
+			command:          []string{"vllm"},
+			engineEnv:        []corev1.EnvVar{{Name: "VLLM_USE_RUST_FRONTEND", Value: "1"}, {Name: "VLLM_ENGINE_READY_TIMEOUT_S", Value: "1800"}},
+			sidecarCommand:   []string{"dynamo-vllm-sidecar"},
+			compilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
+			args: func(role Role, workerRuntime bool) []string {
+				// Hybrid-LB data parallelism passes the same flags on every node; vLLM derives the start rank.
+				if workerRuntime {
+					return []string{"serve", "model", "--grpc-port", "30001", "--data-parallel-hybrid-lb", "--data-parallel-size", "4", "--data-parallel-size-local", "2", "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--data-parallel-address", "$(DYNAMO_LEADER_ADDRESS)"}
+				}
+
+				// Multiprocessing TP serves on the leader and runs a headless engine on the worker.
+				args := []string{"serve", "model", "--grpc-port", "30001"}
+				if role == RoleWorker {
+					args = []string{"serve", "model", "--headless"}
+				}
+				return append(args, "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--master-addr", "$(DYNAMO_LEADER_ADDRESS)", "--master-port", "29500", "--distributed-timeout-seconds", "1800")
+			},
+		},
+	}
+}
+
+// sidecarRoleTemplate authors one complete native role for backend. The leader
+// and a workerRuntime worker declare the runtime sidecar; engineProbesAndPorts
+// adds engine probes and a NIXL port to main.
+func sidecarRoleTemplate(backend multinodeSidecarBackend, role Role, workerRuntime, engineProbesAndPorts bool) *corev1.PodTemplateSpec {
+	engine := corev1.Container{
+		Name: "main", Image: backend.engineImage, Command: backend.command, Args: backend.args(role, workerRuntime),
+		Env: append([]corev1.EnvVar(nil), backend.engineEnv...),
+	}
+	if engineProbesAndPorts {
+		engine.Ports = []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)}}
+		engine.StartupProbe = &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}, FailureThreshold: 30}
+		engine.ReadinessProbe = &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}}
+		engine.LivenessProbe = &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"check-engine"}}}
+	}
+	template := &corev1.PodTemplateSpec{
+		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0", commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"},
+		Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "generation"},
+		Spec: corev1.PodSpec{
+			Containers:     []corev1.Container{engine},
+			InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}},
+		},
+	}
+	if role == RoleLeader || workerRuntime {
+		template.Spec.InitContainers = append(template.Spec.InitContainers, corev1.Container{
+			Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+			Command: backend.sidecarCommand, Args: []string{"--grpc-endpoint", "127.0.0.1:30001"},
+		})
+	}
+	return template
+}
+
+func TestMultinodeSidecarRendering(t *testing.T) {
+	for _, backend := range multinodeSidecarBackends() {
+		for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+			for _, roleTemplates := range []bool{false, true} {
+				for _, workerRuntime := range []bool{false, true} {
+					for _, engineProbesAndPorts := range []bool{true, false} {
+						for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
+							t.Run(fmt.Sprintf("%s/%s/roles=%t/worker-runtime=%t/engine-probes-and-ports=%t/%s", backend.framework, provider, roleTemplates, workerRuntime, engineProbesAndPorts, componentType), func(t *testing.T) {
+								t.Log("Author the shipped launch flags in the templates; the operator must not inject or rewrite any of them")
+								component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+									ComponentName: "engine", ComponentType: componentType,
+									Multinode:        &v1beta1.MultinodeSpec{NodeCount: 2},
+									CompilationCache: backend.compilationCache.DeepCopy(),
 								}
-							}
+								if roleTemplates {
+									for _, role := range []Role{RoleLeader, RoleWorker} {
+										component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: string(role), PodTemplate: sidecarRoleTemplate(backend, role, workerRuntime, engineProbesAndPorts)})
+									}
+								} else {
+									component.PodTemplate = sidecarRoleTemplate(backend, RoleLeader, workerRuntime, engineProbesAndPorts)
+								}
+								original := component.DeepCopy()
+								config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://nats:4222", ETCDAddress: "http://etcd:2379"}}
+
+								if !roleTemplates {
+									t.Log("Reject shared native-sidecar templates before rendering either role")
+									for _, role := range []Role{RoleLeader, RoleWorker} {
+										pod, err := GenerateBasePodSpec(component, backend.framework, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(1))
+										require.ErrorContains(t, err, "spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates")
+										require.Nil(t, pod)
+										dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: string(backend.framework)}}
+										_, err = GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+										require.ErrorContains(t, err, "require complete leader and worker podTemplates")
+										_, err = buildCliqueForRole(cliqueParams{component: component, backendFramework: backend.framework, r: ServiceRole{Role: role}})
+										require.ErrorContains(t, err, "require complete leader and worker podTemplates")
+									}
+									require.Equal(t, original, component)
+									return
+								}
+
+								if provider == commonconsts.MultinodeDeploymentTypeGrove {
+									t.Log("Render the complete Grove group from a 1.6.0-origin DGD and retain concurrent startup")
+									dgd := &v1beta1.DynamoGraphDeployment{
+										Name: "graph", Namespace: "ns",
+										Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+										Spec:        v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend.framework), Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()}},
+									}
+									pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+									require.NoError(t, err)
+									require.Len(t, pcs.Spec.Template.Cliques, 2)
+									for _, clique := range pcs.Spec.Template.Cliques {
+										require.Empty(t, clique.Spec.StartsAfter)
+										env := envVarsToMap(clique.Spec.PodSpec.Containers[0].Env)
+										require.NotContains(t, env, "DYN_SYSTEM_ENABLED")
+										require.Contains(t, env, commonconsts.DynamoRankEnvVar)
+										require.Contains(t, env, commonconsts.DynamoLeaderAddressEnvVar)
+										count := 2
+										if strings.HasSuffix(clique.Name, "-wkr") && !workerRuntime {
+											count = 1
+										}
+										require.Len(t, clique.Spec.PodSpec.InitContainers, count)
+										for _, init := range clique.Spec.PodSpec.InitContainers {
+											require.NotEqual(t, "wait-for-leader-mp", init.Name)
+										}
+									}
+								}
+
+								t.Log("Render both roles through the common and DCD provider entry points")
+								for _, role := range []Role{RoleLeader, RoleWorker} {
+									pod, err := GenerateBasePodSpec(component, backend.framework, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(1))
+									require.NoError(t, err)
+									dcd := &v1beta1.DynamoComponentDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: string(backend.framework)}}
+									childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+									require.NoError(t, err)
+									authored, err := EffectiveComponentForRole(original, role)
+									require.NoError(t, err)
+									main := GetMainContainer(authored)
+									for _, rendered := range []*corev1.PodSpec{pod, childPod} {
+										engine := rendered.Containers[0]
+										env := envVarsToMap(engine.Env)
+										require.Equal(t, backend.engineImage, engine.Image)
+										require.Equal(t, main.Command, engine.Command)
+										require.Equal(t, main.Args, engine.Args)
+										for _, authoredEnv := range backend.engineEnv {
+											require.Equal(t, authoredEnv.Value, env[authoredEnv.Name])
+										}
+										require.NotContains(t, env, "DYN_SYSTEM_ENABLED")
+										require.NotContains(t, env, "NATS_SERVER")
+										require.NotContains(t, env, commonconsts.VLLMNixlSideChannelHostEnvVar)
+										require.Contains(t, env, commonconsts.DynamoRankEnvVar)
+										require.Contains(t, env, commonconsts.DynamoLeaderAddressEnvVar)
+										if backend.compilationCache != nil {
+											require.Equal(t, backend.compilationCache.MountPath, env["VLLM_CACHE_ROOT"])
+										} else {
+											require.NotContains(t, env, "VLLM_CACHE_ROOT")
+										}
+										require.Equal(t, main.StartupProbe, engine.StartupProbe)
+										require.Equal(t, main.ReadinessProbe, engine.ReadinessProbe)
+										require.Equal(t, main.LivenessProbe, engine.LivenessProbe)
+										require.Equal(t, main.Ports, engine.Ports)
+										for _, volume := range rendered.Volumes {
+											require.NotEqual(t, waitLeaderVolumeName, volume.Name)
+										}
+										for _, init := range rendered.InitContainers {
+											require.NotEqual(t, "wait-for-leader-mp", init.Name)
+										}
+										if role == RoleLeader || workerRuntime {
+											require.Len(t, rendered.InitContainers, 2)
+											runtime := rendered.InitContainers[1]
+											runtimeEnv := envVarsToMap(runtime.Env)
+											require.Equal(t, "runtime", runtimeEnv["CONTAINER_NAME"])
+											require.Contains(t, runtimeEnv, commonconsts.DynamoRankEnvVar)
+											require.Contains(t, runtimeEnv, commonconsts.DynamoLeaderAddressEnvVar)
+											require.Equal(t, "nats://nats:4222", runtimeEnv["NATS_SERVER"])
+											require.Equal(t, "generation", runtimeEnv[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
+											require.NotContains(t, runtimeEnv, "VLLM_CACHE_ROOT")
+											require.NotNil(t, runtime.ReadinessProbe)
+										} else {
+											require.Len(t, rendered.InitContainers, 1)
+											require.Equal(t, "setup", rendered.InitContainers[0].Name)
+										}
+									}
+								}
+								require.Equal(t, original, component)
+							})
 						}
-						require.Equal(t, original, component)
-					})
+					}
 				}
 			}
 		}
@@ -707,7 +798,7 @@ func TestSGLangComponentTemplateCompatibility(t *testing.T) {
 	}
 }
 
-func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
+func TestMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 	cases := []struct {
 		name         string
 		omitRole     Role
@@ -747,26 +838,26 @@ func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 			}
 			original := component.DeepCopy()
 
-			t.Log("Require both role templates directly in sidecar validation")
+			t.Log("Require both role templates directly in sidecar validation and when rendering without webhook admission")
 			complete := tc.omitRole == "" && tc.omitTemplate == ""
 			require.Equal(t, complete, HasCompleteMultinodeRolePodTemplates(component))
-			errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), "sglang")
-			if complete {
-				require.Empty(t, errs)
-			} else {
-				require.Equal(t, field.ErrorList{field.Required(field.NewPath("spec", "roles"), "SGLang multinode sidecars require complete leader and worker podTemplates")}, errs)
-			}
-
-			t.Log("Enforce the same requirement when rendering without webhook admission")
-			for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
-				for _, role := range []Role{RoleLeader, RoleWorker} {
-					pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
-					if complete {
-						require.NoError(t, err)
-						require.NotNil(t, pod)
-					} else {
-						require.ErrorContains(t, err, "spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates")
-						require.Nil(t, pod)
+			for _, backend := range []BackendFramework{BackendFrameworkSGLang, BackendFrameworkVLLM} {
+				errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backend))
+				if complete {
+					require.Empty(t, errs)
+				} else {
+					require.Equal(t, field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")}, errs)
+				}
+				for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+					for _, role := range []Role{RoleLeader, RoleWorker} {
+						pod, err := GenerateBasePodSpec(component, backend, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
+						if complete {
+							require.NoError(t, err)
+							require.NotNil(t, pod)
+						} else {
+							require.ErrorContains(t, err, "spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates")
+							require.Nil(t, pod)
+						}
 					}
 				}
 			}
