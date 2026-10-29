@@ -109,6 +109,8 @@ pub struct KvStateAgentVllmSource {
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// Tiers whose framework-owned events are dropped; KVCR events are kept.
+    pub ignored_framework_tiers: Arc<[StorageTier]>,
 }
 
 #[derive(Debug, Clone)]
@@ -1693,7 +1695,8 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
     } = task;
     let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(source.image_token_id)
-        .with_video_token_id(source.video_token_id);
+        .with_video_token_id(source.video_token_id)
+        .with_ignored_framework_tiers(source.ignored_framework_tiers.clone());
     let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(source.image_token_id)
         .with_video_token_id(source.video_token_id);

@@ -55,6 +55,8 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+    /// Tiers whose framework-owned events are dropped. KVCR events are kept.
+    ignored_framework_tiers: Arc<[StorageTier]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +83,7 @@ pub enum ZmqEventFilterReason {
     UnknownKind,
     NonMainAttentionGroup,
     UnlearnedGroupIdx,
+    IgnoredTier,
 }
 
 impl ZmqEventFilterReason {
@@ -96,6 +99,7 @@ impl ZmqEventFilterReason {
             Self::UnknownKind => "unknown_kind",
             Self::NonMainAttentionGroup => "non_main_attention_group",
             Self::UnlearnedGroupIdx => "unlearned_group_idx",
+            Self::IgnoredTier => "ignored_tier",
         }
     }
 }
@@ -109,6 +113,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            ignored_framework_tiers: Arc::from([]),
         }
     }
 
@@ -120,6 +125,7 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            ignored_framework_tiers: Arc::from([]),
         }
     }
 
@@ -133,6 +139,13 @@ impl ZmqEventNormalizer {
 
     pub fn with_video_token_id(mut self, video_token_id: Option<u32>) -> Self {
         self.video_token_id = video_token_id;
+        self
+    }
+
+    /// Drop framework-owned events in these tiers, e.g. an engine staging
+    /// buffer the router should not credit. KVCR events are unaffected.
+    pub fn with_ignored_framework_tiers(mut self, tiers: Arc<[StorageTier]>) -> Self {
+        self.ignored_framework_tiers = tiers;
         self
     }
 
@@ -158,6 +171,29 @@ impl ZmqEventNormalizer {
     /// Normalize a version-gated state-agent stream which may contain both
     /// framework and vLLM-enriched KVCR transitions.
     pub fn preprocess_residency_with_reason(
+        &mut self,
+        raw: RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<RawKvEvent, ZmqEventFilterReason> {
+        // Filter after normalization so ignored events still update the
+        // per-worker namespace and group state that later events rely on.
+        let raw = self.preprocess_residency_inner(raw, worker)?;
+        if self.is_ignored_framework_tier(&raw) {
+            return Err(ZmqEventFilterReason::IgnoredTier);
+        }
+        Ok(raw)
+    }
+
+    fn is_ignored_framework_tier(&self, raw: &RawKvEvent) -> bool {
+        !self.ignored_framework_tiers.is_empty()
+            && raw.ownership() == Ok(KvEventOwnership::Framework)
+            && raw
+                .medium()
+                .and_then(StorageTier::from_kv_medium)
+                .is_some_and(|tier| self.ignored_framework_tiers.contains(&tier))
+    }
+
+    fn preprocess_residency_inner(
         &mut self,
         mut raw: RawKvEvent,
         worker: WorkerWithDpRank,

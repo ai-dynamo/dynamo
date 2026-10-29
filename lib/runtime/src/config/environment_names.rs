@@ -562,6 +562,12 @@ pub mod llm {
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 
+    /// Comma-separated `host_pinned`, `disk` and `external` tiers whose
+    /// framework-owned KV events the worker publisher and KV state agent drop
+    /// before publishing. KVCR-owned events are always published. Invalid
+    /// values fail startup.
+    pub const DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS: &str = "DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS";
+
     /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
     /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
     /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
@@ -1216,6 +1222,7 @@ mod tests {
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS,
             llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,

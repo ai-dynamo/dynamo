@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,6 +15,7 @@ pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
 use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::config::environment_names::llm::DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS as IGNORE_FRAMEWORK_TIERS_ENV;
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -85,6 +87,37 @@ pub enum KvEventSourceConfig {
     },
 }
 
+fn ignored_framework_tiers_from_env() -> Result<Arc<[StorageTier]>> {
+    ignored_framework_tiers(|name| std::env::var_os(name))
+}
+
+fn ignored_framework_tiers(
+    get_env: impl FnOnce(&str) -> Option<OsString>,
+) -> Result<Arc<[StorageTier]>> {
+    let raw = get_env(IGNORE_FRAMEWORK_TIERS_ENV).unwrap_or_default();
+    let tiers = raw
+        .to_string_lossy()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| match name {
+            "host_pinned" => Ok(StorageTier::HostPinned),
+            "disk" => Ok(StorageTier::Disk),
+            "external" => Ok(StorageTier::External),
+            _ => Err(anyhow::anyhow!(
+                "invalid {IGNORE_FRAMEWORK_TIERS_ENV} entry {name:?}: expected host_pinned, disk or external"
+            )),
+        })
+        .collect::<Result<Arc<[_]>>>()?;
+    if !tiers.is_empty() {
+        tracing::info!(
+            ?tiers,
+            "Dropping framework-owned KV events in ignored tiers"
+        );
+    }
+    Ok(tiers)
+}
+
 enum KvEventSource {
     Zmq {
         listener_abort_handle: tokio::task::AbortHandle,
@@ -143,6 +176,7 @@ impl KvEventSource {
                 expected_rank,
                 liveness,
             } => {
+                let ignored_framework_tiers = ignored_framework_tiers_from_env()?;
                 let listener_handle =
                     component
                         .drt()
@@ -160,6 +194,7 @@ impl KvEventSource {
                             video_token_id,
                             expected_rank,
                             liveness,
+                            ignored_framework_tiers,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =

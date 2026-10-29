@@ -141,6 +141,8 @@ These flags only affect routing. Values range from 0 to 1: 0 ignores lower-tier 
 | `--router-disk-cache-hit-weight` | `0.25` | Credit for each matched disk or external-tier block |
 | `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Enable shared-cache lookup and credit matches beyond the device-local prefix |
 
+To stop routers from seeing an engine's own lower tier at all, such as a CPU staging buffer that should not earn credit, set `DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS` on the worker and on the KV state agent. It takes a comma-separated list of `host_pinned`, `disk`, and `external`. The publisher drops the engine's events for those tiers before they reach any router. KVCR-owned events are always published.
+
 See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit weight semantics, [Using HiCache](../backends/sglang/hicache.md#configuration) for the shared-cache flags, and [Router Operations](router-operations.md) for enabling event publishing per backend.
 
 ## See Also

@@ -1392,6 +1392,7 @@ mod tests_startup_helpers {
                 None,
                 Some(0),
                 heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
+                Arc::from([]),
             )
         });
 
@@ -1588,6 +1589,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                Arc::from([]),
             )
         });
 
@@ -1689,6 +1691,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                Arc::from([]),
             )
         });
 
@@ -1783,6 +1786,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                Arc::from([]),
             )
         });
 
@@ -4331,5 +4335,28 @@ mod event_plane_batch_tests {
             },
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod test_ignored_framework_tiers {
+    use super::*;
+
+    #[test]
+    fn ignored_framework_tiers_parse_and_reject_invalid() {
+        let parse = |value: &str| ignored_framework_tiers(|_| Some(OsString::from(value)));
+
+        assert!(ignored_framework_tiers(|_| None).unwrap().is_empty());
+        assert!(parse("").unwrap().is_empty());
+        assert_eq!(
+            &*parse("host_pinned,disk").unwrap(),
+            &[StorageTier::HostPinned, StorageTier::Disk]
+        );
+        assert_eq!(
+            &*parse(" host_pinned , external ").unwrap(),
+            &[StorageTier::HostPinned, StorageTier::External]
+        );
+        assert!(parse("device").is_err());
+        assert!(parse("g2").is_err());
     }
 }
