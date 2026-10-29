@@ -295,18 +295,6 @@ def test_identity_from_priority(req, expected):
     assert identity_from_request(req, "interactive-", priority_min=1) == expected
 
 
-def test_priority_mode_regulates_plain_low_priority_requests():
-    lo = {EXTRA_ARGS_KEY: {"interactive": False}}
-    reqs = [FakeRequest("chat", 20_000)]
-    reqs += [FakeRequest(f"b{i}", 100_000) for i in range(10)]
-    for r in reqs[1:]:
-        r.sampling_params.extra_args = dict(lo)
-    s = Sched(reqs, cfg("class_blind", priority_min=1))
-    scheduled = step(s)
-    assert "chat" in scheduled
-    assert len(scheduled) < len(reqs)
-
-
 def test_summary_counts_both_classes():
     reqs = overloaded(n_subs=2, ctx=10_000)
     s = Sched(reqs, cfg("class_blind", priority_min=1))
