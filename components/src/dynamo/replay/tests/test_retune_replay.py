@@ -271,6 +271,7 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
             60.0,
             100.0,
             8.0,
+            "GoodputPerGPU",
         )
 
     baseline = evaluate({})
@@ -386,18 +387,6 @@ def _planner_candidate_report(traces: list[str]) -> tuple[int, str]:
 
 @pytest.mark.integration
 @pytest.mark.timeout(120)
-@pytest.mark.xfail(
-    strict=True,
-    # Only the report comparison may fail as expected; a crash, a timeout or
-    # a failed precondition below is a real failure.
-    raises=AssertionError,
-    reason=(
-        "the pinned aisimulate keeps the planner's FPM samples in a std "
-        "HashMap (BucketedSamples), so a per-process hasher seed orders every "
-        "regression refit and breaks eviction ties; remove this marker once "
-        "the pin orders the buckets"
-    ),
-)
 def test_planner_candidate_replay_is_identical_across_processes(tmp_path):
     # Each sweep candidate replays in its own spawned worker, so common random
     # numbers need the whole report, inner planner included, to be a function
@@ -437,8 +426,7 @@ def test_planner_candidate_replay_is_identical_across_processes(tmp_path):
             _planner_candidate_report, [traces, traces]
         )
 
-    # Preconditions: pytest.fail is not an AssertionError, so the xfail
-    # marker cannot absorb them.
+    # Verify both independent processes exercised the planner before comparing reports.
     if first_pid == second_pid:
         pytest.fail("both replays ran in one process")
     planner = json.loads(first)["planner"]
@@ -754,6 +742,7 @@ def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
                 100.0,
                 10.0,
                 60.0,
+                "GoodputPerGPU",
             )
     assert set().union(*calls) == _PINNED | _PER_CANDIDATE
     # Common random numbers; an inner planner is warmed from the read task's

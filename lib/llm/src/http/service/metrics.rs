@@ -3552,6 +3552,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -5388,6 +5389,7 @@ mod tests {
             id: Some("test-id".to_string()),
             data: Some(
                 crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    message_boundary: None,
                     inner: CreateChatCompletionStreamResponse {
                         id: "test-id".to_string(),
                         choices: vec![choice],
@@ -5779,6 +5781,7 @@ mod tests {
                 logprobs: None,
             };
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: REQUEST_ID.to_string(),
                     choices: vec![choice],
