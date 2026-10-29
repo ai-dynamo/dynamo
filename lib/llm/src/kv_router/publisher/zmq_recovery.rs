@@ -4,7 +4,7 @@
 //! Opt-in replay recovery for a rank's ZMQ KV event listener.
 
 use super::PublisherInput;
-use super::zmq_listener::{is_mismatched_rank, normalize_batch};
+use super::zmq_listener::{is_mismatched_rank, normalize_batch, split_zmq_kv_batch};
 use crate::utils::zmq::multipart_message;
 use dynamo_kv_router::{protocols::*, zmq_wire::*};
 use dynamo_runtime::transports::zmq::ipv6_option_for;
@@ -23,24 +23,18 @@ enum ReplayFrame {
     End,
 }
 
-fn decode_replay(mut frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
-    // DEALER removes identity; SGLang omits the topic included by vLLM.
-    if !matches!(frames.len(), 3 | 4) || !frames[0].is_empty() {
+fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
+    // DEALER removes the identity, leaving delimiter, topic, sequence and payload.
+    let Ok([delimiter, _, sequence, payload]) = <[Vec<u8>; 4]>::try_from(frames) else {
         bail!("invalid KV replay envelope");
+    };
+    anyhow::ensure!(delimiter.is_empty(), "invalid KV replay envelope");
+    let sequence: [u8; 8] = sequence.as_slice().try_into()?;
+    match (sequence == (-1_i64).to_be_bytes(), payload.is_empty()) {
+        (true, true) => Ok(ReplayFrame::End),
+        (false, false) => Ok(ReplayFrame::Batch(u64::from_be_bytes(sequence), payload)),
+        _ => bail!("invalid KV replay end marker"),
     }
-    let payload = frames.pop().expect("envelope has a payload frame");
-    let sequence: [u8; 8] = frames
-        .pop()
-        .expect("envelope has a sequence frame")
-        .as_slice()
-        .try_into()?;
-    if sequence == (-1_i64).to_be_bytes() && payload.is_empty() {
-        return Ok(ReplayFrame::End);
-    }
-    if payload.is_empty() || sequence == (-1_i64).to_be_bytes() {
-        bail!("invalid KV replay end marker");
-    }
-    Ok(ReplayFrame::Batch(u64::from_be_bytes(sequence), payload))
 }
 
 /// Per-rank sequence cursor; history loss is inferred only from replay, never from a timeout.
@@ -185,15 +179,9 @@ async fn wait_for_handshake(monitor: &mut tmq::pair::Pair) -> Result<()> {
 
 /// Like ordinary live ingestion, an unreadable message is skipped; a later gap repairs it.
 fn live_batch(message: tmq::Multipart) -> Option<(u64, Vec<u8>)> {
-    let decoded = <[Vec<u8>; 3]>::try_from(multipart_message(message))
+    split_zmq_kv_batch(multipart_message(message))
+        .inspect_err(|error| tracing::warn!(%error, "Failed to decode ZMQ KV batch envelope"))
         .ok()
-        .and_then(|[_, sequence, payload]| {
-            Some((u64::from_be_bytes(sequence.try_into().ok()?), payload))
-        });
-    if decoded.is_none() {
-        tracing::warn!("Failed to decode ZMQ KV batch envelope");
-    }
-    decoded
 }
 
 /// Waits until the processor and index have finished every batch sent before it.
@@ -941,6 +929,7 @@ mod tests {
             ReplayFrame::End
         );
         assert!(decode_replay(vec![vec![], vec![], 0_u64.to_be_bytes().to_vec(), vec![]]).is_err());
+        assert!(decode_replay(vec![vec![], 0_u64.to_be_bytes().to_vec(), vec![1]]).is_err());
         assert!(decode_replay(vec![]).is_err());
     }
     #[test]

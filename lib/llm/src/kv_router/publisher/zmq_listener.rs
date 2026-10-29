@@ -26,8 +26,20 @@ pub(super) struct DecodedZmqKvBatch {
 ///
 /// Callers retain their own malformed-input and protocol-version policies.
 pub(super) fn decode_zmq_kv_batch(
-    mut frames: crate::utils::zmq::MultipartMessage,
+    frames: crate::utils::zmq::MultipartMessage,
 ) -> Result<DecodedZmqKvBatch> {
+    let (source_cursor, payload) = split_zmq_kv_batch(frames)?;
+    let batch = decode_event_batch(&payload).context("failed to decode KV event batch")?;
+    Ok(DecodedZmqKvBatch {
+        source_cursor,
+        batch,
+    })
+}
+
+/// Split the envelope into its sequence and still-encoded payload.
+pub(super) fn split_zmq_kv_batch(
+    mut frames: crate::utils::zmq::MultipartMessage,
+) -> Result<(u64, Vec<u8>)> {
     if frames.len() != 3 {
         anyhow::bail!("expected three ZMQ frames, received {}", frames.len());
     }
@@ -39,11 +51,7 @@ pub(super) fn decode_zmq_kv_batch(
             sequence.len()
         )
     })?;
-    let batch = decode_event_batch(&payload).context("failed to decode KV event batch")?;
-    Ok(DecodedZmqKvBatch {
-        source_cursor: u64::from_be_bytes(sequence),
-        batch,
-    })
+    Ok((u64::from_be_bytes(sequence), payload))
 }
 
 #[allow(clippy::too_many_arguments)]
