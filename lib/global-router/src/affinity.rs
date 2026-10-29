@@ -179,7 +179,7 @@ fn headroom<'a, 'b>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use crate::load::InFlightTracker;
@@ -188,13 +188,13 @@ mod tests {
 
     use super::*;
 
-    const OHIO: &str = "us-east-2";
+    pub(crate) const OHIO: &str = "us-east-2";
     const OREGON: &str = "us-west-2";
     const TOKYO: &str = "ap-northeast-1";
 
     /// Two pools in Ohio, one in Oregon and one in Tokyo, with round trips
     /// measured from Ohio.
-    fn fleet() -> (Vec<Pool>, Arc<PoolSignals>) {
+    pub(crate) fn fleet() -> (Vec<Pool>, Arc<PoolSignals>) {
         let pools = vec![
             regional_pool(OHIO, "ohio-a", "qwen", &["http://ohio-a:8000"]),
             regional_pool(OHIO, "ohio-b", "qwen", &["http://ohio-b:8000"]),
@@ -212,7 +212,7 @@ mod tests {
     /// Sets each pool's occupancy, in reports fresh for a minute: requests in
     /// flight, all generating, over 128 slots, with too little KV in use to
     /// bind.
-    fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
+    pub(crate) fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
         let window = Duration::from_secs(20);
         for (pool, load) in pools.iter().zip(loads) {
             let in_flight = (load * 128.0).round() as u64;
