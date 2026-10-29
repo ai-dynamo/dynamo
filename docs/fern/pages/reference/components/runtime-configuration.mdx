@@ -316,6 +316,14 @@ address.
   Environment variable: `DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB`
 </ParamField>
 
+<ParamField path="DYN_MM_ALLOW_REMOTE_URLS" type="boolean" default="true">
+  Environment-only. Set to `0` to refuse every `http://` and `https://` media URL. The request fails with HTTP 400, and the client must send the media inline as a `data:` URL instead. Local paths still work when `DYN_MM_LOCAL_PATH` is set. This setting takes precedence over `DYN_MM_ALLOW_INTERNAL`.
+
+  Accepts `1`, `true`, `on`, `yes` and `0`, `false`, `off`, `no`, case-insensitive. Unset or empty keeps remote URLs enabled. Any other value never enables remote fetching: the frontend logs an error and refuses remote URLs, and workers raise an error.
+
+  Set it on both the frontend and the workers. The frontend rejects remote URLs before fetching them, and the workers cover media URLs that the frontend passes through without fetching.
+</ParamField>
+
 <ParamField path="--output-modalities" type="string" default="text">
   Space-separated list of output modalities for omni or diffusion mode, for example `--output-modalities text image`. Defaults to `text` only. Use `image`, `video`, or `audio` when deploying image/video/audio generation models.
 
