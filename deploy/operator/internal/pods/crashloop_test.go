@@ -126,11 +126,13 @@ func TestFindCrashLoop(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Search the Pods for a crash loop")
+			order := podNames(tt.pods)
 			got, found := FindCrashLoop(tt.pods)
 
-			t.Log("Verify the reported container")
+			t.Log("Verify the reported container and that the Pods keep their order")
 			assert.Equal(t, tt.found, found)
 			assert.Equal(t, tt.want, got)
+			assert.Equal(t, order, podNames(tt.pods))
 		})
 	}
 }
@@ -256,4 +258,12 @@ func TestCrashLoopChanged(t *testing.T) {
 			assert.Equal(t, tt.want, CrashLoopChanged(&tt.oldPod, &tt.newPod))
 		})
 	}
+}
+
+func podNames(pods []corev1.Pod) []string {
+	names := make([]string, 0, len(pods))
+	for i := range pods {
+		names = append(names, pods[i].Name)
+	}
+	return names
 }
