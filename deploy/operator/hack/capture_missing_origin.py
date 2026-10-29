@@ -18,6 +18,27 @@ import yaml
 from bootstrap_upgrade_fixtures import OPERATOR, RELEASES, ROOT, dump
 
 
+def archive_release(revision, paths):
+    """Fetch a missing pinned release object without changing the checkout."""
+    if subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=ROOT,
+        capture_output=True,
+    ).returncode:
+        subprocess.run(
+            [
+                "git",
+                "fetch",
+                "--no-tags",
+                "https://github.com/ai-dynamo/dynamo.git",
+                revision,
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+    return subprocess.check_output(["git", "archive", revision, *paths], cwd=ROOT)
+
+
 def capture(destination):
     if destination.exists():
         raise ValueError("Destination must be a new staging directory")
@@ -83,9 +104,7 @@ def capture(destination):
             paths = ["deploy/operator", "deploy/helm"]
             if version == "1.4.0":
                 paths.append("deploy/snapshot")
-            data = subprocess.check_output(
-                ["git", "archive", revision, *paths], cwd=ROOT
-            )
+            data = archive_release(revision, paths)
             checkout = work / version
             checkout.mkdir()
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:
