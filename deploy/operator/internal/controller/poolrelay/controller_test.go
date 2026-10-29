@@ -229,11 +229,33 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		t.Fatal("new Relay Pod does not match the updated source file")
 	}
 
-	t.Log("Withdraw the Service when the DGD switches to container-mode discovery")
+	t.Log("Keep the Service when explicit runtime settings override container-mode defaults")
 	if err := client.Get(ctx, key, dgd); err != nil {
 		t.Fatal(err)
 	}
 	dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+	for i := range dgd.Spec.Components {
+		dgd.Spec.Components[i].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: commonconsts.MainContainerName,
+			Env:  []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"}},
+		}}}}
+	}
+	if err := client.Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &service); err != nil {
+		t.Fatalf("Relay Service was withdrawn despite explicit pod-mode discovery: %v", err)
+	}
+	t.Log("Withdraw the Service when no runtime override remains")
+	if err := client.Get(ctx, key, dgd); err != nil {
+		t.Fatal(err)
+	}
+	for i := range dgd.Spec.Components {
+		dgd.Spec.Components[i].PodTemplate = nil
+	}
 	if err := client.Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}
@@ -449,6 +471,13 @@ func TestDiscoveryModeFollowsPodTemplatePrecedence(t *testing.T) {
 	if supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes); err != nil || !supported {
 		t.Fatal("consistent pod-mode discovery was rejected")
 	}
+	dgd.Spec.Components[0].PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoKubeDiscoveryMode] = "container"
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers = []corev1.Container{{Name: commonconsts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"}}}}
+	if supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes); err != nil || !supported {
+		t.Fatalf("explicit pod mode did not override container-mode annotation: supported=%t err=%v", supported, err)
+	}
+	dgd.Spec.Components[0].PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoKubeDiscoveryMode] = "pod"
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers = nil
 	dgd.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
 	if supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes); err != nil || supported {
 		t.Fatal("Grove's non-Kubernetes DGD backend was accepted")
@@ -526,11 +555,22 @@ func TestDiscoveryUsesPreservedServiceAnnotationsAndHubEnvironment(t *testing.T)
 func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
 	for _, test := range []struct {
 		name      string
+		mode      string
 		env       []corev1.EnvVar
 		supported bool
 	}{
 		{
+			name: "explicit pod mode overrides container annotation and envFrom",
+			mode: "container",
+			env: []corev1.EnvVar{
+				{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+				{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
+			},
+			supported: true,
+		},
+		{
 			name: "pod discovery overrides envFrom",
+			mode: "pod",
 			env: []corev1.EnvVar{
 				{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 				{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
@@ -539,6 +579,7 @@ func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
 		},
 		{
 			name: "explicit container mode is rejected",
+			mode: "pod",
 			env: []corev1.EnvVar{
 				{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 				{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
@@ -546,6 +587,7 @@ func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
 		},
 		{
 			name: "unspecified mode could come from envFrom",
+			mode: "pod",
 			env:  []corev1.EnvVar{{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"}},
 		},
 	} {
@@ -553,7 +595,9 @@ func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
 			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 					ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker,
-					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: test.mode,
+					}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: commonconsts.MainContainerName,
 						Env:  test.env,
 						EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{

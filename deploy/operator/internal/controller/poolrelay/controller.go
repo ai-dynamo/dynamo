@@ -193,9 +193,6 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 		}
 		for _, template := range templates {
 			discovery := dynamo.NewDiscoveryContext(defaultBackend, template.Annotations)
-			if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes || discovery.Mode != configv1alpha1.KubeDiscoveryModePod {
-				return false, nil
-			}
 			var runtime *corev1.Container
 			for i := range template.Spec.Containers {
 				if template.Spec.Containers[i].Name == commonconsts.MainContainerName {
@@ -207,26 +204,30 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 					runtime = &template.Spec.InitContainers[i]
 				}
 			}
-			if runtime == nil {
-				continue
-			}
-			hasBackend, hasMode := false, false
-			for _, item := range runtime.Env {
-				switch item.Name {
-				case commonconsts.DynamoDiscoveryBackendEnvVar:
-					hasBackend = true
-					if item.ValueFrom != nil || item.Value != string(configv1alpha1.DiscoveryBackendKubernetes) {
-						return false, nil
-					}
-				case "DYN_KUBE_DISCOVERY_MODE":
-					hasMode = true
-					if item.ValueFrom != nil || item.Value != string(configv1alpha1.KubeDiscoveryModePod) {
-						return false, nil
+			if runtime != nil {
+				hasBackend, hasMode := false, false
+				for _, item := range runtime.Env {
+					switch item.Name {
+					case commonconsts.DynamoDiscoveryBackendEnvVar:
+						hasBackend = true
+						if item.ValueFrom != nil {
+							return false, nil
+						}
+						discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
+					case "DYN_KUBE_DISCOVERY_MODE":
+						hasMode = true
+						if item.ValueFrom != nil {
+							return false, nil
+						}
+						discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
 					}
 				}
+				// Explicit env values override envFrom; missing keys could still come from it.
+				if len(runtime.EnvFrom) != 0 && (!hasBackend || !hasMode) {
+					return false, nil
+				}
 			}
-			// Explicit env values override envFrom; missing keys could still come from it.
-			if len(runtime.EnvFrom) != 0 && (!hasBackend || !hasMode) {
+			if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes || discovery.Mode != configv1alpha1.KubeDiscoveryModePod {
 				return false, nil
 			}
 		}

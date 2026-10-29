@@ -2422,7 +2422,7 @@ func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, componen
 		return nil, fmt.Errorf("read preserved DGD service settings: %w", err)
 	}
 	effective := component.DeepCopy()
-	applyDGDTemplateDefaults(effective, dgd, nil)
+	applyDGDTemplateDefaults(effective, dgd, nil, GetComponentDynamoSidecar(effective) != nil)
 	return ComponentPodTemplates(effective), nil
 }
 
