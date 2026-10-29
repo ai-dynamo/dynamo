@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated deployment for a model served through an out-of-tree vLLM
+# plugin; rendered by deploy.sh (see README.md for the substitution vars).
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-oot-plugin
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - "${OOT_MODEL}"
+          - --served-model-name
+          - "${OOT_SERVED_MODEL_NAME}"
+          # Cap the served context to what your GPU memory budget allows.
+          # Models with very large native contexts (e.g. 1M tokens) will OOM
+          # during KV-cache profiling if --max-model-len is left at the
+          # model default. See README.md for sizing guidance.
+          - --max-model-len
+          # Quoted: envsubst renders the default as a bare number, and
+          # Kubernetes requires args entries to be strings.
+          - "${OOT_MAX_MODEL_LEN}"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase for larger models; the HF cache download of a 4B
+              # checkpoint needs roughly 10Gi.
+              ephemeral-storage: 16Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker
