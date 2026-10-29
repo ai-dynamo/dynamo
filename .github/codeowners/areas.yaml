@@ -75,6 +75,7 @@ areas:
   - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
   - container/global-discovery-service.yaml
+  - deploy/global-discovery-mcs/
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**
@@ -1294,6 +1295,10 @@ shared:
   owners:
   - global-router
   - ops
+- glob: deploy/global-discovery-mcs/Dockerfile
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator
@@ -1314,11 +1319,13 @@ shared:
   - operator
   - gms
   - planner
+  - global-router
 - glob: .github/actions/check-deploy-component/action.yml
   owners:
   - ops
   - operator
   - gms
+  - global-router
 - glob: .github/actions/setup-dynamo-operator/action.yml
   owners:
   - ops

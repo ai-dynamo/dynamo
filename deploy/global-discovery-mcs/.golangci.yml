@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The linters and settings of deploy/operator/.golangci.yml, plus goheader
+# and gci for this module.
+version: "2"
+
+run:
+  timeout: 10m
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - dupl
+    - errcheck
+    - goconst
+    - gocyclo
+    - goheader
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - modernize
+    - nakedret
+    - prealloc
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    staticcheck:
+      # SA* matches the v1 staticcheck linter and S1* the v1 gosimple linter.
+      checks:
+        - SA*
+        - S1*
+    govet:
+      # The inline analyzer is new in Go 1.27 and offends on deliberate
+      # reflect usage, as in deploy/operator.
+      disable:
+        - inline
+    goconst:
+      # As in deploy/operator: strings in composite literals are not
+      # checked.
+      exclude-types:
+        - Call
+        - CompositeLit
+    modernize:
+      # omitzero would rewrite omitempty JSON tags, which changes the wire
+      # format.
+      disable:
+        - omitzero
+    goheader:
+      # Every Go file starts with the dated two-line SPDX header. The year is
+      # the year the file was added; a range is allowed.
+      values:
+        regexp:
+          YEARS: '20\d\d(-20\d\d)?'
+      template: |-
+        SPDX-FileCopyrightText: Copyright (c) {{ YEARS }} NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+        SPDX-License-Identifier: Apache-2.0
+  exclusions:
+    generated: lax
+    # The usual errcheck exceptions: fmt.Fprint* to the CLI's writers and
+    # Close of readers and test listeners.
+    presets:
+      - std-error-handling
+    rules:
+      - path: "api/*"
+        linters:
+          - lll
+      - path: "internal/*"
+        linters:
+          - dupl
+          - lll
+      # gRPC method signatures of the client and the fake are long.
+      - path: "pkg/*"
+        linters:
+          - lll
+      # Repeated literal strings and slice growth in tests are deliberate.
+      - path: _test\.go$
+        linters:
+          - goconst
+          - prealloc
+    paths:
+      - api/gen
+      - bin
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/ai-dynamo/dynamo/deploy/global-discovery-mcs)
+      custom-order: true
+  exclusions:
+    generated: lax
+    paths:
+      - api/gen
+      - bin

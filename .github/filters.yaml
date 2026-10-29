@@ -6,6 +6,7 @@
 #   snapshot -> standalone Snapshot integration + all-framework checkpoint deploy tests
 #   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's checkpoint suite
 #   power_agent -> power-agent image build
+#   global_discovery_mcs -> Multi-Cluster Services module and chart checks, global-discovery-mcs image build
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
@@ -322,6 +323,16 @@ power_agent:
   - *ci
   - 'deploy/power-agent/**'
   - 'deploy/helm/charts/power-agent/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# Multi-Cluster Services registry module and its chart. The dotfile pattern
+# covers .dockerignore and .golangci.yml, which '**' skips.
+global_discovery_mcs:
+  - *ci
+  - 'deploy/global-discovery-mcs/**'
+  - 'deploy/global-discovery-mcs/.*'
+  - 'deploy/helm/charts/global-discovery-mcs/**'
   - '!**/*.md'
   - '!**/*.rst'
 
