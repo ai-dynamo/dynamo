@@ -84,9 +84,13 @@ labels Prometheus adds, and verification steps are in
 [Scrape Engine Metrics in Sidecar Mode](../../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
 
 The endpoint reports the schedulers on its own node. In multi-node TP and attention-DP the leader
-runs the HTTP server. A follower node runs only a health server on `--port`, which serves `/metrics`
-for its local schedulers in SGLang releases that include
-[sgl-project/sglang#34430](https://github.com/sgl-project/sglang/pull/34430). The multinode examples
+runs the HTTP server. A follower node runs SGLang's health server
+(`launch_dummy_health_check_server`) on `--port`. That server adds the Prometheus middleware when
+`--enable-metrics` is set ([sgl-project/sglang#7720](https://github.com/sgl-project/sglang/pull/7720))
+and binds to `--host` since [sgl-project/sglang#12297](https://github.com/sgl-project/sglang/pull/12297),
+so it serves `/metrics` for its local schedulers. Where the embedded Rust server occupies a node's
+port instead, there is no `/metrics` on it
+([sgl-project/sglang#34430](https://github.com/sgl-project/sglang/pull/34430)). The multinode examples
 do not declare `engine-metrics` yet. Declare it on the leader, and on a follower only after
 confirming that the follower answers on the pinned image.
 

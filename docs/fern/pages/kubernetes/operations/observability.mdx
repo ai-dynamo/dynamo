@@ -252,7 +252,7 @@ port `system` with `container="runtime"` and one on `engine-metrics` with `conta
 that an engine family carries the joined namespace:
 
 ```promql
-vllm:num_requests_running{container="main", dynamo_namespace=~".+-[0-9a-f]{8}"}
+{__name__=~"vllm:num_requests_running|sglang:num_running_reqs", container="main", dynamo_namespace=~".+-[0-9a-f]{8}"}
 ```
 
 A `DOWN` target on `engine-metrics` means the port is declared but nothing listens on it. Check the
