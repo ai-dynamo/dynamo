@@ -1277,6 +1277,58 @@ async fn chat_completions_reject_empty_tools() {
     .await;
 }
 
+/// The deprecated `function_call` and `functions` fields answer 400 rather than
+/// 501, so OpenAI SDKs do not retry them as server errors. The request metric
+/// keeps the `NotImplemented` label.
+#[tokio::test]
+#[serial]
+async fn chat_completions_reject_deprecated_function_fields_as_bad_request() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (field, value, message) in [
+            (
+                "function_call",
+                json!({"name": "get_weather"}),
+                "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+            ),
+            (
+                "functions",
+                json!([{"name": "get_weather", "parameters": {"type": "object"}}]),
+                "`functions` is deprecated. Please migrate to use `tools` instead.",
+            ),
+        ] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "ping"}],
+                });
+                body[field] = value.clone();
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                assert_openai_error(response, ExpectedError::UnsupportedContent, message).await;
+            }
+        }
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::ChatCompletions,
+                &request_type,
+                &[
+                    (ErrorType::NotImplemented, 2),
+                    (ErrorType::Validation, 0),
+                    (ErrorType::Internal, 0),
+                ],
+            );
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn anthropic_content_validation_applies_to_messages_and_count_tokens() {
