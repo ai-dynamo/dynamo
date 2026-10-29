@@ -57,7 +57,6 @@ impl StructuralTagBuilder {
                 schema_mode,
                 structured_output_schema: request.structured_output_schema,
                 starts_in_reasoning: request.starts_in_reasoning,
-                allow_unprefilled_reasoning: request.allow_unprefilled_reasoning,
             },
             &StructuralTagOptions {
                 exclude_special_tokens: request.exclude_special_tokens,

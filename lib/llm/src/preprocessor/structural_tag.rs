@@ -21,13 +21,6 @@ use dynamo_protocols::types::ResponseFormat;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
-/// Prompt state and permission for a model-opened reasoning block are independent.
-#[derive(Clone, Copy, Default)]
-pub(super) struct StructuralTagReasoning {
-    pub starts_in_reasoning: bool,
-    pub allow_unprefilled_reasoning: bool,
-}
-
 struct StructuralTagBuildRequest<'a> {
     tool_choice: &'a ToolChoice,
     tools: &'a [ToolDefinition],
@@ -37,7 +30,6 @@ struct StructuralTagBuildRequest<'a> {
     reasoning_boundary: ResolvedReasoningBoundary,
     tool_arguments_any_order: bool,
     starts_in_reasoning: bool,
-    allow_unprefilled_reasoning: bool,
     structured_output_schema: Option<&'a serde_json::Value>,
 }
 
@@ -276,7 +268,7 @@ impl OpenAIPreprocessor {
         tool_choice: &ToolChoice,
         tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
-        reasoning: StructuralTagReasoning,
+        prompt_injected_reasoning: bool,
         response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
@@ -333,8 +325,7 @@ impl OpenAIPreprocessor {
             exclude_special_tokens: config.exclude_special_tokens,
             reasoning_boundary,
             tool_arguments_any_order: config.tool_arguments_any_order,
-            starts_in_reasoning: reasoning.starts_in_reasoning,
-            allow_unprefilled_reasoning: reasoning.allow_unprefilled_reasoning,
+            starts_in_reasoning: prompt_injected_reasoning,
             structured_output_schema: structured_output_schema.as_deref(),
         };
 
@@ -363,7 +354,7 @@ impl OpenAIPreprocessor {
                 .json = None;
         }
         if applied
-            && reasoning.starts_in_reasoning
+            && prompt_injected_reasoning
             && config.reasoning_boundary != StructuralTagReasoningBoundary::Auto
         {
             preprocessed_request.require_reasoning =
@@ -581,10 +572,7 @@ mod tests {
                     &ToolChoice::Required,
                     &tools,
                     None,
-                    StructuralTagReasoning {
-                        starts_in_reasoning: true,
-                        ..Default::default()
-                    },
+                    true,
                     None,
                     &mut request,
                 )
@@ -859,7 +847,7 @@ mod tests {
                 &ToolChoice::Required,
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -903,7 +891,7 @@ mod tests {
                 &ToolChoice::Required,
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -931,7 +919,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -953,7 +941,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -977,7 +965,7 @@ mod tests {
                 &ToolChoice::Named("does_not_exist".to_string()),
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -999,7 +987,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1026,7 +1014,7 @@ mod tests {
                 &ToolChoice::Named("does_not_exist".to_string()),
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1050,7 +1038,7 @@ mod tests {
                 &ToolChoice::None,
                 &[],
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1063,7 +1051,7 @@ mod tests {
                 &ToolChoice::Auto,
                 &[],
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1111,7 +1099,7 @@ mod tests {
                 &ToolChoice::None,
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1127,7 +1115,7 @@ mod tests {
                 &ToolChoice::None,
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
@@ -1201,10 +1189,7 @@ mod tests {
                         &choice,
                         &tools,
                         None,
-                        StructuralTagReasoning {
-                            starts_in_reasoning: prompt_injected_reasoning,
-                            ..Default::default()
-                        },
+                        prompt_injected_reasoning,
                         None,
                         &mut request,
                     )
@@ -1296,14 +1281,7 @@ mod tests {
             let mut request = preprocessed_request();
 
             let applied = preprocessor
-                .apply_tool_choice_structural_tag(
-                    &choice,
-                    &tools,
-                    None,
-                    StructuralTagReasoning::default(),
-                    None,
-                    &mut request,
-                )
+                .apply_tool_choice_structural_tag(&choice, &tools, None, false, None, &mut request)
                 .unwrap();
 
             assert!(applied, "{parser} + {choice:?} must retain its native tag");
@@ -1344,7 +1322,7 @@ mod tests {
                 &ToolChoice::Auto,
                 &tools,
                 None,
-                StructuralTagReasoning::default(),
+                false,
                 None,
                 &mut request,
             )
