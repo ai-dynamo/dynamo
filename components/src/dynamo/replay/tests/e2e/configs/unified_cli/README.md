@@ -17,14 +17,29 @@ limits, image, namespace, runtime override, and total GPU use. The Pareto case k
 different scheduler limits on its front so emitting the winner repeatedly fails.
 
 The fixed aggregated and disaggregated cases additionally compare the complete DGD
-to `goldens/dgd/`. Regenerate those goldens explicitly from the real CLI:
+to `goldens/dgd/`. Run those cases normally to check the reviewed output:
 
 ```bash
-UPDATE_GOLDENS=1 python -m pytest \
+python -m pytest \
   components/src/dynamo/replay/tests/e2e/test_unified_cli_dynamo.py \
   -k '01-no-adapters-throughput or 07-disagg-dgd'
 ```
 
-Normal test runs only read the goldens. Review generated diffs before committing.
+When a golden is missing or differs semantically, the test writes the actual CLI
+output beside it as `<stem>.new.yaml` and fails. The reviewed golden is never
+rewritten. The failure prints the exact per-file diff and acceptance commands.
+For example, from the repository root:
+
+```bash
+diff -u \
+  components/src/dynamo/replay/tests/e2e/configs/unified_cli/goldens/dgd/01-no-adapters-throughput.yaml \
+  components/src/dynamo/replay/tests/e2e/configs/unified_cli/goldens/dgd/01-no-adapters-throughput.new.yaml
+```
+
+Inspect each proposal separately. If that change is intended, replace only its
+corresponding golden with the reviewed `.new.yaml` file and rerun the case. If the
+change is unintended, fix the regression and discard that proposal. Proposal files
+remain visible in the working tree; there is no batch-update mode.
+
 The broader comparison corpus under `dynamo/aisimulate/tests/dgd/comparison` remains
 a separate, manually invoked recipe/performance-database comparison.
