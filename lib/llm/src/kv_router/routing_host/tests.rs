@@ -4410,7 +4410,11 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
             &[]
         ));
         assert_eq!(
-            error.downcast_ref::<DynamoError>().unwrap().message(),
+            error
+                .downcast_ref::<UnknownWorkerTarget>()
+                .unwrap()
+                .0
+                .message(),
             format!("nvext.{field}={worker_id} does not identify a known worker")
         );
     }
@@ -4453,7 +4457,11 @@ async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
             &[]
         ));
         assert_eq!(
-            error.downcast_ref::<DynamoError>().unwrap().message(),
+            error
+                .downcast_ref::<UnknownWorkerTarget>()
+                .unwrap()
+                .0
+                .message(),
             format!("nvext.{field}={unknown} does not identify a known worker")
         );
         let error = host
@@ -4529,7 +4537,11 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
         );
         let error = host.validate_explicit_worker(&content, phase).unwrap_err();
         assert_eq!(
-            error.downcast_ref::<DynamoError>().unwrap().message(),
+            error
+                .downcast_ref::<UnknownWorkerTarget>()
+                .unwrap()
+                .0
+                .message(),
             format!("nvext.{field}=42 does not identify a known worker")
         );
     }

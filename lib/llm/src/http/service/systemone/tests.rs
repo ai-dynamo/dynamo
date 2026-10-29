@@ -385,6 +385,7 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
     let parent = Context::new(());
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker,
             stream,
@@ -419,6 +420,7 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     parent_context.kill();
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker,
             stream,
@@ -444,6 +446,7 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
     });
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker: Arc::new(RequestTracker::new()),
             stream: ResponseStream::new(Box::pin(stream), Context::new(()).context()),
@@ -469,6 +472,7 @@ enum EngineBehavior {
     PendingSiblings,
     RejectGenerate,
     RejectStream,
+    RejectStalePlacement,
     RejectRequest {
         class: dynamo_runtime::error::ErrorClass,
         branch: usize,
@@ -566,6 +570,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }])),
                 stream_context,
             ));
+        }
+        if let EngineBehavior::RejectStalePlacement = self.behavior
+            && index > 0
+        {
+            return Err(crate::kv_router::UnknownWorkerTarget(
+                dynamo_runtime::error::DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .message("private pinned worker detail")
+                    .build(),
+            )
+            .into());
         }
         if matches!(self.behavior, EngineBehavior::TransportFailure) {
             let transport = std::io::Error::new(
