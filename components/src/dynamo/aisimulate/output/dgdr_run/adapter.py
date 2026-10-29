@@ -438,14 +438,15 @@ class DGDRRunOutputAdapter:
             self._wake.set()
 
     def _retain(self, record: CandidateRecordLike) -> _Retained | None:
-        if (record.score is None and not self._is_pareto) or record.used_gpus is None:
+        if record.score is None and not self._is_pareto:
             logger.warning(
-                "dgdr_run: feasible candidate %s has no score/used_gpus; skipped",
+                "dgdr_run: feasible candidate %s has no score; skipped",
                 record.candidate_id,
             )
             return None
         parameters = _plain(dict(record.config))
         score = float(record.score) if record.score is not None else 0.0
+        used_gpus = int(record.used_gpus) if record.used_gpus is not None else 0
         # Every measurement AISimulate resolved for the point (throughput, TTFT, ITL, E2E latency,
         # goodput, power, ...) is kept under its own name, with non-finite values as null. The
         # adapter's rank metadata is added under the reserved names.
@@ -461,7 +462,8 @@ class DGDRRunOutputAdapter:
                 )
                 del metrics[reserved]
         metrics["score"] = score if math.isfinite(score) else None
-        metrics["usedGpus"] = int(record.used_gpus)
+        if used_gpus:
+            metrics["usedGpus"] = used_gpus
         objectives = getattr(record, "objectives", None)
         if objectives:
             metrics["objectives"] = _finite(_plain(dict(objectives)))
@@ -469,7 +471,7 @@ class DGDRRunOutputAdapter:
             id=candidate_id_for(parameters),
             # A NaN score has no place in an ordering; it ranks as the worst.
             score=-math.inf if math.isnan(score) else score,
-            used_gpus=int(record.used_gpus),
+            used_gpus=used_gpus,
             parameters=parameters,
             metrics=metrics,
         )
@@ -784,10 +786,7 @@ class DGDRRunOutputPlugin:
         output_dir: Path,
     ) -> Sequence[str | Path]:
         resolved = DGDRRunOutputConfig.model_validate(dict(config))
-        if result.views.pareto_front:
-            selected = list(result.views.pareto_front)[: resolved.max_candidates]
-        else:
-            selected = list(result.selected_candidates)[: resolved.max_candidates]
+        selected = list(result.selected_candidates)[: resolved.max_candidates]
         if not selected:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
@@ -837,15 +836,11 @@ class _FinalCandidate:
 def _as_feasible(candidate: Any) -> _FinalCandidate:
     score = getattr(candidate, "score", None)
     used_gpus = getattr(candidate, "used_gpus", None)
-    if used_gpus is None:
-        raise CandidateMaterializationError(
-            "selected candidate has no used_gpus, so it cannot be materialized"
-        )
     return _FinalCandidate(
         candidate_id=str(getattr(candidate, "candidate_id", "")),
         config=dict(candidate.config),
         score=score if score is not None else 0.0,
-        used_gpus=used_gpus,
+        used_gpus=int(used_gpus) if used_gpus is not None else 0,
         objectives=getattr(candidate, "objectives", None),
         metrics=dict(getattr(candidate, "metrics", None) or {}),
     )
