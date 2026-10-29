@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -152,6 +153,7 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    pub queue_wait: Duration,
     /// Greatest raw router-visible overlap among eligible workers, in tokens,
     /// for tracked requests.
     pub max_raw_cached_tokens: Option<usize>,

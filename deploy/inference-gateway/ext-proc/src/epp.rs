@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -327,10 +327,15 @@ impl Router {
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = cache_namespace_from_request(request, headers);
 
-        let encoding = match self.preprocessor.apply_template(request)? {
+        let template_start = Instant::now();
+        let formatted = self.preprocessor.apply_template(request)?;
+        crate::metrics::observe_template_time(template_start.elapsed());
+        let tokenize_start = Instant::now();
+        let encoding = match formatted {
             Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
             None => self.preprocessor.tokenize("")?,
         };
+        crate::metrics::observe_tokenize_time(tokenize_start.elapsed());
         Ok(TokenizeResult {
             tokens: encoding.token_ids().to_vec(),
             cache_namespace,
@@ -403,10 +408,12 @@ impl Router {
     ) -> Result<Vec<u32>> {
         let prompt = std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new()));
         request.inner.prompt = Prompt::String(completion_prompt_routing_text(prompt));
+        let tokenize_start = Instant::now();
         let (tokens, _annotations) = self
             .preprocessor
             .gather_tokens(&request, None, None)
             .await?;
+        crate::metrics::observe_tokenize_time(tokenize_start.elapsed());
         Ok(tokens)
     }
 
