@@ -1802,9 +1802,8 @@ impl QuicResponseClientPool {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let entry = entry.insert(Arc::new(ClientPoolEntry::new())).clone();
-                // Drop entries left by stopped runtimes so their bundles do not
-                // keep UDP sockets open. Only another runtime's unhealthy bundle
-                // that nobody is reconnecting is removed.
+                // Drop other runtimes' unhealthy bundles that nobody is reconnecting,
+                // so bundles of stopped runtimes do not keep UDP sockets open.
                 self.connections.retain(|other, other_entry| {
                     other.runtime == key.runtime
                         || other_entry.reconnect.try_lock().is_err()
