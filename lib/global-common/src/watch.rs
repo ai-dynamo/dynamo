@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! List-and-watch, as `dynamo_runtime::discovery::Discovery` does it: a watch
-//! starts with one `Added` per current item, then one `Resync` with the same
-//! set, then changes. A `Resync` replaces all earlier state.
+//! starts with one `Upserted` per current item (the runtime's `Added`), then
+//! one `Resync` with the same set, then changes. A `Resync` replaces all
+//! earlier state.
 
 #[derive(Clone, Debug)]
 pub enum WatchEvent<T, K> {
     /// A new or changed item. It replaces any earlier item with the same key.
-    Added(T),
+    Upserted(T),
     /// An item went away. It can name a key the watcher never got, for an
     /// item that went away just before the watch started; ignore those.
     Removed(K),
