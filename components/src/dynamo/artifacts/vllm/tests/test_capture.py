@@ -378,6 +378,47 @@ async def test_valid_nonzero_start_keeps_requested_origin():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(10)
+async def test_route_compaction_runs_off_loop_and_finishes_before_cancellation(
+    monkeypatch,
+):
+    original = generation_artifact.compact_routes
+    started = threading.Event()
+    finish = threading.Event()
+    thread_ids = []
+
+    def delayed(*args, **kwargs):
+        thread_ids.append(threading.get_ident())
+        started.set()
+        if not finish.wait(timeout=5):
+            raise RuntimeError("test route compaction was not released")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(generation_artifact, "compact_routes", delayed)
+    budget = CaptureBudget(1 << 20)
+    capture = session(request(("moe_routes",)), budget=budget)
+    routes = np.asarray([[[1, 2], [3, 4]], [[2, 3], [4, 5]]], dtype=np.int64)
+    output = SimpleNamespace(index=0, token_ids=[12], routed_experts=routes)
+    loop_thread = threading.get_ident()
+
+    task = asyncio.create_task(capture.observe_async(output, [10, 11]))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert len(thread_ids) == 1
+        assert thread_ids[0] != loop_thread
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert budget.used > 0
+    finally:
+        finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    capture.close()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
 async def test_cancelled_encoder_holds_reservation_until_thread_finishes(monkeypatch):
     original = generation_artifact.encode_generation_artifact
     started = threading.Event()

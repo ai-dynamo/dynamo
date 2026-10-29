@@ -26,13 +26,42 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_responses_sse,
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
 
+#[tokio::test]
+async fn responses_sse_requires_terminal_event_without_trailers() {
+    for terminal in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_responses_sse(&body).await.is_ok());
+        for trailer in [
+            "data: [DONE]\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        ] {
+            assert!(
+                parse_responses_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_responses_sse("").await.is_err());
+    assert!(
+        parse_responses_sse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+            .await
+            .is_err()
+    );
+}
+
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
-/// unary and streaming requests, including mixed tools and namespace members.
+/// unary and streaming requests, including mixed function/hosted tool lists.
 #[tokio::test]
 #[serial]
 async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
@@ -44,13 +73,6 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
                 (
                     json!([tool("read_file"), {"type": "web_search"}]),
                     "web_search",
-                ),
-                (
-                    json!([{
-                        "type": "namespace", "name": "custom", "description": "Custom tools",
-                        "tools": [{"type": "custom", "name": "run", "format": {"type": "text"}}]
-                    }]),
-                    "custom",
                 ),
             ] {
                 let body = json!({
@@ -73,6 +95,40 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
 
 /// Unsupported choices return HTTP 400 without dispatch for unary and streaming
 /// requests even when the supplied function tool definitions are valid.
+/// Custom tools now share the function-template adapter while retaining their
+/// namespace and custom identity in the public Responses surface.
+#[tokio::test]
+#[serial]
+async fn namespaced_custom_tools_are_accepted_and_echoed() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL, "input":"ping", "stream":stream,
+                    "tools":[{"type":"namespace","name":"custom","description":"Custom tools",
+                        "tools":[{"type":"custom","name":"run","format":{"type":"text"}}]}]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            if stream {
+                assert!(body.contains("response.completed"));
+            } else {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["tools"][0]["type"], "namespace");
+                assert_eq!(body["tools"][0]["tools"][0]["type"], "custom");
+            }
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
@@ -187,7 +243,7 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
         assert!(events.iter().any(|event| event.event == "response.failed"));
@@ -251,7 +307,7 @@ async fn colliding_namespace_tools_round_trip_through_http() {
                 let response = post_responses(&svc, &body).await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let response_body = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
                     for kind in ["response.output_item.added", "response.output_item.done"] {
                         let call = events.iter().find(|event| event.event == kind
                             && event.data["item"]["type"] == "function_call").unwrap();
@@ -371,7 +427,7 @@ async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
                 let expected_response_metadata =
                     request_metadata.clone().unwrap_or_else(|| json!({}));
                 if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_responses_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     assert_streamed_response_metadata(&events, &expected_response_metadata);
@@ -431,7 +487,7 @@ async fn refusal_fragments_reach_responses_content_and_events() {
                 .await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let body: Value = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_responses_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let refusal_events: Vec<_> = events
@@ -552,8 +608,7 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -625,7 +680,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure(#[case
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
         let text_done_position = event_position(&events, if refusal { "response.refusal.done" } else { "response.output_text.done" });
@@ -701,7 +756,7 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -808,8 +863,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -854,7 +908,7 @@ async fn parallel_function_calls_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 

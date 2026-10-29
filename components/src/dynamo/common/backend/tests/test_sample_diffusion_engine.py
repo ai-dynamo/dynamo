@@ -76,6 +76,27 @@ async def test_generate_honors_n():
     assert len(chunks[0]["data"]) == 3
 
 
+@pytest.mark.parametrize("requested_steps", [4, None], ids=["steps", "model-default"])
+async def test_generate_reports_image_accounting_not_token_usage(requested_steps):
+    """The template contract for a DiffusionEngine: the images returned, the
+    reference images consumed, and the step count the request asked for go
+    under ``nvext.usage``. Token ``usage`` is left out: a diffusion engine has
+    no token counts."""
+    engine = SampleDiffusionEngine(delay=0.0)
+    request = {"prompt": "x", "n": 2, "response_format": "b64_json"}
+    if requested_steps is not None:
+        request["nvext"] = {"num_inference_steps": requested_steps}
+    chunks = await _collect(engine, request)
+    response = chunks[0]
+    assert "usage" not in response
+    assert response["size"] == "1x1"
+    assert response["output_format"] == "png"
+    expected = {"output_images": 2, "input_images": 0}
+    if requested_steps is not None:
+        expected["num_inference_steps"] = requested_steps
+    assert response["nvext"] == {"usage": expected}
+
+
 async def test_generate_defaults_missing_n_to_one():
     engine = SampleDiffusionEngine(delay=0.0)
     chunks = await _collect(engine, {"prompt": "x", "response_format": "b64_json"})

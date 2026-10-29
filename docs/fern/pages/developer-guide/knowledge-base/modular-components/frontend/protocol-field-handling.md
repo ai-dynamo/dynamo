@@ -211,6 +211,10 @@ Schema generation and permissive parsing belong to the source-contract layer. Th
 behavioral compatibility. Source inspection can explain a result or identify a likely gap, but it
 does not replace either acceptance layer.
 
+Use [OpenAPI request-contract comparison](openapi-request-contract-comparison.md) to compare
+declared request and response schemas and identify coverage gaps. Schema comparison does not
+prove actual request acceptance, backend delivery or effects, or runtime response and error behavior.
+
 ## Development Checklist
 
 Before merging a protocol-field change:

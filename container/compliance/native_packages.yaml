@@ -115,10 +115,10 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
-  # etcd — coordination store, downloaded as a release binary in dynamo_base and
-  # placed at /usr/local/bin (no apt metadata).
+  # etcd and nats-server are built from their release tags with patched Go.
+  # The copied binaries have no apt metadata.
   - name: etcd
-    version: v3.5.34
+    version: v3.5.35
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
@@ -130,10 +130,9 @@ packages:
       - trtllm-runtime-efa
       - dynamo-planner
 
-  # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
-  # may not survive into the final runtime layer attribution reliably).
+  # nats-server — messaging server rebuilt in dynamo_base.
   - name: nats-server
-    version: v2.14.7
+    version: v2.14.8
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:

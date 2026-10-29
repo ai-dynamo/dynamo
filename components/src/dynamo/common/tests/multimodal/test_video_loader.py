@@ -25,6 +25,16 @@ pytestmark = [
 ]
 
 
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
+
+
 @pytest.mark.asyncio
 async def test_load_video_rejects_http_by_default():
     """Wiring smoke: VideoLoader plumbs ``url_policy`` to the validator.
@@ -144,6 +154,17 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
     with pytest.raises(ValueError, match="enable_frontend_decoding=False"):
         await loader.load_video_batch([{"Decoded": {"shape": [1, 2, 2, 3]}}])
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_rejects_later_malformed_item_before_loading():
+    loader = VideoLoader()
+    loader.load_video = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="index 1"):
+        await loader.load_video_batch([{"Url": "https://example.com/one.mp4"}, {}])
+
+    loader.load_video.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -595,3 +616,46 @@ async def test_load_video_preserves_a_configuration_error(monkeypatch):
         await loader.load_video("https://example.com/v.mp4")
 
     assert not isinstance(excinfo.value, ValueError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        RuntimeError("Invalid data found when processing input"),
+        (np.empty((0, 2, 2, 3), dtype=np.uint8), {}),
+    ],
+    ids=["decode_error", "empty_clip"],
+)
+async def test_load_video_failure_keeps_signed_url_out(result, caplog):
+    url = _SIGNED_URL.format(name="clip.mp4")
+    loader = VideoLoader()
+    mock = AsyncMock(side_effect=result) if isinstance(result, Exception) else None
+    loader._load_video_with_vllm = mock or AsyncMock(  # type: ignore[method-assign]
+        return_value=result
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as exc_info:
+        await loader.load_video(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/clip.mp4" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_failure_keeps_signed_url_out(caplog):
+    url = _SIGNED_URL.format(name="clip.mp4")
+    loader = VideoLoader()
+    loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("Invalid data found when processing input")
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as exc_info:
+        await loader.load_video_batch([{"Url": url}])
+
+    # The old batch line cut the URL at 80 characters, which kept the start of
+    # the query; the signature itself sits further along.
+    for text in (str(exc_info.value), caplog.text):
+        assert _SIGNATURE not in text
+        assert "X-Amz-" not in text

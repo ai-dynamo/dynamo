@@ -35,6 +35,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.state_agent import StateAgentLifecycle
 
 
 async def _warmup_prefill_engine(
@@ -236,21 +237,27 @@ async def _teardown_worker(
     handler,
     metrics_task,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None,
+    state_agent: StateAgentLifecycle,
     *,
     body_failed: bool,
 ) -> None:
-    """The `finally` block shared by `init_decode` and `init_prefill`: stop the
-    metrics task, clean up the handler, and run any deferred handlers.
+    """The `finally` block shared by `init_decode` and `init_prefill`: withdraw
+    the KVCR state agent, stop the metrics task, clean up the handler, and run
+    any deferred handlers.
 
-    Delegates to `finish_worker_teardown`, which runs teardown to completion,
+    The state agent is closed first, and `finish_worker_teardown` runs even if
+    that close raises. `finish_worker_teardown` runs teardown to completion,
     keeps a failing body's exception, and otherwise honours cancellation.
     """
-    await finish_worker_teardown(
-        metrics_task,
-        handler.cleanup,
-        run_deferred_handlers,
-        body_failed=body_failed,
-    )
+    try:
+        await state_agent.close()
+    finally:
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )
 
 
 async def init_decode(
@@ -329,7 +336,9 @@ async def init_decode(
         )
 
     body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -349,6 +358,7 @@ async def init_decode(
                 needs=decode_needs,
                 # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
@@ -359,7 +369,11 @@ async def init_decode(
         body_failed = False
     finally:
         await _teardown_worker(
-            handler, metrics_task, run_deferred_handlers, body_failed=body_failed
+            handler,
+            metrics_task,
+            run_deferred_handlers,
+            state_agent,
+            body_failed=body_failed,
         )
 
 
@@ -406,7 +420,9 @@ async def init_prefill(
     ready_event = asyncio.Event()
 
     body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -434,6 +450,7 @@ async def init_prefill(
                 # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
                 # advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         )
     except Exception as e:
@@ -443,5 +460,9 @@ async def init_prefill(
         body_failed = False
     finally:
         await _teardown_worker(
-            handler, metrics_task, run_deferred_handlers, body_failed=body_failed
+            handler,
+            metrics_task,
+            run_deferred_handlers,
+            state_agent,
+            body_failed=body_failed,
         )

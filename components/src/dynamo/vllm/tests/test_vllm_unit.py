@@ -73,6 +73,20 @@ def _load_vllm_main() -> ModuleType:
 
 
 @pytest.mark.parametrize(
+    "configured", ["not-json", "{}", "[[1, 0, 1]]", "[[1, 8, 2], [1, 8, 2]]"]
+)
+def test_invalid_artifact_router_profile_fails_startup(configured):
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    with pytest.raises(ValueError, match="DYNAMO_ARTIFACT_ROUTER_PROFILE"):
+        handlers._configured_artifact_router_profile(configured)
+
+
+def test_artifact_router_profile_is_validated_once():
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    assert handlers._configured_artifact_router_profile("[[3, 8, 2]]") == ((3, 8, 2),)
+
+
+@pytest.mark.parametrize(
     "enable_lora, model_type, expected",
     [
         (True, dynamo_llm.ModelType.Prefill, 3),
@@ -321,11 +335,44 @@ def test_connector_to_kv_transfer_json_multi():
     result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
     assert result["kv_role"] == "kv_both"
+    assert result["kv_connector_module_path"] == "dynamo.vllm.pd_connector"
     nested = result["kv_connector_extra_config"]["connectors"]
     assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
         "DynamoConnector": "kv_both",
         "NixlConnector": "kv_consumer",
     }
+
+
+def test_pd_connector_importable_from_module_path():
+    """Test PdConnector resolves from the module path vLLM loads it by."""
+    module = importlib.import_module("dynamo.vllm.pd_connector")
+    assert module.PdConnector.__name__ == "PdConnector"
+
+
+@pytest.mark.parametrize("offload", ["_LMCacheConnectorV1", "_FlexKVConnectorV1"])
+def test_pd_connector_checks_connector_order(monkeypatch, offload):
+    """Test PdConnector takes LMCache or FlexKV first and NIXL second, without KVBM."""
+    pd = importlib.import_module("dynamo.vllm.pd_connector")
+    offload_cls = getattr(pd, offload)
+    if offload_cls is None:
+        pytest.skip(f"{offload} is not available in this vLLM build")
+
+    def children(*classes):
+        def init(self, vllm_config, role, kv_cache_config):
+            self._connectors = [Mock(spec=cls) for cls in classes]
+
+        return init
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(offload_cls, pd.NixlConnector)
+    )
+    pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(pd.NixlConnector, offload_cls)
+    )
+    with pytest.raises(TypeError, match="first connector"):
+        pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
@@ -520,6 +567,31 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
 
 
 @pytest.mark.parametrize(
+    "tool_parser,reasoning_parser,expected",
+    [
+        ("muse_spark_open", None, True),
+        ("muse_spark", None, True),
+        (None, "muse_spark_open", True),
+        (None, "muse_spark", True),
+        ("qwen3_coder", "muse_spark_open", False),
+        (None, None, False),
+    ],
+)
+def test_muse_grammar_owns_reasoning_before_engine_launch(
+    tool_parser, reasoning_parser, expected
+):
+    vllm_main = _load_vllm_main()
+    config = SimpleNamespace(
+        dyn_tool_call_parser=tool_parser, dyn_reasoning_parser=reasoning_parser
+    )
+    outputs = SimpleNamespace(enable_in_reasoning=False)
+    vllm_main.configure_muse_structural_tag_reasoning(
+        config, SimpleNamespace(structured_outputs_config=outputs)
+    )
+    assert outputs.enable_in_reasoning is expected
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
@@ -671,6 +743,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         engine_args=FakeEngineArgs(),
         embedding_worker=False,
         embedding_worker_processes=1,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -2408,3 +2482,83 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
 
     assert chunks[0]["choices"][0]["delta"]["content"] == ""
     assert context.notifications == 1
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_maybe_freeze_gc_after_init_runs_once(monkeypatch, enabled):
+    vllm_main = _load_vllm_main()
+    freeze = Mock()
+    monkeypatch.setattr(vllm_main, "freeze_gc_heap", freeze)
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    vllm_main.maybe_freeze_gc_after_init(enabled)
+    vllm_main.maybe_freeze_gc_after_init(enabled)
+
+    assert freeze.call_count == (1 if enabled else 0)
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
+    vllm_main = _load_vllm_main()
+    order: list[str] = []
+    monkeypatch.setattr(
+        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
+    )
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    async def fake_register_model(*_args, **_kwargs):
+        order.append("register_model")
+
+    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
+    # Stub everything register_vllm_model calls before register_model; this
+    # test covers only the freeze ordering.
+    for name in (
+        "ModelRuntimeConfig",
+        "publish_vllm_structural_tag_reasoning_policy",
+        "publish_vllm_qwen_video_processor_contract",
+        "publish_vllm_nemotron_video_processor_contract",
+        "apply_data_parallel_runtime_config",
+        "publish_kv_hint_capabilities",
+        "publish_vllm_token_budget",
+        "apply_topology_config",
+        "_register_model_source_path",
+        "build_router_config",
+        "should_register_model_ignore_weights",
+        "_base_model_lora_capacity",
+    ):
+        monkeypatch.setattr(vllm_main, name, Mock())
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(vllm_main, "state_agent_settings", lambda _: None)
+    monkeypatch.setattr(
+        vllm_main, "publish_engine_generate_capability", lambda *_: False
+    )
+    monkeypatch.setattr(vllm_main, "per_rank_kv_blocks", lambda blocks, _: blocks)
+    monkeypatch.setattr(vllm_main, "get_spec_decode_runtime_data", lambda *_: None)
+    monkeypatch.setattr(
+        vllm_main, "create_frontend_media_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _: {
+            "num_gpu_blocks": 16,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 512,
+            "kv_event_block_size": 16,
+        },
+    )
+
+    config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
+    vllm_config = Mock(lora_config=None)
+
+    await vllm_main.register_vllm_model(
+        dynamo_llm.ModelInput.Tokens,
+        dynamo_llm.ModelType.Chat,
+        Mock(),
+        config,
+        Mock(),
+        vllm_config,
+        worker_type=dynamo_llm.WorkerType.Aggregated,
+    )
+
+    assert order == ["freeze_gc_heap", "register_model"]

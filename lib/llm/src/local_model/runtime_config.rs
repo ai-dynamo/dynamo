@@ -476,6 +476,14 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Whether the configured grammar can replay distinct Responses phases.
+    pub fn preserves_response_message_phases(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        ) == Some("muse_spark")
+    }
+
     /// Normalize older wire fields into the current policy and project it back for older readers
     pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
         if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
@@ -746,7 +754,8 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
-    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+    /// Return the validated global DP ranks advertised by this worker.
+    pub fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
         if self.data_parallel_size == 0 {
             return Err("data_parallel_size must be at least 1".to_string());
         }
