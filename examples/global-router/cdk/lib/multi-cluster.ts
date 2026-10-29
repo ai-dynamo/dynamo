@@ -35,7 +35,10 @@ export const KARMADA_RELEASE = "karmada";
 export const KARMADA_API_SERVICE = `${KARMADA_RELEASE}-apiserver`;
 export const KARMADA_KUBECONFIG_SECRET = `${KARMADA_RELEASE}-kubeconfig`;
 export const KARMADA_API_PORT = 5443;
-/** The release that `crds/` and the setup image pins below come from. */
+/**
+ * The release that the setup image pins below come from. It must read an MCS
+ * version that `crds/` serves.
+ */
 export const KARMADA_VERSION = "1.19.0";
 
 /** `karmadactl register` rejects longer member names. */
@@ -65,8 +68,9 @@ const KARMADA_DEFAULT_CERT_HOSTS = [
   "127.0.0.1",
 ];
 
-// From Karmada `KARMADA_VERSION`, `charts/karmada/_crds/bases/multicluster`;
-// see crds/README.md.
+// From `sigs.k8s.io/mcs-api` v0.5.2, `config/crd`; see crds/README.md. They
+// serve `v1alpha1`, which Karmada reads, and `v1beta1`, which they store and
+// which an MCS controller built on mcs-api v0.5 uses.
 const MCS_CRD_FILES = [
   "multicluster.x-k8s.io_serviceexports.json",
   "multicluster.x-k8s.io_serviceimports.json",
@@ -135,9 +139,10 @@ export class MultiClusterSupport extends Construct {
     });
 
     // `overwrite` applies instead of creating, so CRDs that already exist
-    // in a running cluster are adopted. They are kept on removal and
-    // rollback: they may predate this stack, and deleting a CRD deletes every
-    // ServiceExport and ServiceImport.
+    // in a running cluster are adopted, and Karmada's `v1alpha1`-only
+    // copies are replaced by ones that also serve `v1beta1`. They are kept
+    // on removal and rollback: they may predate this stack, and deleting a
+    // CRD deletes every ServiceExport and ServiceImport.
     new eks.KubernetesManifest(this, "McsCrds", {
       cluster,
       manifest: loadMcsCrds(),
@@ -227,7 +232,7 @@ export function validateMultiClusterConfig(
   }
   if (karmada.version !== KARMADA_VERSION) {
     throw new Error(
-      `Karmada ${karmada.version} is not supported: crds/ and the pinned setup images come from ${KARMADA_VERSION}. crds/README.md says how to move them together.`,
+      `Karmada ${karmada.version} is not supported: the pinned setup images come from ${KARMADA_VERSION}, which reads an MCS version that crds/ serves. crds/README.md says what to check before moving.`,
     );
   }
   if (karmada.apiSourceCidrs.some((cidr) => !isValidIpv4Cidr(cidr))) {
