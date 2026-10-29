@@ -106,8 +106,6 @@ class RouterConfigBase(ConfigBase):
         prefill_threshold = self.active_prefill_tokens_threshold
         if prefill_threshold is not None and prefill_threshold < 0:
             raise ValueError("--active-prefill-tokens-threshold must be >= 0")
-        if prefill_threshold is not None:
-            logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
 
         prefill_threshold_frac = self.active_prefill_tokens_threshold_frac
         if prefill_threshold_frac is not None and not (
@@ -421,6 +419,15 @@ def build_router_config(
     if router_mode is None:
         return None
 
+    router_kwargs = config.router_kwargs()
+    # TODO(v1.7): Remove with --active-prefill-tokens-threshold.
+    # Warned here rather than in frontend validation: every advertisement, the
+    # frontend's and each worker's (vLLM, SGLang, TRT-LLM, mocker), is built
+    # here, so the notice reaches each process exactly once and only when the
+    # deprecated value is actually forwarded.
+    if router_kwargs["active_prefill_tokens_threshold"] is not None:
+        logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
+
     # Imported lazily so that importing a backend's argument definitions does
     # not pull in the compiled bindings.
     from dynamo.llm import KvRouterConfig, RouterConfig, RouterMode
@@ -439,4 +446,4 @@ def build_router_config(
     kv_router_config = (
         KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
     )
-    return RouterConfig(mode, kv_router_config, **config.router_kwargs())
+    return RouterConfig(mode, kv_router_config, **router_kwargs)

@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -693,10 +694,14 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
     assert f"{flag}={expected}" in caplog.text
+
+    # The deprecation notice is emitted where the frontend forwards the value,
+    # the same path worker advertisements take, and exactly once per process.
+    build_router_config(config)
     deprecated = field == "active_prefill_tokens_threshold"
-    assert (
-        "--active-prefill-tokens-threshold is deprecated" in caplog.text
-    ) == deprecated
+    assert caplog.text.count("--active-prefill-tokens-threshold is deprecated") == int(
+        deprecated
+    )
 
 
 @pytest.mark.parametrize(
