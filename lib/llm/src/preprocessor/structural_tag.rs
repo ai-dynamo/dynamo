@@ -12,7 +12,6 @@ use crate::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
-    TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
@@ -45,9 +44,6 @@ struct StructuralTagBuildRequest<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ResolvedReasoningBoundary {
     StructuralTag,
-    /// The tag owns reasoning only if the backend's gate is bypassed. Apply
-    /// that override after successful construction, never for JSON fallback.
-    StructuralTagWithBackendOverride,
     Backend,
 }
 
@@ -75,10 +71,6 @@ pub(crate) enum SelectedStructuralTagBuilder {
 }
 
 impl SelectedStructuralTagBuilder {
-    fn supports_reasoning_gate_override(self) -> bool {
-        matches!(self, Self::V2(builder) if builder.supports_reasoning_gate_override())
-    }
-
     fn for_parser(parser_name: &str) -> Option<Self> {
         if v2::enabled()
             && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
@@ -317,19 +309,6 @@ impl OpenAIPreprocessor {
         };
         let parser_name = parser_name.expect("Required decision implies a parser name");
 
-        // Both the family grammar and backend must explicitly support bypassing
-        // the backend gate. Reasoning delimiters alone do not opt a family in.
-        let reasoning_boundary = if builder.supports_reasoning_gate_override()
-            && !matches!(tool_choice, ToolChoice::None)
-            && config.reasoning_boundary == StructuralTagReasoningBoundary::Auto
-            && self.structural_tag_reasoning_metadata(
-                TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
-            ) {
-            ResolvedReasoningBoundary::StructuralTagWithBackendOverride
-        } else {
-            reasoning_boundary
-        };
-
         let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto)
             && config.allow_tool_calls_with_structured_output
         {
@@ -374,20 +353,6 @@ impl OpenAIPreprocessor {
             result => result,
         };
         let applied = apply_structural_tag(parser_name, built_tag, preprocessed_request)?;
-        if applied
-            && reasoning_boundary == ResolvedReasoningBoundary::StructuralTagWithBackendOverride
-        {
-            let extra_args = preprocessed_request
-                .extra_args
-                .get_or_insert_with(|| serde_json::json!({}));
-            let extra_args = extra_args.as_object_mut().ok_or_else(|| {
-                DynamoError::builder()
-                    .error_type(ErrorType::Unknown)
-                    .message("preprocessed extra_args must be an object")
-                    .build()
-            })?;
-            extra_args.insert("reasoning_ended".to_string(), true.into());
-        }
         if applied && structured_output_schema.is_some() {
             // Request preprocessing materializes `response_format` as guided JSON.
             // The composite structural tag now owns that schema.

@@ -438,43 +438,6 @@ mod tests {
             .unwrap()
     }
 
-    fn reasoning_backend_preprocessor(
-        parser: &str,
-        capability: Option<Value>,
-        boundary: crate::local_model::runtime_config::StructuralTagReasoningBoundary,
-    ) -> Arc<OpenAIPreprocessor> {
-        use crate::local_model::runtime_config::{
-            StructuralTagConfig, StructuralTagScope,
-            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-            TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
-        };
-        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.tool_call_parser = Some(parser.into());
-        mdc.runtime_config.reasoning_parser = Some(parser.into());
-        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
-            scope: StructuralTagScope::Always,
-            reasoning_boundary: boundary,
-            ..Default::default()
-        });
-        mdc.runtime_config
-            .set_engine_specific(
-                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-                true,
-            )
-            .unwrap();
-        if let Some(capability) = capability {
-            mdc.runtime_config
-                .set_engine_specific(
-                    TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
-                    capability,
-                )
-                .unwrap();
-        }
-        OpenAIPreprocessor::new(mdc).unwrap()
-    }
-
     #[test]
     fn tool_call_parsing_requires_tools() {
         assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
@@ -957,6 +920,9 @@ mod tests {
             json!({"type":"object","properties":{"location":{"type":"string"}},"additionalProperties":true}),
             json!({"type":"object","properties":{"location":{"type":"string","minLength":1}},"additionalProperties":false}),
             json!({"type":"object","properties":{"location":{"type":["string","integer"]}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"location":{"allOf":[{"type":"integer"},{"minimum":1}]}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"location":{"type":"integer","not":{"const":1}}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"location":{"$ref":"#/$defs/missing"}},"additionalProperties":false}),
         ] {
             let mut definitions = tools();
             definitions[0]["function"]["parameters"] = schema;
@@ -990,11 +956,15 @@ mod tests {
         ) {
             return;
         }
-        let processor = reasoning_backend_preprocessor(
-            "minimax_m3",
-            Some(json!(true)),
-            crate::local_model::runtime_config::StructuralTagReasoningBoundary::Auto,
-        );
+        // This backend applies the full structural tag, including reasoning.
+        let mut processor = preprocessor("minimax_m3", StructuralTagMode::On);
+        Arc::get_mut(&mut processor)
+            .unwrap()
+            .runtime_config
+            .structural_tag
+            .as_mut()
+            .unwrap()
+            .scope = crate::local_model::runtime_config::StructuralTagScope::Always;
         // Recorded from the matched v1 BFCL simple_1 control. These outputs
         // begin with model-generated reasoning, not a prompt-prefilled opener.
         let thought =
@@ -1117,10 +1087,6 @@ mod tests {
                 );
                 assert_eq!(common.require_reasoning, required_before);
                 let wire = serde_json::to_value(&common).unwrap();
-                assert_eq!(
-                    wire["extra_args"]["reasoning_ended"], true,
-                    "{choice_name}/{mode} must activate its full grammar from token zero"
-                );
                 let tag = common
                     .sampling_options
                     .guided_decoding
@@ -1235,131 +1201,6 @@ mod tests {
                 tags[0], tags[1],
                 "{family} must retain its existing grammar"
             );
-        }
-    }
-
-    #[test]
-    fn minimax_m3_reasoning_override_requires_native_tag_and_backend_capability() {
-        use crate::local_model::runtime_config::StructuralTagReasoningBoundary;
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::minimax_m3_reasoning_override_requires_native_tag_and_backend_capability"
-            ),
-            &[(
-                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
-                "2",
-            )],
-        ) {
-            return;
-        }
-        for (parser, capability, boundary, override_expected) in [
-            (
-                "minimax_m3",
-                None,
-                StructuralTagReasoningBoundary::Auto,
-                false,
-            ),
-            (
-                "minimax_m3",
-                Some(json!(false)),
-                StructuralTagReasoningBoundary::Auto,
-                false,
-            ),
-            (
-                "minimax_m3",
-                Some(json!("true")),
-                StructuralTagReasoningBoundary::Auto,
-                false,
-            ),
-            (
-                "minimax_m3",
-                Some(json!(true)),
-                StructuralTagReasoningBoundary::Auto,
-                true,
-            ),
-            (
-                "minimax_m3",
-                Some(json!(true)),
-                StructuralTagReasoningBoundary::Backend,
-                false,
-            ),
-            (
-                "qwen3",
-                Some(json!(true)),
-                StructuralTagReasoningBoundary::Auto,
-                false,
-            ),
-        ] {
-            let processor = reasoning_backend_preprocessor(parser, capability, boundary);
-            for scenario in [
-                "native",
-                "relaxed",
-                "unsupported_schema",
-                "intersection",
-                "negation",
-                "invalid_ref",
-                "guided_only",
-                "tools_disabled",
-                "no_tools",
-            ] {
-                let mut definitions = tools();
-                definitions[0]["function"]["parameters"]["additionalProperties"] = json!(false);
-                definitions[0]["function"]["parameters"]["properties"]["location"]["enum"] =
-                    json!(["Paris", "Tokyo"]);
-                let mut body = json!({"tools":definitions,"tool_choice":"auto","chat_template_kwargs":{"thinking_mode":"adaptive"}});
-                match scenario {
-                    "relaxed" => body["tools"][0]["function"]["strict"] = json!(false),
-                    "unsupported_schema" => {
-                        body["tools"][0]["function"]["parameters"]["properties"]["location"]["minLength"] =
-                            json!(1)
-                    }
-                    "intersection" => {
-                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
-                            json!({"allOf":[{"type":"integer"},{"minimum":1}]});
-                    }
-                    "negation" => {
-                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
-                            json!({"type":"integer","not":{"const":1}});
-                    }
-                    "invalid_ref" => {
-                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
-                            json!({"$ref":"#/$defs/missing"});
-                    }
-                    "guided_only" => body["guided_regex"] = json!("[a-z]+"),
-                    "tools_disabled" => body["tool_choice"] = json!("none"),
-                    "no_tools" => {
-                        body.as_object_mut().unwrap().remove("tools");
-                    }
-                    _ => {}
-                }
-                let mut common = preprocessed_request();
-                common.extra_args =
-                    Some(json!({"reasoning_ended":false,"nvext":{"cache_salt":"preserve"}}));
-                let constraint = processor
-                    .apply_tool_choice_guided_decoding(&request(body), &mut common, false)
-                    .unwrap();
-                let overridden = override_expected && scenario == "native";
-                let wire = serde_json::to_value(&common).unwrap();
-                assert_eq!(
-                    wire["extra_args"]["reasoning_ended"], overridden,
-                    "{parser}/{boundary:?}/{scenario}"
-                );
-                assert_eq!(wire["extra_args"]["nvext"]["cache_salt"], "preserve");
-                if parser == "minimax_m3"
-                    && matches!(scenario, "intersection" | "negation" | "invalid_ref")
-                {
-                    assert_ne!(constraint, GuidedToolConstraint::StructuralTag);
-                }
-                if overridden {
-                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
-                    assert!(
-                        wire["sampling_options"]["guided_decoding"]["structural_tag"]
-                            .to_string()
-                            .contains("<mm:think>")
-                    );
-                }
-            }
         }
     }
 
