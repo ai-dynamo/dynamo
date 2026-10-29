@@ -4,6 +4,7 @@
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -13,6 +14,7 @@ import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio import client
 
 from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
@@ -346,3 +348,86 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+
+
+class _FakeHttpResponse:
+    """The parts of an aiohttp response that kubernetes_asyncio reads."""
+
+    def __init__(self, payload):
+        self.status = 200
+        self.reason = "OK"
+        self.headers = {"Content-Type": "application/json"}
+        self._body = json.dumps(payload).encode()
+        self.released = False
+
+    async def read(self):
+        return self._body
+
+    async def json(self):
+        return json.loads(self._body)
+
+    def raise_for_status(self):
+        pass
+
+    def release(self):
+        self.released = True
+
+
+class _FakeHttpSession:
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.responses = []
+
+    async def request(self, method, url, **kwargs):
+        resource = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        response = _FakeHttpResponse(self.payloads[resource])
+        self.responses.append(response)
+        return response
+
+    async def close(self):
+        pass
+
+
+async def test_discovery_capture_records_endpointslice_without_endpoints(
+    tmp_path,
+):
+    deployment = managed_deployment(tmp_path)
+    api_client = client.ApiClient(client.Configuration(host="http://kubernetes.test"))
+    await api_client.rest_client.pool_manager.close()
+    empty = {"apiVersion": "v1", "metadata": {}, "items": []}
+    endpoint_slice = {
+        "metadata": {
+            "name": "frontend-abc12",
+            "labels": {"kubernetes.io/service-name": "frontend"},
+        },
+        "addressType": "IPv4",
+        "endpoints": None,
+    }
+    session = _FakeHttpSession(
+        {
+            "dynamographdeployments": empty,
+            "dynamoworkermetadatas": empty,
+            "pods": empty,
+            "services": empty,
+            "endpointslices": {
+                "apiVersion": "discovery.k8s.io/v1",
+                "kind": "EndpointSliceList",
+                "metadata": {},
+                "items": [endpoint_slice],
+            },
+        }
+    )
+    api_client.rest_client.pool_manager = session
+    deployment._custom_api = client.CustomObjectsApi(api_client)
+    deployment._core_api = client.CoreV1Api(api_client)
+
+    try:
+        await deployment._capture_discovery_state()
+    finally:
+        await api_client.close()
+
+    record = json.loads((tmp_path / "discovery" / "endpointslices.json").read_text())
+    assert "error" not in record, record
+    assert record["response"]["items"] == [endpoint_slice]
+    assert len(session.responses) == 5
+    assert all(response.released for response in session.responses)

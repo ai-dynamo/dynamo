@@ -26,7 +26,7 @@ from tests.utils.collection_env_guard import (
 )
 from tests.utils.constants import TEST_MODELS, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.output_paths import resolve_test_output_path
+from tests.utils.output_paths import prepare_test_output_dir, resolve_test_output_path
 from tests.utils.port_utils import (
     ServicePorts,
     allocate_contiguous_ports,
@@ -624,8 +624,7 @@ def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
     log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(log_dir, ignore_errors=True)
-    os.makedirs(log_dir, exist_ok=True)
+    prepare_test_output_dir(log_dir, request.node.nodeid)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

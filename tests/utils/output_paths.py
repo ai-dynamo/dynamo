@@ -8,7 +8,9 @@ This module provides centralized logic for determining where test output
 output out of the git working tree by default.
 """
 
+import glob
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Union
@@ -59,3 +61,30 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
         os.path.join(tempfile.gettempdir(), "dynamo_tests"),
     )
     return os.path.join(log_root, path_str)
+
+
+# Executions seen per test in this process. Retries of a test (Datadog Auto Test
+# Retries and Early Flake Detection, pytest-rerunfailures) run again in the same
+# process, including under xdist.
+_output_dir_attempts: dict[str, int] = {}
+
+
+def prepare_test_output_dir(log_dir: str, test_id: str) -> None:
+    """Create an empty output directory for one execution of a test.
+
+    The first execution of ``test_id`` in this process removes stale output
+    left by earlier sessions. A repeat execution moves the previous attempt's
+    output to ``<log_dir>.attempt<N>`` instead of deleting it, so a failed
+    attempt's logs survive a passing retry and are uploaded with it.
+    """
+    attempt = _output_dir_attempts.get(test_id, 0) + 1
+    _output_dir_attempts[test_id] = attempt
+    if attempt == 1:
+        shutil.rmtree(log_dir, ignore_errors=True)
+        for stale in glob.glob(f"{glob.escape(log_dir)}.attempt*"):
+            shutil.rmtree(stale, ignore_errors=True)
+    elif os.path.exists(log_dir):
+        previous = f"{log_dir}.attempt{attempt - 1}"
+        shutil.rmtree(previous, ignore_errors=True)
+        os.rename(log_dir, previous)
+    os.makedirs(log_dir, exist_ok=True)

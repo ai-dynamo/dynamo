@@ -1941,6 +1941,9 @@ class ManagedDeployment:
             ),
         )
         # DWM ownership is through Pod UIDs; a DGD label selector can miss it.
+        # Read raw JSON: client models reject valid objects such as an
+        # EndpointSlice with `endpoints: null`, which the API returns for a
+        # slice with no ready endpoints.
         for name, read in resources:
             record = {
                 "namespace": self.namespace,
@@ -1949,8 +1952,15 @@ class ManagedDeployment:
             }
             try:
                 async with asyncio.timeout(DISCOVERY_RESOURCE_TIMEOUT):
-                    response = await read(_request_timeout=DISCOVERY_RESOURCE_TIMEOUT)
-                record["response"] = api_client.sanitize_for_serialization(response)
+                    response = await read(
+                        _request_timeout=DISCOVERY_RESOURCE_TIMEOUT,
+                        _preload_content=False,
+                    )
+                    try:
+                        response.raise_for_status()
+                        record["response"] = await response.json()
+                    finally:
+                        response.release()
             except Exception as error:
                 record["error"] = f"{type(error).__name__}: {error}"
                 self._logger.warning(
