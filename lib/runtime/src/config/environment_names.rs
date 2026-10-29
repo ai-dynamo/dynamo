@@ -377,6 +377,13 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Path prefixes the frontend reverse-proxies to upstream HTTP servers:
+    /// whitespace-separated `PREFIX=URL` entries, e.g.
+    /// `/v1/custom=http://127.0.0.1:8080`, or `PREFIX=owner` entries
+    /// forwarded to the worker owning the named resource. Built-in routes take
+    /// precedence.
+    pub const DYN_HTTP_FORWARD_ROUTES: &str = "DYN_HTTP_FORWARD_ROUTES";
+
     /// Batch file upload limit in MiB, including multipart framing (default 202).
     pub const DYN_BATCH_UPLOAD_BODY_LIMIT_MB: &str = "DYN_BATCH_UPLOAD_BODY_LIMIT_MB";
 
@@ -1190,6 +1197,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_FORWARD_ROUTES,
             llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
             llm::DYN_BATCH_MAX_FILE_TRANSFERS,
             llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
