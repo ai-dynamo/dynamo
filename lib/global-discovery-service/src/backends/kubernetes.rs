@@ -31,12 +31,12 @@
 //! changed.
 //!
 //! ```ignore
-//! let store = DiscoveryStore {
+//! let backend = DiscoveryBackend {
 //!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
 //!     registrar: None,
 //! };
-//! service::serve(listener, store, None, shutdown).await?;
+//! service::serve(listener, backend, None, shutdown).await?;
 //! ```
 
 mod cache;

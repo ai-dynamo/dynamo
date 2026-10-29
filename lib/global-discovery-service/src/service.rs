@@ -10,7 +10,7 @@
 //! - `POST /routers`: `RegisterRouter` from the design, not available yet.
 //!   It answers `501` with the reason.
 //! - `GET /pools`: the pools a Global Router routes to.
-//! - `GET /healthz`: OK while the service can answer from its store. Use it
+//! - `GET /healthz`: OK while the service can answer from its backend. Use it
 //!   for readiness; liveness needs only the TCP port. With mTLS, a probe
 //!   needs a client certificate too, so probe with TCP or a command.
 //!
@@ -36,17 +36,19 @@ use dynamo_http_server::server::{HttpServer, HttpServerConfig};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// What the service reads and writes.
-pub struct DiscoveryStore {
+/// The backend behind the API: where the pool and router lists come from,
+/// and where registrations go.
+pub struct DiscoveryBackend {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
-    /// `None` for a store that takes no registrations, such as MCS.
+    /// `None` when the service takes no registrations, as with pools from
+    /// MCS.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
 }
 
-impl fmt::Debug for DiscoveryStore {
+impl fmt::Debug for DiscoveryBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DiscoveryStore")
+        f.debug_struct("DiscoveryBackend")
             .field("takes_registrations", &self.registrar.is_some())
             .finish_non_exhaustive()
     }
@@ -62,12 +64,12 @@ pub struct Tls {
 }
 
 /// The service's HTTP routes.
-pub fn routes(store: DiscoveryStore) -> Router {
+pub fn routes(backend: DiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers).post(register_router))
         .route("/healthz", get(healthz))
-        .with_state(Arc::new(store))
+        .with_state(Arc::new(backend))
 }
 
 /// Serves until `shutdown` is cancelled. Then it stops taking connections and
@@ -75,7 +77,7 @@ pub fn routes(store: DiscoveryStore) -> Router {
 /// (5 s by default) to finish.
 pub async fn serve(
     listener: TcpListener,
-    store: DiscoveryStore,
+    backend: DiscoveryBackend,
     tls: Option<Tls>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -91,20 +93,20 @@ pub async fn serve(
     // The observer counts inference requests, and this service has none, so
     // shutdown goes straight to letting open requests finish.
     let observer = Arc::new(ServiceObserver::default());
-    HttpServer::prepare(routes(store), config, Some(listener))
+    HttpServer::prepare(routes(backend), config, Some(listener))
         .await?
         .serve(observer, CancellationToken::new(), shutdown)
         .await
 }
 
 async fn register_pool(
-    State(store): State<Arc<DiscoveryStore>>,
+    State(backend): State<Arc<DiscoveryBackend>>,
     Json(registration): Json<PoolRegistration>,
 ) -> Response {
-    let Some(registrar) = &store.registrar else {
+    let Some(registrar) = &backend.registrar else {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            "this store takes no registrations",
+            "this service takes no registrations: its pools come from MCS",
         )
             .into_response();
     };
@@ -114,8 +116,8 @@ async fn register_pool(
     }
 }
 
-async fn list_pools(State(store): State<Arc<DiscoveryStore>>) -> Response {
-    match store.pools.list().await {
+async fn list_pools(State(backend): State<Arc<DiscoveryBackend>>) -> Response {
+    match backend.pools.list().await {
         Ok(snapshot) => Json(PoolsResponse {
             complete: snapshot.completeness == Completeness::Exact,
             pools: snapshot.items,
@@ -125,8 +127,8 @@ async fn list_pools(State(store): State<Arc<DiscoveryStore>>) -> Response {
     }
 }
 
-async fn list_routers(State(store): State<Arc<DiscoveryStore>>) -> Response {
-    match store.routers.list().await {
+async fn list_routers(State(backend): State<Arc<DiscoveryBackend>>) -> Response {
+    match backend.routers.list().await {
         Ok(snapshot) => Json(RoutersResponse {
             routers: snapshot.items,
         })
@@ -135,37 +137,37 @@ async fn list_routers(State(store): State<Arc<DiscoveryStore>>) -> Response {
     }
 }
 
-/// `RegisterRouter` from the design. No store takes router registrations yet,
-/// so every call answers `501`, whatever its body. With MCS, routers need not
-/// register. Without it, how a router proves it is a router, and what it
-/// sends, are not decided, and trusting every caller would let a fake router
-/// entry receive every pool's state.
+/// `RegisterRouter` from the design. The service takes no router
+/// registrations yet, so every call answers `501`, whatever its body. With
+/// MCS, routers need not register. Without it, how a router proves it is a
+/// router, and what it sends, are not decided, and trusting every caller
+/// would let a fake router entry receive every pool's state.
 async fn register_router() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "router registration is not implemented yet. The Kubernetes stores list router \
-         replicas from the router Service's EndpointSlices, which MCS imports. The memory \
-         store lists the replicas given with --router.",
+        "router registration is not implemented yet. With --pool-discovery karmada or mcs, \
+         router replicas come from the router Service's EndpointSlices, which MCS imports. \
+         With --pool-discovery registrations, they are the ones given with --router.",
     )
         .into_response()
 }
 
-/// Lists what `GET /pools` and `GET /routers` would serve. A Kubernetes store
-/// answers from its cache once that has synced, so an API server outage does
-/// not turn every replica unready at once. The first probe also starts the
-/// store's watch.
-async fn healthz(State(store): State<Arc<DiscoveryStore>>) -> StatusCode {
-    let (pools, routers) = tokio::join!(store.pools.list(), store.routers.list());
+/// Lists what `GET /pools` and `GET /routers` would serve. With pools from
+/// MCS, the backend answers from its cache once that has synced, so an API
+/// server outage does not turn every replica unready at once. The first probe
+/// also starts its watch.
+async fn healthz(State(backend): State<Arc<DiscoveryBackend>>) -> StatusCode {
+    let (pools, routers) = tokio::join!(backend.pools.list(), backend.routers.list());
     match pools.and(routers) {
         Ok(_) => StatusCode::OK,
         Err(error) => {
-            tracing::warn!(?error, "discovery store is unreachable");
+            tracing::warn!(?error, "discovery backend is unreachable");
             StatusCode::SERVICE_UNAVAILABLE
         }
     }
 }
 
-/// Maps a store error to a status. The cause is logged, not returned.
+/// Maps a backend error to a status. The cause is logged, not returned.
 fn error_response(error: DiscoveryError) -> Response {
     let status = match &error {
         DiscoveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -208,21 +210,21 @@ mod tests {
         }
     }
 
-    fn memory_store() -> DiscoveryStore {
+    fn registrations_backend() -> DiscoveryBackend {
         let pools = Arc::new(MemoryPoolStore::new(Lease::new(5, 15).unwrap()));
-        DiscoveryStore {
+        DiscoveryBackend {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
         }
     }
 
-    /// Serves `store` on a free local port and returns its base URL.
-    async fn start(store: DiscoveryStore) -> (String, CancellationToken) {
+    /// Serves `backend` on a free local port and returns its base URL.
+    async fn start(backend: DiscoveryBackend) -> (String, CancellationToken) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let shutdown = CancellationToken::new();
-        tokio::spawn(serve(listener, store, None, shutdown.clone()));
+        tokio::spawn(serve(listener, backend, None, shutdown.clone()));
         (base, shutdown)
     }
 
@@ -248,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_then_list_pools() {
-        let (base, shutdown) = start(memory_store()).await;
+        let (base, shutdown) = start(registrations_backend()).await;
         let (status, lease) = post_pool(&base, &registration()).await;
         assert_eq!(status, reqwest::StatusCode::OK);
         assert_eq!(
@@ -282,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn routers_use_the_client_shape() {
-        let (base, shutdown) = start(memory_store()).await;
+        let (base, shutdown) = start(registrations_backend()).await;
         let (status, routers) = get_json(&base, "/routers").await;
         assert_eq!(status, reqwest::StatusCode::OK);
         assert_eq!(
@@ -294,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_key_is_rejected() {
-        let (base, shutdown) = start(memory_store()).await;
+        let (base, shutdown) = start(registrations_backend()).await;
         let mut body = registration();
         body["key"]["cluster_id"] = json!(" ");
         let (status, _) = post_pool(&base, &body).await;
@@ -306,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn routers_cannot_register_and_the_answer_says_why() {
-        let (base, shutdown) = start(memory_store()).await;
+        let (base, shutdown) = start(registrations_backend()).await;
         let registration =
             json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"});
         for body in [String::new(), registration.to_string()] {
@@ -328,16 +330,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_without_registrar_refuses_registrations() {
-        let mut store = memory_store();
-        store.registrar = None;
-        let (base, shutdown) = start(store).await;
+    async fn backend_without_registrar_refuses_registrations() {
+        let mut backend = registrations_backend();
+        backend.registrar = None;
+        let (base, shutdown) = start(backend).await;
         let (status, _) = post_pool(&base, &registration()).await;
         assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
         shutdown.cancel();
     }
 
-    /// A store whose backend is down.
+    /// A directory that is down.
     struct Down;
 
     #[async_trait]
@@ -355,8 +357,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreachable_store_is_unavailable() {
-        let (base, shutdown) = start(DiscoveryStore {
+    async fn unreachable_backend_is_unavailable() {
+        let (base, shutdown) = start(DiscoveryBackend {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
@@ -380,7 +382,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let healthz = format!("http://{}/healthz", listener.local_addr().unwrap());
         let shutdown = CancellationToken::new();
-        let server = tokio::spawn(serve(listener, memory_store(), None, shutdown.clone()));
+        let server = tokio::spawn(serve(
+            listener,
+            registrations_backend(),
+            None,
+            shutdown.clone(),
+        ));
         let response = reqwest::get(&healthz).await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
 
