@@ -34,6 +34,9 @@ and the booking lifecycle these rules protect.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
   - `query.rs`: `reserve_prefill_worker`, the prefill-only booking used by the Runtime EPP.
+  - `stage.rs`: `PrefillRouter` as a `StageRouter`, and `generate_v2` composed from it.
+- `stage_router.rs`: `StageRouter`, the `schedule` / `preview` / `dispatch` interface shared by
+  single-stage routers. `PrefillRouter` implements it so far.
 - `encoder_router.rs`: `EncoderRouter`, the optional encode hop for multimodal inputs.
 - `plugins.rs`: installs the linked router plugin registry.
 - `shared_cache.rs`: the HiCache shared KV cache client (SGLang + Mooncake).

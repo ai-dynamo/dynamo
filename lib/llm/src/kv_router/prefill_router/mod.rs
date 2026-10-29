@@ -45,6 +45,7 @@ mod admission;
 mod conditional_bypass;
 mod handoff;
 mod query;
+mod stage;
 use activation::ActivationSnapshot;
 use handoff::PrefillTask;
 pub use query::PrefillReservation;
@@ -182,7 +183,7 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
     })
 }
 
-struct PreparedPrefill {
+pub(crate) struct PreparedPrefill {
     worker_id: u64,
     prefill_dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
@@ -268,7 +269,7 @@ pub struct PrefillRouter {
     activation_task_state: Arc<()>,
 }
 
-struct PrefillBinding {
+pub(crate) struct PrefillBinding {
     target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
     router: Arc<RoutingHost>,
@@ -781,6 +782,20 @@ impl PrefillRouter {
         target: AffinityTarget,
         endpoint_id: &EndpointId,
     ) -> anyhow::Result<PreparedPrefill> {
+        let prepared = self.plan_prefill_dispatch(target, endpoint_id)?;
+        apply_prefill_dispatch(request, &prepared);
+        Ok(prepared)
+    }
+
+    /// Everything the prefill leg needs to know about its chosen worker:
+    /// topology constraints for decode and, when the worker serves a bootstrap
+    /// endpoint, the bootstrap rendezvous. Fails when the worker is missing
+    /// from the runtime configs.
+    fn plan_prefill_dispatch(
+        &self,
+        target: AffinityTarget,
+        endpoint_id: &EndpointId,
+    ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
@@ -804,11 +819,6 @@ impl PrefillRouter {
                     handoff_id: Some(Uuid::new_v4()),
                 })
             });
-        let routing = request.routing_mut();
-        routing.prefill_worker_id = Some(worker_id);
-        routing.prefill_dp_rank = dp_rank;
-        request.bootstrap_info = bootstrap_info.clone();
-
         Ok(PreparedPrefill {
             worker_id,
             prefill_dp_rank: dp_rank,
@@ -829,6 +839,14 @@ impl PrefillRouter {
         self.model_manager
             .get_kv_transfer_routing_constraints(endpoint_id, worker_id)
     }
+}
+
+/// Point the prefill request at its chosen worker.
+fn apply_prefill_dispatch(request: &mut PreprocessedRequest, prepared: &PreparedPrefill) {
+    let routing = request.routing_mut();
+    routing.prefill_worker_id = Some(prepared.worker_id);
+    routing.prefill_dp_rank = prepared.prefill_dp_rank;
+    request.bootstrap_info = prepared.bootstrap_info.clone();
 }
 
 fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, random_room: u64) -> u64 {
@@ -1051,6 +1069,28 @@ mod tests {
         );
     }
 
+    /// The two request paths under test: the operator's `generate` and
+    /// `generate_v2`, composed from the stage interface.
+    #[derive(Clone, Copy, Debug)]
+    enum Path {
+        Generate,
+        GenerateV2,
+    }
+
+    const PATHS: [Path; 2] = [Path::Generate, Path::GenerateV2];
+
+    async fn run(
+        router: &PrefillRouter,
+        path: Path,
+        request: PreprocessedRequest,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        match path {
+            Path::Generate => router.generate(SingleIn::new(request), next).await,
+            Path::GenerateV2 => router.generate_v2(SingleIn::new(request), next).await,
+        }
+    }
+
     // -- Activation-window behavior (worker rollout race) --
     //
     // Admission counts a prefill worker as live once it registers, but this
@@ -1059,82 +1099,86 @@ mod tests {
 
     #[tokio::test]
     async fn pending_target_fails_closed_instead_of_forwarding_to_decode() {
-        let router = fresh_decode_router();
-        mark_target_pending(&router);
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Pending
-        ));
+        for path in PATHS {
+            let router = fresh_decode_router();
+            mark_target_pending(&router);
+            assert!(matches!(
+                router.activation_snapshot(),
+                ActivationSnapshot::Pending
+            ));
 
-        let host = Arc::new(CountingDecodeHost::default());
-        let error = router
-            .generate(SingleIn::new(inference_request()), host.clone())
-            .await
-            .expect_err("a pending prefill target must not pass through to decode");
+            let host = Arc::new(CountingDecodeHost::default());
+            let error = run(&router, path, inference_request(), host.clone())
+                .await
+                .expect_err("a pending prefill target must not pass through to decode");
 
-        assert!(
-            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
-            "expected WorkerUnavailable so the error maps to a retryable 503, got: {error}"
-        );
-        assert!(
-            crate::migration::is_migratable(error.as_ref()),
-            "the retry layer must be able to re-dispatch this request"
-        );
-        assert_eq!(
-            host.requests.load(Ordering::Relaxed),
-            0,
-            "decode must not see a request without its prefill hop"
-        );
+            assert!(
+                match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+                "{path:?}: expected WorkerUnavailable so the error maps to a retryable 503, got: {error}"
+            );
+            assert!(
+                crate::migration::is_migratable(error.as_ref()),
+                "{path:?}: the retry layer must be able to re-dispatch this request"
+            );
+            assert_eq!(
+                host.requests.load(Ordering::Relaxed),
+                0,
+                "{path:?}: decode must not see a request without its prefill hop"
+            );
+        }
     }
 
     #[tokio::test]
     async fn untargeted_router_still_passes_through() {
-        let router = fresh_decode_router();
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
-        ));
+        for path in PATHS {
+            let router = fresh_decode_router();
+            assert!(matches!(
+                router.activation_snapshot(),
+                ActivationSnapshot::Untargeted
+            ));
 
-        let host = Arc::new(CountingDecodeHost::default());
-        router
-            .generate(SingleIn::new(inference_request()), host.clone())
-            .await
-            .expect("no target means plain passthrough");
-        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+            let host = Arc::new(CountingDecodeHost::default());
+            run(&router, path, inference_request(), host.clone())
+                .await
+                .expect("no target means plain passthrough");
+            assert_eq!(host.requests.load(Ordering::Relaxed), 1, "{path:?}");
+        }
     }
 
     #[tokio::test]
     async fn cleared_target_still_passes_through() {
-        let router = fresh_decode_router();
-        mark_target_pending(&router);
-        router.set_target(None);
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
-        ));
+        for path in PATHS {
+            let router = fresh_decode_router();
+            mark_target_pending(&router);
+            router.set_target(None);
+            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+            assert!(matches!(
+                router.activation_snapshot(),
+                ActivationSnapshot::Untargeted
+            ));
 
-        let host = Arc::new(CountingDecodeHost::default());
-        router
-            .generate(SingleIn::new(inference_request()), host.clone())
-            .await
-            .expect("a deactivated router passes through");
-        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+            let host = Arc::new(CountingDecodeHost::default());
+            run(&router, path, inference_request(), host.clone())
+                .await
+                .expect("a deactivated router passes through");
+            assert_eq!(host.requests.load(Ordering::Relaxed), 1, "{path:?}");
+        }
     }
 
     #[tokio::test]
     async fn pending_target_still_serves_query_only_requests() {
         // Routing previews never reach the engine, so they are not at risk and
         // must keep working while the prefill binding is being built.
-        let router = fresh_decode_router();
-        mark_target_pending(&router);
+        for path in PATHS {
+            let router = fresh_decode_router();
+            mark_target_pending(&router);
 
-        let host = Arc::new(QueryOnlyDecodeHost::default());
-        router
-            .generate(SingleIn::new(query_only_request()), host.clone())
-            .await
-            .expect("query-only requests bypass the activation gate");
-        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+            let host = Arc::new(QueryOnlyDecodeHost::default());
+            run(&router, path, query_only_request(), host.clone())
+                .await
+                .expect("query-only requests bypass the activation gate");
+            assert_eq!(host.requests.load(Ordering::Relaxed), 1, "{path:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1145,38 +1189,40 @@ mod tests {
         // Hold the phase barrier so the request is parked in that gap, replace
         // the target, then release it: the request must fail closed rather than
         // reach the missing-binding passthrough.
-        let router = fresh_decode_router();
-        router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
-        let tracker = Arc::new(RequestTracker::new());
-        let barrier = tracker.set_phase(RequestPhase::Prefill).await;
-        let mut request = inference_request();
-        request.tracker = Some(tracker.clone());
+        for path in PATHS {
+            let router = fresh_decode_router();
+            router.lifecycle.store(
+                PrefillLifecycleState::Active as u8,
+                std::sync::atomic::Ordering::Release,
+            );
+            let tracker = Arc::new(RequestTracker::new());
+            let barrier = tracker.set_phase(RequestPhase::Prefill).await;
+            let mut request = inference_request();
+            request.tracker = Some(tracker.clone());
 
-        let host = Arc::new(CountingDecodeHost::default());
-        let in_flight = tokio::spawn({
-            let router = router.clone();
-            let host = host.clone();
-            async move { router.generate(SingleIn::new(request), host).await }
-        });
-        // With paused time this sleep completes only once every other task is
-        // idle, i.e. once the request has passed the gate and parked on the barrier.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let host = Arc::new(CountingDecodeHost::default());
+            let in_flight = tokio::spawn({
+                let router = router.clone();
+                let host = host.clone();
+                async move { run(&router, path, request, host).await }
+            });
+            // With paused time this sleep completes only once every other task is
+            // idle, i.e. once the request has passed the gate and parked on the barrier.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        mark_target_pending(&router);
-        drop(barrier);
+            mark_target_pending(&router);
+            drop(barrier);
 
-        let error = match in_flight.await.unwrap() {
-            Ok(_) => panic!("a replaced target must not pass through to decode"),
-            Err(error) => error,
-        };
-        assert!(
-            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
-            "expected WorkerUnavailable after a mid-flight target replacement, got: {error}"
-        );
-        assert_eq!(host.requests.load(Ordering::Relaxed), 0);
+            let error = match in_flight.await.unwrap() {
+                Ok(_) => panic!("{path:?}: a replaced target must not pass through to decode"),
+                Err(error) => error,
+            };
+            assert!(
+                match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+                "{path:?}: expected WorkerUnavailable after a mid-flight target replacement, got: {error}"
+            );
+            assert_eq!(host.requests.load(Ordering::Relaxed), 0, "{path:?}");
+        }
     }
 
     #[test]
@@ -1342,6 +1388,7 @@ mod tests {
             .component("decode")
             .unwrap()
             .endpoint("generate");
+        let endpoint_id = endpoint.id();
         let client = endpoint.client().await.unwrap();
         let (_workers_tx, workers) = watch::channel(HashMap::<u64, ModelRuntimeConfig>::new());
         let config = KvRouterConfig {
@@ -1374,52 +1421,87 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let router = active_conditional_router();
-        assert!(router.decode_routing_host.set(host).is_ok());
-        let downstream = Arc::new(QueryOnlyDecodeHost::default());
-        let mut request = query_only_request();
-        request.annotations.clear();
-        request.routing_mut().decode_worker_id = Some(u64::MAX);
+        for path in PATHS {
+            let router = active_conditional_router();
+            assert!(router.decode_routing_host.set(host.clone()).is_ok());
+            let downstream = Arc::new(QueryOnlyDecodeHost::default());
+            let mut request = query_only_request();
+            request.annotations.clear();
+            request.routing_mut().decode_worker_id = Some(u64::MAX);
 
-        // No prefill binding: the old fallback would continue to downstream instead
-        // of returning the preview's client error.
-        let error = router
-            .generate(SingleIn::new(request), downstream.clone())
+            // No prefill binding: the old fallback would continue to downstream instead
+            // of returning the preview's client error.
+            let error = run(&router, path, request, downstream.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                match_error_chain(error.as_ref(), &[ErrorType::InvalidArgument], &[]),
+                "{path:?}: {error}"
+            );
+            assert_eq!(downstream.requests.load(Ordering::Relaxed), 0, "{path:?}");
+        }
+
+        // A KV-routed prefill binding with no prefill workers fails the
+        // request the same way on both paths (`generate_v2` at `schedule`),
+        // and decode sees nothing.
+        for path in PATHS {
+            let router = fresh_decode_router();
+            router.binding.store(Some(Arc::new(PrefillBinding {
+                target_id: WorkerSetTargetId::Committed {
+                    group: "conditional-invalid-worker/decode/generate".to_string(),
+                    generation: 1,
+                },
+                endpoint_id: endpoint_id.clone(),
+                router: host.clone(),
+                prefill_router_mode: RouterMode::KV,
+            })));
+            router.lifecycle.store(
+                PrefillLifecycleState::Active as u8,
+                std::sync::atomic::Ordering::Release,
+            );
+            let downstream = Arc::new(CountingDecodeHost::default());
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run(&router, path, inference_request(), downstream.clone()),
+            )
             .await
-            .unwrap_err();
-        assert!(match_error_chain(
-            error.as_ref(),
-            &[ErrorType::InvalidArgument],
-            &[]
-        ));
-        assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
-        drop(router);
+            .unwrap_or_else(|_| panic!("{path:?}: prefill selection did not finish"));
+            let Err(error) = result else {
+                panic!("{path:?}: no prefill worker should fail the request");
+            };
+            assert!(
+                error.to_string().contains("no endpoints available"),
+                "{path:?}: {error:#}"
+            );
+            assert_eq!(downstream.requests.load(Ordering::Relaxed), 0, "{path:?}");
+        }
+        drop(host);
         runtime.shutdown();
     }
 
     #[tokio::test]
     async fn conditional_disagg_query_only_forwards_to_decode_host() {
-        let router = active_conditional_router();
-        let decode_host = Arc::new(QueryOnlyDecodeHost::default());
-        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            decode_host.clone();
+        for path in PATHS {
+            let router = active_conditional_router();
+            let decode_host = Arc::new(QueryOnlyDecodeHost::default());
 
-        let mut response = router
-            .generate(SingleIn::new(query_only_request()), next)
-            .await
-            .expect("query-only request should bypass conditional planning");
-        let output = response
-            .next()
-            .await
-            .expect("decode host should return routing data")
-            .data
-            .expect("query-only response should contain data");
+            let mut response = run(&router, path, query_only_request(), decode_host.clone())
+                .await
+                .expect("query-only request should bypass conditional planning");
+            let output = response
+                .next()
+                .await
+                .expect("decode host should return routing data")
+                .data
+                .expect("query-only response should contain data");
 
-        assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            output.routing_data.and_then(|routing| routing.token_ids),
-            Some(vec![1, 2, 3])
-        );
+            assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1, "{path:?}");
+            assert_eq!(
+                output.routing_data.and_then(|routing| routing.token_ids),
+                Some(vec![1, 2, 3]),
+                "{path:?}"
+            );
+        }
     }
 
     #[test]
