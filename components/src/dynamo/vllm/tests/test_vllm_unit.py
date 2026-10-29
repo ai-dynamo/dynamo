@@ -1699,6 +1699,7 @@ def _make_dynamo_config(**overrides):
         "enable_local_indexer": True,
         "embedding_worker": False,
         "classify_worker": False,
+        "rerank_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1744,7 +1745,9 @@ class TestPoolingWorkerPrefixCachingDefault:
     attention groups") that bare `vllm serve` runs fine.
     """
 
-    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    @pytest.mark.parametrize(
+        "role", ["embedding_worker", "classify_worker", "rerank_worker"]
+    )
     def test_pooling_family_defaults_to_disabled(self, role):
         dynamo_cfg = _make_dynamo_config(**{role: True})
         engine_cfg = _make_engine_config_with_runner(
@@ -1755,7 +1758,9 @@ class TestPoolingWorkerPrefixCachingDefault:
 
         assert engine_cfg.enable_prefix_caching is False
 
-    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    @pytest.mark.parametrize(
+        "role", ["embedding_worker", "classify_worker", "rerank_worker"]
+    )
     def test_explicit_enable_is_preserved(self, role):
         dynamo_cfg = _make_dynamo_config(**{role: True})
         engine_cfg = _make_engine_config_with_runner(
@@ -1941,6 +1946,7 @@ class TestForwardPassMetricsActivation:
         [
             ({"embedding_worker": True}, "embedding"),
             ({"classify_worker": True}, "classify"),
+            ({"rerank_worker": True}, "rerank"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},

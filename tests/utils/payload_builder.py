@@ -32,6 +32,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
+    RerankPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
@@ -607,6 +608,30 @@ def classify_payload(
         expected_log=expected_log or [],
         expected_response=expected_response or [f"Classified {expected_count} inputs"],
         expected_prompt_tokens=expected_prompt_tokens,
+    )
+
+
+def rerank_payload(
+    query: str,
+    documents: List[str],
+    expected_top_index: Optional[int] = None,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> RerankPayload:
+    body: Dict[str, Any] = {"query": query, "documents": documents}
+    if extra_body:
+        body.update(extra_body)
+    top_n = body.get("top_n")
+    expected_count = min(top_n, len(documents)) if top_n else len(documents)
+
+    return RerankPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Ranked {expected_count} documents"],
+        expected_top_index=expected_top_index,
     )
 
 

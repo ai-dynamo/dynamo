@@ -174,6 +174,43 @@ script declares a GPU requirement of 1.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_classify.sh)
 </Accordion>
+<Accordion title="Reranking">
+
+Starts a vLLM pooling worker that registers the rerank model type, so the frontend mounts
+`/v1/rerank`. Requests run through vLLM's scoring path, which supports cross-encoder, embedding,
+and late-interaction rerankers.
+
+The default model is `cross-encoder/ms-marco-MiniLM-L-6-v2`, a small cross-encoder. The script
+declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | Model default | Maximum model context length. Left unset so each rerank model keeps its own native context length. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
+```bash
+./launch/agg_rerank.sh
+```
+
+Decoder-only rerankers such as `Qwen/Qwen3-Reranker-4B` need vLLM's score template and model
+overrides. Download the template from vLLM's `examples/pooling/score/template/qwen3_reranker.jinja`,
+then pass it with the overrides:
+
+```bash
+./launch/agg_rerank.sh --model Qwen/Qwen3-Reranker-4B \
+  --custom-jinja-template qwen3_reranker.jinja \
+  --hf-overrides '{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}'
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_rerank.sh)
+</Accordion>
 <Accordion title="Image and Video Inputs">
 
 Serves a multimodal model with media preprocessing in the Dynamo frontend and one vLLM worker. Use

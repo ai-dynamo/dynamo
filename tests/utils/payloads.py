@@ -2187,6 +2187,47 @@ class ClassifyPayload(BasePayload):
 
 
 @dataclass
+class RerankPayload(BasePayload):
+    """Payload for the ``/v1/rerank`` endpoint."""
+
+    endpoint: str = "/v1/rerank"
+    expected_top_index: Optional[int] = None
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert isinstance(result, list), f"Expected a list, got {type(result).__name__}"
+
+        documents = self.body["documents"]
+        top_n = self.body.get("top_n")
+        expected_count = min(top_n, len(documents)) if top_n else len(documents)
+        assert (
+            len(result) == expected_count
+        ), f"Expected {expected_count} results, got {len(result)}"
+
+        scores = [item["score"] for item in result]
+        assert all(isinstance(score, (int, float)) for score in scores)
+        assert scores == sorted(scores, reverse=True), "Results must be sorted by score"
+
+        indices = [item["index"] for item in result]
+        assert len(set(indices)) == len(indices), "Result indices must be unique"
+        assert all(0 <= index < len(documents) for index in indices)
+        for item in result:
+            if self.body.get("return_documents", True):
+                assert item.get("document") == documents[item["index"]]
+            else:
+                assert "document" not in item
+
+        if self.expected_top_index is not None:
+            assert indices[0] == self.expected_top_index, (
+                f"Expected document {self.expected_top_index} ranked first, "
+                f"got {indices[0]}"
+            )
+
+        return f"Ranked {len(result)} documents"
+
+
+@dataclass
 class PoolingPayload(BasePayload):
     """Payload for JSON and binary ``/v1/pooling`` responses."""
 

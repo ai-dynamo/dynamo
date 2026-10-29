@@ -37,6 +37,7 @@ from tests.utils.payload_builder import (
     lora_chat_payload,
     metric_payload_default,
     pooling_payload,
+    rerank_payload,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
@@ -827,6 +828,45 @@ vllm_configs = {
                     "embed_dtype": "float16",
                     "endianness": "big",
                 },
+            ),
+        ],
+    ),
+    "rerank_agg": VLLMConfig(
+        name="rerank_agg",
+        directory=vllm_dir,
+        script_name="agg_rerank.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Small MiniLM cross-encoder plus vLLM pooling overhead; sized
+            # like classify_agg, which serves a model of the same family.
+            pytest.mark.profiled_vram_gib(3.0),
+            # Pooling models do not use a KV cache, but the harness requires
+            # a non-zero allocation budget.
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        request_payloads=[
+            rerank_payload(
+                query="What is the capital of France?",
+                documents=[
+                    "Bread is baked from flour and water.",
+                    "Paris is the capital of France.",
+                    "The Pacific is the largest ocean.",
+                ],
+                expected_top_index=1,
+            ),
+            rerank_payload(
+                query="What is the capital of France?",
+                documents=[
+                    "Bread is baked from flour and water.",
+                    "Paris is the capital of France.",
+                    "The Pacific is the largest ocean.",
+                ],
+                expected_top_index=1,
+                extra_body={"top_n": 1, "return_documents": False},
             ),
         ],
     ),

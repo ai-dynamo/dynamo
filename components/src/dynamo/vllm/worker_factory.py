@@ -47,6 +47,7 @@ from .health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmRerankHealthCheckPayload,
 )
 from .instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
@@ -58,6 +59,7 @@ from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
+from .rerank_handler import RerankWorkerHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
 
 
@@ -1827,6 +1829,12 @@ class WorkerFactory:
             )
             return
 
+        if config.rerank_worker:
+            await self._create_rerank_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -2209,6 +2217,74 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve classify worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_rerank_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated rerank worker.
+
+        Like the classify worker, this uses a pooling ``AsyncLLM`` and skips
+        the generation-only KV-cache and scheduler machinery. Requests run
+        through vLLM's scoring path, and the worker registers
+        ``ModelType.Rerank`` so the frontend mounts ``/v1/rerank``.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = await RerankWorkerHandler.from_engine(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+
+        rerank_health_check_payload = VllmRerankHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the rerank worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=rerank_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Rerank,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve rerank worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()
