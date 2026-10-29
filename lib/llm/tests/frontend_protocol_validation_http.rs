@@ -587,13 +587,11 @@ async fn strict_tool_schema_rejected_before_dispatch() {
     .await;
 }
 
-// Beam route: the handler normalizes the request from the parsing options of the engine
-// it then dispatches to, and does so before generic validation, which would otherwise
-// reject exactly the shapes being normalized (noncompliant `strict` schema; legacy
-// `builtin_tools` declaration with `tool_choice: "required"` and no top-level `tools`).
+// Beam promotes legacy builtin declarations before generic validation, while preserving
+// strict schema validation rather than silently downgrading invalid tools to non-strict.
 #[tokio::test]
 #[serial]
-async fn beam_request_normalization_precedes_generic_validation() {
+async fn beam_request_normalization_preserves_strict_validation() {
     let noncompliant_strict = json!({
         "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
         "tools": [{"type": "function", "function": {
@@ -610,13 +608,21 @@ async fn beam_request_normalization_precedes_generic_validation() {
         }]}
     });
     let cases = [
-        ("noncompliant strict", noncompliant_strict),
-        ("legacy builtin_tools", legacy_builtin_required),
+        (
+            "noncompliant strict",
+            noncompliant_strict,
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "legacy builtin_tools",
+            legacy_builtin_required,
+            reqwest::StatusCode::OK,
+        ),
     ];
     temp_env::async_with_vars(BASE_ENV, async {
         // Control: without the Beam parsers, generic validation rejects both shapes.
         let svc = HarnessService::start(Vec::new()).await;
-        for (case, body) in &cases {
+        for (case, body, _) in &cases {
             for stream in [false, true] {
                 let mut body = body.clone();
                 body["stream"] = json!(stream);
@@ -636,34 +642,30 @@ async fn beam_request_normalization_precedes_generic_validation() {
         card.runtime_config.tool_call_parser = Some("beam".to_string());
         card.runtime_config.reasoning_parser = Some("beam".to_string());
         let engine = Arc::new(ScriptedChatEngine::new(
-            std::iter::repeat_n(script, cases.len() * 2).map(Ok),
+            std::iter::repeat_n(script, 2).map(Ok),
         ));
         let svc = HarnessService::start_with_engine_and_card(engine, card).await;
-        for (case, body) in &cases {
+        for (case, body, expected_status) in &cases {
             for stream in [false, true] {
                 let mut body = body.clone();
                 body["stream"] = json!(stream);
                 let response = post_json(&svc, "/v1/chat/completions", body).await;
                 let status = response.status();
                 let body = bounded(response.text()).await.unwrap_or_default();
-                assert_eq!(
-                    status,
-                    reqwest::StatusCode::OK,
-                    "{case} stream={stream}: {body}"
-                );
+                assert_eq!(status, *expected_status, "{case} stream={stream}: {body}");
                 let requests = svc.engine.take_requests().await;
+                if *expected_status == reqwest::StatusCode::BAD_REQUEST {
+                    assert!(body.contains("additionalProperties"), "{body}");
+                    assert!(
+                        requests.is_empty(),
+                        "invalid strict schema must not dispatch"
+                    );
+                    continue;
+                }
                 assert_eq!(requests.len(), 1, "{case} stream={stream} dispatches once");
                 let tools = requests[0].inner.tools.as_ref().unwrap();
                 assert_eq!(tools.len(), 1, "{case} stream={stream}");
-                match *case {
-                    "noncompliant strict" => {
-                        assert_eq!(tools[0].function.name, "search");
-                        assert_eq!(tools[0].function.strict, None, "served as non-strict");
-                    }
-                    _ => {
-                        assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
-                    }
-                }
+                assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
             }
         }
         assert_eq!(svc.engine.remaining_scripts().await, 0);
