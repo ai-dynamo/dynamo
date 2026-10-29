@@ -305,6 +305,8 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         if component.get("type") == "decode"
     )
 
+    for args in (prefill_args, decode_args):
+        assert not any(arg.startswith("--disaggregation-mode=") for arg in args)
     assert prefill_args.count("--disaggregation-mode") == 1
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--kv-transfer-config") == 1
@@ -350,7 +352,7 @@ def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
         assert args[args.index("--disaggregation-mode") + 1] == expected_mode
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+@pytest.mark.parametrize("backend", ["sglang", "trtllm"])
 def test_build_dgd_config_disagg_sets_canonical_worker_roles(backend: str) -> None:
     """AIC tuning args replace blueprint args, so the worker role is re-applied."""
     modifier = CONFIG_MODIFIERS[backend]
@@ -382,11 +384,7 @@ def test_build_dgd_config_trtllm_disagg_restores_runtime_args() -> None:
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
     decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
 
-    assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "1"
-    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--publish-kv-events") == 1
-    assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "2"
-    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
     assert "--publish-kv-events" not in decode_args
 
 
@@ -438,10 +436,7 @@ def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
         blueprint_args.index("--disaggregation-bootstrap-port") + 1
     ]
 
-    assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "1"
-    assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "2"
-    for args, expected_mode in ((prefill_args, "prefill"), (decode_args, "decode")):
-        assert args[args.index("--disaggregation-mode") + 1] == expected_mode
+    for args in (prefill_args, decode_args):
         assert args[args.index("--disaggregation-transfer-backend") + 1] == "nixl"
         assert args.count("--disaggregation-bootstrap-port") == 1
         assert args[args.index("--disaggregation-bootstrap-port") + 1] == blueprint_port

@@ -186,18 +186,6 @@ _DISAGG_DEFAULT_ARGS = (
 )
 
 
-def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
-    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
-    # SGLang treats a missing --disaggregation-mode as aggregated serving.
-    finalized = set_unique_argument_value(
-        break_arguments(args), "--disaggregation-mode", role.value
-    )
-    for key, value in _DISAGG_DEFAULT_ARGS:
-        if not _has_arg(finalized, key):
-            finalized = append_argument(finalized, [key, value])
-    return finalized
-
-
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -211,35 +199,20 @@ class SGLangConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
-    def _apply_disagg_workers(
-        cls,
-        cfg: Config,
-        prefill_cli_args: list[str],
-        prefill_replicas: int,
-        prefill_gpus: int,
-        decode_cli_args: list[str],
-        decode_replicas: int,
-        decode_gpus: int,
-        num_gpus_per_node: int | None = None,
-    ) -> None:
-        # Rename before the prefill safety check so it sees generated values.
-        prefill_cli_args = _normalize_prefill_dp_limits(
-            _rename_legacy_cuda_graph_args(prefill_cli_args)
+    def _finalize_disagg_cli_args(
+        cls, args: list[str], role: SubComponentType
+    ) -> list[str]:
+        if role == SubComponentType.PREFILL:
+            # Rename before the prefill safety check so it sees generated values.
+            args = _normalize_prefill_dp_limits(_rename_legacy_cuda_graph_args(args))
+        # SGLang treats a missing --disaggregation-mode as aggregated serving.
+        finalized = set_unique_argument_value(
+            break_arguments(args), "--disaggregation-mode", role.value
         )
-        super()._apply_disagg_workers(
-            cfg,
-            prefill_cli_args=_finalize_disagg_cli_args(
-                prefill_cli_args, SubComponentType.PREFILL
-            ),
-            prefill_replicas=prefill_replicas,
-            prefill_gpus=prefill_gpus,
-            decode_cli_args=_finalize_disagg_cli_args(
-                decode_cli_args, SubComponentType.DECODE
-            ),
-            decode_replicas=decode_replicas,
-            decode_gpus=decode_gpus,
-            num_gpus_per_node=num_gpus_per_node,
-        )
+        for key, value in _DISAGG_DEFAULT_ARGS:
+            if not _has_arg(finalized, key):
+                finalized = append_argument(finalized, [key, value])
+        return finalized
 
     @classmethod
     def _apply_worker_config(
