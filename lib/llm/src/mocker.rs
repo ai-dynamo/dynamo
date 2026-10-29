@@ -279,7 +279,7 @@ struct MockerExecutionContext {
     engine_args: MockerConfig,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
-    dp_budget: parking_lot::Mutex<DpBudget>,
+    dp_budget: Arc<parking_lot::Mutex<DpBudget>>,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     source_handoff_manager: OnceCell<SourceHandoffManager>,
@@ -302,6 +302,10 @@ struct DpBudget {
     metrics_rxs: Vec<watch::Receiver<MockerMetrics>>,
     total_requests: Vec<u64>,
     total_tokens: Vec<u64>,
+    /// Prompt tokens of dispatched requests that have not produced output yet. SGLang's token
+    /// load includes its waiting queue, but the scheduler snapshot only reports allocated KV
+    /// blocks, so a refresh adds these back instead of erasing queued demand.
+    queued_tokens: Vec<u64>,
 }
 
 impl DpBudget {
@@ -320,6 +324,7 @@ impl DpBudget {
         let ranks = dp_size as usize;
         self.total_requests.resize(ranks, 0);
         self.total_tokens.resize(ranks, 0);
+        self.queued_tokens.resize(ranks, 0);
         if self.metrics_rxs.is_empty()
             && let Some(engines) = engines
         {
@@ -333,7 +338,8 @@ impl DpBudget {
             let rank = metrics.dp_rank as usize;
             if rank < ranks {
                 self.total_requests[rank] = metrics.running_requests + metrics.waiting_requests;
-                self.total_tokens[rank] = metrics.active_decode_blocks * block_size as u64;
+                self.total_tokens[rank] =
+                    metrics.active_decode_blocks * block_size as u64 + self.queued_tokens[rank];
             }
         }
 
@@ -350,6 +356,7 @@ impl DpBudget {
         };
         self.total_requests[target] += 1;
         self.total_tokens[target] += estimated_tokens as u64;
+        self.queued_tokens[target] += estimated_tokens as u64;
         target as u32
     }
 
@@ -360,6 +367,13 @@ impl DpBudget {
         if let Some(tokens) = self.total_tokens.get_mut(rank) {
             *tokens = tokens.saturating_sub(estimated_tokens);
         }
+        self.release_queued(rank, estimated_tokens);
+    }
+
+    fn release_queued(&mut self, rank: usize, estimated_tokens: u64) {
+        if let Some(tokens) = self.queued_tokens.get_mut(rank) {
+            *tokens = tokens.saturating_sub(estimated_tokens);
+        }
     }
 }
 
@@ -367,21 +381,46 @@ impl DpBudget {
 /// charge, so a request rejected before it reaches the scheduler leaves no phantom load that
 /// no later snapshot would clear.
 #[must_use]
-struct DpCharge<'a> {
-    budget: &'a parking_lot::Mutex<DpBudget>,
+struct DpCharge {
+    /// `None` once committed.
+    budget: Option<Arc<parking_lot::Mutex<DpBudget>>>,
     rank: usize,
     estimated_tokens: u64,
 }
 
-impl DpCharge<'_> {
-    fn commit(self) {
-        std::mem::forget(self);
+impl DpCharge {
+    /// Keeps the charge once the scheduler accepts the request. The returned guard keeps the
+    /// prompt counted as queued until it is dropped at the request's first output.
+    fn commit(mut self) -> QueuedDpTokens {
+        QueuedDpTokens {
+            budget: self.budget.take().expect("DpCharge is committed once"),
+            rank: self.rank,
+            estimated_tokens: self.estimated_tokens,
+        }
     }
 }
 
-impl Drop for DpCharge<'_> {
+impl Drop for DpCharge {
     fn drop(&mut self) {
-        self.budget.lock().release(self.rank, self.estimated_tokens);
+        if let Some(budget) = self.budget.take() {
+            budget.lock().release(self.rank, self.estimated_tokens);
+        }
+    }
+}
+
+/// Queued prompt tokens of an admitted request. Dropping it removes them from the rank's queued
+/// load, after which the rank's KV snapshot accounts for the request.
+struct QueuedDpTokens {
+    budget: Arc<parking_lot::Mutex<DpBudget>>,
+    rank: usize,
+    estimated_tokens: u64,
+}
+
+impl Drop for QueuedDpTokens {
+    fn drop(&mut self) {
+        self.budget
+            .lock()
+            .release_queued(self.rank, self.estimated_tokens);
     }
 }
 
@@ -454,7 +493,7 @@ impl MockerExecutionContext {
             engine_args,
             response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
-            dp_budget: parking_lot::Mutex::new(DpBudget::default()),
+            dp_budget: Arc::new(parking_lot::Mutex::new(DpBudget::default())),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
             handoff_shutdown: CancellationToken::new(),
@@ -487,7 +526,7 @@ impl MockerExecutionContext {
         method: DpLoadBalanceMethod,
         request: &PreprocessedRequest,
         forced_rank: Option<u32>,
-    ) -> (u32, DpCharge<'_>) {
+    ) -> (u32, DpCharge) {
         let estimated_tokens = request.token_ids.len();
         let rank = self.dp_budget.lock().dispatch(
             method,
@@ -498,7 +537,7 @@ impl MockerExecutionContext {
             forced_rank,
         );
         let charge = DpCharge {
-            budget: &self.dp_budget,
+            budget: Some(Arc::clone(&self.dp_budget)),
             rank: rank as usize,
             estimated_tokens: estimated_tokens as u64,
         };
@@ -511,7 +550,7 @@ impl MockerExecutionContext {
     fn resolve_dp_rank(
         &self,
         request: &PreprocessedRequest,
-    ) -> Result<(u32, Option<DpCharge<'_>>), String> {
+    ) -> Result<(u32, Option<DpCharge>), String> {
         let dp_size = self.engine_args.dp_size;
         let method = self.dp_load_balance_method();
         let load_based = matches!(
@@ -1293,9 +1332,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map_err(|error| Error::msg(error.to_string()))?;
         }
         // The scheduler has the request now, so its snapshots account for this load.
-        if let Some(dp_charge) = dp_charge {
-            dp_charge.commit();
-        }
+        let mut queued_dp_tokens = dp_charge.map(DpCharge::commit);
 
         let async_context = ctx.context();
         let reasoning = self.engine_args.runtime.reasoning.clone();
@@ -1396,6 +1433,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             );
                             break;
                         }
+
+                        // The prompt has been prefilled, so its KV blocks now carry its load.
+                        drop(queued_dp_tokens.take());
 
                         if let Some(cached) = signal.cached_tokens {
                             cached_prefix_tokens = Some(cached);
@@ -1741,8 +1781,9 @@ mod tests {
     impl MockerExecutionContext {
         fn resolve_committed_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
             let (rank, charge) = self.resolve_dp_rank(request)?;
+            // Tests model requests still waiting in the queue, so keep their tokens queued.
             if let Some(charge) = charge {
-                charge.commit();
+                std::mem::forget(charge.commit());
             }
             Ok(rank)
         }
@@ -1922,6 +1963,43 @@ mod tests {
             .collect();
         // Loads after each step: [8,0,0] [8,2,0] [8,2,4] [8,3,4] then rank 1 again.
         assert_eq!(ranks, [0, 1, 2, 1, 1]);
+    }
+
+    #[test]
+    fn total_tokens_snapshot_keeps_queued_prompt_tokens() {
+        let budget = Arc::new(parking_lot::Mutex::new(DpBudget::default()));
+        let (rank0_tx, rank0_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
+        let (rank1_tx, rank1_rx) = watch::channel(MockerMetrics::new(1, 0, 128));
+        budget.lock().metrics_rxs = vec![rank0_rx, rank1_rx];
+        rank1_tx.send_replace(MockerMetrics::from_parts(1, 10, 128, 1, 0, 0, 0, 0));
+        let dispatch = |estimated_tokens| {
+            budget.lock().dispatch(
+                DpLoadBalanceMethod::TotalTokens,
+                None,
+                2,
+                4,
+                estimated_tokens,
+                None,
+            )
+        };
+        let charge = |estimated_tokens| DpCharge {
+            budget: Some(Arc::clone(&budget)),
+            rank: dispatch(estimated_tokens) as usize,
+            estimated_tokens: estimated_tokens as u64,
+        };
+
+        let queued = charge(100).commit();
+        assert_eq!(queued.rank, 0);
+        // Rank 0 reports the request as waiting with no KV yet; its 100 queued tokens still
+        // outweigh rank 1's 40 KV tokens.
+        rank0_tx.send_replace(MockerMetrics::from_parts(0, 0, 128, 0, 1, 0, 0, 0));
+        assert_eq!(dispatch(10), 1);
+
+        // After prefill, the KV snapshot carries the load and the queued charge is gone.
+        drop(queued);
+        rank0_tx.send_replace(MockerMetrics::from_parts(0, 25, 128, 1, 0, 0, 0, 0));
+        assert_eq!(dispatch(0), 1);
+        assert_eq!(budget.lock().total_tokens, [100, 50]);
     }
 
     #[test]
