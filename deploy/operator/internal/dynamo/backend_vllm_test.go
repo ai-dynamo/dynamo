@@ -1160,8 +1160,11 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:underscore",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
+			expectedScript:      "exec python3 /scripts/wait-for-leader.py",
 		},
 		{
 			// The shell ends the word at ";", so vLLM runs with the mp backend and the
@@ -1181,8 +1184,11 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:terminated",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
+			expectedScript:      "exec python3 /scripts/wait-for-leader.py",
 		},
 		{
 			name:              "mp worker with shell-form command injects init container",
