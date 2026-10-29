@@ -1885,7 +1885,7 @@ class KvRouterConfig:
         router_approximate_cache_policy: Literal["ttl", "lru"] = "ttl",
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
-        router_queue_policy: str = "fcfs",
+        router_queue_policy: str = "edf",
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
         enable_session_prefix_index: bool = False,
@@ -1957,7 +1957,8 @@ class KvRouterConfig:
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
-            router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+            router_queue_policy: Queue policy of the synthetic policy class (default: "edf").
+                "edf": earliest due time first, then arrival order; priorities do not reorder it.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.

@@ -3,7 +3,7 @@
 
 use dynamo_custom_policy_builtin::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +21,8 @@ use dynamo_kv_router::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
-    ScheduleMode, WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue,
+    QueueEntryHandle, QueueMetadata, QueueSnapshot, ScheduleMode,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -464,6 +464,8 @@ pub(crate) struct OfflineReplayRouter {
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: DefaultWorkerSelector,
     pending: PolicyQueue<PendingRequest>,
+    /// The queue entry of each pending request, so cancellation does not scan the queue.
+    pending_entries: BTreeMap<Uuid, QueueEntryHandle>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
@@ -719,6 +721,7 @@ impl OfflineReplayRouter {
             slots,
             selector,
             pending: PolicyQueue::new(&profile),
+            pending_entries: BTreeMap::new(),
             indexer,
             prefill_load_estimator,
             // This is only a base Instant for converting replay `now_ms` values into
@@ -796,27 +799,41 @@ impl OfflineReplayRouter {
             .profile
             .resolve_class_index(pending.policy_class.as_deref());
         let class = self.profile.class(class_index);
+        // Replay requests carry no explicit deadline, so a class TTFT budget counts from the
+        // virtual arrival, as the live router counts it from ingress. As there, an
+        // unrepresentable budget fails before either admission path reserves anything.
+        let class_due_at = class.slo_ttft_due_at(decay_now)?;
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let snapshot = self.snapshot_for(&pending);
+            let uuid = pending.uuid;
+            anyhow::ensure!(
+                !self.pending_entries.contains_key(&uuid),
+                "request {uuid} is already queued"
+            );
+            let metadata = QueueMetadata {
+                class_index,
+                snapshot: self.snapshot_for(&pending),
+                due_at: None,
+                class_due_at,
+                arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+            };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
-            self.pending
-                .enqueue(
-                    class_index,
+            let entry = self
+                .pending
+                .enqueue_with_due_at(
+                    metadata,
                     self.workers_with_configs
                         .len()
                         .saturating_mul(self.dp_size as usize),
-                    snapshot,
-                    now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
-                    WorkerPlacement::Any,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
+            self.pending_entries.insert(uuid, entry);
             return Ok(RouterEffects::default());
         }
 
@@ -887,9 +904,10 @@ impl OfflineReplayRouter {
 
     /// Cancel a request that has not yet been assigned to a worker.
     pub(crate) fn cancel_pending(&mut self, uuid: Uuid) -> bool {
-        let before = self.pending.pending_count();
-        self.pending.retain(|request| request.uuid != uuid);
-        self.pending.pending_count() != before
+        self.pending_entries
+            .remove(&uuid)
+            .and_then(|entry| self.pending.remove(entry))
+            .is_some()
     }
 
     pub(crate) fn pending_count(&self) -> usize {
@@ -1227,6 +1245,8 @@ impl OfflineReplayRouter {
             };
             let request = popped.into_payload();
             let uuid = request.uuid;
+            let indexed = self.pending_entries.remove(&uuid);
+            debug_assert!(indexed.is_some());
             let outcome = self.admit_request(request, decay_now)?;
             admissions.push(WorkerAdmission {
                 uuid,
@@ -2162,6 +2182,190 @@ policy_classes:
                 .collect::<Vec<_>>();
             assert_eq!(pending, expected);
         }
+    }
+
+    #[test]
+    fn edf_offline_queue_orders_by_virtual_class_due_time_without_priority_modifiers() {
+        let path = std::env::temp_dir().join(format!("dynamo-replay-edf-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 64
+    slo_ttft_ms: 250
+    prefill_busy_threshold_frac: 0.5
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(router.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        for (uuid, priority, strict_priority, now_ms) in
+            [(2, 0, 0, 10.0), (3, 1_000_000, 9, 20.0), (4, 0, 0, 30.0)]
+        {
+            router
+                .on_request_arrival(
+                    &request_with_priorities(uuid, uuid as u32, 64, priority, strict_priority),
+                    None,
+                    now_ms,
+                )
+                .unwrap();
+        }
+
+        // Each due time counts from the virtual arrival, not from wall-clock enqueue time.
+        let mut due_at = router
+            .pending
+            .entries()
+            .map(|entry| (entry.payload().uuid.as_u128(), entry.due_at()))
+            .collect::<Vec<_>>();
+        due_at.sort_unstable_by_key(|(uuid, _)| *uuid);
+        assert_eq!(
+            due_at,
+            [10.0, 20.0, 30.0]
+                .into_iter()
+                .zip(2..)
+                .map(|(now_ms, uuid)| (
+                    uuid,
+                    Some(router.decay_now(now_ms) + Duration::from_millis(250))
+                ))
+                .collect::<Vec<_>>()
+        );
+        let pending = router
+            .debug_snapshot(30.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid.as_u128())
+            .collect::<Vec<_>>();
+        assert_eq!(pending, [2, 3, 4]);
+
+        // A passed class budget neither rejects nor delays a queued request.
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 10_000.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn offline_cancellation_removes_only_the_indexed_queued_request() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        for uuid in 2..=4 {
+            router
+                .on_request_arrival(&request(uuid, uuid as u32), None, uuid as f64)
+                .unwrap();
+        }
+        assert_eq!(router.pending_count(), 3);
+        assert!(
+            router
+                .on_request_arrival(&request(3, 3), None, 5.0)
+                .unwrap_err()
+                .to_string()
+                .contains("is already queued")
+        );
+
+        assert!(router.cancel_pending(Uuid::from_u128(3)));
+        assert!(!router.cancel_pending(Uuid::from_u128(3)));
+        assert_eq!(router.pending_count(), 2);
+        assert_eq!(router.pending_entries.len(), 2);
+
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(2)]);
+        // An admitted request is no longer pending, so cancelling it finds nothing.
+        assert!(!router.cancel_pending(Uuid::from_u128(2)));
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(2), 20.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(4)]);
+        assert_eq!(router.pending_count(), 0);
+        assert!(router.pending_entries.is_empty());
+    }
+
+    #[test]
+    fn unrepresentable_class_budget_fails_before_offline_admission_or_queueing() {
+        // Size the budget and a late virtual arrival from the platform clock's range: the arrival
+        // fits but arrival plus budget does not, while both fit for an arrival at 0.
+        let start = tokio::time::Instant::now();
+        let mut range = Duration::ZERO;
+        let mut step = Duration::MAX;
+        while step > Duration::from_secs(1) {
+            match range
+                .checked_add(step)
+                .filter(|later| start.checked_add(*later).is_some())
+            {
+                Some(later) => range = later,
+                None => step /= 2,
+            }
+        }
+        let budget_ms = u64::try_from(range.as_millis() * 2 / 3).unwrap_or(u64::MAX);
+        let late_ms = range.as_millis() as f64 - budget_ms as f64 / 2.0;
+
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-overflow-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(
+                "policy_classes:\n  - name: unbounded\n    quantum: 64\n    slo_ttft_ms: {budget_ms}\n    prefill_busy_threshold_frac: 0.5\n"
+            ),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let overflows = |result: anyhow::Result<super::RouterEffects>| {
+            result.err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("exceeds the monotonic clock range")
+            })
+        };
+
+        // An idle worker would admit directly; the error comes first and books nothing.
+        assert!(overflows(router.on_request_arrival(
+            &request(1, 1),
+            None,
+            late_ms
+        )));
+        assert_eq!(
+            router
+                .on_request_arrival(&request(1, 1), None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+        // With the worker busy it would queue; the error again leaves nothing queued.
+        assert!(overflows(router.on_request_arrival(
+            &request(2, 2),
+            None,
+            late_ms
+        )));
+        assert_eq!(router.pending_count(), 0);
+        assert!(
+            router
+                .on_request_arrival(&request(2, 2), None, 1.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert_eq!(router.pending_count(), 1);
     }
 
     #[test]

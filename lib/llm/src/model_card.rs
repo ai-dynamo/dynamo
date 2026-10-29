@@ -3538,6 +3538,63 @@ mod ownership_tests {
     }
 
     #[test]
+    fn default_edf_queue_policy_is_omitted_from_cards_and_explicit_policies_round_trip() {
+        use crate::entrypoint::RouterConfig;
+        use dynamo_kv_router::scheduling::config::RouterQueuePolicy;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let card_with = |policy: RouterQueuePolicy| {
+            let mut card = ModelDeploymentCard::with_name_only("wire-compat-queue-policy");
+            let mut router = RouterConfig {
+                router_mode: RouterMode::KV,
+                ..Default::default()
+            };
+            router.kv_router_config.router_queue_policy = policy;
+            card.router_config = Some(router);
+            card
+        };
+        let parsed_policy = |card: &ModelDeploymentCard| {
+            card.router_config
+                .as_ref()
+                .unwrap()
+                .kv_router_config
+                .router_queue_policy
+        };
+
+        // v1.5 and v1.6 readers reject "edf" but read a missing value as "fcfs".
+        let edf = card_with(RouterQueuePolicy::default());
+        let emitted: serde_json::Value = serde_json::from_str(&edf.to_json().unwrap()).unwrap();
+        assert!(
+            emitted["router_config"]["kv_router_config"]
+                .get("router_queue_policy")
+                .is_none()
+        );
+        let parsed = ModelDeploymentCard::load_from_json_str(&emitted.to_string()).unwrap();
+        assert_eq!(parsed_policy(&parsed), RouterQueuePolicy::Edf);
+        assert_eq!(parsed.mdcsum(), edf.mdcsum());
+
+        // A card that names its policy, as every v1.6 card does, keeps it and its JSON.
+        for policy in [
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Lcfs,
+            RouterQueuePolicy::Wspt,
+        ] {
+            let mut legacy = emitted.clone();
+            legacy["router_config"]["kv_router_config"]["router_queue_policy"] =
+                serde_json::json!(policy.to_string());
+            let parsed = ModelDeploymentCard::load_from_json_str(&legacy.to_string()).unwrap();
+            assert_eq!(parsed_policy(&parsed), policy);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap(),
+                legacy
+            );
+            assert_eq!(parsed.mdcsum(), card_with(policy).mdcsum());
+            // Admission keeps EDF and the legacy policies apart.
+            assert_ne!(parsed.mdcsum(), edf.mdcsum());
+        }
+    }
+
+    #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
         let mut legacy_value = serde_json::to_value(&card).unwrap();

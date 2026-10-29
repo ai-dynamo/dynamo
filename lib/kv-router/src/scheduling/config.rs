@@ -494,7 +494,10 @@ impl FromStr for SharedCacheType {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
+    /// Earliest due time first, then enqueue order. Strict priority and priority jumps do
+    /// not reorder it.
     #[default]
+    Edf,
     Fcfs,
     Lcfs,
     Wspt,
@@ -503,6 +506,7 @@ pub enum RouterQueuePolicy {
 impl fmt::Display for RouterQueuePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Edf => f.write_str("edf"),
             Self::Fcfs => f.write_str("fcfs"),
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
@@ -595,11 +599,12 @@ impl FromStr for RouterQueuePolicy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "edf" => Ok(Self::Edf),
             "fcfs" => Ok(Self::Fcfs),
             "lcfs" => Ok(Self::Lcfs),
             "wspt" => Ok(Self::Wspt),
             _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
+                "unknown queue policy: {s:?}, expected 'edf', 'fcfs', 'lcfs', or 'wspt'"
             )),
         }
     }
@@ -910,9 +915,14 @@ pub struct KvRouterConfig {
 
     pub skip_initial_worker_wait: bool,
 
-    /// Scheduling policy for the router queue.
-    /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
+    /// Queue policy of the synthetic policy class used when no policy classes are configured.
+    /// "edf" (default): earliest due time first, then arrival order.
+    /// "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
     /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+    // Compatibility with v1.5 and v1.6 frontends during v1.7 rolling upgrades: they reject
+    // "edf" in a worker card but read a missing value as their default, "fcfs".
+    // TODO(v1.9): Always serialize this field when v1.6 falls outside the N-2 window.
+    #[serde(skip_serializing_if = "is_default")]
     pub router_queue_policy: RouterQueuePolicy,
 
     /// Whether to query a remote KV indexer served from the worker component
@@ -1787,6 +1797,80 @@ mod tests {
     }
 
     #[test]
+    fn edf_queue_policy_is_omitted_from_the_wire_and_explicit_policies_are_kept() {
+        // The v1.5/v1.6 reader has no "edf" variant and reads a missing field as "fcfs".
+        #[derive(Debug, Default, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum LegacyQueuePolicy {
+            #[default]
+            Fcfs,
+            Lcfs,
+            Wspt,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(default)]
+        struct LegacyReader {
+            router_queue_policy: LegacyQueuePolicy,
+        }
+
+        assert_eq!(
+            KvRouterConfig::default().router_queue_policy,
+            RouterQueuePolicy::Edf
+        );
+        let default_wire = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        assert!(default_wire.get("router_queue_policy").is_none());
+        let decoded: KvRouterConfig = serde_json::from_value(default_wire.clone()).unwrap();
+        assert_eq!(decoded.router_queue_policy, RouterQueuePolicy::Edf);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), default_wire);
+        assert_eq!(
+            serde_json::from_value::<LegacyReader>(default_wire)
+                .unwrap()
+                .router_queue_policy,
+            LegacyQueuePolicy::Fcfs
+        );
+
+        for (policy, legacy) in [
+            (RouterQueuePolicy::Fcfs, LegacyQueuePolicy::Fcfs),
+            (RouterQueuePolicy::Lcfs, LegacyQueuePolicy::Lcfs),
+            (RouterQueuePolicy::Wspt, LegacyQueuePolicy::Wspt),
+        ] {
+            let wire = serde_json::to_value(KvRouterConfig {
+                router_queue_policy: policy,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(wire["router_queue_policy"], policy.to_string());
+            let decoded: KvRouterConfig = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.router_queue_policy, policy);
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<LegacyReader>(wire)
+                    .unwrap()
+                    .router_queue_policy,
+                legacy
+            );
+        }
+
+        let explicit_edf = serde_json::json!({ "router_queue_policy": "edf" });
+        assert_eq!(
+            serde_json::from_value::<KvRouterConfig>(explicit_edf.clone())
+                .unwrap()
+                .router_queue_policy,
+            RouterQueuePolicy::Edf
+        );
+        assert!(serde_json::from_value::<LegacyReader>(explicit_edf).is_err());
+        for (spelling, policy) in [
+            ("edf", RouterQueuePolicy::Edf),
+            ("fcfs", RouterQueuePolicy::Fcfs),
+            ("lcfs", RouterQueuePolicy::Lcfs),
+            ("wspt", RouterQueuePolicy::Wspt),
+        ] {
+            assert_eq!(spelling.parse::<RouterQueuePolicy>().unwrap(), policy);
+            assert_eq!(policy.to_string(), spelling);
+        }
+    }
+
+    #[test]
     fn dynamo_env_config_parses_canonical_settings() {
         let config = config_from_values(&[
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
@@ -1939,7 +2023,7 @@ mod tests {
         assert!(error.contains("expected 'ttl' or 'lru'"));
 
         let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
-        assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
+        assert!(error.contains("expected 'edf', 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
         assert!(error.contains("expected 'none' or 'hicache'"));

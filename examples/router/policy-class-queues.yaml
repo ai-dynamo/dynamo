@@ -4,18 +4,18 @@
 # Requests select a class by name with the x-dynamo-meta-policy-class header.
 # A missing or unknown name uses default_policy_class. While both queues are
 # backlogged, the 800:200 quanta split uncached-token scheduling credit 80/20.
-# slo_ttft_ms is validated and stored; queue ordering and expiry do not use it yet.
+# Within a class, the default edf queue_policy dispatches the earliest due time
+# first: router ingress plus slo_ttft_ms, unless a request classifier sets a
+# deadline. Equal budgets keep arrival order. A passed budget does not reject.
 default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
     prefill_busy_threshold_frac: 1.0
     request_queue_limit_per_worker: 256
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
     prefill_busy_threshold_frac: 1.0
     request_queue_limit_per_worker: 1024
@@ -26,7 +26,6 @@ models:
     policy_classes:
       - name: standard
         quantum: 1000
-        queue_policy: fcfs
         slo_ttft_ms: 3000
         prefill_busy_threshold_frac: 1.0
         request_queue_limit_per_worker: 1024

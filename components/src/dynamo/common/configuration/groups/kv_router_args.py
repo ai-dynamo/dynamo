@@ -684,14 +684,15 @@ class KvRouterArgGroup(ArgGroup):
                 remove_in="v1.7",
             ),
             env_var="DYN_ROUTER_QUEUE_POLICY",
-            default="fcfs",
+            default="edf",
             help=(
-                "KV Router: Scheduling policy for the router queue. "
-                "'fcfs' (default): first-come first-served with priority bumps — optimizes tail TTFT. "
+                "KV Router: Queue policy of the synthetic policy class. "
+                "'edf' (default): earliest due time first, then arrival order. "
+                "'fcfs': first-come first-served with priority bumps — optimizes tail TTFT. "
                 "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
             ),
             arg_type=str,
-            choices=["fcfs", "wspt"],
+            choices=["edf", "fcfs", "wspt"],
         )
         add_negatable_bool_argument(
             g,

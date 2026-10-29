@@ -6,10 +6,12 @@ use std::fs;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
+use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
@@ -48,7 +50,8 @@ pub struct PolicyClassConfig {
     pub queue_policy: RouterQueuePolicy,
     pub quantum: usize,
     /// Time-to-first-token budget in whole milliseconds, or `None` when the class sets none.
-    /// Queue ordering, deadlines, and expiry do not read it.
+    /// An EDF class orders a request without its own deadline by its router ingress time
+    /// plus this budget. Nothing rejects or expires a request when the budget passes.
     pub slo_ttft_ms: Option<NonZeroU64>,
     /// The limits this class waits on.
     pub busy_thresholds: BusyThresholds,
@@ -70,6 +73,35 @@ impl PolicyClassConfig {
             || self.raw_isl_token_queue_limit_per_worker == Some(0)
             || self.cached_token_queue_limit_per_worker == Some(0)
     }
+
+    /// When this class's TTFT budget runs out for a request that entered the router queue at
+    /// `ingress_at`, or `None` when the class sets no budget.
+    pub fn slo_ttft_due_at(
+        &self,
+        ingress_at: Instant,
+    ) -> Result<Option<Instant>, SloTtftOutOfRange> {
+        let Some(slo_ttft_ms) = self.slo_ttft_ms else {
+            return Ok(None);
+        };
+        ingress_at
+            .checked_add(Duration::from_millis(slo_ttft_ms.get()))
+            .map(Some)
+            .ok_or_else(|| SloTtftOutOfRange {
+                policy_class: self.name.clone(),
+                slo_ttft_ms: slo_ttft_ms.get(),
+            })
+    }
+}
+
+/// A class TTFT budget the monotonic clock cannot represent from a request's ingress time.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "policy class {policy_class:?} slo_ttft_ms {slo_ttft_ms} from router ingress exceeds \
+     the monotonic clock range"
+)]
+pub struct SloTtftOutOfRange {
+    pub policy_class: String,
+    pub slo_ttft_ms: u64,
 }
 
 /// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
@@ -582,7 +614,7 @@ fn resolve_policy_class(
     }
     if raw.queue_policy == RouterQueuePolicy::Lcfs {
         return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} queue_policy must be fcfs or wspt",
+            "{location} policy class {:?} queue_policy must be edf, fcfs, or wspt",
             raw.name
         )));
     }
@@ -865,7 +897,7 @@ models:
                 .class(exact.resolve_class_index(Some("model-queued")))
                 .queueing_enabled()
         );
-        assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
+        assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Edf);
         assert_eq!(
             exact.default_class().request_queue_limit_per_worker,
             Some(0)
@@ -1076,7 +1108,7 @@ policy_classes:
             ),
             (
                 "policy_classes:\n  - name: lcfs\n    queue_policy: lcfs\n    quantum: 1\n",
-                "root policy class \"lcfs\" queue_policy must be fcfs or wspt",
+                "root policy class \"lcfs\" queue_policy must be edf, fcfs, or wspt",
             ),
             (
                 "models:\n  m:\n    policy_classes:\n      - name: a\n        quantum: 1\n      - name: b\n        quantum: 1\n",
@@ -1174,6 +1206,50 @@ policy_classes:
             error.contains("root policy class \"c\" slo_ttft_ms must be greater than zero"),
             "{error}"
         );
+
+        let class = |slo_ttft_ms| PolicyClassConfig {
+            slo_ttft_ms: NonZeroU64::new(slo_ttft_ms),
+            ..PolicyProfile::synthetic(None, RouterQueuePolicy::Edf)
+                .default_class()
+                .clone()
+        };
+        let out_of_range = SloTtftOutOfRange {
+            policy_class: SYNTHETIC_POLICY_CLASS.to_string(),
+            slo_ttft_ms: u64::MAX,
+        };
+        let ingress_at = Instant::now();
+        assert_eq!(class(0).slo_ttft_due_at(ingress_at), Ok(None));
+        assert_eq!(
+            class(1500).slo_ttft_due_at(ingress_at),
+            Ok(Some(ingress_at + Duration::from_millis(1500)))
+        );
+        // The largest budget is exact where the platform clock represents it, and an error
+        // where it does not; it never becomes "no budget".
+        assert_eq!(
+            class(u64::MAX).slo_ttft_due_at(ingress_at),
+            ingress_at
+                .checked_add(Duration::from_millis(u64::MAX))
+                .map(Some)
+                .ok_or(out_of_range.clone())
+        );
+
+        // Walk to within two seconds of the end of the platform clock's range.
+        let mut near_clock_end = ingress_at;
+        let mut step = Duration::MAX;
+        while step > Duration::from_secs(1) {
+            match near_clock_end.checked_add(step) {
+                Some(later) => near_clock_end = later,
+                None => step /= 2,
+            }
+        }
+        let error = class(u64::MAX).slo_ttft_due_at(near_clock_end).unwrap_err();
+        assert_eq!(error, out_of_range);
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the monotonic clock range"),
+            "{error}"
+        );
         for malformed in [
             "-1",
             "1.5",
@@ -1190,6 +1266,45 @@ policy_classes:
                 "unexpectedly accepted slo_ttft_ms {malformed}"
             );
         }
+    }
+
+    #[test]
+    fn omitted_queue_policy_selects_edf_and_explicit_policies_remain() {
+        let queue_policy = |setting: &str| {
+            RouterPolicyConfig::from_yaml(&format!(
+                "policy_classes:\n  - name: c\n    quantum: 1\n{setting}"
+            ))
+            .map(|config| {
+                config
+                    .resolve_profile(None, None, RouterQueuePolicy::Wspt)
+                    .default_class()
+                    .queue_policy
+            })
+        };
+
+        assert_eq!(queue_policy("").unwrap(), RouterQueuePolicy::Edf);
+        for policy in [
+            RouterQueuePolicy::Edf,
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Wspt,
+        ] {
+            assert_eq!(
+                queue_policy(&format!("    queue_policy: {policy}\n")).unwrap(),
+                policy
+            );
+        }
+        assert!(queue_policy("    queue_policy: lcfs\n").is_err());
+
+        // The synthetic class takes the router-wide policy, still including LCFS.
+        for policy in [RouterQueuePolicy::default(), RouterQueuePolicy::Lcfs] {
+            assert_eq!(
+                PolicyProfile::synthetic(None, policy)
+                    .default_class()
+                    .queue_policy,
+                policy
+            );
+        }
+        assert_eq!(RouterQueuePolicy::default(), RouterQueuePolicy::Edf);
     }
 
     #[test]
@@ -1213,7 +1328,7 @@ policy_classes:
             ]
         );
         assert!(root.classes().iter().all(|class| {
-            class.queue_policy == RouterQueuePolicy::Fcfs && class.queueing_enabled()
+            class.queue_policy == RouterQueuePolicy::Edf && class.queueing_enabled()
         }));
         assert_eq!(
             root.class(root.resolve_class_index(Some("priority")))

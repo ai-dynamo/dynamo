@@ -70,7 +70,7 @@ cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/l
 
 ### Classify Requests
 
-Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to stop queueing the request:
+Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to stop queueing the request. It takes precedence over the class's `slo_ttft_ms`, whether earlier or later, and an `edf` class orders the request by it:
 
 ```rust
 use std::time::Duration;
@@ -183,7 +183,6 @@ request_classifier:
 
 policy_classes:
   - name: standard
-    queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold_frac: 1.0
 ```
@@ -278,7 +277,7 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 | Setter | Effect |
 |---|---|
 | `set_policy_class(name)` | Select a configured policy class by name |
-| `set_due_at(instant)` | Set a deadline for router queue waiting |
+| `set_due_at(instant)` | Set a deadline for router queue waiting; it replaces the class `slo_ttft_ms` as the request's due time |
 | `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
 | `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
 | `clear_worker_selection_target()` | Clear the soft preference |

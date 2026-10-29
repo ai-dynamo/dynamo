@@ -46,36 +46,37 @@ sequenceDiagram
   for zero-discovered-worker windows, which surface `NoEndpoints` from selection.
 - `PolicyQueue` does not classify requests. It owns all class queues and uses deficit round robin (DRR) to give each class weighted turns.
 - Each `PolicyClassQueue` owns ordering and accounting for one class such as `latency`, `agents`, or `batch`.
-- Within one strict-priority tier, deadline-bearing entries order earliest-due-first
-  ahead of all non-deadline entries before the FCFS/LCFS/WSPT policy score applies.
-  Deadlines are indexed in an ordered due set and a conditional actor timer rejects
-  expired entries; all deadline math uses `tokio::time::Instant` so paused-clock tests
-  stay coherent.
+- An EDF class, the default, orders by due time and then enqueue sequence; strict
+  priority and priority jumps do not reorder it. The due time is the classifier's explicit
+  deadline, else router ingress plus the final class's `slo_ttft_ms` (resolved once before
+  the actor), else absent, which sorts after every finite due time.
+- FCFS/LCFS/WSPT classes keep their order: within one strict-priority tier, entries with
+  an explicit deadline order earliest-due-first ahead of the rest before the policy score
+  applies. Class due times never enter their order.
+- Only explicit deadlines enter the deadline index and its conditional actor timer, which
+  rejects expired entries. Class due times order EDF but never expire. All deadline math
+  uses `tokio::time::Instant` so paused-clock tests stay coherent.
 - `SchedulerQueueActor::admit_one` performs final worker selection and reserves worker capacity after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
 
 ## Per-class ready storage
 
-`PolicyQueueEntry<T>` is one queued payload plus its class index, priority key, enqueue sequence, and token/accounting snapshot. In production, `T` is `QueuedRequest`, which wraps the `SchedulingRequest`, enqueue timestamp, and optional block hashes.
+`PolicyQueueEntry<T>` is one queued payload plus its class index, immutable dispatch order (due time, policy score, enqueue sequence, strict priority), resolved due time, and token/accounting snapshot. In production, `T` is `QueuedRequest`, which wraps the `SchedulingRequest`, enqueue timestamp, and optional block hashes.
 
 ```text
 PolicyClassQueue("agents")
-├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
-├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
-│   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
-│   └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
-├── blocked_workers: FxHashSet<WorkerWithDpRank>
-└── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+└── pending: BTreeSet<PolicyQueueEntry>                   # one dispatch order per class
+PolicyQueue
+└── deadlines: BTreeMap<(Instant, seq), QueueEntryHandle>  # explicit deadlines only
 ```
 
-- `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
-- `ready_by_worker` contains requests pinned to a particular worker and data-parallel rank. Each worker/rank heap is removed when its last request leaves.
-- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes.
-- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` only identifies a queue pinned to one worker/rank; the actor and selector retain worker knowledge.
-- Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
-- `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
-- A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
+- `pending` holds every queued request of the class in one dispatch order, pinned or not. Worker constraints (exact pins, DP ranks, allow-lists) stay on the request; `PolicyQueue` never reads them and keeps no per-worker queues or indexes.
+- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. The actor's dispatch gate checks the class head against the workers its constraints allow (only the pinned rank for a pinned request), and worker selection enforces the same constraints after the head dispatches. A pinned request is never routed to another worker.
+- The class's last entry dispatches first. An ordered tree, not a heap or hash map, gives worst-case O(log n) insert, dispatch, and removal of a known entry, with no rebuild, scan, or deferred cleanup.
+- `enqueue` returns a `QueueEntryHandle` naming the entry's class and order. Enqueue sequences are never reused, so a stale handle matches nothing. The actor keeps the handle in the pending lifecycle state and cancels exactly that entry; a request ID could also name a later attempt. `retain` is a bulk O(n + k log n) operation, not cancellation.
+- `PolicyClassQueue::dispatchable_head_cost` checks only the class head, once per `pop_next`. No blocked state is cached, so a capacity hint only wakes the actor; the next drain reads every head again.
+- `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `dispatchable_head_cost` confirms that its head can run.
+- Head-of-line blocking is class-wide. A blocked head, such as a request pinned to a full worker, holds every later entry of its class, including requests another worker could serve now; other classes keep competing under DRR. Do not add per-worker subqueues or a scan past the head to bypass it.
 
 ## Guardrails
 
@@ -84,7 +85,7 @@ PolicyClassQueue("agents")
   reuse the ID only after the previous booking has been released.
 - Before an unpinned retry, exclude every worker already failed by that migration state machine. Preserve caller allowlists and routing constraints. An affinity-derived pin may be invalidated and rebound; an explicit request pin remains exact.
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
-- Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)` and the admission lifecycle lease remains request-ID-only until handoff.
+- Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)`. Until handoff, the admission lifecycle lease names its queued entry by `QueueEntryHandle` and its booking by `(request_id, worker, attempt_id)`.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery
@@ -110,8 +111,8 @@ PolicyClassQueue("agents")
   `ActiveSequences`.
 - Selectors should be side-effect free: no capacity reservation, no queue mutation, and no
   `PromptRegistry` mutation.
-- Do not hold the pending-heap lock while selecting, reading worker capacity,
-  responding, or awaiting. The queue heap is only for waiting requests.
+- Do not hold the pending-queue lock while selecting, reading worker capacity,
+  responding, or awaiting. The policy queue is only for waiting requests.
 - Do not hold `workers_with_configs.borrow()` across `.await`; take a short
   synchronous snapshot or borrow for selection only.
 - Any change to queue ordering, WSPT keys, capacity checks, admission

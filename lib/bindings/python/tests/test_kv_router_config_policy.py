@@ -70,6 +70,24 @@ def test_to_json_round_trip_is_idempotent() -> None:
     assert KvRouterConfig.from_json(text).to_json() == text
 
 
+def test_default_edf_queue_policy_is_omitted_and_explicit_policies_are_kept() -> None:
+    # v1.5/v1.6 readers reject "edf" in a worker card but read a missing value as "fcfs".
+    for config in (KvRouterConfig(), KvRouterConfig(router_queue_policy="edf")):
+        text = config.to_json()
+        assert "router_queue_policy" not in json.loads(text)
+        assert KvRouterConfig.from_json(text).to_json() == text
+    for policy in ("fcfs", "lcfs", "wspt"):
+        text = KvRouterConfig(router_queue_policy=policy).to_json()
+        assert json.loads(text)["router_queue_policy"] == policy
+        assert KvRouterConfig.from_json(text).to_json() == text
+    explicit_edf = json.dumps({"router_queue_policy": "edf"})
+    assert "router_queue_policy" not in json.loads(
+        KvRouterConfig.from_json(explicit_edf).to_json()
+    )
+    with pytest.raises(ValueError, match="expected 'edf', 'fcfs', 'lcfs', or 'wspt'"):
+        KvRouterConfig(router_queue_policy="random")
+
+
 def test_policy_parameters_resolve_every_worker_type() -> None:
     config = _non_default_config()
     for worker_type in ("aggregated", "prefill"):

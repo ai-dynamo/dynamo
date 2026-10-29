@@ -23,8 +23,8 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 | `--router-kv-overlap-score-credit` | `1.0` | 设备本地 prefix 重叠的 credit 乘数，范围从 0.0 到 1.0 |
 | `--router-prefill-load-scale` | `1.0` | 在加入 decode block 之前，对调整后的 prompt 侧 prefill 负载进行缩放 |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | 消费 worker KV 事件，或在没有事件时回退到近似路由 |
-| `--router-queue-threshold` | disabled | 背压队列阈值；设置数值后启用队列，`nvext.agent_hints.priority` 会对等待中的请求重新排序 |
-| `--router-queue-policy` | `fcfs` | 队列调度策略：`fcfs`（尾部 TTFT）、`wspt`（平均 TTFT）或 `lcfs`（仅用于比较的反向排序） |
+| `--router-queue-threshold` | disabled | 背压队列阈值；设置数值后启用队列。使用 `fcfs` 或 `wspt` 时，`nvext.agent_hints.priority` 会对等待中的请求重新排序 |
+| `--router-queue-policy` | `edf` | 队列调度策略：`edf`（最早截止时间优先，其后按到达顺序；不按优先级重新排序）、`fcfs`（尾部 TTFT）或 `wspt`（平均 TTFT） |
 | `--no-router-track-prefill-tokens` | disabled | 在 router 负载统计中忽略 prompt 侧 prefill token；适用于仅 decode 的路由路径 |
 
 ### 独立 Router
