@@ -3622,7 +3622,7 @@ fn hint_source_must_share_the_target_worker_type() {
 #[test]
 fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
@@ -3637,7 +3637,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(3),
+            ClusterId::new(3),
         ),
         StableDpSlotId::new([4; 16], IdentitySource::Explicit),
     );
@@ -3777,7 +3777,7 @@ fn preferred_island_falls_back_to_a_cross_island_source() {
 #[test]
 fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
@@ -3790,7 +3790,7 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )

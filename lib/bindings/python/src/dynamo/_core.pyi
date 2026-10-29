@@ -82,7 +82,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
-            response_plane: Response plane transport ("tcp" or "quic")
+            response_plane: Response plane transport ("tcp", "quic", or "velo")
         """
         ...
 
@@ -2804,11 +2804,11 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class KvDcRelay:
+class PoolRelay:
     def __init__(
         self,
         endpoint: Endpoint,
-        dc_id: str,
+        cluster_id: str,
         namespace_filter: Optional[str] = None,
         endpoint_prefix: Optional[str] = None,
         publication_threshold: int = 16,
