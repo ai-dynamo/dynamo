@@ -187,29 +187,18 @@ cargo fmt --all
 cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
 ```
 
-- **Keep one `-p` set per area.** Cargo resolves features across the packages you name,
-  so each `-p` set gets its own build of the shared crates; the first build of a new set
-  costs a rebuild. For the sidecars, always use
+- **Name the test target** (`--lib` or `--test <name>`). Plain `cargo test -p dynamo-llm`
+  builds all 44 test binaries.
+- **Don't set `RUSTFLAGS`.** It replaces the flags in [`.cargo/config.toml`](.cargo/config.toml)
+  and rebuilds every dependency, and unsetting it rebuilds them again.
+- **Build the sidecars with one `-p` set:**
   `-p dynamo-vllm-sidecar -p dynamo-sglang-sidecar -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar -p dynamo-sidecar-testkit`.
-- **Name the test target.** `cargo test -p dynamo-llm` with no target builds the unit-test
-  harness (a second compile of `dynamo-llm`), all 44 test binaries, and the doc tests.
-  Use `--lib` or `--test <name>`.
-- **Keep build flags stable.** [`.cargo/config.toml`](.cargo/config.toml) sets the
-  `rustflags`. A `RUSTFLAGS` variable replaces them and recompiles every dependency, and
-  so does changing it back; a change to the dev profile or the toolchain does the same.
-  Set `CARGO_PROFILE_DEV_DEBUG=line-tables-only` once and leave it set: a cold
-  `dynamo-llm` test build took 4 min with it and 5.5 min with full debug info.
-- **Reuse your worktree.** A new worktree starts with an empty build cache; switching
-  branches in an existing one rebuilds only the crates that changed.
-- **Measure performance on optimized builds.** Debug timings mean nothing. Use
-  `--release` (`maturin develop --uv --release` for the bindings). To profile with perf or
-  Nsight, build with `--profile profiling`, which is release with symbols;
-  `-p dynamo-llm --features nvtx` adds NVTX ranges.
-- **Run only the feature lanes you touch.** CI also checks some crates with non-default
-  features, such as `dynamo-llm --no-default-features` and
-  `dynamo-kv-router --features standalone-indexer`; the exact commands are in
-  [`.github/workflows/pre-merge.yml`](.github/workflows/pre-merge.yml). Each feature set is
-  a separate build: `dynamo-llm --no-default-features` takes 4 min the first time.
+  A different set changes features and rebuilds `dynamo-llm`.
+- **Reuse your worktree.** A new one starts with an empty build cache (last row of the table).
+- **Profiling:** `--profile profiling` is release with symbols; `-p dynamo-llm --features nvtx`
+  adds NVTX ranges.
+- CI's non-default feature checks are in [`pre-merge.yml`](.github/workflows/pre-merge.yml).
+  Each is a separate cold build (about 4 min), so run only the one you touched.
 
 On macOS, run `dynamo-llm` checks and targeted tests with `--no-default-features` unless the
 target explicitly requires `block-manager`. The default feature enables Linux/CUDA-oriented NIXL,
