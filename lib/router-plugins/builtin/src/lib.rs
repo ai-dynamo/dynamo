@@ -4,10 +4,11 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
+//! catalog adds the named default, two-tier, ThunderAgent and Contact Router providers through `register`. The default
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+mod contact_router;
 mod default;
 mod thunderagent;
 mod two_tier_cost_fn;
@@ -31,6 +32,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
     two_tier_cost_fn::register(registry)?;
+    contact_router::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())
 }
