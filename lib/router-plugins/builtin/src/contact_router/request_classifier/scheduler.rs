@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use super::super::ContactRouterConfig;
 use super::ContactRouterError;
 use super::capacity::WorkerCapacitySnapshot;
-use crate::contact_router::group_priority::{GroupTag, Groups, PriorityConfig, header};
+use crate::contact_router::group_priority::{GroupTag, Groups, VERSION_HEADER, header};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgramStatus {
@@ -238,17 +238,14 @@ impl State {
         &self,
         headers: &BTreeMap<String, Vec<String>>,
     ) -> (GroupTag, Option<u64>) {
-        let fallback;
-        let priority = match &self.config.priority {
-            Some(priority) => priority,
-            None if self.config.target_age.is_some() || self.config.kv_admission => {
-                fallback = PriorityConfig::new(0.0, 0.0, 0.0);
-                &fallback
-            }
-            None => return (GroupTag::default(), None),
-        };
-        let version = header(headers, &self.config.version_header).and_then(|v| v.parse().ok());
-        (priority.tag(headers), version)
+        if self.config.priority.is_none()
+            && self.config.target_age.is_none()
+            && !self.config.kv_admission
+        {
+            return (GroupTag::default(), None);
+        }
+        let version = header(headers, VERSION_HEADER).and_then(|v| v.parse().ok());
+        (GroupTag::from_headers(headers), version)
     }
 
     /// The program's group score, when priority is configured; higher goes first.
@@ -367,7 +364,7 @@ impl State {
                 limit: self.config.max_tracked_requests,
             });
         };
-        self.remove_program(&evicted);
+        self.drop_program(&evicted);
         Ok(())
     }
 
@@ -490,9 +487,20 @@ impl State {
 
     fn kv_limit(&self) -> f64 {
         self.peak_tokens
+            .filter(|_| self.kv_capacity > 0)
             .map_or(self.config.initial_programs as f64, |peak| {
                 self.config.pause_threshold * self.kv_capacity as f64 / peak
             })
+    }
+
+    /// Remove a program that ended without finishing; its group stops waiting
+    /// for it but does not move the age limit.
+    fn drop_program(&mut self, session_id: &str) {
+        if let Some(program) = self.remove_program(session_id)
+            && program.wv.is_some()
+        {
+            self.groups.end(&program.tag);
+        }
     }
 
     /// Remove a program that finished; its group has one fewer to wait for.
@@ -1229,7 +1237,7 @@ impl State {
         self.compact_session_waiting(&request.session_id);
 
         if request.session_final && request.began_program {
-            self.remove_program(&request.session_id);
+            self.drop_program(&request.session_id);
         } else if completed && request.phase == RequestPhase::Released {
             let pause = self
                 .update_program(&request.session_id, |program| {
@@ -1251,7 +1259,7 @@ impl State {
                     self.replace_program(request.session_id.clone(), prior);
                 }
                 None => {
-                    self.remove_program(&request.session_id);
+                    self.drop_program(&request.session_id);
                 }
             }
         }
@@ -1365,7 +1373,7 @@ impl State {
         }
         self.next_retention_expiry = next_expiry;
         for session_id in &expired {
-            self.remove_program(session_id);
+            self.drop_program(session_id);
         }
         !expired.is_empty()
     }
@@ -1508,6 +1516,7 @@ fn reserve_capacity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contact_router::group_priority::PriorityConfig;
 
     fn state(config: ContactRouterConfig) -> State {
         State::new(config)
@@ -2311,6 +2320,17 @@ mod tests {
                 .count();
             assert_eq!(released, 16);
         }
+        let later = now + state.config.resume_timeout() + Duration::from_secs(2);
+        for member in 0..8 {
+            state.cancel_request(&format!("g0t{member}"), &capacities, later);
+        }
+        state.reconcile(&capacities, later);
+        let released = notifies
+            .iter()
+            .filter(|(id, _)| !id.starts_with("g0") && !id.starts_with("g1"))
+            .filter(|(id, notify)| state.wait_status(id, notify) != WaitStatus::Waiting)
+            .count();
+        assert_eq!(released, 8, "a cancelled group frees its slots");
     }
 
     #[test]

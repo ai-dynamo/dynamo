@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Contact Router
 subtitle: Group-aware admission for RL rollouts that bounds weight-version staleness
@@ -41,7 +41,7 @@ worker_selection:
       type: contact_router
 ```
 
-Start the frontend as for ThunderAgent, with `--router-policy-config contact_router.yaml` and soft session affinity.
+Start the frontend as for ThunderAgent, with `--router-policy-config contact_router.yaml` and soft session affinity. End each rollout with a `X-Dynamo-Session-Final: true` request; a rollout that is cancelled, evicted or expires frees its group slot without moving the age limit.
 
 Request headers:
 
@@ -50,7 +50,7 @@ Request headers:
 | `X-Dynamo-Session-ID` | One rollout (program). |
 | `x-dynamo-group` | Data group of the rollout. |
 | `x-dynamo-group-size` | Rollouts in the group (default 1). |
-| `x-dynamo-weight-version` | Weight version the harness is on; the router tracks the highest seen. Header name set by `version_header`. |
+| `x-dynamo-weight-version` | Weight version the harness is on; the router tracks the highest seen. |
 | `x-dynamo-env-s` | Expected environment seconds of the task (priority only). |
 
 Parameters beyond ThunderAgent's:
@@ -62,5 +62,4 @@ Parameters beyond ThunderAgent's:
 | `initial_programs` | `256` | Starting age limit. |
 | `age_gain` | `0.1` | Programs per group program per version of age error. |
 | `age_delay_versions` | `0` | Do not move the age limit until the current version exceeds this. |
-| `version_header` | `x-dynamo-weight-version` | Header carrying the weight version. |
 | `priority` | unset | `{wv, left, env_s}` weights; pauses the lowest and resumes/admits the highest `wv * group_version + left * programs_left + env_s * env_seconds` first. |

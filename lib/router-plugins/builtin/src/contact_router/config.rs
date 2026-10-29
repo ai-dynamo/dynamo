@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::contact_router::group_priority::{PriorityConfig, default_version_header};
+use crate::contact_router::group_priority::PriorityConfig;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -27,8 +27,6 @@ pub struct ContactRouterConfig {
     pub acting_decay_tau_seconds: f64,
     pub buffer_per_program: usize,
     pub max_tracked_requests: usize,
-    /// Request header carrying the weight version the harness is on.
-    pub version_header: String,
     /// Pause the lowest group score first and resume the highest first.
     pub priority: Option<PriorityConfig>,
     /// Adapt how many programs may run so groups finish this many versions
@@ -59,7 +57,6 @@ impl Default for ContactRouterConfig {
             acting_decay_tau_seconds: 1.0,
             buffer_per_program: 100,
             max_tracked_requests: 10_000,
-            version_header: default_version_header(),
             priority: None,
             target_age: None,
             initial_programs: 256,

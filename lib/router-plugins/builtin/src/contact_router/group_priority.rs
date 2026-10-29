@@ -25,30 +25,14 @@ pub(crate) struct PriorityConfig {
     /// Weight on the task's environment seconds; positive serves slow environments first.
     #[serde(default)]
     pub(crate) env_s: f64,
-    /// Headers carrying the data group, its size and its environment seconds.
-    #[serde(default = "default_group_header")]
-    group_header: String,
-    #[serde(default = "default_group_size_header")]
-    group_size_header: String,
-    #[serde(default = "default_env_header")]
-    env_header: String,
 }
 
-fn default_group_header() -> String {
-    "x-dynamo-group".into()
-}
-
-fn default_group_size_header() -> String {
-    "x-dynamo-group-size".into()
-}
-
-fn default_env_header() -> String {
-    "x-dynamo-env-s".into()
-}
-
-pub(crate) fn default_version_header() -> String {
-    "x-dynamo-weight-version".into()
-}
+/// Headers carrying the data group, its size, its environment seconds and
+/// the weight version; `dynamo-llm` forwards them as agent headers.
+const GROUP_HEADER: &str = "x-dynamo-group";
+const GROUP_SIZE_HEADER: &str = "x-dynamo-group-size";
+const ENV_HEADER: &str = "x-dynamo-env-s";
+pub(crate) const VERSION_HEADER: &str = "x-dynamo-weight-version";
 
 /// The last value of header `name`, trimmed.
 pub(crate) fn header(headers: &BTreeMap<String, Vec<String>>, name: &str) -> Option<String> {
@@ -67,24 +51,20 @@ pub(crate) struct GroupTag {
 }
 
 impl PriorityConfig {
+    #[cfg(test)]
     pub(crate) fn new(wv: f64, left: f64, env_s: f64) -> Self {
-        Self {
-            wv,
-            left,
-            env_s,
-            group_header: default_group_header(),
-            group_size_header: default_group_size_header(),
-            env_header: default_env_header(),
-        }
+        Self { wv, left, env_s }
     }
+}
 
-    pub(crate) fn tag(&self, headers: &BTreeMap<String, Vec<String>>) -> GroupTag {
-        GroupTag {
-            group: header(headers, &self.group_header),
-            size: header(headers, &self.group_size_header)
+impl GroupTag {
+    pub(crate) fn from_headers(headers: &BTreeMap<String, Vec<String>>) -> Self {
+        Self {
+            group: header(headers, GROUP_HEADER),
+            size: header(headers, GROUP_SIZE_HEADER)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1),
-            env_s: header(headers, &self.env_header)
+            env_s: header(headers, ENV_HEADER)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0.0),
         }
