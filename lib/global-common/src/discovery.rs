@@ -13,7 +13,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::pool::{self, PoolKey, PoolLocation};
-use crate::replicas::ReplicaEndpoint;
+use crate::replicas::RouterReplica;
 
 /// `POST /pools` body. A PoolRelay sends it on a timer, and each call is also
 /// the pool's heartbeat.
@@ -44,7 +44,7 @@ fn checked_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Capacity {
     pub sku: String,
-    pub count: u32,
+    pub workers: u32,
 }
 
 /// `POST /pools` reply: register again after the heartbeat interval. If the
@@ -58,6 +58,7 @@ pub struct Capacity {
 /// grants, and a client follows any lease it is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "LeaseFields")]
+#[must_use = "register again after `heartbeat_interval`"]
 pub struct Lease {
     heartbeat_interval_s: u64,
     lease_duration_s: u64,
@@ -81,7 +82,7 @@ impl Lease {
         Duration::from_secs(self.heartbeat_interval_s)
     }
 
-    pub fn lease_duration(&self) -> Duration {
+    pub fn duration(&self) -> Duration {
         Duration::from_secs(self.lease_duration_s)
     }
 }
@@ -152,7 +153,7 @@ pub fn address_identity(address: IpAddr) -> String {
 /// `GET /routers` reply: every Global Router replica.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutersResponse {
-    pub routers: Vec<ReplicaEndpoint>,
+    pub routers: Vec<RouterReplica>,
 }
 
 #[cfg(test)]
@@ -170,20 +171,16 @@ mod tests {
     #[test]
     fn json_matches_the_service_and_its_clients() {
         let key =
-            json!({"site_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"});
-        let location = json!({
-            "region": "us-west-2",
-            "availability_zone": null,
-            "cluster": "aws-west",
-            "datacenter": null
-        });
+            json!({"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"});
+        let location =
+            json!({"region": "us-west-2", "availability_zone": null, "datacenter": null});
         let mut registration = json!({
             "key": key,
             "location": location,
             "model": "Qwen/Qwen3-0.6B",
             "capabilities": ["aggregated"],
             "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "count": 8}]
+            "capacity": [{"sku": "H100", "workers": 8}]
         });
         round_trip::<PoolRegistration>(registration.clone());
         registration["model"] = json!(" ");
@@ -211,10 +208,12 @@ mod tests {
     #[test]
     fn a_lease_parses_unless_it_would_make_a_relay_spin() {
         let lease = round_trip::<Lease>(json!({"heartbeat_interval_s": 5, "lease_duration_s": 15}));
-        assert_eq!(lease, Lease::new(5, 15).unwrap());
         assert_eq!(lease.heartbeat_interval(), Duration::from_secs(5));
+        assert_eq!(lease.duration(), Duration::from_secs(15));
         // The longest lease a client could be given.
-        round_trip::<Lease>(json!({"heartbeat_interval_s": 1, "lease_duration_s": u64::MAX}));
+        let longest =
+            round_trip::<Lease>(json!({"heartbeat_interval_s": 1, "lease_duration_s": u64::MAX}));
+        assert_eq!(longest.duration(), Duration::from_secs(u64::MAX));
         for (interval, lease) in [(0, 15), (15, 15), (20, 15)] {
             let body = json!({"heartbeat_interval_s": interval, "lease_duration_s": lease});
             assert!(
@@ -222,5 +221,43 @@ mod tests {
                 "{interval}s / {lease}s"
             );
         }
+    }
+
+    #[test]
+    fn a_reply_without_its_list_does_not_parse() {
+        // `{}` must not read as "no routers", or a PoolRelay would drop every
+        // router connection.
+        assert!(serde_json::from_value::<RoutersResponse>(json!({})).is_err());
+        assert!(serde_json::from_value::<PoolsResponse>(json!({"complete": true})).is_err());
+    }
+
+    #[test]
+    fn a_reader_skips_unknown_fields_and_fills_missing_lists() {
+        // Either side can add a field, at any depth, before the other reads it.
+        let key = json!({"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1", "new": 1});
+        let location =
+            json!({"region": "us-west-2", "availability_zone": null, "datacenter": null, "new": 1});
+        serde_json::from_value::<PoolRegistration>(json!({
+            "key": key, "location": location, "model": "Qwen/Qwen3-0.6B", "new": 1
+        }))
+        .unwrap();
+        serde_json::from_value::<PoolsResponse>(json!({
+            "pools": [{
+                "key": key, "location": location, "model": null,
+                "capacity": [{"sku": "H100", "workers": 8, "new": 1}], "new": 1
+            }],
+            "complete": true,
+            "new": 1
+        }))
+        .unwrap();
+        let _: Lease = serde_json::from_value(
+            json!({"heartbeat_interval_s": 5, "lease_duration_s": 15, "new": 1}),
+        )
+        .unwrap();
+        serde_json::from_value::<RoutersResponse>(json!({
+            "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/", "new": 1}],
+            "new": 1
+        }))
+        .unwrap();
     }
 }

@@ -11,13 +11,13 @@ use crate::watch::WatchEvent;
 
 /// In JSON, a plain string.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ReplicaId(pub String);
+pub struct RouterReplicaId(pub String);
 
-/// A replica's address as seen from workload clusters.
+/// A Global Router replica and the address workload clusters reach it at.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicaEndpoint {
-    pub replica: ReplicaId,
+pub struct RouterReplica {
+    pub replica: RouterReplicaId,
     pub url: Url,
 }
 
-pub type ReplicaEvent = WatchEvent<ReplicaEndpoint, ReplicaId>;
+pub type RouterReplicaEvent = WatchEvent<RouterReplica, RouterReplicaId>;

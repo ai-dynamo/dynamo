@@ -176,7 +176,7 @@ fn error_response(error: DiscoveryError) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use crate::pool_discovery::{Directory, ReplicaEndpoint, ReplicaId, Snapshot, WatchStream};
+    use crate::pool_discovery::{Directory, RouterReplica, RouterReplicaId, Snapshot, WatchStream};
     use async_trait::async_trait;
     use dynamo_global_common::Lease;
     use serde_json::{Value, json};
@@ -188,23 +188,22 @@ mod tests {
     /// The body `dynamo-global-discovery-client` sends.
     fn registration() -> Value {
         json!({
-            "key": {"site_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
+            "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
             "location": {
                 "region": "us-west-2",
                 "availability_zone": null,
-                "cluster": "aws-west",
                 "datacenter": null
             },
             "model": "Qwen/Qwen3-0.6B",
             "capabilities": ["aggregated"],
             "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "count": 8}]
+            "capacity": [{"sku": "H100", "workers": 8}]
         })
     }
 
-    fn router_replica() -> ReplicaEndpoint {
-        ReplicaEndpoint {
-            replica: ReplicaId("aws-ohio/global-router-0".to_owned()),
+    fn router_replica() -> RouterReplica {
+        RouterReplica {
+            replica: RouterReplicaId("aws-ohio/global-router-0".to_owned()),
             url: Url::parse("http://10.42.0.5:50051").unwrap(),
         }
     }
@@ -263,17 +262,16 @@ mod tests {
             pools,
             json!({
                 "pools": [{
-                    "key": {"site_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
+                    "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
                     "location": {
                         "region": "us-west-2",
                         "availability_zone": null,
-                        "cluster": "aws-west",
                         "datacenter": null
                     },
                     "model": "Qwen/Qwen3-0.6B",
                     "capabilities": ["aggregated"],
                     "frontends": ["http://10.43.1.2:8000/"],
-                    "capacity": [{"sku": "H100", "count": 8}],
+                    "capacity": [{"sku": "H100", "workers": 8}],
                     "relay_identities": []
                 }],
                 "complete": false
@@ -298,7 +296,7 @@ mod tests {
     async fn invalid_key_is_rejected() {
         let (base, shutdown) = start(memory_store()).await;
         let mut body = registration();
-        body["key"]["site_id"] = json!(" ");
+        body["key"]["cluster_id"] = json!(" ");
         let (status, _) = post_pool(&base, &body).await;
         assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         let (_, pools) = get_json(&base, "/pools").await;

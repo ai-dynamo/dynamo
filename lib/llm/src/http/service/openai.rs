@@ -70,8 +70,8 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
-    ParsingOptions,
-    audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    MediaDelivery, ParsingOptions,
+    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -4631,7 +4631,8 @@ pub fn validate_response_unsupported_fields(
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
     use crate::protocols::openai::validate;
 
-    let map_err = |e: anyhow::Error| {
+    /// Maps any validation diagnostic to a prefixed HTTP 400 invalid-request response.
+    fn invalid_request(e: impl std::fmt::Display) -> ErrorResponse {
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
             HttpError {
@@ -4639,18 +4640,18 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
                 message: VALIDATION_PREFIX.to_string() + &e.to_string(),
             },
         )
-    };
+    }
 
-    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
-    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
-    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+    validate::validate_temperature(request.inner.temperature).map_err(invalid_request)?;
+    validate::validate_top_p(request.inner.top_p).map_err(invalid_request)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(invalid_request)?;
     crate::protocols::openai::responses::sdk_tool_choice(request.inner.tool_choice.as_ref())
-        .map_err(&map_err)?;
+        .map_err(invalid_request)?;
 
     if let Some(text) = &request.inner.text {
         use crate::protocols::openai::responses::convert_text_format;
         if let Some(response_format) = convert_text_format(text) {
-            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+            validate::validate_response_format(&Some(response_format)).map_err(invalid_request)?;
         }
     }
 
@@ -5180,9 +5181,9 @@ async fn images_with_request(
     request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model readiness check is deferred until after we resolve the
-    // ImageModel enum into a string; see below)
     check_ready(&state)?;
+
+    validate_request_fields_generic(&request, "images")?;
 
     let request_id = get_or_create_request_id(&headers);
     let mut request = context_from_headers(request, request_id, &headers)?;
@@ -5192,15 +5193,8 @@ async fn images_with_request(
     let streaming = false;
 
     // Get the model name from the request (diffusion model)
-    let model = request
-        .inner
-        .model
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "diffusion".to_string());
+    let model = request.model.as_deref().unwrap_or("diffusion").to_string();
 
-    // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
     check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
@@ -5342,6 +5336,8 @@ async fn videos(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    validate_request_fields_generic(&request, "videos")?;
+
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -5476,6 +5472,8 @@ async fn video_stream(
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5681,13 +5679,13 @@ async fn handler_audio_speech(
 
     validate_request_fields_generic(&request, "audio speech")?;
 
-    let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
+    let returns_audio_bytes = request.data_source != Some(MediaDelivery::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(
             request.response_format.as_deref().unwrap_or("wav"),
             "pcm" | "wav"
         )
-        && request.speed.is_none_or(|speed| speed == 1.0);
+        && request.speed == 1.0;
     let request_id = get_or_create_request_id(&headers);
     if streams_audio_chunks {
         // Advertise that this frontend can concatenate incremental worker
