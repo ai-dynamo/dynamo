@@ -758,6 +758,9 @@ impl DeltaAggregator {
                     super::unified_parser::UnifiedRequestPolicy {
                         reasoning_disabled: parsing_options.reasoning_disabled,
                         structured_response: parsing_options.structured_response,
+                        // The complete text shows its own channels; `detect_prefill`
+                        // reads them back without a first-bytes probe.
+                        explicit_guidance: false,
                     },
                 ) {
                     Ok(parsed) => {
