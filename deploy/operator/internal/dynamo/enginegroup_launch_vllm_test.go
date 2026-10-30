@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestVLLMNativeTemplate(t *testing.T) {
@@ -51,6 +53,42 @@ func TestVLLMNativeTemplate(t *testing.T) {
 			assert.Equal(t, before.PodTemplate.Spec.Containers[0].Command, main.Command)
 			assert.Equal(t, before.PodTemplate.Spec.Containers[0].Args, main.Args)
 			assert.Equal(t, before, component)
+		})
+	}
+}
+
+func TestVLLMPackedNativeTemplate(t *testing.T) {
+	for _, test := range []struct {
+		name                        string
+		tp, local, initial, maximum int32
+	}{
+		{name: "EP2 seed on one two-GPU Pod", tp: 1, local: 2, initial: 1, maximum: 2},
+		{name: "EP8 on two four-GPU Pods", tp: 1, local: 4, initial: 2, maximum: 3},
+		{name: "two TP2 engines per Pod", tp: 2, local: 2, initial: 1, maximum: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("declare a single worker owning the Pod's complete native engine range")
+			component := newVLLMComponentEngineGroupForTest()
+			component.EngineGroup.InitialSize = test.initial
+			component.EngineGroup.Policy = nil
+			main := &component.PodTemplate.Spec.Containers[0]
+			main.Command = []string{"python3", "-m", "dynamo.vllm", "--model", "model"}
+			main.Args = append(withoutTestVLLMProfileOptions(main.Args, "--tensor-parallel-size", "--data-parallel-rank", "--data-parallel-size-local", "--data-parallel-external-lb", "--elastic-ep-initial-dp-size", "--elastic-ep-max-dp-size"),
+				fmt.Sprintf("--tensor-parallel-size=%d", test.tp), fmt.Sprintf("--data-parallel-size-local=%d", test.local),
+				fmt.Sprintf("--elastic-ep-initial-dp-size=%d", test.initial*test.local), fmt.Sprintf("--elastic-ep-max-dp-size=%d", test.maximum*test.local),
+				"--elastic-ep-allocation-index="+engineGroupOrdinalRef)
+			main.Resources.Limits["nvidia.com/gpu"] = resource.MustParse(fmt.Sprint(test.tp * test.local))
+			main.Resources.Requests = nil
+			before := component.DeepCopy()
+
+			t.Log("resolve allocation counts separately from DP/EP geometry without altering the launch template")
+			_, profile, err := ResolveVLLMComponentEngineGroup(component, nil)
+			require.NoError(t, err)
+			require.Equal(t, test.initial, profile.InitialReplicas)
+			require.Equal(t, test.maximum, profile.MaximumReplicas)
+			require.Equal(t, test.local, profile.NativeMembersPerReplica)
+			require.Equal(t, int32(1), profile.Geometry.PodsPerReplica)
+			require.Equal(t, before, component)
 		})
 	}
 }

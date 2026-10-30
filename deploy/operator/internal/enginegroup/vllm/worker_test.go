@@ -160,6 +160,8 @@ type workerControlFixture struct {
 	withdrawalPending  bool
 	podUIDs            map[int32]domain.PodUID
 	pendingWithdrawals map[int32]bool
+	localWidth         int32
+	omitLastMember     bool
 }
 
 func (w *workerControlFixture) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -192,9 +194,16 @@ func (w *workerControlFixture) RoundTrip(request *http.Request) (*http.Response,
 		podUID = uid
 	}
 	retired := native.Phase == PhaseCompleted && native.TopologyKnown && rank >= native.EffectiveDataParallelSize
+	memberIDs := []string{fmt.Sprintf("dp-%d", rank)}
+	for offset := int32(1); offset < w.localWidth; offset++ {
+		memberIDs = append(memberIDs, fmt.Sprintf("dp-%d", rank+offset))
+	}
+	if retired && w.omitLastMember {
+		memberIDs = memberIDs[:len(memberIDs)-1]
+	}
 	status := map[string]any{
 		"pod_uid":              podUID,
-		"member_ids":           []string{fmt.Sprintf("dp-%d", rank)},
+		"member_ids":           memberIDs,
 		"binding":              &binding,
 		"listener_ready":       true,
 		"verified":             !w.failProbe,
@@ -224,15 +233,17 @@ type workerTestCapacity struct {
 
 func (a *workerTestCapacity) Observe(_ context.Context, _ domain.GroupID) (domain.CapacityObservation, error) {
 	observation := domain.CapacityObservation{AppliedRevision: a.revision, ReleaseFences: a.releases}
-	width := a.width
-	if width == 0 {
-		width = 1
-	}
 	for index := int32(0); index < a.count; index++ {
-		process := a.processes[index*width]
-		members := make([]domain.NativeMemberIncarnation, 0, width)
-		for offset := int32(0); offset < width; offset++ {
-			members = append(members, a.processes[index*width+offset].Membership.Members...)
+		var process Process
+		var members []domain.NativeMemberIncarnation
+		for _, candidate := range a.processes {
+			if candidate.Membership.ReplicaID == domain.ReplicaID(fmt.Sprintf("replica-%d", index)) {
+				process = candidate
+				members = append(members, candidate.Membership.Members...)
+			}
+		}
+		if len(members) == 0 {
+			return domain.CapacityObservation{}, fmt.Errorf("allocation %d has no native members", index)
 		}
 		observation.Allocations = append(observation.Allocations, domain.CapacityAllocation{Available: true, Health: domain.AllocationHealthHealthy,
 			Incarnation: domain.ReplicaIncarnation{ReplicaID: process.Membership.ReplicaID, SlotID: domain.CapacitySlotID(fmt.Sprintf("slot-%d", index)), Members: members, CapacityRefs: []domain.CapacityRef{{Name: fmt.Sprintf("pod-%d", index), UID: process.PodUID}}},

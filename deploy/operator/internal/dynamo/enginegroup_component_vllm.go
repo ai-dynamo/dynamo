@@ -28,8 +28,8 @@ func ResolveVLLMComponentEngineGroup(component *api.DynamoComponentDeploymentSha
 	}
 	// The first integration owns one world with one dedicated, scalar-GPU main container per allocation.
 	if !IsWorkerComponent(string(component.ComponentType)) || ptr.Deref(component.Replicas, 1) != 1 ||
-		component.EngineGroup.InitialSize < 2 || component.PodTemplate == nil {
-		return VLLMProfileGeometrySource{}, ResolvedVLLMElasticEPProfile{}, fmt.Errorf("vLLM Engine Groups require one worker world, an explicit podTemplate and initialSize greater than one")
+		component.EngineGroup.InitialSize < 1 || component.PodTemplate == nil {
+		return VLLMProfileGeometrySource{}, ResolvedVLLMElasticEPProfile{}, fmt.Errorf("vLLM Engine Groups require one worker world, an explicit podTemplate and positive initialSize")
 	}
 	if component.Multinode != nil || len(component.Roles) != 0 || component.ScalingAdapter != nil ||
 		component.Experimental != nil || component.ProviderOverride != nil {

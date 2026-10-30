@@ -2030,18 +2030,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if serving is None or not self.can_serve_engine_group():
             return False
         await self.engine_client.check_health()
-        completed = False
         async with asyncio.timeout(60):
-            async for output in self.engine_client.generate(
-                {"prompt_token_ids": [0]},
-                SamplingParams(max_tokens=1, temperature=0, ignore_eos=True),
-                "engine-group-probe-" + uuid.uuid4().hex,
-                data_parallel_rank=self._to_local_dp_rank(serving.rank),
-            ):
-                completed = output.finished and any(
-                    item.token_ids for item in output.outputs
-                )
-        return completed and self.can_serve_engine_group()
+            for rank in range(serving.rank, serving.rank + serving.rank_count):
+                completed = False
+                async for output in self.engine_client.generate(
+                    {"prompt_token_ids": [0]},
+                    SamplingParams(max_tokens=1, temperature=0, ignore_eos=True),
+                    "engine-group-probe-" + uuid.uuid4().hex,
+                    data_parallel_rank=self._to_local_dp_rank(rank),
+                ):
+                    completed = output.finished and any(
+                        item.token_ids for item in output.outputs
+                    )
+                if not completed:
+                    return False
+        return self.can_serve_engine_group()
 
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.

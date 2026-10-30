@@ -2430,6 +2430,7 @@ class WorkerFactory:
                 handler.can_serve_engine_group,
                 handler.probe_engine_group,
                 drain_requests=vllm_envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS,
+                rank_count=vllm_config.parallel_config.data_parallel_size_local,
             )
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)

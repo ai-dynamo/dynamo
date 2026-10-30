@@ -198,10 +198,7 @@ func validateVLLMCapacityBootstrap(target domain.CapacityTarget, profile dynamo.
 }
 
 func resolveVLLMLaunchMembers(pod *corev1.Pod, slot domain.CapacitySlotID, width int32) ([]domain.NativeMemberIncarnation, error) {
-	// The current launcher starts one non-restarting server. Packed launches need independently observed process bindings.
-	if width != 1 {
-		return nil, fmt.Errorf("packed vLLM allocations require per-process launch identities")
-	}
+	// Native children are not independently restarted in this profile; each member is pinned to its Pod lifetime and rank.
 	for _, container := range pod.Status.ContainerStatuses {
 		if container.Name == consts.MainContainerName && container.RestartCount > 0 {
 			return nil, fmt.Errorf("%w: vLLM Pod %s restarted outside membership recovery", domain.ErrRecoveryRequired, pod.Name)
@@ -211,7 +208,15 @@ func resolveVLLMLaunchMembers(pod *corev1.Pod, slot domain.CapacitySlotID, width
 	if err != nil {
 		return nil, err
 	}
-	return []domain.NativeMemberIncarnation{{ID: ids[0], RuntimeIncarnation: domain.RuntimeIncarnationID(pod.UID)}}, nil
+	members := make([]domain.NativeMemberIncarnation, len(ids))
+	for i, id := range ids {
+		incarnation := domain.RuntimeIncarnationID(pod.UID)
+		if width > 1 {
+			incarnation += "/" + domain.RuntimeIncarnationID(id)
+		}
+		members[i] = domain.NativeMemberIncarnation{ID: id, RuntimeIncarnation: incarnation}
+	}
+	return members, nil
 }
 
 var _ domain.CapacityAdapter = (*VLLMCapacity)(nil)
