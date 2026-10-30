@@ -2245,7 +2245,8 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
-            reasoning_closed_by_prompt: None,
+            minimax_m3_prompt_tail: None,
+            backend_holds_guided_grammar: false,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };
@@ -2317,7 +2318,8 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
-            reasoning_closed_by_prompt: None,
+            minimax_m3_prompt_tail: None,
+            backend_holds_guided_grammar: false,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };
