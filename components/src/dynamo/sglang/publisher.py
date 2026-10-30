@@ -416,7 +416,10 @@ class DynamoSglangPublisher:
             connect_ip = kv_event_connect_ip(base_ep)
             # Event tokens carry SGLang's own multimodal pad values on builds
             # with sgl-project/sglang#43043; the normalizer excludes them.
-            engine_owned_mm_identity = sglang_uses_engine_owned_mm_identity()
+            # Pass the active processor so we don't falsely flag non-Kimi models.
+            _tm = getattr(self.engine, "tokenizer_manager", None)
+            _mm_proc = getattr(_tm, "mm_processor", None)
+            engine_owned_mm_identity = sglang_uses_engine_owned_mm_identity(_mm_proc)
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)

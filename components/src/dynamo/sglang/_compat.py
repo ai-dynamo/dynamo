@@ -379,20 +379,32 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def sglang_uses_engine_owned_mm_identity() -> bool:
-    """Whether this SGLang derives multimodal pad values from its own identity.
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether this SGLang build and processor derive multimodal pad values from engine-owned identity.
 
-    sgl-project/sglang#43043 replaced the 30-bit per-item pad value with four
-    wide values (``MultimodalDataItem.pad_values``). Caller ``mm_hashes`` then
-    no longer reproduce Dynamo's routing pad, Kimi rejects them outright, and
-    event token ids exceed 32 bits.
+    sgl-project/sglang#43043 added ``MultimodalDataItem.pad_values`` as a
+    class-level field, but only Kimi-family processors call ``set_identity``
+    to populate it from engine-owned state. All other processors (Qwen, etc.)
+    still derive pad values from caller-provided ``mm_hashes``, so disabling
+    caller hashes for them would silently regress their MM routing to
+    text-prefix-only. Check the active processor's module to distinguish.
+
+    When ``mm_processor`` is ``None`` (processor not yet available), the
+    function is conservative: it returns ``True`` on a post-43043 build so
+    that callers err toward safety rather than forwarding hashes that the
+    engine may reject.
     """
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
         from sglang.srt.managers.schedule_batch import MultimodalDataItem
     except ImportError:
         return False
-    return "pad_values" in MultimodalDataItem.__struct_fields__
+    if "pad_values" not in MultimodalDataItem.__struct_fields__:
+        return False
+    # Post-43043 SGLang: only Kimi-family processors own mm identity.
+    if mm_processor is not None:
+        return "kimi" in type(mm_processor).__module__
+    return True  # conservative: unknown processor on a wide-pad build
 
 
 def supports_external_mm_hashes(engine: Any) -> bool:
@@ -405,14 +417,15 @@ def supports_external_mm_hashes(engine: Any) -> bool:
 
     Builds that own multimodal identity never get caller hashes.
     """
-    if sglang_uses_engine_owned_mm_identity():
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_proc = getattr(tokenizer_manager, "mm_processor", None)
+    if sglang_uses_engine_owned_mm_identity(mm_proc):
         return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False

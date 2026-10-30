@@ -33,6 +33,7 @@ from dynamo.sglang._compat import (
     publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_uses_engine_owned_mm_identity,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
 )
@@ -1091,7 +1092,7 @@ async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatc
     # The repair applies to SGLang builds that still derive pad values from
     # caller hashes.
     monkeypatch.setattr(
-        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda: False
+        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda mm_processor=None: False
     )
     item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
@@ -1129,7 +1130,7 @@ def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatc
     # sgl-project/sglang#43043 builds derive wide pad values from their own
     # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
     monkeypatch.setattr(
-        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda: True
+        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda mm_processor=None: True
     )
 
     class MmHashEngine:
@@ -1137,6 +1138,44 @@ def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatc
             return None
 
     assert not supports_external_mm_hashes(MmHashEngine())
+
+
+def test_engine_owned_mm_identity_probe_with_legacy_and_wide_pad_schemas(monkeypatch):
+    # Test the probe directly rather than mocking its result, so a regression
+    # in capability detection is caught.
+    import sys
+    import types
+
+    def _fake_schedule_batch(struct_fields):
+        mod = types.ModuleType("sglang.srt.managers.schedule_batch")
+        mod.MultimodalDataItem = type(
+            "MultimodalDataItem", (), {"__struct_fields__": struct_fields}
+        )
+        return mod
+
+    # Legacy schema (no pad_values): always False regardless of processor.
+    legacy_mod = _fake_schedule_batch(("hash", "pad_value", "modality"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", legacy_mod)
+    assert not sglang_uses_engine_owned_mm_identity()
+    assert not sglang_uses_engine_owned_mm_identity(SimpleNamespace())
+
+    # Wide-pad schema: True only for Kimi-family processors.
+    wide_mod = _fake_schedule_batch(("hash", "pad_value", "pad_values", "modality"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", wide_mod)
+
+    class _KimiProc:
+        pass
+
+    _KimiProc.__module__ = "sglang.srt.multimodal.processors.kimi_k3"
+
+    class _QwenProc:
+        pass
+
+    _QwenProc.__module__ = "sglang.srt.multimodal.processors.qwen_vl"
+
+    assert sglang_uses_engine_owned_mm_identity(_KimiProc())  # Kimi owns identity
+    assert not sglang_uses_engine_owned_mm_identity(_QwenProc())  # Qwen does not
+    assert sglang_uses_engine_owned_mm_identity()  # conservative: no processor given
 
 
 @pytest.mark.parametrize(
