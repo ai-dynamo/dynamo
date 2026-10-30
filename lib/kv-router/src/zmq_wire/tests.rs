@@ -84,6 +84,10 @@ fn trtllm_invalid_image_metadata_fails_closed() {
             "/mm_keys/0/0/uuid",
             serde_json::json!("dynamo-image-v1:invalid"),
         ),
+        (
+            "/mm_keys/0/0/uuid",
+            serde_json::json!("dynamo-image-v1:+123456789abcdef"),
+        ),
     ] {
         let mut event = valid.clone();
         *event.pointer_mut(pointer).unwrap() = replacement;

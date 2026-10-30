@@ -103,7 +103,7 @@ fn key_pad(key: &MediaKey) -> Option<u32> {
         return None;
     }
     let hash = key.uuid.as_deref()?.strip_prefix("dynamo-image-v1:")?;
-    if hash.len() != 16 {
+    if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let hash = u64::from_str_radix(hash, 16).ok()?;

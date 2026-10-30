@@ -170,6 +170,31 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
 }
 
 #[test]
+fn image_url_aliases_keep_distinct_routing_hints() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    for (url, hash) in [
+        ("https://example.com/first.png", "0123456789abcdef"),
+        ("https://example.com/alias.png", "fedcba9876543210"),
+    ] {
+        let mut req = request();
+        add_images(&mut req, [url]);
+        req.extra_args = Some(json!({"mm_hashes": [hash]}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11, 22, 33],
+            expanded_prompt_len: 3,
+            ..Default::default()
+        });
+        let native = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap();
+        assert_eq!(native.media[0].uuid, format!("dynamo-image-v1:{hash}"));
+        assert_eq!(
+            native.media[0].source,
+            Some(pb::media_item::Source::Url(url.into()))
+        );
+    }
+}
+
+#[test]
 fn malformed_image_routing_hashes_are_rejected_before_dispatch() {
     for hashes in [
         json!([]),
