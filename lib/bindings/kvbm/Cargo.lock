@@ -2156,6 +2156,7 @@ dependencies = [
  "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-truthy",
@@ -2521,6 +2522,20 @@ dependencies = [
  "validator",
  "velo",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-session-affinity"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "dashmap",
+ "dynamo-router-protocol",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

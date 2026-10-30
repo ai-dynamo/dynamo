@@ -22,7 +22,7 @@ standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:dynamo-zmq", "d
 standalone-slot-tracker = ["dep:axum", "dep:zmq", "dep:dynamo-zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing"]
+testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing"]
 
 [dependencies]
 # repo
@@ -31,6 +31,7 @@ dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
+dynamo-session-affinity = { workspace = true }
 dynamo-zmq = { workspace = true, optional = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }
@@ -84,6 +85,7 @@ tracing-appender = { version = "0.2", optional = true }
 [dev-dependencies]
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }
 dynamo-slot-tracker = { workspace = true, features = ["testing"] }
+dynamo-session-affinity = { workspace = true, features = ["testing"] }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rstest = "0.18.2"

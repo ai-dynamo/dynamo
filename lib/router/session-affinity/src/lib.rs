@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Session bindings in, constraints out: the Dynamo router's session affinity stage.
+//!
 //! Session affinity: pin a session id to the worker (and optionally the DP
 //! rank) that served it, for as long as requests keep arriving within the TTL.
 //!
@@ -23,7 +25,9 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-pub use crate::protocols::WorkerAffinityTarget as AffinityTarget;
+pub mod wire;
+
+pub use dynamo_router_protocol::worker::WorkerAffinityTarget as AffinityTarget;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;
@@ -222,7 +226,8 @@ pub enum AcquireStep {
 }
 
 impl SessionAffinity {
-    pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), AffinityError> {
+    /// Rejects a TTL outside the supported range; the router validates its config with it.
+    pub fn validate_ttl(ttl: Duration) -> Result<(), AffinityError> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
         {

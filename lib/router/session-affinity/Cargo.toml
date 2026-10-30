@@ -1,0 +1,29 @@
+[package]
+name = "dynamo-session-affinity"
+description = "Session bindings in, constraints out: the Dynamo router's session affinity stage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = []
+
+[dependencies]
+dynamo-router-protocol = { workspace = true }
+blake3 = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

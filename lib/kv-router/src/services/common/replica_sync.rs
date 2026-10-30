@@ -35,31 +35,7 @@ const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 const AFFINITY_TOPIC: &[u8] = b"dynamo.session-affinity.v1";
 pub(crate) const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
-/// One replicated session binding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AffinityBindingEvent {
-    #[serde(flatten)]
-    pub partition: RoutingPartitionId,
-    pub session_id: String,
-    pub worker_id: u64,
-    pub dp_rank: Option<u32>,
-    pub sequence: u64,
-    pub writer_id: u64,
-}
-
-#[cfg(feature = "standalone-selection")]
-impl AffinityBindingEvent {
-    pub(crate) fn target(&self) -> AffinityTarget {
-        AffinityTarget::new(self.worker_id, self.dp_rank)
-    }
-
-    pub(crate) fn version(&self) -> AffinityVersion {
-        AffinityVersion {
-            sequence: self.sequence,
-            writer_id: self.writer_id,
-        }
-    }
-}
+pub use dynamo_session_affinity::wire::AffinityBindingEvent;
 
 #[cfg(feature = "standalone-selection")]
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
