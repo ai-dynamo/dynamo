@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # The test writes trace.jsonl, gzip-compressed, to retune/w-1.jsonl.gz on the request-traces claim
-# before it applies this Request. The direct generator renders the Candidate without the AIC
-# generator bridge.
+# before it applies this Request.
 apiVersion: nvidia.com/v1beta2
 kind: DynamoGraphDeploymentRequest
 metadata:
@@ -32,6 +31,10 @@ spec:
         mode: aggregated
         context_length: 32768
         workers:
+          # TODO(#17581): Remove this explicit value after AISimulate preserves an unset runtime block size.
+          aggregated:
+            kv_cache:
+              block_size: 64
           prefill: null
           decode: null
       optimizer:
@@ -40,7 +43,6 @@ spec:
         parallelism: 1
         candidate_timeout_seconds: 120
       dgdr_run:
-        generator: direct
         snapshot_interval_seconds: 0
   recommendation:
     maxCandidates: 1
