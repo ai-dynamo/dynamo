@@ -467,6 +467,17 @@ async def test_frontend_only_unready_keeps_worker_drain_guard():
 
 
 @pytest.mark.asyncio
+async def test_frontend_only_unready_ignores_terminating_frontend_pod():
+    pods = _frontend_short_pods()
+    pods[-1].metadata.deletion_timestamp = datetime.now(timezone.utc)
+    connector = _connector(_frontend_short_deployment(), pods)
+
+    await connector.set_component_replicas(_decode_target(3), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 3)
+
+
+@pytest.mark.asyncio
 async def test_frontend_only_unready_requires_pod_snapshot():
     connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
     connector.kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)

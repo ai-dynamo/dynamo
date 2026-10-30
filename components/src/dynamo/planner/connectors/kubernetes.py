@@ -1243,6 +1243,20 @@ class KubernetesConnector(PlannerConnector):
         # checks: status can read settled while old worker Pods still terminate.
         if not ready or frontend_only_unready or scale_down_pending or reducing:
             startup_pods = self._list_startup_pods()
+            if startup_pods is not None and frontend_only_unready:
+                # Gate only on worker Pods; a terminating Frontend must not
+                # block worker scaling.
+                frontends = {
+                    name
+                    for name, spec in get_components_by_name(deployment).items()
+                    if get_component_type(spec) == "frontend"
+                }
+                startup_pods = [
+                    pod
+                    for pod in startup_pods
+                    if (pod.metadata.labels or {}).get(DYNAMO_COMPONENT_LABEL)
+                    not in frontends
+                ]
             if startup_pods is None:
                 # Keep ordinary Ready-deployment scaling working with old RBAC.
                 # Never release an accepted startup reversal without observing
