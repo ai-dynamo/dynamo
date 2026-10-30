@@ -205,12 +205,21 @@ docker-push: ## Push the image.
 # (1 keeps the clusters when the run fails, always also after a pass),
 # E2E_SKIP_BUILD (1 reuses the images of an earlier run), E2E_TIMEOUT.
 E2E_DIR ?= test/e2e
-E2E_PHASES ?= 1 2 3
-export E2E_PHASES
+E2E_PROVIDER ?= dynamo
+E2E_PHASES ?= $(if $(filter cilium,$(E2E_PROVIDER)),3,1 2 3)
+export E2E_PROVIDER E2E_PHASES
 
 .PHONY: e2e
 e2e: kind ## Run the kind end-to-end test of the registry, the controller and the Global Discovery Service.
 	KIND=$(KIND) $(E2E_DIR)/run.sh
+
+.PHONY: e2e-runner-test
+e2e-runner-test: ## Check runner cleanup and exit statuses without creating clusters.
+	bash $(E2E_DIR)/runner_test.sh
+
+.PHONY: e2e-discovery
+e2e-discovery: e2e-runner-test kind ## Run the same strict discovery cases with E2E_PROVIDER=dynamo or cilium.
+	E2E_PHASES=3 E2E_STRICT=1 KIND=$(KIND) $(E2E_DIR)/run.sh
 
 .PHONY: e2e-down
 e2e-down: kind ## Delete the kind clusters of the end-to-end test.

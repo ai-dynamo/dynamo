@@ -102,9 +102,20 @@ summary and exits non-zero on a failure.
 
 ```bash
 make e2e E2E_PHASES="1 2 3"
+make e2e-discovery E2E_PROVIDER=dynamo               # shared discovery suite, strict mode
+make e2e-discovery E2E_PROVIDER=cilium               # identical cases, external MCS provider
 make e2e E2E_PHASES=2 E2E_KEEP=always E2E_SKIP_BUILD=1   # iterate against kept clusters
 make e2e-down
+make e2e-down E2E_PROVIDER=cilium
 ```
+
+Cilium mode installs Cilium 1.20.4 with MCS and EndpointSlice synchronization
+in two dedicated clusters, without the bundled registry or controller. Both
+providers use the same phase-3 headless Services and discovery/lifecycle
+assertions. `e2e-discovery` fails on skipped cases or known gaps, and the CI
+provider matrix invokes this same target. Add discovery cases once; Cilium
+keeps this boundary independent of bundled MCS features. See the
+[provider boundary and test settings](test/e2e/README.md).
 
 `kind` installs into `bin/`. The Docker host needs `fs.inotify.max_user_instances`
 of at least 256 for three clusters (colima: `colima ssh -- sudo sysctl -w
@@ -293,8 +304,9 @@ registry; it watches the EndpointSlices the controller writes:
   of slices per source cluster, the local cluster included, so every
   cluster's endpoints of a Service are told apart. Each slice also carries
   `topology.kubernetes.io/region` when the source cluster registered a
-  region. The service reads it as the pool's region once ai-dynamo/dynamo#17604
-  lands; until then a pool's region is its cluster id.
+  region. The service reads it as the pool's region, using the backend fix
+  from [#17604](https://github.com/ai-dynamo/dynamo/pull/17604). Without the
+  label, a pool's region remains its cluster id.
 - A pool is a Service named `<DGD name><--pool-service-suffix>` (default
   `-pool-relay`) in a source cluster; the Global Router's replicas are the
   ready endpoints of the Service given by `--router-namespace` and

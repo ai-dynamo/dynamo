@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # variables are shared with the other sourced files
 #
-# Phase 3: the Global Discovery Service reads what mcs-controller imports. It
+# Phase 3: the Global Discovery Service reads what the MCS provider imports. It
 # runs in the hub with --pool-discovery mcs; cluster a runs the pool demo (two
 # pods, the Services demo-pool-relay and demo-frontend, exported) and the hub
 # runs the router Service gr/global-router (two pods, exported). Namespaces
@@ -88,6 +88,21 @@ pool_region_seen() {
   [ -n "${POOL_REGION}" ]
 }
 
+# The region label is optional; both providers must satisfy the same GDS contract.
+pool_region_matches_import() {
+  local slices expected
+  pool_region_seen || return 1
+  slices="$(kc hub --request-timeout=10s -n "${P3_POOL_NS}" get endpointslices \
+    -l multicluster.kubernetes.io/service-name=demo-pool-relay,multicluster.kubernetes.io/source-cluster=a -o json)" || return 1
+  expected="$(jq -er '
+    select(.items | length > 0) |
+    [.items[].metadata.labels["topology.kubernetes.io/region"] | select(. != null and . != "")] | unique |
+    if length == 0 then "a" elif length == 1 then .[0] else error("conflicting imported region labels") end
+  ' <<<"${slices}")" || { LAST_OBSERVED="missing imported slices or conflicting region labels"; return 1; }
+  LAST_OBSERVED="location.region [${POOL_REGION}]; expected [${expected}] from imported region label or source-cluster fallback"
+  [ "${POOL_REGION}" = "${expected}" ]
+}
+
 # routers_are: GET /routers lists the ready global-router pods of the hub as
 # hub/<pod> with http://<pod IP>:<port> URLs, the port of the slice (the
 # container port).
@@ -117,10 +132,6 @@ p3_export() {
 
 run_phase_3() {
   section "Phase 3: the Global Discovery Service on the imports"
-  if ! has_cluster a || ! has_cluster hub; then
-    skip "phase 3 needs the clusters hub and a"
-    return 0
-  fi
   once "Global Discovery Service (--pool-discovery mcs) in the hub, router gr/global-router (2 pods) in the hub, pool demo (2 pods) in a" \
     p3_setup || return 0
   expect "ServiceExport global-router in the hub: Valid=True and Ready=True" \
@@ -131,13 +142,8 @@ run_phase_3() {
   expect "ServiceImports demo-pool-relay and demo-frontend in the hub" p3_imports_in_hub || true
 
   expect "GET /pools lists one complete pool: cluster_id a, namespace demo, dgd_name demo (demo-frontend is not a pool)" pool_listed || true
-  if expect "the pool has a location.region" pool_region_seen; then
-    case "${POOL_REGION}" in
-      region-a) pass "pool location.region is region-a, the topology.kubernetes.io/region of its slices" ;;
-      a) gap "pool location.region is region-a" "the service reports the source cluster id (a): it does not read the topology.kubernetes.io/region label that mcs-controller sets on the slices; ai-dynamo/dynamo#17604 adds that read" ;;
-      *) fail "pool location.region is region-a" "got ${POOL_REGION}" ;;
-    esac
-  fi
+  expect "the pool has a location.region" pool_region_seen || true
+  expect "pool location.region follows the imported region label or source-cluster fallback" pool_region_matches_import || true
   if expect "pool relay_identities name the relay pods or one bound relay pod by address" relay_identities_are_bound; then
     log "relay_identities kind: ${RELAY_IDENTITIES_KIND}"
   fi

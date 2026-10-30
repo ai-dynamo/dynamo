@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: MCS Provider Discovery
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/mcs-provider-e2e.yml
+      - .dockerignore
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - container/Dockerfile.global-discovery-service
+      - deploy/global-discovery-mcs/**
+      - deploy/helm/charts/global-discovery-mcs/**
+      - lib/global-discovery-service/**
+      - lib/global-router/**
+      # GDS workspace dependencies, including the runtime's truthy dependency.
+      - lib/global-common/**
+      - lib/http-server/**
+      - lib/runtime/**
+      - lib/truthy/**
+      - '!**/*.md'
+      - '!deploy/global-discovery-mcs/test/e2e/assets/**'
+      - '!deploy/global-discovery-mcs/test/e2e/results/**'
+
+concurrency:
+  group: mcs-provider-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [dynamo, cilium]
+    env:
+      E2E_PROVIDER: ${{ matrix.provider }}
+      E2E_PREFIX: mcs-provider-${{ matrix.provider }}
+      E2E_WORK_DIR: ${{ github.workspace }}/deploy/global-discovery-mcs/bin/provider-ci
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/global-discovery-mcs/go.mod
+          cache-dependency-path: deploy/global-discovery-mcs/go.sum
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.21.0
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcs-helm"
+          cd "$RUNNER_TEMP/mcs-helm"
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error "https://get.helm.sh/${archive}" -o "$archive"
+          curl --fail --location --silent --show-error "https://get.helm.sh/${archive}.sha256sum" -o checksum
+          sha256sum --check checksum
+          tar -xzf "$archive"
+          echo "$PWD/linux-amd64" >> "$GITHUB_PATH"
+      - name: Run shared Global Discovery Service assertions
+        run: |
+          set -o pipefail
+          make -C deploy/global-discovery-mcs e2e-discovery 2>&1 | tee mcs-provider.log
+      - name: Upload results and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: mcs-provider-${{ matrix.provider }}
+          path: |
+            mcs-provider.log
+            deploy/global-discovery-mcs/bin/provider-ci/reports/
+            deploy/global-discovery-mcs/bin/provider-ci/*.log
+          if-no-files-found: warn

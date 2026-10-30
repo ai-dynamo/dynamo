@@ -58,6 +58,9 @@ sboms-extract/
 .venv
 .venv-docs
 
+# Local MCS tools and kind state include private kubeconfigs.
+deploy/global-discovery-mcs/bin/
+
 # GPU Memory Service build artifacts
 lib/gpu_memory_service/build/
 lib/gpu_memory_service/*.egg-info/
