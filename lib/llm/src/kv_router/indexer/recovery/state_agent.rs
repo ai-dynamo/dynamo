@@ -2404,6 +2404,7 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::protocols::ResidencyOwnerKeyExt;
     use std::{collections::HashMap, sync::Arc};
 
     use dynamo_kv_router::identity::{

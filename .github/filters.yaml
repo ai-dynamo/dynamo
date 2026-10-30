@@ -148,6 +148,9 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Developer tooling for the router crate split (proves a move is a move);
+  # no CI job consumes it.
+  - 'scripts/router_move_diff.py'
   # Pre-commit generator for the Python media protocol models. Its outputs are
   # covered by `core` and `frontend`; the generate-media-protocols hook
   # validates the script itself.
@@ -505,6 +508,10 @@ rust:
   # changes.
   - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
   - 'lib/bindings/python/src/dynamo/prometheus_names.py'
+  # The rust-clippy job runs the router crate layering check; it reads the
+  # whole lib/router tree, Rust sources and per-crate docs alike.
+  - 'scripts/router_layering_check.sh'
+  - 'lib/router/**'
 
 benchmarks:
   - 'benchmarks/**'

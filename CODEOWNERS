@@ -73,9 +73,11 @@
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
+/lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                                                   @ai-dynamo/dynamo-router-codeowners
+/lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                                             @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/recovery/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/zmq_wire/                                                                            @ai-dynamo/dynamo-router-codeowners

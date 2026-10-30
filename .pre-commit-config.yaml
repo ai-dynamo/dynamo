@@ -224,6 +224,15 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pyyaml
+    - id: router-layering
+      name: Router crates have exactly the dependency edges the split allows
+      entry: bash scripts/router_layering_check.sh
+      language: system
+      # Per-crate checks only. The host-resolved checks (--host) take about a
+      # minute of cargo tree, so the rust-clippy job in pre-merge.yml runs them.
+      files: ^(lib/router/|lib/kv-router/|Cargo\.toml|Cargo\.lock|scripts/router_layering_check\.sh)
+      pass_filenames: false
+      always_run: false
     - id: check-action-pins
       name: GitHub Actions pinned to a commit SHA with a version comment
       entry: python3 scripts/check_action_pins.py

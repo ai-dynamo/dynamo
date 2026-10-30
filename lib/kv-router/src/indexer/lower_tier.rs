@@ -14,6 +14,7 @@
 //! duplicate or conflicting store arrives, the existing mapping wins and the new
 //! event is ignored.
 
+use crate::protocols::ResidencyOwnerKeyExt;
 use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex};
 
@@ -1580,6 +1581,7 @@ fn finalize_workers(
 #[cfg(test)]
 mod tests {
     use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
+    use crate::protocols::ResidencyOwnerKeyExt;
     use rustc_hash::FxHashMap;
 
     use crate::identity::{

@@ -8,6 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::protocols::ResidencyOwnerKeyExt;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -1874,7 +1875,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
     let booking = |attempt: u64| SchedulerBookingDescriptor {
         request_id: "shared".to_string(),
         worker: WorkerWithDpRank::new(1, 0),
-        attempt_id: AttemptId::new(attempt),
+        attempt_id: AttemptId::for_testing(attempt),
     };
     let row =
         |partition: &RoutingPartitionId, booking: Option<SchedulerBookingDescriptor>| Reservation {
@@ -1953,7 +1954,7 @@ async fn index_observer_releases_displaced_affinity_after_unlock() {
     });
     assert!(table.enable_replication(1, sink.clone()));
     let replacement = SchedulerBookingDescriptor {
-        attempt_id: AttemptId::new(999),
+        attempt_id: AttemptId::for_testing(999),
         ..booking
     };
     let observer = ReservationIndexObserver {
@@ -2003,7 +2004,7 @@ async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     let peer = SchedulerBookingDescriptor {
         request_id: "shared".to_string(),
         worker: WorkerWithDpRank::new(1, 0),
-        attempt_id: AttemptId::new(999),
+        attempt_id: AttemptId::for_testing(999),
     };
     observer.admitted(peer.clone());
     observer.completed(&peer);

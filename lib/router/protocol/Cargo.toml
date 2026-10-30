@@ -1,0 +1,24 @@
+[package]
+name = "dynamo-router-protocol"
+description = "Identities and worker-facing wire vocabulary shared by the Dynamo router crates"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+# Chosen attempt ids for tests and benchmarks; never enable in release builds.
+testing = []
+bench = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rmp-serde = { workspace = true }

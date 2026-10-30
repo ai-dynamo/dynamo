@@ -415,6 +415,7 @@ impl KvTransferSourceSummary {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocols::ResidencyOwnerKeyExt;
     use std::sync::Arc;
 
     use super::*;

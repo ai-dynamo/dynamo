@@ -2629,6 +2629,7 @@ dependencies = [
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
+ "dynamo-router-protocol",
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
@@ -2985,6 +2986,16 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-router-protocol"
+version = "1.7.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

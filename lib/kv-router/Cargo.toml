@@ -16,18 +16,19 @@ readme = "README.md"
 default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
-bench = []
+bench = ["dynamo-router-protocol/bench"]
 profile = []
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = []
+testing = ["dynamo-router-protocol/testing"]
 
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-truthy = { workspace = true }
 
@@ -81,6 +82,7 @@ reqwest = { version = "0.12.24", default-features = false, features = ["json", "
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"

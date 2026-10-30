@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     fn attempt(value: u64) -> AttemptId {
-        AttemptId::new(value)
+        AttemptId::for_testing(value)
     }
 
     fn block(value: u64) -> ApproximateLruBlock {

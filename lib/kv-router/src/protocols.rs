@@ -10,8 +10,7 @@ use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::identity::CacheOwnerId;
 use crate::kv_hints::{CacheOwnerKvTransferKeys, KvTransferSourceChoice, WorkerKvTransferKeys};
@@ -447,122 +446,25 @@ pub trait RouterEventSink: Send + Sync {
     -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-/// A worker identifier.
-pub type WorkerId = u64;
+pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+pub use dynamo_router_protocol::load::{ActiveLoad, SchedulerGroup, SchedulerLoad};
+pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+pub use dynamo_router_protocol::residency::{
+    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
+    UnsupportedResidencyDomain, WireResidencyDomain,
+};
+pub use dynamo_router_protocol::worker::{
+    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+};
 
-/// A data parallel rank identifier.
-pub type DpRank = u32;
-
-/// A worker identifier combined with its data parallel rank.
-/// Used for routing decisions in data parallel setups.
-/// dp_rank = 0 indicates either DP not enabled or the first rank.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct WorkerWithDpRank {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
+/// Compact BLAKE3 keying of a residency owner. Hashing is router logic, so it lives here and
+/// not in the wire crate that owns [`ResidencyOwner`].
+pub trait ResidencyOwnerKeyExt {
+    fn compact_key(self) -> ResidencyOwnerKey;
 }
 
-/// A worker affinity target that may apply to every data-parallel rank of a worker.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct WorkerAffinityTarget {
-    pub worker_id: WorkerId,
-    pub dp_rank: Option<DpRank>,
-}
-
-impl WorkerAffinityTarget {
-    pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
-        Self { worker_id, dp_rank }
-    }
-}
-
-impl From<WorkerWithDpRank> for WorkerAffinityTarget {
-    fn from(worker: WorkerWithDpRank) -> Self {
-        Self::new(worker.worker_id, Some(worker.dp_rank))
-    }
-}
-
-impl WorkerWithDpRank {
-    pub fn new(worker_id: WorkerId, dp_rank: DpRank) -> Self {
-        Self { worker_id, dp_rank }
-    }
-
-    pub fn from_worker_id(worker_id: WorkerId) -> Self {
-        Self {
-            worker_id,
-            dp_rank: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum StorageTier {
-    #[default]
-    Device,
-    HostPinned,
-    Disk,
-    External,
-}
-
-/// Logical lifetime that owns a cache residency independently of its physical tier.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ResidencyDomain {
-    #[default]
-    Worker,
-    CacheOwner,
-}
-
-/// Exact logical owner recorded inside a physical-tier index.
-///
-/// Worker ownership is tied to one serving attachment. Cache-owner ownership
-/// is stable across those attachments and is projected to a ready worker only
-/// by the lib/llm reconciliation layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResidencyOwner {
-    Worker(WorkerWithDpRank),
-    CacheOwner(CacheOwnerId),
-}
-
-/// Compact mutation-path identity for an exact residency owner.
-///
-/// Lower-tier edges carry this fixed-size value instead of embedding the full
-/// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
-/// reverse index once per logical owner so dumps can round-trip it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResidencyOwnerKey([u8; 16]);
-
-impl ResidencyOwnerKey {
-    pub const fn digest(self) -> [u8; 16] {
-        self.0
-    }
-}
-
-impl ResidencyOwner {
-    pub const fn worker(worker: WorkerWithDpRank) -> Self {
-        Self::Worker(worker)
-    }
-
-    pub const fn cache_owner(cache_owner: CacheOwnerId) -> Self {
-        Self::CacheOwner(cache_owner)
-    }
-
-    pub const fn domain(self) -> ResidencyDomain {
-        match self {
-            Self::Worker(_) => ResidencyDomain::Worker,
-            Self::CacheOwner(_) => ResidencyDomain::CacheOwner,
-        }
-    }
-
-    pub const fn as_worker(self) -> Option<WorkerWithDpRank> {
-        match self {
-            Self::Worker(worker) => Some(worker),
-            Self::CacheOwner(_) => None,
-        }
-    }
-
-    pub fn compact_key(self) -> ResidencyOwnerKey {
+impl ResidencyOwnerKeyExt for ResidencyOwner {
+    fn compact_key(self) -> ResidencyOwnerKey {
         let mut hasher = blake3::Hasher::new();
         match self {
             Self::Worker(worker) => {
@@ -576,7 +478,7 @@ impl ResidencyOwner {
             }
         }
         let digest = hasher.finalize();
-        ResidencyOwnerKey(
+        ResidencyOwnerKey::from_digest(
             digest.as_bytes()[..16]
                 .try_into()
                 .expect("BLAKE3 output is 32 bytes"),
@@ -647,20 +549,6 @@ impl ResidencyProjection {
     pub fn is_empty(&self) -> bool {
         self.exact_owners.is_empty()
     }
-}
-
-/// Persistent source metadata used to resolve a cache owner into a router hint.
-///
-/// This is advisory discovery metadata. Endpoint health and ownership takeover
-/// are guaranteed by the persistent cache implementation, not probed by Dynamo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RouterHintSourceMetadata {
-    pub source_control_endpoint: String,
-    pub worker_type: String,
-    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
-    /// targets with a `kv_transfer_domain` only fetch from the same island.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub topology_domains: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,182 +626,6 @@ pub enum ResidencyProjectionError {
         existing: WorkerWithDpRank,
         proposed: WorkerWithDpRank,
     },
-}
-
-/// Scope of a cache-residency reset.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ResetScope {
-    #[default]
-    All,
-    Domain(ResidencyDomain),
-}
-
-/// Tolerant wire representation for the additive `residency_domain` field.
-///
-/// `Missing` is the legacy compatibility signal. Unsupported values stay at
-/// the wire boundary and never enter [`ResidencyDomain`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum WireResidencyDomain {
-    #[default]
-    Missing,
-    Known(ResidencyDomain),
-    Unknown(Box<str>),
-    Invalid,
-}
-
-impl WireResidencyDomain {
-    pub fn explicit(domain: ResidencyDomain) -> Self {
-        Self::Known(domain)
-    }
-
-    fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-
-    pub fn parse(&self) -> Result<Option<ResidencyDomain>, UnsupportedResidencyDomain> {
-        match self {
-            Self::Missing => Ok(None),
-            Self::Known(domain) => Ok(Some(*domain)),
-            Self::Unknown(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
-        }
-    }
-}
-
-impl Serialize for WireResidencyDomain {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Missing | Self::Invalid => serializer.serialize_none(),
-            Self::Known(ResidencyDomain::Worker) => serializer.serialize_str("worker"),
-            Self::Known(ResidencyDomain::CacheOwner) => serializer.serialize_str("cache_owner"),
-            Self::Unknown(value) => serializer.serialize_str(value),
-        }
-    }
-}
-
-struct WireResidencyDomainVisitor;
-
-impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
-    type Value = WireResidencyDomain;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a residency-domain string")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(match value {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            value => WireResidencyDomain::Unknown(value.into()),
-        })
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(match value.as_str() {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            _ => WireResidencyDomain::Unknown(value.into_boxed_str()),
-        })
-    }
-
-    fn visit_char<E>(self, _value: char) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_bytes<E>(self, _value: &[u8]) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_byte_buf<E>(self, _value: Vec<u8>) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        // Explicit null is malformed. Only an omitted field selects legacy
-        // semantics; treating null as omission would turn a malformed clear
-        // into an all-domain reset.
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        // MessagePack nil follows the same contract as JSON null above.
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while sequence.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(WireResidencyDomain::Invalid)
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(WireResidencyDomain::Invalid)
-    }
-}
-
-impl<'de> Deserialize<'de> for WireResidencyDomain {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(WireResidencyDomainVisitor)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("unsupported residency domain")]
-pub struct UnsupportedResidencyDomain;
-
-impl StorageTier {
-    pub fn from_kv_medium(medium: &str) -> Option<Self> {
-        match medium {
-            "GPU" | "DEVICE" => Some(Self::Device),
-            "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
-            "CPU_TIER2" | "DISK" | "NVME" | "STORAGE" => Some(Self::Disk),
-            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
-            _ => None,
-        }
-    }
-
-    /// Canonical wire-format medium string. `None` for the default GPU tier so
-    /// existing consumers that omit the field continue to round-trip.
-    pub fn to_kv_medium(self) -> Option<&'static str> {
-        match self {
-            Self::Device => None,
-            Self::HostPinned => Some("CPU_PINNED"),
-            Self::Disk => Some("DISK"),
-            Self::External => Some("EXTERNAL"),
-        }
-    }
-
-    pub fn is_gpu(self) -> bool {
-        matches!(self, Self::Device)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1175,83 +887,6 @@ pub struct SelectionTrace {
     pub rows: Vec<SelectionTraceRow>,
 }
 
-/// One router scheduler's view of a worker rank's in-flight load.
-///
-/// Routers publish this on the scheduler-load subject; workers never do.
-/// Fields added after the first release must be `#[serde(default)]`, and `Option`
-/// when absent does not mean zero.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SchedulerLoad {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
-    pub active_decode_blocks: u64,
-    pub active_prefill_tokens: u64,
-    pub group: SchedulerGroup,
-}
-
-/// Which schedulers' views describe the same requests.
-///
-/// Views within one group overlap, so consumers take their maximum; views from
-/// different groups are disjoint, so consumers sum them.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SchedulerGroup {
-    /// A scheduler that only knows the requests it routed itself.
-    Standalone { scheduler_id: u64 },
-    /// Schedulers that replicate request state, so each reports the group's full load.
-    ReplicaGroup { group_id: String },
-    /// Future aggregation kinds are decoded but cannot contribute to load totals.
-    #[serde(other)]
-    Unknown,
-}
-
-/// Active load metrics for a worker, used for overload detection.
-///
-/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
-/// `active_decode_blocks` and `active_prefill_tokens`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct ActiveLoad {
-    pub worker_id: WorkerId,
-    #[serde(default)]
-    pub dp_rank: DpRank,
-    /// Scheduler-reported decode block load.
-    pub active_decode_blocks: Option<u64>,
-    /// Number of active prefill tokens (from scheduler's view).
-    pub active_prefill_tokens: Option<u64>,
-    /// Total KV blocks currently in use on the worker.
-    ///
-    /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by overload detection.
-    pub kv_used_blocks: Option<u64>,
-}
-
-/// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
-/// and optional LoRA adapter name of a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct LocalBlockHash(pub u64);
-
-/// A sequence-aware hash of a block computed by the engine from token IDs, optional metadata,
-/// and the hash of the parent block.
-///
-/// In this case, the hashing function is external and unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct ExternalSequenceBlockHash(pub u64);
-
-// Implement From trait for convenient conversion
-impl From<u64> for ExternalSequenceBlockHash {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl From<i64> for ExternalSequenceBlockHash {
-    /// Bitwise reinterpretation: preserves all bits, including negatives.
-    /// This is lossless, but negative i64 values will appear as large u64 values.
-    fn from(value: i64) -> Self {
-        Self(value as u64)
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillEvent {
     pub request_id: String,
@@ -1495,44 +1130,6 @@ pub struct KvCacheStoredBlockData {
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-impl Serialize for LocalBlockHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u64(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for LocalBlockHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = u64::deserialize(deserializer)?;
-        Ok(LocalBlockHash(value))
-    }
-}
-
-impl Serialize for ExternalSequenceBlockHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u64(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = u64::deserialize(deserializer)?;
-        Ok(ExternalSequenceBlockHash(value))
-    }
 }
 
 // ------
@@ -2629,18 +2226,6 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_source_topology_is_optional_on_the_wire() {
-        let without_topology = serde_json::json!({
-            "source_control_endpoint": "tcp://owner:23280",
-            "worker_type": "prefill",
-        });
-        let metadata: RouterHintSourceMetadata =
-            serde_json::from_value(without_topology.clone()).unwrap();
-        assert!(metadata.topology_domains.is_empty());
-        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
-    }
-
-    #[test]
     fn test_worker_config_like_topology_domains_default() {
         // A minimal implementor that does NOT override topology_domains()
         struct MinimalConfig;
@@ -2963,46 +2548,5 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
-    }
-
-    #[test]
-    fn scheduler_load_accepts_unknown_fields_but_requires_identity_and_measurements() {
-        let frame = serde_json::json!({
-            "worker_id": 7,
-            "dp_rank": 2,
-            "active_decode_blocks": 10,
-            "active_prefill_tokens": 20,
-            "group": {"kind": "standalone", "scheduler_id": 42, "future_group_field": true},
-            "future_measurement": 99
-        });
-        let batch: Vec<SchedulerLoad> =
-            rmp_serde::from_slice(&rmp_serde::to_vec_named(&vec![frame.clone()]).unwrap()).unwrap();
-        assert_eq!(
-            batch,
-            [SchedulerLoad {
-                worker_id: 7,
-                dp_rank: 2,
-                active_decode_blocks: 10,
-                active_prefill_tokens: 20,
-                group: SchedulerGroup::Standalone { scheduler_id: 42 },
-            }]
-        );
-        for required in [
-            "worker_id",
-            "dp_rank",
-            "group",
-            "active_decode_blocks",
-            "active_prefill_tokens",
-        ] {
-            let mut incomplete = frame.clone();
-            incomplete.as_object_mut().unwrap().remove(required);
-            assert!(
-                rmp_serde::from_slice::<Vec<SchedulerLoad>>(
-                    &rmp_serde::to_vec_named(&vec![incomplete]).unwrap(),
-                )
-                .is_err(),
-                "missing {required} must not become a valid zero-load report"
-            );
-        }
     }
 }

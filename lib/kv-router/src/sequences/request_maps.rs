@@ -3,11 +3,10 @@
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::single::RequestId;
 use crate::protocols::WorkerWithDpRank;
-use crate::scheduling::AttemptId;
+use crate::scheduling::{AttemptId, AttemptIdMinter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RequestBooking {
@@ -33,7 +32,7 @@ pub(super) struct RemovedBooking {
 pub(super) struct RequestIndex {
     request_to_booking: DashMap<RequestId, BookingEntry>,
     request_to_lora: DashMap<RequestId, String>,
-    next_attempt_id: AtomicU64,
+    attempt_ids: AttemptIdMinter,
 }
 
 impl RequestIndex {
@@ -46,8 +45,7 @@ impl RequestIndex {
         match self.request_to_booking.entry(request_id.clone()) {
             Entry::Occupied(entry) => Err(entry.get().booking.worker),
             Entry::Vacant(entry) => {
-                let attempt_id =
-                    AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
+                let attempt_id = self.attempt_ids.mint();
                 entry.insert(BookingEntry {
                     booking: RequestBooking { worker, attempt_id },
                     has_lora: lora_name.is_some(),
@@ -67,7 +65,7 @@ impl RequestIndex {
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
     ) {
-        let attempt_id = AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let attempt_id = self.attempt_ids.mint();
         self.request_to_booking.insert(
             request_id.clone(),
             BookingEntry {
