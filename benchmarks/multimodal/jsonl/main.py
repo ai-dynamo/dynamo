@@ -19,6 +19,7 @@ import argparse
 import json
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,26 @@ from generate_images import (
 )
 from generate_input_text import generate_filler
 from generate_videos import generate_synthetic_video_pool, sample_video_slots
+
+
+def _text_factory(args: argparse.Namespace, py_rng: random.Random) -> Callable[[], str]:
+    """Return the per-row user-text generator.
+
+    With --shared-user-text the filler is drawn once and every row reuses it,
+    so the text becomes a KV prefix shared by every request instead of unique
+    prefill work per request. Called after the image pool is built, so the
+    image RNG draws are unaffected either way and a given --seed yields the
+    same `images` regardless of this setting.
+    """
+    if args.shared_user_text:
+        shared = generate_filler(py_rng, args.user_text_tokens)
+        return lambda: shared
+    return lambda: generate_filler(py_rng, args.user_text_tokens)
+
+
+def _text_tag(args: argparse.Namespace) -> str:
+    """Filename marker keeping shared-text output from clobbering random-text."""
+    return "_sharedtext" if args.shared_user_text else ""
 
 
 def _make_pool(
@@ -74,12 +95,14 @@ def run_single_turn(
 
     output_path = args.output or (
         Path(__file__).parent
-        / f"{num_requests}req_{images_per_request}img_{image_pool}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
+        / f"{num_requests}req_{images_per_request}img_{image_pool}pool_{args.user_text_tokens}word{_text_tag(args)}_{args.image_mode}.jsonl"
     )
+
+    next_text = _text_factory(args, py_rng)
 
     with open(output_path, "w") as f:
         for i in range(num_requests):
-            user_text = generate_filler(py_rng, args.user_text_tokens)
+            user_text = next_text()
             start = i * images_per_request
             images = slot_refs[start : start + images_per_request]
             row: dict = {"text": user_text, "images": images}
@@ -113,8 +136,10 @@ def run_sliding_window(
 
     output_path = args.output or (
         Path(__file__).parent
-        / f"{num_users}u_{turns_per_user}t_{window_size}w_{args.user_text_tokens}word_{args.image_mode}.jsonl"
+        / f"{num_users}u_{turns_per_user}t_{window_size}w_{args.user_text_tokens}word{_text_tag(args)}_{args.image_mode}.jsonl"
     )
+
+    next_text = _text_factory(args, py_rng)
 
     with open(output_path, "w") as f:
         for turn_idx in range(turns_per_user):
@@ -123,7 +148,7 @@ def run_sliding_window(
                 window = pool[offset : offset + window_size]
                 entry: dict = {
                     "session_id": f"user_{user_idx}",
-                    "text": generate_filler(py_rng, args.user_text_tokens),
+                    "text": next_text(),
                     "images": window,
                 }
                 if args.uuid:
@@ -155,13 +180,15 @@ def run_video_single_turn(
 
     output_filename = (
         f"{num_requests}req_{videos_per_request}vid_{video_pool}pool_"
-        f"{args.user_text_tokens}word_local.jsonl"
+        f"{args.user_text_tokens}word{_text_tag(args)}_local.jsonl"
     )
     output_path = args.output or (Path(__file__).parent / output_filename)
 
+    next_text = _text_factory(args, py_rng)
+
     with open(output_path, "w") as f:
         for i in range(num_requests):
-            user_text = generate_filler(py_rng, args.user_text_tokens)
+            user_text = next_text()
             start = i * videos_per_request
             videos = slot_refs[start : start + videos_per_request]
             row: dict = {"text": user_text, "videos": videos}
