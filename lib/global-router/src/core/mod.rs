@@ -141,7 +141,6 @@ pub struct CoreSelector {
     sessions: bool,
     /// Under affinity, when each session's pin was last booked.
     pins: Option<PinRefresh>,
-    /// The gRPC transport, when that is how this replica replicates.
     grpc: Option<GrpcTransport>,
 }
 
