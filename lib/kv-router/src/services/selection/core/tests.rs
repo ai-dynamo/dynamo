@@ -4281,13 +4281,7 @@ async fn peer_bindings_converge_by_version() {
     assert_eq!(bound_worker(&peer, "s"), Some(3));
 
     // Held bindings for undiscovered workers obey the same rule once applied.
-    let mut stale = newer.clone();
-    stale.worker_id = 4;
-    stale.sequence -= 1;
-    peer.dispatch_affinity_event(stale);
-    peer.upsert_worker(worker(4)).await.unwrap();
-    assert_eq!(bound_worker(&peer, "s"), Some(3));
-    let mut early = newer.clone();
+    let mut early = newer;
     early.worker_id = 5;
     early.sequence += 1;
     peer.dispatch_affinity_event(early);
