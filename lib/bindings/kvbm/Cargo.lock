@@ -2129,6 +2129,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
+ "dynamo-zmq",
  "fastrand",
  "flume",
  "futures-util",
@@ -2550,6 +2551,16 @@ name = "dynamo-truthy"
 version = "1.7.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-zmq"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
+ "zmq",
 ]
 
 [[package]]

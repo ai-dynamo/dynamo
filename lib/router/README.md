@@ -29,7 +29,7 @@ On the request path but not router crates: `dynamo-llm` (the frontend host) and 
 
 ## Status
 
-So far `protocol` exists here, `dynamo-kv-hashing` (`lib/kv-hashing`) holds the router's hash contract in its `routing` module, and `dynamo-kv-events` (`lib/kv-events`) holds the event types, the engine ZMQ codec, and the replay cursor. The rest arrive in the order of the split plan: `dynamo-zmq`, the five stages (`kv-indexer`, `slot-tracker`, `session-affinity`, `worker-selection`, `admission`), `dynamo-scheduler`, then `dynamo-kv-router` thinned to composition and the host import rewrite; `dynamo-error` and `dynamo-metrics` land on their own tracks. Until a crate arrives, `lib/kv-router` is the monolith and keeps `pub use` shims for every type that has moved.
+So far `protocol` exists here, `dynamo-kv-hashing` (`lib/kv-hashing`) holds the router's hash contract in its `routing` module, `dynamo-kv-events` (`lib/kv-events`) holds the event types, the engine ZMQ codec, and the replay cursor, and `dynamo-zmq` (`lib/zmq`) holds the socket helper. The rest arrive in the order of the split plan: the five stages (`kv-indexer`, `slot-tracker`, `session-affinity`, `worker-selection`, `admission`), `dynamo-scheduler`, then `dynamo-kv-router` thinned to composition and the host import rewrite; `dynamo-error` and `dynamo-metrics` land on their own tracks. Until a crate arrives, `lib/kv-router` is the monolith and keeps `pub use` shims for every type that has moved.
 
 ## Gate
 

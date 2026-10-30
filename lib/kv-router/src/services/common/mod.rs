@@ -6,7 +6,7 @@
     feature = "standalone-slot-tracker",
     feature = "standalone-selection"
 ))]
-pub(crate) mod zmq;
+pub(crate) use dynamo_zmq as zmq;
 
 #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
 pub(crate) mod http;

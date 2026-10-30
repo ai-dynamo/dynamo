@@ -42,6 +42,7 @@ export LC_ALL=C
 TABLE=(
   "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
   "dynamo-kv-events | dynamo-router-protocol dynamo-kv-hashing | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq | dynamo-kv-hashing dynamo-router-protocol rmp-serde rustc-hash serde serde_json thiserror tracing | -"
+  "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing prometheus axum hyper reqwest | anyhow tokio tracing zmq | -"
   "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
 

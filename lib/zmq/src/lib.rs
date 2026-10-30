@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! One ZMQ socket helper for Dynamo: an async [`ZmqSocket`] over `tokio::io::unix::AsyncFd`,
+//! multipart send and receive, a process-wide context pool sized by `DYN_ZMQ_IO_THREADS`, the
+//! SUB, DEALER, and bound PUB constructors the router adapters and publishers use, and
+//! [`validate_endpoint`]. Nothing here knows about KV events or routing; the codec that reads
+//! the frames is `dynamo-kv-events`, and the listeners that drive these sockets are
+//! `dynamo-kv-router` adapters.
+
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -10,7 +17,7 @@ use std::task::{Context, Poll, ready};
 use anyhow::{Result, anyhow};
 use tokio::io::unix::AsyncFd;
 
-pub(crate) type MultipartMessage = Vec<Vec<u8>>;
+pub type MultipartMessage = Vec<Vec<u8>>;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -105,7 +112,7 @@ impl AsRawFd for SocketWrapper {
     }
 }
 
-pub(crate) struct ZmqSocket(AsyncFd<SocketWrapper>);
+pub struct ZmqSocket(AsyncFd<SocketWrapper>);
 
 impl ZmqSocket {
     fn new(socket: zmq::Socket) -> Result<Self> {
@@ -120,14 +127,13 @@ impl ZmqSocket {
         &self.0.get_ref().socket
     }
 
-    pub(crate) fn connect(&self, endpoint: &str) -> Result<()> {
+    pub fn connect(&self, endpoint: &str) -> Result<()> {
         set_ipv6_for(self.socket(), endpoint)?;
         self.socket().connect(endpoint)?;
         Ok(())
     }
 
-    #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
-    pub(crate) fn disconnect(&self, endpoint: &str) -> Result<()> {
+    pub fn disconnect(&self, endpoint: &str) -> Result<()> {
         self.socket().disconnect(endpoint)?;
         Ok(())
     }
@@ -211,11 +217,11 @@ impl ZmqSocket {
         Poll::Ready(Ok(()))
     }
 
-    pub(crate) async fn recv_multipart(&mut self) -> Result<MultipartMessage> {
+    pub async fn recv_multipart(&mut self) -> Result<MultipartMessage> {
         poll_fn(|cx| self.poll_recv_multipart(cx)).await
     }
 
-    pub(crate) async fn send_multipart(&mut self, frames: MultipartMessage) -> Result<()> {
+    pub async fn send_multipart(&mut self, frames: MultipartMessage) -> Result<()> {
         let mut buffer = frames
             .into_iter()
             .map(zmq::Message::from)
@@ -248,18 +254,12 @@ fn configure_receive_socket(socket: &zmq::Socket) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "standalone-indexer")]
 fn configure_bidirectional_socket(socket: &zmq::Socket) -> Result<()> {
     configure_receive_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
     Ok(())
 }
 
-#[cfg(any(
-    feature = "standalone-slot-tracker",
-    feature = "standalone-selection",
-    test
-))]
 fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
     configure_common_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
@@ -275,12 +275,11 @@ where
     ZmqSocket::new(socket)
 }
 
-#[cfg(any(test, feature = "standalone-indexer"))]
-pub(crate) fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
+pub fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
     create_sub_socket_topics(&[topic])
 }
 
-pub(crate) fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
+pub fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
     build_socket(zmq::SUB, |socket| {
         configure_receive_socket(socket)?;
         for topic in topics {
@@ -290,15 +289,13 @@ pub(crate) fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
     })
 }
 
-#[cfg(feature = "standalone-indexer")]
-pub(crate) fn connect_sub_socket(endpoint: &str) -> Result<ZmqSocket> {
+pub fn connect_sub_socket(endpoint: &str) -> Result<ZmqSocket> {
     let socket = create_sub_socket(b"")?;
     socket.connect(endpoint)?;
     Ok(socket)
 }
 
-#[cfg(feature = "standalone-indexer")]
-pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
+pub fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
     build_socket(zmq::DEALER, |socket| {
         configure_bidirectional_socket(socket)?;
         set_ipv6_for(socket, endpoint)?;
@@ -307,12 +304,7 @@ pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
     })
 }
 
-#[cfg(any(
-    feature = "standalone-slot-tracker",
-    feature = "standalone-selection",
-    test
-))]
-pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
+pub fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     // Not pooled: the socket holds the only reference to its context, so dropping it
     // terminates the context, which waits until libzmq has closed the listener. The port is
     // free again as soon as the publisher's owner has shut down.
@@ -323,7 +315,7 @@ pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     ZmqSocket::new(socket)
 }
 
-pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
+pub fn validate_endpoint(endpoint: &str) -> Result<()> {
     let (scheme, address) = endpoint
         .split_once("://")
         .ok_or_else(|| anyhow!("invalid ZMQ endpoint `{endpoint}`: missing scheme"))?;

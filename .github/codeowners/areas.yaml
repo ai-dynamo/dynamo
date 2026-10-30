@@ -55,6 +55,7 @@ areas:
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-events/
+  - lib/zmq/
   - lib/kv-router/
   - lib/kv-router/src/indexer/
   - lib/kv-router/src/recovery/

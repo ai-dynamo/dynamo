@@ -1,0 +1,17 @@
+[package]
+name = "dynamo-zmq"
+description = "Async ZMQ socket helper shared by Dynamo's router adapters and KV event publishers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zmq = { workspace = true }
