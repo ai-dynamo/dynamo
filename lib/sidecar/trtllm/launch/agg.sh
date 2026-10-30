@@ -19,7 +19,7 @@ source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_trtllm_o
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/common.sh"    # trtllm_ensure_openengine_bindings, trtllm_resolve_context_length
+source "$SCRIPT_DIR/common.sh"    # OpenEngine bindings, context length, config merge
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -48,8 +48,11 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 30001)"
+            echo "  AGG_ENGINE_ARGS         Base TensorRT-LLM YAML/JSON options file"
             echo "  TRTLLM_CONTEXT_LENGTH   Model context length, applied to both the engine and the"
             echo "                          sidecar (default: 4096; unset when --max_seq_len is given)"
+            echo "  TRTLLM_DISABLE_GUIDED_DECODING=1"
+            echo "                          Disable xgrammar for models that do not support it"
             exit 0
             ;;
         *)
@@ -76,15 +79,13 @@ TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_GRPC_PORT:-30001}")
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
-# forwarded copy would drop the guided-decoding backend and a required or named
-# tool_choice would fail again. Refuse it rather than silently losing the setting.
+# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive. The
+# launcher reserves it for required and profiler overrides; callers can supply
+# base options through AGG_ENGINE_ARGS, which are merged below.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
         --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
-            echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
-            echo "guided_decoding_backend. Add 'guided_decoding_backend: xgrammar'" >&2
-            echo "to your file and run the engine yourself." >&2
+            echo "Cannot forward ${arg%%=*}: use AGG_ENGINE_ARGS instead." >&2
             exit 1
             ;;
     esac
@@ -98,9 +99,17 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 # Dynamo sends a required or named tool_choice as a JSON schema, which
 # TensorRT-LLM enforces only with a guided-decoding backend.
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
-build_trtllm_override_args_with_mem \
-    --merge-with-json '{"guided_decoding_backend": "xgrammar"}' \
-    > "$TRTLLM_EXTRA_CONFIG"
+TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": "xgrammar"}'
+if [[ "${TRTLLM_DISABLE_GUIDED_DECODING:-0}" == "1" ]]; then
+    TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": null}'
+fi
+TRTLLM_OVERRIDES=$(build_trtllm_override_args_with_mem \
+    --merge-with-json "$TRTLLM_REQUIRED_OVERRIDES")
+trtllm_write_merged_config \
+    "${AGG_ENGINE_ARGS:-}" \
+    "$TRTLLM_OVERRIDES" \
+    "$TRTLLM_EXTRA_CONFIG" \
+    "$TRTLLM_PYTHON"
 
 print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \

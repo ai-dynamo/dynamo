@@ -45,6 +45,45 @@ class MediaResponseTests(unittest.TestCase):
             ):
                 runner.validate_response("video", "A rotating triangle.", response, 21)
 
+    def test_audio_requires_expected_transcription_and_completion(self):
+        response = {"prompt_tokens": 0, "completion_tokens": 17}
+        runner.validate_response("audio", "Thoughts affected Hester.", response, 0)
+        with self.assertRaisesRegex(AssertionError, "transcription"):
+            runner.validate_response("audio", "An unrelated sentence.", response, 0)
+        with self.assertRaisesRegex(AssertionError, "token usage"):
+            runner.validate_response(
+                "audio",
+                "Thoughts affected Hester.",
+                {"prompt_tokens": 0, "completion_tokens": 0},
+                0,
+            )
+
+    def test_audio_selects_whisper_without_changing_image_identity(self):
+        config = {
+            "model": "vision",
+            "model_revision": "vision-revision",
+            "image": "official@sha256:digest",
+            "upstream_commit": "commit",
+            "audio": {"model": "whisper", "model_revision": "audio-revision"},
+        }
+        selected = runner.model_config(config, "audio")
+        self.assertEqual(selected["model"], "whisper")
+        self.assertEqual(selected["model_revision"], "audio-revision")
+        self.assertEqual(selected["image"], config["image"])
+        self.assertEqual(config["model"], "vision")
+
+    def test_changed_audio_fixture_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(runner.urllib.request, "urlopen") as fetch,
+                self.assertRaisesRegex(ValueError, "Audio fixture"),
+            ):
+                fetch.return_value.__enter__.return_value.read.return_value = (
+                    b"wrong audio"
+                )
+                runner.prepare_audio(Path(tmp))
+            self.assertFalse((Path(tmp) / "audio-data-uri.txt").exists())
+
     def test_video_data_uri_contains_the_checked_in_clip(self):
         uri = runner.video_data_uri()
         header, encoded = uri.split(",", 1)

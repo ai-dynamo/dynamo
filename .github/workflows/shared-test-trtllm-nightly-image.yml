@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        media: [image, video]
+        media: [image, video, audio]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
