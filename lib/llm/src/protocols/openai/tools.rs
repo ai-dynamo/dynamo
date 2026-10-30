@@ -5,6 +5,26 @@ use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption
 use serde_json::{Value, json};
 use thiserror::Error;
 
+pub(crate) fn custom_input(arguments: &str) -> anyhow::Result<String> {
+    let value: Value = serde_json::from_str(arguments)?;
+    value
+        .get(dynamo_protocols::types::CUSTOM_TOOL_INPUT_ARG)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Custom tool arguments must contain a string input parameter")
+        })
+}
+
+pub(crate) fn custom_input_or_raw(arguments: &str) -> String {
+    custom_input(arguments).unwrap_or_else(|_| {
+        // Model output is application input, not an adapter failure. Keep valid
+        // siblings and let the caller validate malformed output, as with functions.
+        tracing::warn!("Custom tool output lacks a string input wrapper; returning raw arguments");
+        arguments.to_owned()
+    })
+}
+
 /// Errors that can occur when deriving JSON schemas for tool_choice requests.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ToolChoiceError {
@@ -324,7 +344,9 @@ mod tests {
     fn sample_tools() -> Vec<ChatCompletionTool> {
         vec![
             ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: "add_numbers".to_string(),
                     description: Some("Add two integers".to_string()),
@@ -339,11 +361,11 @@ mod tests {
                     strict: None,
                     defer_loading: None,
                 },
-                custom: None,
-                defer_loading: None,
             },
             ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: "get_weather".to_string(),
                     description: Some("Get weather".to_string()),
@@ -358,15 +380,15 @@ mod tests {
                     strict: None,
                     defer_loading: None,
                 },
-                custom: None,
-                defer_loading: None,
             },
         ]
     }
 
     fn zero_arg_tool(parameters: Value) -> Vec<ChatCompletionTool> {
         vec![ChatCompletionTool {
+            custom: None,
             r#type: ChatCompletionToolType::Function,
+            defer_loading: None,
             function: FunctionObject {
                 name: "get_server_time".to_string(),
                 description: Some("Get the current server time.".to_string()),
@@ -374,8 +396,6 @@ mod tests {
                 strict: None,
                 defer_loading: None,
             },
-            custom: None,
-            defer_loading: None,
         }]
     }
 

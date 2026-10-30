@@ -19,7 +19,7 @@
 //! value no span maps. That block and every block chained after it are
 //! excluded, including later stores under an excluded parent, and their
 //! removals never reach the index. An engine id is never both mapped and
-//! excluded.
+//! excluded on the same tier.
 //!
 //! Every source excludes values that did not fit in `u32`: they all narrow to
 //! one sentinel, so indexing them would give different images one local hash.
@@ -35,20 +35,36 @@ use crate::protocols::{
     PlacementEvent, StorageTier, WorkerWithDpRank, compute_next_seq_hash, pad_value_for_mm_hash,
 };
 
+use super::convert::has_duplicate_block_hashes;
 use super::types::{BlockHashValue, RawKvEvent, WIDE_TOKEN_SENTINEL};
 
 /// Parent seed for a multimodal chain that starts at the root.
 const MM_CHAIN_ROOT: u64 = 0x6d6d_5f72_6f6f_7421;
 
-/// Bound on the exclusion set. Losing entries never indexes an excluded block:
-/// its descendants then fail the indexer's parent lookup.
+/// Bound on per-block exclusion state. Overflow switches the affected rank to
+/// root stores until its cache is cleared, keeping unknown parents out of relays.
 const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
-/// Bound on engine blocks with a Dynamo-owned id. A live mapping is never
+/// Bound on engine block residencies with a Dynamo-owned id. A live mapping is never
 /// evicted: once full, new multimodal chains are excluded like unmapped ones.
 const DEFAULT_ID_CAPACITY: usize = 1 << 22;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
+
+#[derive(Debug, Clone)]
+struct MappedBlock {
+    dynamo_id: u64,
+    tiers: u8,
+}
+
+fn tier_bit(tier: StorageTier) -> u8 {
+    match tier {
+        StorageTier::Device => 1,
+        StorageTier::HostPinned => 2,
+        StorageTier::Disk => 4,
+        StorageTier::External => 8,
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EngineMmStats {
@@ -59,7 +75,7 @@ pub struct EngineMmStats {
     /// Blocks dropped because their hashed tokens hold multimodal values no
     /// span maps.
     pub excluded_unmapped: u64,
-    /// Blocks dropped because their parent was dropped.
+    /// Blocks dropped because their parent was excluded or exclusion state overflowed.
     pub excluded_parent: u64,
     /// Blocks dropped because their spans were out of bounds, overlapping, or
     /// covered non-multimodal tokens.
@@ -75,11 +91,14 @@ pub struct EngineMmStats {
 #[derive(Debug, Clone)]
 pub(super) struct EngineMmState {
     engine_owned: bool,
-    ids: FxHashMap<Key, u64>,
+    ids: FxHashMap<(WorkerWithDpRank, u64), MappedBlock>,
+    mapped_residencies: usize,
     refs: FxHashMap<Key, u32>,
     excluded: FxHashSet<Key>,
     excluded_capacity: usize,
     id_capacity: usize,
+    /// One latch per affected source worker/rank, independent of its block count.
+    overflowed_workers: FxHashSet<WorkerWithDpRank>,
     pub(super) stats: EngineMmStats,
 }
 
@@ -98,10 +117,12 @@ impl EngineMmState {
         Self {
             engine_owned,
             ids: FxHashMap::default(),
+            mapped_residencies: 0,
             refs: FxHashMap::default(),
             excluded: FxHashSet::default(),
             excluded_capacity: DEFAULT_EXCLUDED_CAPACITY,
             id_capacity: DEFAULT_ID_CAPACITY,
+            overflowed_workers: FxHashSet::default(),
             stats: EngineMmStats::default(),
         }
     }
@@ -153,10 +174,20 @@ impl EngineMmState {
             return Some(PreparedStore { has_mm: Vec::new() });
         };
 
+        if parent_block_hash.is_some() && self.overflowed_workers.contains(&worker) {
+            self.stats.excluded_parent += block_hashes.len() as u64;
+            // This may repeat a text store indexed before overflow. Do not mark
+            // its ids excluded: its eventual removal must still reach the index.
+            return None;
+        }
+
         if !self.excluded.is_empty()
             && let Some(parent) = parent_block_hash.map(BlockHashValue::into_u64)
             && self.excluded.contains(&(worker, tier, parent))
         {
+            if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
+                return None;
+            }
             self.stats.excluded_parent += block_hashes.len() as u64;
             for hash in block_hashes.iter() {
                 self.exclude((worker, tier, hash.into_u64()));
@@ -212,6 +243,11 @@ impl EngineMmState {
         }
 
         if let Some((block_idx, issue)) = cut {
+            // Validate before truncation can hide a repeated text id and mark
+            // it excluded, which would suppress that text block's eviction.
+            if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
+                return None;
+            }
             let dropped = (block_hashes.len() - block_idx) as u64;
             match issue {
                 BlockIssue::Unmapped => self.stats.excluded_unmapped += dropped,
@@ -249,14 +285,9 @@ impl EngineMmState {
         };
 
         let parent_engine = store.parent_hash.map(|hash| hash.0);
-        let mut in_chain =
-            parent_engine.is_some_and(|parent| self.ids.contains_key(&(worker, tier, parent)));
-        let mut parent_effective = parent_engine.map(|parent| {
-            self.ids
-                .get(&(worker, tier, parent))
-                .copied()
-                .unwrap_or(parent)
-        });
+        let mapped_parent = parent_engine.and_then(|parent| self.ids.get(&(worker, parent)));
+        let mut in_chain = mapped_parent.is_some();
+        let mut parent_effective = mapped_parent.map(|block| block.dynamo_id).or(parent_engine);
         let mut run_parent = parent_effective;
         let mut publishing = false;
 
@@ -265,11 +296,21 @@ impl EngineMmState {
         // Engine ids dropped with the rest of the store (relabel or full map).
         let mut dropped: Vec<u64> = Vec::new();
         let mut remaining = blocks.into_iter().enumerate();
+        let tier_bit = tier_bit(tier);
 
         while let Some((block_idx, mut block)) = remaining.next() {
             let engine_id = block.block_hash.0;
             let labeled = prepared.has_mm.get(block_idx).copied().unwrap_or(false);
             let mut already_indexed = false;
+            let key = (worker, engine_id);
+
+            if !in_chain && !labeled && self.ids.contains_key(&key) {
+                // The parent mapping has gone away. Publishing the native id
+                // would bypass this block's existing routing identity.
+                dropped.push(engine_id);
+                dropped.extend(remaining.by_ref().map(|(_, rest)| rest.block_hash.0));
+                break;
+            }
 
             if in_chain || labeled {
                 in_chain = true;
@@ -277,10 +318,8 @@ impl EngineMmState {
                     parent_effective.unwrap_or(MM_CHAIN_ROOT),
                     block.tokens_hash,
                 );
-                let key = (worker, tier, engine_id);
-                match self.ids.get(&key).copied() {
-                    Some(existing) if existing == dynamo_id => already_indexed = true,
-                    Some(_) => {
+                match self.ids.get(&key) {
+                    Some(existing) if existing.dynamo_id != dynamo_id => {
                         // The engine re-stored a block with a different label.
                         // Keep the first mapping and drop the rest of the store:
                         // publishing it would give one external id two local
@@ -290,7 +329,10 @@ impl EngineMmState {
                         dropped.extend(remaining.by_ref().map(|(_, rest)| rest.block_hash.0));
                         break;
                     }
-                    None if self.ids.len() >= self.id_capacity => {
+                    existing
+                        if existing.is_none_or(|block| block.tiers & tier_bit == 0)
+                            && self.mapped_residencies >= self.id_capacity =>
+                    {
                         // Never evict a live mapping; exclude this block and
                         // the rest of the store as if they were unmapped.
                         dropped.push(engine_id);
@@ -298,16 +340,22 @@ impl EngineMmState {
                         self.stats.map_full += dropped.len() as u64;
                         break;
                     }
-                    None => {
-                        // A block excluded earlier, for example while its
-                        // label was missing, is mapped from now on.
-                        self.excluded.remove(&key);
-                        self.ids.insert(key, dynamo_id);
-                        let refs = self.refs.entry((worker, tier, dynamo_id)).or_insert(0);
-                        *refs += 1;
-                        if *refs > 1 {
-                            already_indexed = true;
-                            self.stats.aliased_blocks += 1;
+                    _ => {
+                        let mapping = self.ids.entry(key).or_insert(MappedBlock {
+                            dynamo_id,
+                            tiers: 0,
+                        });
+                        already_indexed = mapping.tiers & tier_bit != 0;
+                        if !already_indexed {
+                            mapping.tiers |= tier_bit;
+                            self.mapped_residencies += 1;
+                            self.excluded.remove(&(worker, tier, engine_id));
+                            let refs = self.refs.entry((worker, tier, dynamo_id)).or_insert(0);
+                            *refs += 1;
+                            if *refs > 1 {
+                                already_indexed = true;
+                                self.stats.aliased_blocks += 1;
+                            }
                         }
                     }
                 }
@@ -361,8 +409,14 @@ impl EngineMmState {
             if self.excluded.remove(&key) {
                 continue;
             }
-            match self.ids.remove(&key) {
-                Some(dynamo_id) => {
+            match self.ids.get_mut(&(worker, hash.0)) {
+                Some(mapping) if mapping.tiers & tier_bit(tier) != 0 => {
+                    let dynamo_id = mapping.dynamo_id;
+                    mapping.tiers &= !tier_bit(tier);
+                    self.mapped_residencies -= 1;
+                    if mapping.tiers == 0 {
+                        self.ids.remove(&(worker, hash.0));
+                    }
                     let refs_key = (worker, tier, dynamo_id);
                     if let Some(refs) = self.refs.get_mut(&refs_key) {
                         *refs -= 1;
@@ -372,7 +426,7 @@ impl EngineMmState {
                         }
                     }
                 }
-                None => kept.push(hash),
+                _ => kept.push(hash),
             }
         }
         remove.block_hashes = kept;
@@ -380,27 +434,47 @@ impl EngineMmState {
 
     /// Forget all state for a worker after the engine cleared its cache.
     pub(super) fn clear(&mut self, worker: WorkerWithDpRank) {
-        self.ids.retain(|(known, _, _), _| *known != worker);
+        self.ids.retain(|(known, _), mapping| {
+            if *known == worker {
+                self.mapped_residencies -= mapping.tiers.count_ones() as usize;
+                false
+            } else {
+                true
+            }
+        });
         self.refs.retain(|(known, _, _), _| *known != worker);
         self.excluded.retain(|(known, _, _)| *known != worker);
+        self.overflowed_workers.remove(&worker);
     }
 
     /// Exclude an engine id from the index. A mapped id stays mapped: its
     /// removal must still reach the index through its Dynamo-owned id.
     fn exclude(&mut self, key: Key) {
-        if self.ids.contains_key(&key) {
+        if self
+            .ids
+            .get(&(key.0, key.2))
+            .is_some_and(|mapping| mapping.tiers & tier_bit(key.1) != 0)
+        {
             return;
         }
         if self.excluded.len() < self.excluded_capacity {
             self.excluded.insert(key);
         } else if !self.excluded.contains(&key) {
             self.stats.excluded_overflow += 1;
+            if self.overflowed_workers.insert(key.0) {
+                tracing::warn!(
+                    worker_id = key.0.worker_id,
+                    dp_rank = key.0.dp_rank,
+                    capacity = self.excluded_capacity,
+                    "Multimodal exclusion state is full; accepting only root stores until cache clear"
+                );
+            }
         }
     }
 
     #[cfg(test)]
     pub(super) fn tracked_ids(&self) -> usize {
-        self.ids.len()
+        self.mapped_residencies
     }
 }
 

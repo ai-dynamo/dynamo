@@ -41,6 +41,7 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
     new_sglang_request_id,
 )
+from dynamo.sglang.kv_hints import kv_hint_kwargs
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -68,6 +69,7 @@ _SAMPLING_OPTION_FIELDS = (
     "top_p",
     "top_k",
     "min_p",
+    "logit_bias",
 )
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 _MAX_ABORT_MESSAGE_LENGTH = 8192
@@ -660,6 +662,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
+            kv_hint=request.get("kv_hint"),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -825,6 +828,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -899,8 +903,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            # Labels when SGLang owns multimodal identity; caller hashes only on
-            # older builds that still derive pad values from them.
+            # Prefer routing labels when supported; otherwise send caller hashes
+            # only when the processor accepts them.
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_routing_labels_supported or self._mm_hashes_supported:
                 forwarded = extract_mm_hashes(request)
@@ -934,6 +938,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(

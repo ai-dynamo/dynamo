@@ -23,6 +23,7 @@ Runtime data-contract notes (not code-level shims):
 import argparse
 import importlib
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -379,13 +380,10 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def sglang_uses_engine_owned_mm_identity() -> bool:
-    """Whether this SGLang derives multimodal pad values from its own identity.
+def sglang_has_wide_mm_pad_values() -> bool:
+    """Detect the wide event-token format introduced by sglang#43043.
 
-    sgl-project/sglang#43043 replaced the 30-bit per-item pad value with four
-    wide values (``MultimodalDataItem.pad_values``). Caller ``mm_hashes`` then
-    no longer reproduce Dynamo's routing pad, Kimi rejects them outright, and
-    event token ids exceed 32 bits.
+    Both caller hashes and engine-owned identities produce wide values.
     """
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
@@ -393,6 +391,16 @@ def sglang_uses_engine_owned_mm_identity() -> bool:
     except ImportError:
         return False
     return "pad_values" in MultimodalDataItem.__struct_fields__
+
+
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether the active processor rejects caller-supplied image identities."""
+    if not sglang_has_wide_mm_pad_values():
+        return False
+    # Unknown processors on wide-pad builds must not receive identity overrides.
+    return mm_processor is None or bool(
+        getattr(mm_processor, "uses_wide_image_identity", False)
+    )
 
 
 def supports_mm_routing_labels(engine: Any) -> bool:
@@ -416,14 +424,15 @@ def supports_external_mm_hashes(engine: Any) -> bool:
 
     Builds that own multimodal identity never get caller hashes.
     """
-    if sglang_uses_engine_owned_mm_identity():
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_proc = getattr(tokenizer_manager, "mm_processor", None)
+    if sglang_uses_engine_owned_mm_identity(mm_proc):
         return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
@@ -466,6 +475,37 @@ def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     if "cache_salt" not in kwargs:
         raise ValueError("cache_salt is not supported by the installed SGLang engine")
     return kwargs
+
+
+@lru_cache(maxsize=1)
+def _kv_events_config_has_format() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "format" in KVEventsConfig.model_fields
+
+
+def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | None:
+    """Publish enabled KV events in the "dynamo" format unless one is set.
+
+    The format carries the LoRA adapter name that the router hashes adapter
+    blocks by. SGLang 0.5.19 in the XPU image has no format option; remove the
+    check when the XPU pin is upgraded to 0.5.22+.
+    """
+    if not kv_events_config:
+        return kv_events_config
+    try:
+        config = json.loads(kv_events_config)
+    except json.JSONDecodeError:
+        return kv_events_config
+    if (
+        not isinstance(config, dict)
+        or config.get("publisher", "null") == "null"
+        or "format" in config
+        or not _kv_events_config_has_format()
+    ):
+        return kv_events_config
+    config["format"] = "dynamo"
+    return json.dumps(config)
 
 
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
@@ -536,4 +576,5 @@ __all__ = [
     "supports_external_mm_hashes",
     "supports_mm_routing_labels",
     "sglang_uses_engine_owned_mm_identity",
+    "sglang_has_wide_mm_pad_values",
 ]

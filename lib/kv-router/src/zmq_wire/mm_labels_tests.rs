@@ -13,7 +13,8 @@ use super::*;
 use crate::PositionalIndexer;
 use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use crate::indexer::{
-    BranchShardedIndexer, KvIndexerInterface, LowerTierIndexer, RadixTree, ThreadPoolIndexer,
+    BranchShardedIndexer, KvIndexerInterface, LowerTierContinuation, LowerTierIndexer, RadixTree,
+    ThreadPoolIndexer,
 };
 use crate::protocols::{
     BlockHashOptions, KvCacheStoreData, LocalBlockHash, RouterEvent, compute_block_hash_for_seq,
@@ -603,6 +604,7 @@ async fn unlabeled_image_is_excluded_with_its_descendants() {
     // Removals of excluded blocks never reach the index; only E_T passes through.
     let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
     assert_eq!(removed_ids(&evict), vec![E_T]);
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
     indexes.apply(A, &evict).await;
 
     let stats = normalizer.engine_mm_stats();
@@ -708,10 +710,9 @@ async fn fully_excluded_store_is_a_noop_for_an_unseen_worker() {
     assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
 }
 
-/// Exclusion state is advisory: with none remembered, a descendant of an
-/// excluded block reaches the index, which rejects it for its unknown parent.
+/// Exhausted exclusion state must not send unknown-parent stores to an index.
 #[tokio::test]
-async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
+async fn exclusion_overflow_drops_descendants_and_preserves_text_eviction() {
     let mut normalizer = labeled_normalizer().with_engine_mm_capacities(0, usize::MAX);
     let mut indexes = Indexes::new();
     let first = run(
@@ -735,26 +736,26 @@ async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
         2,
         stored(Some(E_IX), &[block(E_KX, text(300), vec![])]),
     );
-    assert!(
-        store_data(&child).is_some(),
-        "not dropped without exclusion state"
-    );
-    let event = router_event(A, &child);
-    assert!(indexes.radix.apply_event(event.clone()).is_err());
-    let _ = indexes.crtc.apply_event_and_wait(event).await;
+    assert!(is_noop(&child));
+    indexes.apply(A, &child).await;
 
     let query = request_hashes(&[text(100), routing_pad(LABEL_U, BLOCK), text(300)]);
     assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
+    let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, E_T]));
+    let event = router_event(A, &evict);
+    // Unknown removals are reported, but must not prevent the text eviction.
+    assert_eq!(
+        indexes.radix.apply_event(event.clone()),
+        Err(crate::protocols::KvCacheEventError::BlockNotFound)
+    );
+    indexes.crtc.apply_event_and_wait(event).await.unwrap();
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
 }
 
-/// The DC relay's producer is stricter than the router's indexes: a store under
-/// an unknown parent is a source protocol fault there (the relay host then
-/// rejects the source). Exclusion state therefore matters to the relay, so it
-/// must not overflow while the engine still holds the excluded blocks.
+/// Overflow must preserve the relay source and subsequent root text updates.
 #[test]
-fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
+fn exclusion_overflow_preserves_the_relay_source() {
     use crate::indexer::cuckoo::{CkfConfig, DcCkfState};
-    use crate::protocols::KvCacheEventError;
 
     let events = |excluded_capacity: usize| {
         let mut normalizer =
@@ -777,9 +778,22 @@ fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
             2,
             stored(Some(E_IX), &[block(E_KX, text(300), vec![])]),
         );
-        [first, child]
+        let text_root = run(
+            &mut normalizer,
+            A,
+            3,
+            stored(None, &[block(0xc0de, text(500), vec![])]),
+        );
+        assert_eq!(store_data(&first).unwrap().blocks.len(), 1);
+        assert!(is_noop(&child));
+        assert_eq!(
+            store_data(&text_root).unwrap().blocks[0].block_hash.0,
+            0xc0de
+        );
+        let evict = run(&mut normalizer, A, 4, removed(&[E_IX, E_KX, E_T, 0xc0de]));
+        [first, child, text_root, evict]
     };
-    let relay_errors = |events: [PlacementEvent; 2]| -> Vec<Option<KvCacheEventError>> {
+    let relay_errors = |events: [PlacementEvent; 4]| {
         let mut relay = DcCkfState::new(CkfConfig::new(64)).expect("relay producer");
         events
             .iter()
@@ -789,14 +803,82 @@ fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
                     .first_error()
                     .copied()
             })
-            .collect()
+            .collect::<Vec<_>>()
     };
 
-    assert_eq!(relay_errors(events(1 << 10)), vec![None, None]);
-    assert_eq!(
-        relay_errors(events(0)),
-        vec![None, Some(KvCacheEventError::ParentBlockNotFound)]
+    assert_eq!(relay_errors(events(1 << 10)), vec![None; 4]);
+    assert_eq!(relay_errors(events(0)), vec![None; 4]);
+}
+
+/// A replayed text store suppressed after overflow was already indexed. Its
+/// removal must still pass through, even though the replay itself is a no-op.
+#[tokio::test]
+async fn overflow_does_not_hide_evictions_of_previously_indexed_text() {
+    let mut normalizer = labeled_normalizer().with_engine_mm_capacities(0, usize::MAX);
+    let mut indexes = Indexes::new();
+    let root = run(
+        &mut normalizer,
+        A,
+        1,
+        stored(None, &[block(E_T, text(100), vec![])]),
     );
+    let continuation = || stored(Some(E_T), &[block(E_KX, text(300), vec![])]);
+    let child = run(&mut normalizer, A, 2, continuation());
+    indexes.apply(A, &root).await;
+    indexes.apply(A, &child).await;
+    let query = request_hashes(&[text(100), text(300)]);
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
+
+    let image = run(
+        &mut normalizer,
+        A,
+        3,
+        stored(None, &[block(E_IX, image(IMAGE_X, BLOCK), vec![])]),
+    );
+    assert!(is_noop(&image));
+    let replay = run(&mut normalizer, A, 4, continuation());
+    assert!(is_noop(&replay));
+    indexes.apply(A, &replay).await;
+    let evict = run(&mut normalizer, A, 5, removed(&[E_KX]));
+    assert_eq!(removed_ids(&evict), vec![E_KX]);
+    indexes.apply(A, &evict).await;
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
+}
+
+#[test]
+fn cache_clear_resets_overflow_only_for_the_affected_worker_rank() {
+    let mut normalizer = labeled_normalizer().with_engine_mm_capacities(0, usize::MAX);
+    let scopes = [worker(A), WorkerWithDpRank::new(A, 1), worker(A + 1)];
+    for scope in scopes {
+        run_on(
+            &mut normalizer,
+            scope,
+            1,
+            stored(
+                None,
+                &[
+                    block(E_T, text(100), vec![]),
+                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
+                ],
+            ),
+        );
+    }
+    run_on(&mut normalizer, scopes[0], 2, cleared());
+    run_on(
+        &mut normalizer,
+        scopes[0],
+        3,
+        stored(None, &[block(E_T, text(100), vec![])]),
+    );
+    for scope in scopes {
+        let event = run_on(
+            &mut normalizer,
+            scope,
+            4,
+            stored(Some(E_T), &[block(E_KX, text(300), vec![])]),
+        );
+        assert_eq!(store_data(&event).is_some(), scope == scopes[0]);
+    }
 }
 
 #[test]
@@ -823,6 +905,50 @@ fn multimodal_values_that_fit_in_u32_are_still_classified() {
         "the block with unlabeled values is cut"
     );
     assert_eq!(normalizer.engine_mm_stats().excluded_unmapped, 1);
+}
+
+#[tokio::test]
+async fn malformed_multimodal_stores_do_not_suppress_text_eviction() {
+    for excluded_parent in [false, true] {
+        let mut normalizer = labeled_normalizer();
+        let mut indexes = Indexes::new();
+        let text_store = run(
+            &mut normalizer,
+            A,
+            1,
+            stored(None, &[block(E_T, text(100), vec![])]),
+        );
+        indexes.apply(A, &text_store).await;
+        let malformed = if excluded_parent {
+            run(
+                &mut normalizer,
+                A,
+                2,
+                stored(None, &[block(E_IX, image(IMAGE_X, BLOCK), vec![])]),
+            );
+            stored(
+                Some(E_IX),
+                &[block(E_T, text(100), vec![]), block(E_T, text(300), vec![])],
+            )
+        } else {
+            stored(
+                None,
+                &[
+                    block(E_T, text(100), vec![]),
+                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
+                    block(E_T, text(300), vec![]),
+                ],
+            )
+        };
+        let rejected = run(&mut normalizer, A, 3, malformed);
+        assert!(is_noop(&rejected));
+        indexes.apply(A, &rejected).await;
+        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+        let evict = run(&mut normalizer, A, 4, removed(&[E_T]));
+        assert_eq!(removed_ids(&evict), vec![E_T]);
+        indexes.apply(A, &evict).await;
+        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
+    }
 }
 
 #[test]
@@ -952,54 +1078,202 @@ fn cleared_resets_tracked_ids() {
 }
 
 #[test]
-fn storage_tiers_are_counted_separately() {
-    let mut normalizer = labeled_normalizer();
-    let blocks = |ids: [u64; 3]| {
-        vec![
-            block(ids[0], text(100), vec![]),
-            block(
-                ids[1],
-                image(IMAGE_X, BLOCK),
-                vec![(0, BLOCK as u32, LABEL_U)],
+fn storage_tier_replays_and_evictions_preserve_mapping_capacity() {
+    for (first, second) in [("GPU", "CPU_PINNED"), ("CPU_PINNED", "GPU")] {
+        let mut normalizer = labeled_normalizer().with_engine_mm_capacities(16, 2);
+        let image_store = |medium, id, label| {
+            stored_on(
+                None,
+                &[block(
+                    id,
+                    image(IMAGE_X, BLOCK),
+                    vec![(0, BLOCK as u32, label)],
+                )],
+                Some(medium),
+            )
+        };
+        let gpu = run(&mut normalizer, A, 1, image_store("GPU", E_IX, LABEL_U));
+        let routing_id = store_data(&gpu).unwrap().blocks[0].block_hash.0;
+        let cpu = run(
+            &mut normalizer,
+            A,
+            2,
+            image_store("CPU_PINNED", E_IX, LABEL_U),
+        );
+        assert_eq!(store_data(&cpu).unwrap().blocks[0].block_hash.0, routing_id);
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 2);
+
+        let replay = run(
+            &mut normalizer,
+            A,
+            3,
+            image_store("CPU_PINNED", E_IX, LABEL_U),
+        );
+        assert!(is_noop(&replay));
+        let unknown = run(&mut normalizer, A, 4, removed_on(&[E_IX], Some("DISK")));
+        assert_eq!(removed_ids(&unknown), vec![E_IX]);
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 2);
+        let full = run(&mut normalizer, B, 1, image_store("GPU", E_IY, LABEL_V));
+        assert!(is_noop(&full));
+
+        let evict = run(&mut normalizer, A, 5, removed_on(&[E_IX], Some(first)));
+        assert_eq!(removed_ids(&evict), vec![routing_id]);
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 1);
+        let admitted = run(&mut normalizer, B, 2, image_store("GPU", E_IY, LABEL_V));
+        assert!(store_data(&admitted).is_some());
+        let evict = run(&mut normalizer, A, 6, removed_on(&[E_IX], Some(second)));
+        assert_eq!(removed_ids(&evict), vec![routing_id]);
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 1);
+        run(&mut normalizer, B, 3, cleared());
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 0);
+    }
+}
+
+#[test]
+fn unusable_second_tier_store_preserves_the_original_mapping() {
+    for spans in [vec![], vec![(0, BLOCK as u32, LABEL_V)]] {
+        let mut normalizer = labeled_normalizer();
+        let gpu = run(
+            &mut normalizer,
+            A,
+            1,
+            stored(
+                None,
+                &[block(
+                    E_IX,
+                    image(IMAGE_X, BLOCK),
+                    vec![(0, BLOCK as u32, LABEL_U)],
+                )],
             ),
-            block(ids[2], text(300), vec![]),
-        ]
-    };
+        );
+        let routing_id = store_data(&gpu).unwrap().blocks[0].block_hash.0;
+        let cpu = run(
+            &mut normalizer,
+            A,
+            2,
+            stored_on(
+                None,
+                &[block(E_IX, image(IMAGE_X, BLOCK), spans)],
+                Some("CPU_PINNED"),
+            ),
+        );
+        assert!(is_noop(&cpu));
+        let cpu_evict = run(
+            &mut normalizer,
+            A,
+            3,
+            removed_on(&[E_IX], Some("CPU_PINNED")),
+        );
+        assert!(is_noop(&cpu_evict));
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 1);
+        let gpu_evict = run(&mut normalizer, A, 4, removed(&[E_IX]));
+        assert_eq!(removed_ids(&gpu_evict), vec![routing_id]);
+        assert_eq!(normalizer.engine_mm_tracked_ids(), 0);
+    }
+}
+
+#[test]
+fn mapped_suffix_with_a_forgotten_parent_keeps_its_eviction_identity() {
+    let mut normalizer = labeled_normalizer();
+    let original = run(
+        &mut normalizer,
+        A,
+        1,
+        image_request_store(IMAGE_X, LABEL_U, [E_T, E_IX, E_KX]),
+    );
+    let suffix_id = store_data(&original).unwrap().blocks[2].block_hash.0;
+    run(&mut normalizer, A, 2, removed(&[E_IX]));
+    let replay = run(
+        &mut normalizer,
+        A,
+        3,
+        stored(Some(E_IX), &[block(E_KX, text(300), vec![])]),
+    );
+    assert!(is_noop(&replay));
+    let evict = run(&mut normalizer, A, 4, removed(&[E_KX]));
+    assert_eq!(removed_ids(&evict), vec![suffix_id]);
+    assert_eq!(normalizer.engine_mm_tracked_ids(), 0);
+}
+
+#[tokio::test]
+async fn host_continuation_uses_the_gpu_parents_routing_identity() {
+    let mut normalizer = labeled_normalizer();
+    let mut indexes = Indexes::new();
+    let lower = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, BLOCK as u32);
     let gpu = run(
         &mut normalizer,
         A,
         1,
-        stored_on(None, &blocks([E_T, E_IX, E_KX]), Some("GPU")),
+        stored(
+            None,
+            &[
+                block(E_T, text(100), vec![]),
+                block(
+                    E_IX,
+                    image(IMAGE_X, BLOCK),
+                    vec![(0, BLOCK as u32, LABEL_U)],
+                ),
+            ],
+        ),
     );
-    let cpu = run(
+    let image_id = store_data(&gpu).unwrap().blocks[1].block_hash;
+    indexes.apply(A, &gpu).await;
+    let query = request(LABEL_U);
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
+
+    // Write-back can put a text suffix on CPU without its image parent.
+    let host = run(
         &mut normalizer,
         A,
         2,
-        stored_on(None, &blocks([E_T, E_IX, E_KX]), Some("CPU_PINNED")),
+        stored_on(
+            Some(E_IX),
+            &[block(E_KX, text(300), vec![])],
+            Some("CPU_PINNED"),
+        ),
     );
-    assert_eq!(store_data(&gpu).unwrap().blocks.len(), 3);
+    lower
+        .apply_event_and_wait(RouterEvent::with_storage_tier(
+            A,
+            host.event,
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
+    let continuations =
+        std::collections::HashMap::from([(worker(A), LowerTierContinuation::new(2, image_id))]);
     assert_eq!(
-        store_data(&cpu).unwrap().blocks.len(),
-        3,
-        "host tier indexed separately"
+        lower
+            .backend()
+            .query_contiguous_hits(&query, &continuations)
+            .get(&worker(A)),
+        Some(&1)
     );
 
-    // Evicting from the GPU removes only the GPU entries.
-    let gpu_evict = run(
+    let evict = run(
         &mut normalizer,
         A,
         3,
-        removed_on(&[E_IX, E_KX], Some("GPU")),
+        removed_on(&[E_KX], Some("CPU_PINNED")),
     );
-    assert_eq!(removed_ids(&gpu_evict).len(), 2);
-    let cpu_evict = run(
-        &mut normalizer,
-        A,
-        4,
-        removed_on(&[E_IX, E_KX], Some("CPU_PINNED")),
+    lower
+        .apply_event_and_wait(RouterEvent::with_storage_tier(
+            A,
+            evict.event,
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        lower
+            .backend()
+            .query_contiguous_hits(&query, &continuations)
+            .get(&worker(A))
+            .copied()
+            .unwrap_or(0),
+        0
     );
-    assert_eq!(removed_ids(&cpu_evict).len(), 2);
-    assert_eq!(normalizer.engine_mm_tracked_ids(), 0);
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
 }
 
 /// Without the engine-owned flag, every value that did not fit in `u32`

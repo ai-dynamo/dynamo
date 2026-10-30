@@ -23,6 +23,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,6 +60,7 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no historical inputs")
 	}
+	inputs = append(inputs, upgradeMissingOriginInput)
 	snapshots := map[string][]unstructured.Unstructured{}
 	for _, input := range inputs {
 		objects, err := golden.ReadManifests(input)
@@ -309,9 +311,11 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
 					container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
 				}
+				desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+				require.NoError(t, err)
 				require.NoError(t, env.Client().Update(ctx, current))
-				require.Eventually(t, func() bool {
-					return upgradeWorkerEditError(captureUpgrade(t, env), workers) == nil
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					assert.NoError(c, upgradeWorkerEditError(captureUpgrade(t, env), workers, desiredHash))
 				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach every immediate template")
 				require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
 			}
@@ -362,6 +366,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 	}
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
+	t.Run("missing-origin", testUpgradeMissingOrigin)
 }
 
 // Upgrade capture and replay use the same version source as production admission.

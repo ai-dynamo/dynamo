@@ -96,6 +96,8 @@ struct AttachmentDescriptorInput {
     kv_state_endpoint: String,
     indexer_domain_id: String,
     kv_block_size: u32,
+    #[serde(default)]
+    ingress_protocol: Option<llm_rs::discovery::kv_state_agent::KvStateIngressProtocol>,
     raw_zmq_endpoint: String,
     #[serde(default)]
     raw_topic: String,
@@ -103,6 +105,8 @@ struct AttachmentDescriptorInput {
     image_token_id: Option<u32>,
     #[serde(default)]
     video_token_id: Option<u32>,
+    #[serde(default)]
+    engine_owned_mm_identity: bool,
     #[serde(default)]
     router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
 }
@@ -133,12 +137,14 @@ impl KvStateAttachmentOwner {
                     kv_state_endpoint: input.kv_state_endpoint.parse()?,
                     indexer_domain_id: input.indexer_domain_id.parse()?,
                     kv_block_size: input.kv_block_size,
-                    ingress_protocol:
+                    ingress_protocol: input.ingress_protocol.unwrap_or(
                         llm_rs::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1,
+                    ),
                     raw_zmq_endpoint: input.raw_zmq_endpoint,
                     raw_topic: input.raw_topic,
                     image_token_id: input.image_token_id,
                     video_token_id: input.video_token_id,
+                    engine_owned_mm_identity: input.engine_owned_mm_identity,
                     router_hint_source: input.router_hint_source,
                 })
             })

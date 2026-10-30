@@ -36,6 +36,8 @@ mod state_agent_host;
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
+mod zmq_recovery;
+pub use zmq_recovery::{KvStreamCommand, KvStreamStatus, ZmqRecoveryConfig};
 
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
@@ -81,19 +83,23 @@ pub enum KvEventSourceConfig {
         /// Source rank when this socket is dedicated to one DP rank.
         expected_rank: Option<u32>,
         /// Expected source rank and negotiated heartbeat timeout.
+        /// Cannot be combined with `recovery`.
         liveness: Option<(u32, std::time::Duration)>,
         /// The source derives multimodal pad values from engine identities
         /// (SGLang after sgl-project/sglang#43043), so every event token at or
         /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
         /// values that do not fit in `u32` are excluded.
         engine_owned_mm_identity: bool,
+        /// Opt-in replay recovery that gates readiness on verified continuity.
+        /// Cannot be combined with `liveness`.
+        recovery: Option<ZmqRecoveryConfig>,
     },
 }
 
 enum KvEventSource {
     Zmq {
         listener_abort_handle: tokio::task::AbortHandle,
-        supervisor_handle: tokio::task::JoinHandle<bool>,
+        supervisor_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<bool>>>,
     },
 }
 
@@ -136,7 +142,7 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+        tx: mpsc::UnboundedSender<PublisherInput>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
@@ -148,7 +154,12 @@ impl KvEventSource {
                 expected_rank,
                 liveness,
                 engine_owned_mm_identity,
+                recovery,
             } => {
+                anyhow::ensure!(
+                    recovery.is_none() || liveness.is_none(),
+                    "KV replay recovery and heartbeat liveness cannot be combined"
+                );
                 let listener_handle =
                     component
                         .drt()
@@ -167,6 +178,7 @@ impl KvEventSource {
                             expected_rank,
                             liveness,
                             engine_owned_mm_identity,
+                            recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
@@ -183,7 +195,7 @@ impl KvEventSource {
 
                 Ok(KvEventSource::Zmq {
                     listener_abort_handle,
-                    supervisor_handle,
+                    supervisor_handle: parking_lot::Mutex::new(Some(supervisor_handle)),
                 })
             }
         }
@@ -193,11 +205,47 @@ impl KvEventSource {
         match self {
             KvEventSource::Zmq {
                 listener_abort_handle,
-                supervisor_handle,
+                ..
             } => {
                 listener_abort_handle.abort();
-                supervisor_handle.abort();
             }
+        }
+    }
+
+    async fn stop_and_wait(&self) -> Result<()> {
+        self.shutdown();
+        match self {
+            Self::Zmq {
+                supervisor_handle, ..
+            } => {
+                let handle = supervisor_handle.lock().take();
+                if let Some(handle) = handle {
+                    handle.await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum PublisherInput {
+    Events(Vec<PlacementEvent>),
+    /// Replies once the processor and local index have finished every earlier input.
+    Barrier(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
+}
+
+impl From<Vec<PlacementEvent>> for PublisherInput {
+    fn from(events: Vec<PlacementEvent>) -> Self {
+        Self::Events(events)
+    }
+}
+
+impl PublisherInput {
+    fn into_events(self) -> Vec<PlacementEvent> {
+        match self {
+            Self::Events(events) => events,
+            Self::Barrier(..) => unreachable!("event send returned a barrier"),
         }
     }
 }
@@ -220,12 +268,13 @@ pub struct KvEventPublisher {
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+    tx: mpsc::UnboundedSender<PublisherInput>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
     /// Local pipeline initialization, independent of remote source activity.
     startup: Option<oneshot::Receiver<()>>,
-    processor_task: tokio::task::JoinHandle<()>,
+    /// Locked only because `stop_and_wait` runs through shared `Arc` handles.
+    processor_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl KvEventPublisher {
@@ -333,7 +382,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
@@ -352,6 +401,17 @@ impl KvEventPublisher {
 
         let next_event_id = Arc::new(AtomicU64::new(0));
 
+        anyhow::ensure!(
+            enable_local_indexer
+                || !matches!(
+                    &source_config,
+                    Some(KvEventSourceConfig::Zmq {
+                        recovery: Some(_),
+                        ..
+                    })
+                ),
+            "KV replay recovery requires the local indexer"
+        );
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
@@ -383,7 +443,7 @@ impl KvEventPublisher {
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
         let (startup_tx, startup) = oneshot::channel();
-        let processor_task = component.drt().runtime().secondary().spawn(async move {
+        let processor_handle = component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
                 match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
                     endpoint_clone.drt(),
@@ -503,7 +563,7 @@ impl KvEventPublisher {
             tx,
             next_event_id,
             startup: Some(startup),
-            processor_task,
+            processor_handle: parking_lot::Mutex::new(Some(processor_handle)),
         })
     }
 
@@ -515,8 +575,13 @@ impl KvEventPublisher {
                 _ = self.cancellation_token.cancelled() => anyhow::bail!("KV event listener stopped during initialization"),
             }
         }
+        let is_stopped = self
+            .processor_handle
+            .get_mut()
+            .as_ref()
+            .is_none_or(|handle| handle.is_finished());
         anyhow::ensure!(
-            !self.cancellation_token.is_cancelled() && !self.processor_task.is_finished(),
+            !self.cancellation_token.is_cancelled() && !is_stopped,
             "KV event publisher stopped during initialization"
         );
         Ok(())
@@ -524,9 +589,15 @@ impl KvEventPublisher {
 
     /// Observe fatal termination. Ordinary gaps and heartbeat expiry keep listening.
     pub async fn terminated(&mut self) {
+        let processor = self.processor_handle.get_mut();
+        let Some(handle) = processor.as_mut() else {
+            return;
+        };
         tokio::select! {
-            _ = &mut self.processor_task => {},
-            _ = self.cancellation_token.cancelled() => {},
+            _ = handle => {
+                processor.take();
+            }
+            _ = self.cancellation_token.cancelled() => {}
         }
     }
 
@@ -552,9 +623,17 @@ impl KvEventPublisher {
             .into_iter()
             .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
             .collect();
-        self.tx.send(placement_events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
-        })
+        self.tx
+            .send(PublisherInput::Events(placement_events))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .map(|event| event.event)
+                        .collect(),
+                )
+            })
     }
 
     pub fn publish_with_storage_tier(
@@ -602,8 +681,14 @@ impl KvEventPublisher {
             })
             .collect();
 
-        self.tx.send(events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        self.tx.send(PublisherInput::Events(events)).map_err(|err| {
+            mpsc::error::SendError(
+                err.0
+                    .into_events()
+                    .into_iter()
+                    .map(|event| event.event)
+                    .collect(),
+            )
         })
     }
 
@@ -611,15 +696,18 @@ impl KvEventPublisher {
         &self,
         event: PlacementEvent,
     ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        self.tx.send(vec![event]).map_err(|err| {
-            mpsc::error::SendError(
-                err.0
-                    .into_iter()
-                    .next()
-                    .expect("singleton publish returned an empty failed batch")
-                    .event,
-            )
-        })
+        self.tx
+            .send(PublisherInput::Events(vec![event]))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .next()
+                        .expect("singleton publish returned an empty failed batch")
+                        .event,
+                )
+            })
     }
 
     pub fn next_event_id(&self) -> u64 {
@@ -638,6 +726,19 @@ impl KvEventPublisher {
         if let Some(source) = self.source.take() {
             source.shutdown();
         }
+    }
+
+    /// Retire the source before attaching a replacement engine's publishers.
+    pub async fn stop_and_wait(&self) -> Result<()> {
+        self.cancellation_token.cancel();
+        if let Some(source) = &self.source {
+            source.stop_and_wait().await?;
+        }
+        let handle = self.processor_handle.lock().take();
+        if let Some(handle) = handle {
+            handle.await?;
+        }
+        Ok(())
     }
 }
 

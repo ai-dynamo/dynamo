@@ -27,6 +27,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
 
 ## Run locally
 
@@ -61,6 +62,10 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ### Kubernetes manifest notes
 

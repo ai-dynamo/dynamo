@@ -34,10 +34,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
-from dynamo.sglang._compat import (
-    override_server_args,
-    sglang_uses_engine_owned_mm_identity,
-)
+from dynamo.sglang._compat import override_server_args, sglang_has_wide_mm_pad_values
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import (
@@ -52,6 +49,7 @@ from dynamo.sglang.gateway import (
     owns_engine_metrics,
 )
 from dynamo.sglang.nixl_telemetry import scheduler_metrics_ipc_name
+from dynamo.sglang.state_agent import inventory_sources
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -399,6 +397,10 @@ class DynamoSglangPublisher:
             List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
+        if inventory_sources(self.engine):
+            # The versioned state agent consumes the mixed framework/KVCR
+            # stream. The legacy normalizer rejects independently owned events.
+            return []
         if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
             logging.info(
                 "Non-leader node (node_rank=%s) shares the leader's single KV "
@@ -417,7 +419,8 @@ class DynamoSglangPublisher:
             # Event tokens carry SGLang's own multimodal pad values on builds
             # with sgl-project/sglang#43043; the normalizer maps labeled spans
             # and excludes the rest.
-            engine_owned_mm_identity = sglang_uses_engine_owned_mm_identity()
+            # Accepted caller hashes also produce wide values on non-Kimi models.
+            engine_owned_mm_identity = sglang_has_wide_mm_pad_values()
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)

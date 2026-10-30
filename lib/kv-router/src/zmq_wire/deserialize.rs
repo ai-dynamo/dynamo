@@ -531,9 +531,9 @@ fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
 }
 
 /// Convert SGLang's per-block `[start, length, label]` spans into the existing
-/// per-block multimodal shape (`mm_hash` plus block-relative offsets). A label
-/// that is not 16 hex digits drops its span, which leaves those positions
-/// unmapped so the normalizer fails closed on them.
+/// per-block multimodal shape (`mm_hash` plus block-relative offsets). Labels
+/// contain Dynamo's already-computed hexadecimal `u64` hashes. Invalid or
+/// overflowing hashes leave their spans unmapped so the normalizer fails closed.
 fn mm_routing_spans_to_block_mm_infos(
     spans: Vec<Option<Vec<MmRoutingSpanWire>>>,
 ) -> Vec<Option<BlockExtraInfo>> {
