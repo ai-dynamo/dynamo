@@ -31,6 +31,7 @@ use crate::pool_discovery::{
 use async_trait::async_trait;
 use dynamo_global_common::{Lease, PoolKey};
 use futures::StreamExt;
+use kube::runtime::watcher::DefaultBackoff;
 use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -44,7 +45,9 @@ use super::stream::{EVENT_BUFFER, watch_stream};
 /// One task watches both sources and keeps the join, which serves `list`
 /// and every `list_and_watch` stream. Each event from either source
 /// updates one pool. The task starts on first use and stops when the
-/// directory is dropped.
+/// directory is dropped. When it cannot watch the sources, or a watch ends,
+/// it watches both again after a backoff, and until both have listed again,
+/// `list` joins the sources on each read.
 pub struct RegisteredPoolDirectory {
     mcs: Arc<PoolDirectory>,
     registrations: Arc<PoolDirectory>,
@@ -102,8 +105,9 @@ impl fmt::Debug for RegisteredPoolDirectory {
 
 #[async_trait]
 impl Directory<PoolListing, PoolKey> for RegisteredPoolDirectory {
-    /// From the join once both sources have synced. Before that, joins one
-    /// list of each, so a caller never waits for the watches to start.
+    /// From the join while both sources are synced. Otherwise, as before the
+    /// watches start or while they start again, joins one list of each, so
+    /// a caller never waits for them.
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         self.ensure_joining();
         if let Some(snapshot) = self.join.snapshot() {
@@ -167,7 +171,9 @@ fn merge(mcs: &PoolListing, registered: &PoolListing) -> PoolListing {
 }
 
 /// Single consumer of both sources' watches, so the join applies their events
-/// in order.
+/// in order. A source that cannot be watched, for example a store that is
+/// down at startup, or a watch that ends, does not stop the join: it watches
+/// both sources again after a backoff, and joins on each read until then.
 async fn join_sources(
     mcs: Arc<PoolDirectory>,
     registrations: Arc<PoolDirectory>,
@@ -175,48 +181,50 @@ async fn join_sources(
     lease: Lease,
     stop: CancellationToken,
 ) {
-    let watches = tokio::try_join!(
-        mcs.list_and_watch(Some(stop.child_token())),
-        registrations.list_and_watch(Some(stop.child_token())),
-    );
-    let (mut from_mcs, mut from_registrations) = match watches {
-        Ok(watches) => watches,
-        Err(error) => {
-            // The backends in this crate subscribe without contacting anything.
-            tracing::error!(
-                ?error,
-                "cannot watch the pool sources; joining on each read"
-            );
-            // End watch streams instead of leaving them waiting for a Resync.
-            stop.cancel();
-            return;
-        }
-    };
     let warn_after = lease.duration() * 2;
     let mut ticks = tokio::time::interval(lease.heartbeat_interval());
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // From 0.8 s, doubling to 30 s, and from 0.8 s again after two minutes
+    // without a failure. It never runs out.
+    let mut backoff = DefaultBackoff::default();
     loop {
-        let (source, event) = tokio::select! {
+        let watches = tokio::try_join!(
+            mcs.list_and_watch(Some(stop.child_token())),
+            registrations.list_and_watch(Some(stop.child_token())),
+        );
+        match watches {
+            Ok((mut from_mcs, mut from_registrations)) => loop {
+                let (source, event) = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    event = from_mcs.next() => (Source::Mcs, event),
+                    event = from_registrations.next() => (Source::Registrations, event),
+                    _ = ticks.tick() => {
+                        join.warn_one_sided(warn_after);
+                        continue;
+                    }
+                };
+                match event {
+                    Some(Ok(event)) => join.apply(source, event),
+                    Some(Err(error)) => tracing::warn!(?error, ?source, "pool source watch error"),
+                    None => {
+                        tracing::warn!(?source, "pool source watch ended; watching again");
+                        break;
+                    }
+                }
+            },
+            Err(error) => tracing::warn!(
+                ?error,
+                "cannot watch the pool sources; joining on each read until they can be watched"
+            ),
+        }
+        // Serve fresh joins rather than a view that no longer changes.
+        join.unsync();
+        let delay = backoff.next().unwrap_or(Duration::from_secs(30));
+        tokio::select! {
             biased;
             () = stop.cancelled() => return,
-            event = from_mcs.next() => (Source::Mcs, event),
-            event = from_registrations.next() => (Source::Registrations, event),
-            _ = ticks.tick() => {
-                join.warn_one_sided(warn_after);
-                continue;
-            }
-        };
-        match event {
-            Some(Ok(event)) => join.apply(source, event),
-            Some(Err(error)) => tracing::warn!(?error, ?source, "pool source watch error"),
-            None => {
-                // Only a dropped source ends its stream. Serve fresh joins
-                // rather than a view that no longer changes, and end watch
-                // streams rather than leave them waiting.
-                join.unsync();
-                stop.cancel();
-                return;
-            }
+            () = tokio::time::sleep(delay) => {}
         }
     }
 }
@@ -286,9 +294,12 @@ impl Join {
                 tracing::warn!(
                     ?key,
                     "MCS lists a Ready PoolRelay for this pool, but the pool has no live \
-                     registration here, so it is not listed. Check that its PoolRelays call \
-                     POST /pools with this key, and that this instance shares registrations \
-                     with the discovery instance in the pool's cluster."
+                     registration here, so it is not listed. Either its lease lapsed while MCS \
+                     still shows a stale Ready endpoint, as when the pool's cluster loses contact \
+                     with the MCS implementation, or its registration does not reach this \
+                     instance: check that its PoolRelays call POST /pools with this key, and that \
+                     this instance shares registrations with the discovery instance in the pool's \
+                     cluster."
                 );
             } else {
                 tracing::warn!(
@@ -379,15 +390,16 @@ impl JoinState {
         self.update(&key, now).into_iter().collect()
     }
 
-    /// Joins every pool either source lists again after a source (re)listed.
-    /// Only then is the whole join rebuilt. A joined pool is still in one
-    /// source after one source relists, so `update` drops it from the join.
+    /// Joins every pool again after a source (re)listed: each pool either
+    /// source lists, and each pool in the join, which neither may list after
+    /// both relisted, as when the join watches them again. Only then is the
+    /// whole join rebuilt.
     fn rebuild(&mut self, now: Instant) {
         let JoinState {
             mcs,
             registered,
+            pools,
             one_sided,
-            ..
         } = &mut *self;
         one_sided.retain(|key, _| {
             mcs.listings.contains_key(key) != registered.listings.contains_key(key)
@@ -396,6 +408,7 @@ impl JoinState {
             .listings
             .keys()
             .chain(registered.listings.keys())
+            .chain(pools.keys())
             .cloned()
             .collect();
         for key in &keys {
@@ -434,6 +447,8 @@ impl JoinState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::backends::memory::{MemoryPoolStore, SWEEP_EVERY};
     use crate::pool_discovery::{Capacity, PoolRegistrar, PoolRegistration};
     use dynamo_global_common::PoolLocation;
@@ -503,6 +518,10 @@ mod tests {
     struct FakeMcs {
         listings: Arc<Mutex<HashMap<PoolKey, PoolListing>>>,
         events: broadcast::Sender<PoolEvent>,
+        /// How many of the next `list_and_watch` calls fail.
+        failing_watches: AtomicUsize,
+        /// Ends the watch streams served so far when cancelled.
+        streams: Mutex<CancellationToken>,
     }
 
     impl FakeMcs {
@@ -510,7 +529,20 @@ mod tests {
             Self {
                 listings: Arc::default(),
                 events: broadcast::channel(EVENT_BUFFER).0,
+                failing_watches: AtomicUsize::new(0),
+                streams: Mutex::default(),
             }
+        }
+
+        fn fail_watches(&self, calls: usize) {
+            self.failing_watches.store(calls, Ordering::SeqCst);
+        }
+
+        /// Ends every watch stream served so far, but not later ones.
+        fn end_watches(&self) {
+            let mut streams = self.streams.lock().unwrap();
+            streams.cancel();
+            *streams = CancellationToken::new();
         }
 
         fn put(&self, listing: PoolListing) {
@@ -552,6 +584,17 @@ mod tests {
             &self,
             cancel_token: Option<CancellationToken>,
         ) -> Result<WatchStream<PoolListing, PoolKey>, DiscoveryError> {
+            let failing = self
+                .failing_watches
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |calls| {
+                    calls.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                return Err(DiscoveryError::Unavailable(anyhow::anyhow!(
+                    "MCS is unreachable"
+                )));
+            }
             let listings = Arc::clone(&self.listings);
             let events = self.events.clone();
             Ok(watch_stream(
@@ -560,7 +603,7 @@ mod tests {
                     (events.subscribe(), Some(exact(&listings)))
                 },
                 cancel_token.unwrap_or_default(),
-                CancellationToken::new(),
+                self.streams.lock().unwrap().clone(),
             ))
         }
     }
@@ -621,6 +664,35 @@ mod tests {
     /// Lets the join task run.
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    /// A join with no task, for feeding it events by hand.
+    fn join() -> Join {
+        Join {
+            state: Mutex::default(),
+            events: broadcast::channel(16).0,
+        }
+    }
+
+    fn resync(items: Vec<PoolListing>) -> PoolEvent {
+        WatchEvent::Resync(Snapshot {
+            items,
+            completeness: Completeness::Exact,
+        })
+    }
+
+    /// The DGD names a `Resync` lists, sorted.
+    fn resynced(event: PoolEvent) -> Vec<String> {
+        let WatchEvent::Resync(snapshot) = event else {
+            panic!("expected a Resync");
+        };
+        let mut names: Vec<String> = snapshot
+            .items
+            .into_iter()
+            .map(|listing| listing.key.dgd_name().to_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     #[tokio::test(start_paused = true)]
@@ -746,16 +818,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn tracks_pools_only_one_source_lists() {
-        let join = Join {
-            state: Mutex::default(),
-            events: broadcast::channel(16).0,
-        };
-        let resync = |items: Vec<PoolListing>| {
-            WatchEvent::Resync(Snapshot {
-                items,
-                completeness: Completeness::Exact,
-            })
-        };
+        let join = join();
         let one_sided = |join: &Join| {
             let mut one_sided: Vec<(String, bool)> = join
                 .lock()
@@ -809,5 +872,101 @@ mod tests {
             resync(vec![listed("both", "m"), listed("relay-only", "m")]),
         );
         assert!(one_sided(&join).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relist_that_drops_a_joined_pool_removes_it() {
+        let both_list = |join: &Join| {
+            join.apply(
+                Source::Mcs,
+                resync(vec![from_mcs("kept"), from_mcs("dropped")]),
+            );
+            join.apply(
+                Source::Registrations,
+                resync(vec![listed("kept", "m"), listed("dropped", "m")]),
+            );
+        };
+        for (source, kept) in [
+            (Source::Mcs, from_mcs("kept")),
+            (Source::Registrations, listed("kept", "m")),
+        ] {
+            let join = join();
+            both_list(&join);
+            let mut events = join.events.subscribe();
+            // The pool leaves the join and the published `Resync`, which
+            // replaces per-pool events, and the other source still lists it.
+            join.apply(source, resync(vec![kept]));
+            assert_eq!(resynced(events.try_recv().unwrap()), ["kept"], "{source:?}");
+            assert!(events.try_recv().is_err());
+            let state = join.lock();
+            assert!(!state.pools.contains_key(&key("dropped")));
+            assert!(state.one_sided.contains_key(&key("dropped")));
+        }
+
+        // When both sources list again, as when the join watches them again,
+        // a pool that neither lists any more leaves the join too.
+        let join = join();
+        both_list(&join);
+        let mut events = join.events.subscribe();
+        join.unsync();
+        join.apply(Source::Mcs, resync(vec![from_mcs("kept")]));
+        assert!(events.try_recv().is_err());
+        join.apply(Source::Registrations, resync(vec![listed("kept", "m")]));
+        assert_eq!(resynced(events.try_recv().unwrap()), ["kept"]);
+        let state = join.lock();
+        assert!(!state.pools.contains_key(&key("dropped")));
+        assert!(state.one_sided.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sources_that_cannot_be_watched_yet_are_watched_later() {
+        let fx = fixture();
+        fx.mcs.fail_watches(2);
+        fx.in_mcs("mocker");
+        fx.register("mocker", "m1").await;
+        // Until the join can watch the sources, each read joins them.
+        assert_eq!(fx.keys().await, [key("mocker")]);
+        settle().await;
+        assert!(fx.directory.join.snapshot().is_none());
+
+        // It tries again after a backoff, and then serves watch streams.
+        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(10), watch.next())
+            .await
+            .expect("the join watches the sources once it can");
+        assert!(
+            matches!(first, Some(Ok(WatchEvent::Upserted(listing))) if listing.key == key("mocker"))
+        );
+        assert!(fx.directory.join.snapshot().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_join_watches_again_when_a_watch_ends() {
+        let fx = fixture();
+        fx.in_mcs("old");
+        fx.register("old", "m").await;
+        fx.register("new", "m").await;
+        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Upserted(_)))
+        ));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
+
+        // The MCS watch ends, and MCS changes before the join watches it
+        // again: the next `Resync` lists the pools as they are then.
+        fx.mcs.end_watches();
+        fx.mcs.remove(&key("old"));
+        fx.in_mcs("new");
+        let next = tokio::time::timeout(Duration::from_secs(10), watch.next())
+            .await
+            .expect("the join watches the sources again");
+        let Some(Ok(event)) = next else {
+            panic!("the watch stream ended");
+        };
+        assert_eq!(resynced(event), ["new"]);
     }
 }
