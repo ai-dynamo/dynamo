@@ -42,8 +42,6 @@
 //!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
 //!     registrar: Some(registrations),
-//!     // Or the `Sharing` from `crate::peers::PeerSync::new`.
-//!     sharing: None,
 //! };
 //! service::serve(listener, backend, None, shutdown).await?;
 //! ```

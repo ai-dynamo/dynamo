@@ -12,14 +12,11 @@
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; and with MCS, also
-//!   while another discovery instance has not answered for a lease, so its
-//!   registrations may be missing, and while the MCS watch keeps failing. A
-//!   caller that keeps its own list replaces it with a complete list, but
-//!   merges a partial one: it adds new pools and updates changed ones, keeps
-//!   known pools that are missing, and waits for a complete list to remove
-//!   any. A caller that knows no pools yet still uses a partial list.
-//! - `GET /registrations`: the registrations this instance's PoolRelays
-//!   made, for the other instances ([`crate::peers`]).
+//!   while the MCS watch keeps failing. A caller that keeps its own list
+//!   replaces it with a complete list, but merges a partial one: it adds new
+//!   pools and updates changed ones, keeps known pools that are missing, and
+//!   waits for a complete list to remove any. A caller that knows no pools
+//!   yet still uses a partial list.
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
 //!   for readiness; liveness needs only the TCP port.
 //!
@@ -31,12 +28,9 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
-    RegistrationExchange, ReplicaDirectory,
+    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
 };
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -47,7 +41,6 @@ use axum::{Json, Router};
 use dynamo_global_common::{PoolsResponse, RoutersResponse};
 use dynamo_http_server::lifecycle::ServiceObserver;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig};
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -59,37 +52,12 @@ pub struct PoolDiscoveryBackend {
     /// `None` when the backend takes no registrations: `POST /pools` then
     /// answers `501`.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
-    /// `Some` to serve `GET /registrations` to the other instances.
-    pub sharing: Option<Sharing>,
-}
-
-/// The registrations this instance shares, from
-/// [`crate::peers::PeerSync::new`].
-pub struct Sharing {
-    /// Names this process in `GET /registrations`, so it can skip its own
-    /// reply.
-    pub(crate) instance: String,
-    pub(crate) registrations: Arc<dyn RegistrationExchange>,
-    /// Set once this instance has asked every other one. Until then
-    /// `GET /healthz` fails, so a new replica does not answer before it has
-    /// heard from the others.
-    pub(crate) synced: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PoolDiscoveryBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PoolDiscoveryBackend")
             .field("takes_registrations", &self.registrar.is_some())
-            .field("sharing", &self.sharing)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Sharing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sharing")
-            .field("instance", &self.instance)
-            .field("synced", &self.synced.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -106,7 +74,6 @@ pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers).post(register_router))
-        .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .with_state(Arc::new(backend))
 }
@@ -182,29 +149,6 @@ async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Respo
     }
 }
 
-async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
-    let Some(sharing) = &backend.sharing else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "this instance does not share registrations",
-        )
-            .into_response();
-    };
-    Json(SharedRegistrations {
-        instance: sharing.instance.clone(),
-        registrations: sharing
-            .registrations
-            .local_registrations()
-            .into_iter()
-            .map(|(registration, remaining)| SharedRegistration {
-                registration,
-                expires_in_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
-            })
-            .collect(),
-    })
-    .into_response()
-}
-
 /// `RegisterRouter` from the design. The service takes no router
 /// registrations yet, so every call answers `501`, whatever its body. With
 /// MCS, routers need not register. Without it, how a router proves it is a
@@ -222,15 +166,8 @@ async fn register_router() -> Response {
 /// Lists what `GET /pools` and `GET /routers` would serve. With pools from
 /// MCS, the backend answers from its cache once that has synced, so an API
 /// server outage does not turn every replica unready at once. The first probe
-/// also starts its watch. An instance that shares registrations is ready
-/// only once it has asked the others; an unreachable one later does not make
-/// it unready.
+/// also starts its watch.
 async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode {
-    if let Some(sharing) = &backend.sharing
-        && !sharing.synced.load(Ordering::Acquire)
-    {
-        return StatusCode::SERVICE_UNAVAILABLE;
-    }
     let (pools, routers) = tokio::join!(backend.pools.list(), backend.routers.list());
     match pools.and(routers) {
         Ok(_) => StatusCode::OK,
@@ -248,29 +185,6 @@ fn error_response(error: DiscoveryError) -> Response {
     };
     tracing::warn!(?error, %status, "discovery request failed");
     (status, error.to_string()).into_response()
-}
-
-/// `GET /registrations` reply. Only service instances read it, so it is not
-/// in `dynamo_global_common`.
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct SharedRegistrations {
-    /// The instance that answered.
-    pub(crate) instance: String,
-    pub(crate) registrations: Vec<SharedRegistration>,
-}
-
-/// A registration as its PoolRelay sent it, and how long it has left.
-/// Durations, not times, so the instances' clocks need not agree.
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct SharedRegistration {
-    registration: PoolRegistration,
-    expires_in_ms: u64,
-}
-
-impl SharedRegistration {
-    pub(crate) fn into_registration(self) -> (PoolRegistration, Duration) {
-        (self.registration, Duration::from_millis(self.expires_in_ms))
-    }
 }
 
 #[cfg(test)]
@@ -316,7 +230,6 @@ mod tests {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
-            sharing: None,
         }
     }
 
@@ -510,7 +423,6 @@ mod tests {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
-            sharing: None,
         })
         .await;
         for path in ["/pools", "/routers", "/healthz"] {

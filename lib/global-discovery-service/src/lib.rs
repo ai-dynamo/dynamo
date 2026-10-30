@@ -10,10 +10,9 @@
 //!
 //! [`backends`] implements those traits: registrations kept in memory, and
 //! the EndpointSlices that SIG Multicluster (MCS) imports, joined with
-//! registrations. [`peers`] shares registrations between service instances.
+//! registrations.
 
 pub mod backends;
-pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 

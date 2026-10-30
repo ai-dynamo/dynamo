@@ -19,9 +19,8 @@
 # KUBECONFIG at it, and grant the same read access there.
 #
 # With the default --registration-storage=memory, one instance keeps only the
-# registrations it receives. To run one in each cluster, export this Service
-# and add --peer-service=global-discovery-service, so the instances share
-# their registrations.
+# registrations it receives, so run one, and have every PoolRelay register
+# with it.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -35,7 +35,6 @@ use dynamo_global_discovery_service::backends::kubernetes::{
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
-use dynamo_global_discovery_service::peers::PeerSync;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
@@ -150,36 +149,6 @@ struct Args {
         required_if_eq_any = MCS_VALUES
     )]
     router_port_name: Option<String>,
-    /// This service's own Service, exported through MCS. With it, the
-    /// instances in every cluster share their registrations, over plain
-    /// HTTP, so not with `--tls-cert-path` yet. The lease must be more than
-    /// twice the heartbeat interval. Other regions then drop a pool whose
-    /// PoolRelay is more than the lease minus two heartbeat intervals late
-    /// (5 s with the defaults); its own region allows the lease minus one.
-    #[arg(
-        long,
-        value_parser = NonEmptyStringValueParser::new(),
-        help_heading = WITH_MCS,
-        conflicts_with = "tls_cert_path"
-    )]
-    peer_service: Option<String>,
-    /// Namespace of `--peer-service`. Defaults to `--router-namespace`.
-    #[arg(
-        long,
-        value_parser = NonEmptyStringValueParser::new(),
-        help_heading = WITH_MCS,
-        requires = "peer_service"
-    )]
-    peer_namespace: Option<String>,
-    /// The named HTTP port of `--peer-service`.
-    #[arg(
-        long,
-        default_value = "http",
-        value_parser = NonEmptyStringValueParser::new(),
-        help_heading = WITH_MCS,
-        requires = "peer_service"
-    )]
-    peer_port_name: String,
 }
 
 /// The `--pool-discovery` values that read MCS, for clap's
@@ -215,9 +184,8 @@ impl PoolDiscovery {
 /// Where registrations are kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum RegistrationStorage {
-    /// In this process: each instance keeps only the registrations it
-    /// receives. With MCS, `--peer-service` shares them between instances;
-    /// otherwise run one replica.
+    /// In this process. Run one replica: each keeps only the registrations it
+    /// receives.
     Memory,
 }
 
@@ -292,34 +260,16 @@ where
     }
     // Karmada imports no Service with a longer name, and the API server
     // refuses to list one, so the service would never be ready.
-    if let Some(mcs) = parsed.pool_discovery.mcs() {
-        for (flag, service) in [
-            ("router-service", &parsed.router_service),
-            ("peer-service", &parsed.peer_service),
-        ] {
-            if let Some(service) = service
-                && !mcs.can_import(service)
-            {
-                return Err(command.error(
-                    ErrorKind::ValueValidation,
-                    format!(
-                        "--{flag} has {} characters, and Karmada imports a Service name of at \
-                         most {KARMADA_MAX_SERVICE_NAME}",
-                        service.len()
-                    ),
-                ));
-            }
-        }
-    }
-    // A copy from another instance must outlive the time between its
-    // refreshes.
-    if parsed.peer_service.is_some()
-        && parsed.lease_duration_secs <= parsed.heartbeat_interval_secs.saturating_mul(2)
+    if let (Some(mcs), Some(service)) = (parsed.pool_discovery.mcs(), &parsed.router_service)
+        && !mcs.can_import(service)
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
-            "with --peer-service, --lease-duration-secs must be more than twice \
-             --heartbeat-interval-secs, so that copies stay alive between refreshes",
+            format!(
+                "--router-service has {} characters, and Karmada imports a Service name of at \
+                 most {KARMADA_MAX_SERVICE_NAME}",
+                service.len()
+            ),
         ));
     }
     Ok(parsed)
@@ -329,16 +279,16 @@ where
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
-    let shutdown = CancellationToken::new();
     let backend = match args.pool_discovery.mcs() {
         None => registrations_backend(&args)?,
-        Some(mcs) => mcs_backend(&args, mcs, &shutdown).await?,
+        Some(mcs) => mcs_backend(&args, mcs).await?,
     };
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind the Global Discovery listener at {}", args.listen))?;
     tracing::info!(address = %args.listen, "Global Discovery Service listening");
 
+    let shutdown = CancellationToken::new();
     cancel_on_signal(shutdown.clone())?;
     let tls = args
         .tls_cert_path
@@ -377,7 +327,6 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
-        sharing: None,
     })
 }
 
@@ -386,11 +335,7 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
 /// registered within the lease. MCS gives the addresses; the registration
 /// gives the model, capabilities, capacity and location. Router replicas
 /// come from the router Service's imports.
-async fn mcs_backend(
-    args: &Args,
-    mcs: McsImplementation,
-    shutdown: &CancellationToken,
-) -> Result<PoolDiscoveryBackend> {
+async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
         &args.router_service,
@@ -417,33 +362,6 @@ async fn mcs_backend(
     )
     .context("check --frontend-service-suffix and --pool-service-suffix")?;
     let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease);
-    let sharing = match &args.peer_service {
-        Some(peer_service) => {
-            let peers = ExportedService {
-                namespace: args
-                    .peer_namespace
-                    .clone()
-                    .unwrap_or_else(|| namespace.clone()),
-                name: peer_service.clone(),
-                port_name: args.peer_port_name.clone(),
-            };
-            let (sync, sharing) = PeerSync::new(
-                Arc::new(McsReplicaDirectory::new(client.clone(), &peers, mcs)),
-                registrations.clone(),
-                lease,
-            )
-            .context("create the HTTP client for --peer-service")?;
-            tokio::spawn(sync.run(shutdown.clone()));
-            Some(sharing)
-        }
-        None => {
-            tracing::info!(
-                "no --peer-service: registrations stay in this instance, so only pools that \
-                 register here are listed"
-            );
-            None
-        }
-    };
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
@@ -454,7 +372,6 @@ async fn mcs_backend(
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: Some(registrar),
-        sharing,
     })
 }
 
@@ -583,16 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_flags_need_peer_service() {
-        for flag in ["--peer-namespace=other", "--peer-port-name=grpc"] {
-            let error = parse_args(karmada(&[flag])).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
-            assert!(error.to_string().contains("--peer-service"), "{error}");
-            assert!(parse_args(karmada(&["--peer-service=gds", flag])).is_ok());
-        }
-    }
-
-    #[test]
     fn a_flag_for_another_pool_discovery_fails() {
         assert!(parse_args(["gds", ROUTER]).is_ok());
         assert_refused(&karmada(&[ROUTER]), "router", "registrations");
@@ -604,11 +511,6 @@ mod tests {
         assert_refused(
             &["gds", "--frontend-service-suffix=-web"],
             "frontend-service-suffix",
-            "karmada or mcs",
-        );
-        assert_refused(
-            &["gds", "--peer-service", "global-discovery-service"],
-            "peer-service",
             "karmada or mcs",
         );
         // Every --pool-discovery value takes registrations.
@@ -646,57 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn frontend_and_peer_flags_cannot_be_empty() {
-        for extra in [
-            ["--frontend-port-name=", "--peer-service=gds"],
-            ["--peer-service=", "--frontend-port-name=http"],
-            ["--peer-service=gds", "--peer-namespace="],
-            ["--peer-service=gds", "--peer-port-name="],
-        ] {
-            let error = parse_args(karmada(&extra)).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{extra:?}: {error}");
-        }
-    }
-
-    #[test]
-    fn karmada_refuses_a_peer_service_it_cannot_import() {
-        let name = format!(
-            "--peer-service={}",
-            "p".repeat(KARMADA_MAX_SERVICE_NAME + 1)
-        );
-        let error = parse_args(karmada(&[&name])).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        assert!(error.to_string().contains("--peer-service"), "{error}");
-    }
-
-    #[test]
-    fn peer_sharing_mistakes_are_usage_errors() {
-        // Instances ask each other over plain HTTP.
-        let error = parse_args(karmada(&[
-            "--peer-service=gds",
-            "--tls-cert-path=/tls/tls.crt",
-            "--tls-key-path=/tls/tls.key",
-        ]))
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
-        // A lease of at most two heartbeats lets copies expire between
-        // refreshes.
-        let error = parse_args(karmada(&[
-            "--peer-service=gds",
-            "--heartbeat-interval-secs=5",
-            "--lease-duration-secs=10",
-        ]))
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        assert_eq!(error.exit_code(), 2);
-        assert!(
-            parse_args(karmada(&[
-                "--peer-service=gds",
-                "--heartbeat-interval-secs=5",
-                "--lease-duration-secs=11",
-            ]))
-            .is_ok()
-        );
+    fn frontend_port_name_cannot_be_empty() {
+        let error = parse_args(karmada(&["--frontend-port-name="])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
     }
 
     #[test]

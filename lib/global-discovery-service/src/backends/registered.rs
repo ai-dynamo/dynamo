@@ -282,8 +282,7 @@ impl Join {
                     ?key,
                     "MCS lists a Ready PoolRelay for this pool, but the pool has no live \
                      registration here, so it is not listed. Check that its PoolRelay calls \
-                     POST /pools with this key, and that this instance shares registrations \
-                     with the discovery instance in the pool's cluster."
+                     POST /pools on this service with this key."
                 );
             } else {
                 tracing::warn!(
