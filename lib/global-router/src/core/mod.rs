@@ -29,7 +29,7 @@ use dynamo_kv_router::services::selection::{
     CatalogReconciler, PromptRequest, SelectAndReserveRequest, SelectionService,
     SelectionServiceBuilder,
 };
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -72,18 +72,24 @@ impl CoreSelector {
     }
 
     /// Keeps the core's workers matching `pools`, the frontend's catalog
-    /// subscription, until `cancel` fires or the catalog is dropped. Run it
-    /// as a task.
+    /// subscription, until `cancel` fires or the catalog is dropped. Run the
+    /// future as a task; the receiver resolves once the core has taken the
+    /// first snapshot, so the caller can wait for the configured pools to be
+    /// selectable before serving. It fails if the task ends first.
     pub fn follow<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
         cancel: CancellationToken,
-    ) -> impl Future<Output = ()> + Send + 'static
+    ) -> (
+        oneshot::Receiver<()>,
+        impl Future<Output = ()> + Send + 'static,
+    )
     where
         S: AsRef<[Pool]> + Send + Sync + 'static,
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
-        reconciler.run(PoolCatalogSource::new(pools), cancel)
+        let (source, ready) = PoolCatalogSource::with_ready(pools);
+        (ready, reconciler.run(source, cancel))
     }
 
     /// Books a request on `pool`, whatever the policy would pick.
@@ -100,7 +106,6 @@ impl CoreSelector {
         Reservation::new(self.service.clone(), selected.selection_id)
     }
 
-    /// Requests booked on `pool`.
     #[cfg(test)]
     fn booked(&self, pool: &Pool) -> usize {
         self.service
@@ -311,7 +316,9 @@ mod tests {
     async fn selector(policy: CorePolicy, pools: &[Pool]) -> (CoreSelector, Catalog) {
         let (catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
         let selector = CoreSelector::new(policy).await.unwrap();
-        tokio::spawn(selector.follow(subscription, CancellationToken::new()));
+        let (ready, follower) = selector.follow(subscription, CancellationToken::new());
+        tokio::spawn(follower);
+        ready.await.expect("the core took the first snapshot");
         let expected = pools.iter().filter(|pool| reachable(pool)).count();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -330,7 +337,6 @@ mod tests {
         (selector, catalog)
     }
 
-    /// Waits until `pool` has `booked` requests booked.
     async fn booked_settles(selector: &CoreSelector, pool: &Pool, booked: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while selector.booked(pool) != booked {
@@ -358,7 +364,6 @@ mod tests {
         Some(pool.id.clone())
     }
 
-    /// `n` picks in a row.
     async fn sequence(
         selector: &CoreSelector,
         model: &str,
@@ -534,7 +539,6 @@ mod tests {
         assert_eq!(selection.target.pool.id, green.id);
         assert_eq!((core.booked(&blue), core.booked(&green)), (1, 1));
 
-        // Dropping the selection frees green in the background.
         let mut lifecycle = selection.lifecycle.unwrap();
         lifecycle.prefill_complete();
         drop(lifecycle);

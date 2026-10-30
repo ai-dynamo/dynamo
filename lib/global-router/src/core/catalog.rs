@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use dynamo_global_common::PoolId;
 use dynamo_kv_router::WorkerId;
 use dynamo_kv_router::services::selection::{WorkerCatalogSource, WorkerRequest};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Pool;
@@ -29,7 +29,6 @@ pub const ROUTING_GROUP: &str = "global";
 /// keeps the block arithmetic trivial. The core requires some block size.
 const BLOCK_SIZE: u32 = 1;
 
-/// The core's id for `pool`.
 pub fn worker_id(pool: &PoolId) -> WorkerId {
     xxh3_64(pool.as_str().as_bytes())
 }
@@ -64,6 +63,7 @@ pub fn workers(pools: &[Pool]) -> Vec<WorkerRequest> {
 pub struct PoolCatalogSource<S> {
     pools: watch::Receiver<Arc<S>>,
     started: bool,
+    first_taken: Option<oneshot::Sender<()>>,
 }
 
 impl<S> PoolCatalogSource<S> {
@@ -72,7 +72,19 @@ impl<S> PoolCatalogSource<S> {
         Self {
             pools,
             started: false,
+            first_taken: None,
         }
+    }
+
+    /// Like [`Self::new`], with a receiver that resolves once the core has
+    /// taken the first snapshot and come back for the next one, so a caller
+    /// can hold requests until the configured pools are selectable. It
+    /// fails if the source is dropped first.
+    pub fn with_ready(pools: watch::Receiver<Arc<S>>) -> (Self, oneshot::Receiver<()>) {
+        let (ready, is_ready) = oneshot::channel();
+        let mut source = Self::new(pools);
+        source.first_taken = Some(ready);
+        (source, is_ready)
     }
 }
 
@@ -85,6 +97,9 @@ where
     /// is dropped.
     async fn next_snapshot(&mut self) -> Option<Vec<WorkerRequest>> {
         if std::mem::replace(&mut self.started, true) {
+            if let Some(ready) = self.first_taken.take() {
+                let _ = ready.send(());
+            }
             self.pools.changed().await.ok()?;
         }
         let snapshot = self.pools.borrow_and_update().clone();
@@ -94,6 +109,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::selector::tests::pool;
 
     use super::*;
@@ -145,7 +162,6 @@ mod tests {
         let (catalog, pools) = watch::channel(Arc::new(vec![blue.clone()]));
         let mut source = PoolCatalogSource::new(pools);
 
-        // The first snapshot comes without waiting for a change.
         let first = source.next_snapshot().await.unwrap();
         assert_eq!(ids(&first), [worker_id(&blue.id)]);
 
@@ -156,7 +172,6 @@ mod tests {
         both.sort_unstable();
         assert_eq!(second, both);
 
-        // Losing its last frontend removes a pool.
         let mut blue_down = blue.clone();
         blue_down.frontends.clear();
         catalog.send_replace(Arc::new(vec![blue_down, green.clone()]));
@@ -165,5 +180,32 @@ mod tests {
 
         drop(catalog);
         assert!(source.next_snapshot().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ready_resolves_once_the_core_comes_back_for_a_second_snapshot() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let (_catalog, pools) = watch::channel(Arc::new(vec![blue]));
+        let (mut source, mut ready) = PoolCatalogSource::with_ready(pools);
+
+        source.next_snapshot().await.unwrap();
+        assert!(
+            ready.try_recv().is_err(),
+            "the first snapshot is not yet taken"
+        );
+
+        // Coming back for the next snapshot means the first one is applied
+        // (or in retry); nothing changed, so the call waits.
+        let waits = tokio::time::timeout(Duration::from_millis(20), source.next_snapshot()).await;
+        assert!(waits.is_err());
+        assert!(ready.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ready_fails_if_the_source_is_dropped_first() {
+        let (_catalog, pools) = watch::channel(Arc::new(Vec::<Pool>::new()));
+        let (source, ready) = PoolCatalogSource::with_ready(pools);
+        drop(source);
+        assert!(ready.await.is_err());
     }
 }

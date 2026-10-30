@@ -209,7 +209,13 @@ async fn main() -> Result<()> {
     let selector: Arc<dyn RequestSelector> = match (args.selection, args.router_policy) {
         (SelectionPath::Core, policy) => {
             let core = Arc::new(CoreSelector::new(core_policy(policy)?).await?);
-            tokio::spawn(core.follow(pools.clone(), shutdown.child_token()));
+            // Serve only once the configured pools are the core's workers;
+            // a request before that would get a spurious 503.
+            let (ready, follower) = core.follow(pools.clone(), shutdown.child_token());
+            tokio::spawn(follower);
+            ready
+                .await
+                .context("the router core stopped before taking the first pool snapshot")?;
             core
         }
         (SelectionPath::Legacy, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
