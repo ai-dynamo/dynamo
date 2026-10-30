@@ -351,6 +351,7 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"objective":      {NativeSearchInput: NativeSearchInput{Objective: &ObjectiveSpec{}}},
 		"aisim":          {NativeSearchInput: NativeSearchInput{AISim: &AISimSpec{}}},
 		"recommendation": {NativeSearchInput: NativeSearchInput{Recommendation: &RecommendationSpec{}}},
+		"overrides":      {NativeSearchInput: NativeSearchInput{Overrides: &OverridesSpec{}}},
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {

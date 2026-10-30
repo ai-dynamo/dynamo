@@ -12,7 +12,6 @@ metadata:
     nvidia.com/dgdr-run-uid: $ignore
 spec:
   $strict: false
-  backendFramework: vllm
 status:
   parameters:
     $strict: false
