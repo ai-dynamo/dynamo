@@ -165,6 +165,8 @@ KVCR caches are hint sources through their cache owners. A vLLM worker publishes
 
 A source may hold only the continuation beyond the target's existing device/host-pinned prefix. It must cover every missing block through the credited end and satisfy the same topology rules as root-prefix sources. For example, a worker holding blocks 1–10 can fetch 11–15 from one source even if that source does not hold 1–10. The hint carries the root-aligned hashes 1–15; the receiver skips blocks it already holds.
 
+For fetch-hint source selection, the router extends the device (L1) prefix through contiguous local host-pinned (L2) blocks first, then considers one remote L2 source. A gap or detached local segment adds no local continuation beyond that gap; it does not discard the device prefix. The router does not resume local L2 after a remote fetch or alternate between local and remote sources. For example, with L1 blocks 1–9, local L2 blocks 12–15, and a remote source holding 10–11, the router credits through block 11, not 15. This keeps the estimate conservative without planning multiple transfer steps. Disk and External overlap still contribute to cache scoring, but neither extends the local frontier used for fetch hints nor supplies a remote source for them.
+
 The router selects one source against the target's original local prefix; it does not combine sources or use hypothetical fetched progress to qualify another source. Continuation discovery requires hint-capable workers and a local event-driven indexer without predict-on-route. It also runs when queued requests refresh their cache lookup.
 
 A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
