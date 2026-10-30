@@ -342,7 +342,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
                 14.0
-            ),  # actual nvidia-smi peak with kv-tokens (SGLang 0.5.22)
+            ),  # actual nvidia-smi peak with kv-tokens
             pytest.mark.requested_sglang_kv_tokens(
                 37472
             ),  # KV cache cap (2x safety over min=18736)
