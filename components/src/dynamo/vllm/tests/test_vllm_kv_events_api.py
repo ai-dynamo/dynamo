@@ -28,7 +28,6 @@ to preserve and republish a new upstream field.
 import importlib
 
 import pytest
-from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -49,22 +48,6 @@ pytestmark = [
 ]
 
 
-def _has_group_idx(event_cls):
-    return "group_idx" in event_cls.__struct_fields__
-
-
-def _has_kv_cache_spec_kind(event_cls):
-    return "kv_cache_spec_kind" in event_cls.__struct_fields__
-
-
-def _has_kv_cache_spec_sliding_window(event_cls):
-    return "kv_cache_spec_sliding_window" in event_cls.__struct_fields__
-
-
-def _has_locality(event_cls):
-    return "locality" in event_cls.__struct_fields__
-
-
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -78,18 +61,18 @@ class TestVllmKvEventsApi:
         4. block_size
         5. lora_id
         6. medium
-        7. lora_name (added in vLLM 0.14.0)
-        8. extra_keys (added in vLLM 0.17.0)
-        9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
-        10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
-        11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
-        12. locality (per-tier storage locality; optional for older vLLM)
-        13. ownership (secondary offloading tier; added in vLLM 0.29)
-        14. session_id (request session; added in vLLM 0.30)
+        7. lora_name
+        8. extra_keys
+        9. group_idx (hybrid KV cache groups)
+        10. kv_cache_spec_kind (semantic cache type)
+        11. kv_cache_spec_sliding_window (semantic cache window)
+        12. locality (per-tier storage locality)
+        13. ownership (secondary offloading tier)
+        14. session_id (request session)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
-        expected_fields = [
+        expected_fields = (
             "block_hashes",
             "parent_block_hash",
             "token_ids",
@@ -98,20 +81,13 @@ class TestVllmKvEventsApi:
             "medium",
             "lora_name",
             "extra_keys",
-        ]
-        if _has_group_idx(BlockStored):
-            expected_fields.append("group_idx")
-        if _has_kv_cache_spec_kind(BlockStored):
-            expected_fields.append("kv_cache_spec_kind")
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            expected_fields.append("kv_cache_spec_sliding_window")
-        if _has_locality(BlockStored):
-            expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
-            expected_fields.append("ownership")
-        if Version(_vllm.__version__).release >= (0, 30):
-            expected_fields.append("session_id")
-        expected_fields = tuple(expected_fields)
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+            "session_id",
+        )
 
         actual_fields = BlockStored.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -126,21 +102,13 @@ class TestVllmKvEventsApi:
 
     def test_block_removed_fields(self):
         """Verify BlockRemoved has expected fields in expected order."""
-        expected_fields = [
+        expected_fields = (
             "block_hashes",
             "medium",
-        ]
-        if _has_group_idx(BlockRemoved):
-            expected_fields.append("group_idx")
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            expected_fields.append("kv_cache_spec_kind")
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            expected_fields.append("kv_cache_spec_sliding_window")
-        if _has_locality(BlockRemoved):
-            expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
-            expected_fields.append("ownership")
-        expected_fields = tuple(expected_fields)
+            "group_idx",
+            "locality",
+            "ownership",
+        )
 
         actual_fields = BlockRemoved.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -202,27 +170,21 @@ class TestVllmKvEventsApi:
         """
         import msgspec
 
-        event_kwargs = {
-            "block_hashes": [123, 456],
-            "parent_block_hash": 789,
-            "token_ids": [1, 2, 3, 4],
-            "block_size": 16,
-            "lora_id": None,
-            "medium": "GPU",
-            "lora_name": None,
-            "extra_keys": None,
-        }
-        if _has_group_idx(BlockStored):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        if _has_locality(BlockStored):
-            event_kwargs["locality"] = "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
-            event_kwargs["session_id"] = "session-1"
-        event = BlockStored(**event_kwargs)
+        event = BlockStored(
+            block_hashes=[123, 456],
+            parent_block_hash=789,
+            token_ids=[1, 2, 3, 4],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+            extra_keys=None,
+            group_idx=0,
+            kv_cache_spec_kind="full_attention",
+            kv_cache_spec_sliding_window=128,
+            locality="LOCAL",
+            session_id="session-1",
+        )
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
@@ -237,39 +199,30 @@ class TestVllmKvEventsApi:
         assert decoded["medium"] == "GPU"
         assert decoded["lora_name"] is None
         assert decoded.get("extra_keys") is None
-        if _has_group_idx(BlockStored):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            assert decoded["kv_cache_spec_sliding_window"] == 128
-        if _has_locality(BlockStored):
-            assert decoded["locality"] == "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
-            assert decoded["session_id"] == "session-1"
+        assert decoded["group_idx"] == 0
+        assert decoded["kv_cache_spec_kind"] == "full_attention"
+        assert decoded["kv_cache_spec_sliding_window"] == 128
+        assert decoded["locality"] == "LOCAL"
+        assert decoded["session_id"] == "session-1"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
-        """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
+        """Verify multimodal tuple extra_keys keep their nested wire shape."""
         import msgspec
 
         mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-        event_kwargs = {
-            "block_hashes": [123],
-            "parent_block_hash": None,
-            "token_ids": [1, 2, 3, 4],
-            "block_size": 16,
-            "lora_id": None,
-            "medium": "GPU",
-            "lora_name": None,
-            "extra_keys": [((mm_hash, 7),)],
-        }
-        if _has_group_idx(BlockStored):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        event = BlockStored(**event_kwargs)
+        event = BlockStored(
+            block_hashes=[123],
+            parent_block_hash=None,
+            token_ids=[1, 2, 3, 4],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+            extra_keys=[((mm_hash, 7),)],
+            group_idx=0,
+            kv_cache_spec_kind="full_attention",
+            kv_cache_spec_sliding_window=128,
+        )
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
@@ -278,43 +231,25 @@ class TestVllmKvEventsApi:
             "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
             f"payloads. Decoded: {decoded['extra_keys']!r}"
         )
-        if _has_group_idx(BlockStored):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            assert decoded["kv_cache_spec_sliding_window"] == 128
+        assert decoded["group_idx"] == 0
+        assert decoded["kv_cache_spec_kind"] == "full_attention"
+        assert decoded["kv_cache_spec_sliding_window"] == 128
 
     def test_block_removed_serialization_format(self):
         """Verify BlockRemoved serializes to expected msgpack map format."""
         import msgspec
 
-        event_kwargs = {
-            "block_hashes": [123, 456],
-            "medium": "GPU",
-        }
-        if _has_group_idx(BlockRemoved):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        if _has_locality(BlockRemoved):
-            event_kwargs["locality"] = "REMOTE"
-        event = BlockRemoved(**event_kwargs)
+        event = BlockRemoved(
+            block_hashes=[123, 456],
+            medium="GPU",
+            group_idx=0,
+            locality="REMOTE",
+        )
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
         assert decoded["type"] == "BlockRemoved"
         assert decoded["block_hashes"] == [123, 456]
         assert decoded["medium"] == "GPU"
-        if _has_group_idx(BlockRemoved):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            assert (
-                decoded["kv_cache_spec_sliding_window"] == 128
-            ), "kv_cache_spec_sliding_window has wrong value"
-        if _has_locality(BlockRemoved):
-            assert decoded["locality"] == "REMOTE"
+        assert decoded["group_idx"] == 0
+        assert decoded["locality"] == "REMOTE"

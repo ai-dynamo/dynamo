@@ -57,19 +57,10 @@ class EngineGenerateInput:
 
 @lru_cache(maxsize=1)
 def _native_generate_api() -> tuple[Any, Any]:
-    try:
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            decode_mm_kwargs_item,
-        )
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            GenerateRequest,
-        )
-    except ModuleNotFoundError as exc:
-        expected_module = "vllm.entrypoints.scale_out.token_in_token_out"
-        if exc.name is None or not expected_module.startswith(exc.name):
-            raise
-        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
-        from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 
     return decode_mm_kwargs_item, GenerateRequest
 
@@ -253,8 +244,6 @@ def adapt_engine_generate_request(
             f"({max_num_seqs}), got {sampling_params.n}."
         )
     if not native_request.is_sampling_param_provided("max_tokens"):
-        # Older supported vLLM builds do not expose this helper. Keep the import
-        # lazy so workers that do not adapt native Generate requests still start.
         from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 
         model_config = vllm_config.model_config

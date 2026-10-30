@@ -5,7 +5,6 @@ import asyncio
 import base64
 import functools
 import importlib
-import inspect
 import logging
 import math
 import os
@@ -47,6 +46,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -140,7 +140,6 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # expecting KV-transfer metadata from an upstream prefill worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
-_GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
@@ -911,14 +910,10 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
-        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
-        # the same concept as `thinking_token_budget` on SamplingParams and
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM exposes the
+        # same concept as `thinking_token_budget` on SamplingParams and
         # enforces it via the builtin thinking-budget logits processor.
-        if (
-            key == "max_thinking_tokens"
-            and value is not None
-            and hasattr(sampling_params, "thinking_token_budget")
-        ):
+        if key == "max_thinking_tokens" and value is not None:
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
@@ -997,37 +992,13 @@ def _update_kv_transfer_params(
     sampling_params.extra_args = extra_args
 
 
-@functools.cache
-def _vllm_kv_hints_types() -> tuple[type[Any], type[Any]] | None:
-    """Load vLLM's first-class KV hint types when the API is available."""
-    try:
-        module = importlib.import_module("vllm.v1.kv_hints")
-    except ModuleNotFoundError as exc:
-        if exc.name != "vllm.v1.kv_hints":
-            raise
-        return None
-
-    action_type = getattr(module, "KvHintAction", None)
-    envelope_type = getattr(module, "KvHintsEnvelope", None)
-    if action_type is None or envelope_type is None:
-        return None
-    return action_type, envelope_type
-
-
-def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
+def _build_vllm_kv_hints(request: Mapping[str, Any]) -> KvHintsEnvelope | None:
     """Convert Dynamo's typed KV hint message to vLLM's envelope type."""
     raw_envelope = request.get("kv_hint")
     if raw_envelope is None:
         return None
     if not isinstance(raw_envelope, Mapping):
         raise ValueError("kv_hint must be an object")
-
-    kv_hints_types = _vllm_kv_hints_types()
-    if kv_hints_types is None:
-        raise RuntimeError(
-            "This vLLM version does not support first-class KV hint request metadata"
-        )
-    action_type, envelope_type = kv_hints_types
 
     raw_actions = raw_envelope.get("actions")
     if not isinstance(raw_actions, list):
@@ -1040,7 +1011,7 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
         if not isinstance(payload, Mapping):
             raise ValueError("kv_hint action payload must be an object")
         actions.append(
-            action_type(
+            KvHintAction(
                 action_id=str(raw_action["action_id"]),
                 action_type=str(raw_action["action_type"]),
                 action_version=str(raw_action["action_version"]),
@@ -1048,7 +1019,7 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
             )
         )
 
-    envelope = envelope_type(
+    envelope = KvHintsEnvelope(
         protocol_version=str(raw_envelope["protocol_version"]),
         message_id=str(raw_envelope["message_id"]),
         actions=actions,
@@ -1111,9 +1082,7 @@ def build_sampling_params_openai(
         sampling_params.min_tokens = request["min_tokens"]
 
     thinking_token_budget = resolve_thinking_token_budget(request)
-    if thinking_token_budget is not None and hasattr(
-        sampling_params, "thinking_token_budget"
-    ):
+    if thinking_token_budget is not None:
         sampling_params.thinking_token_budget = thinking_token_budget
 
     # Same setattr gap as in build_sampling_params.
@@ -1122,62 +1091,15 @@ def build_sampling_params_openai(
 
 
 def _engine_generate_reasoning_kwargs(
-    engine_client: Any,
     reasoning_ended: bool | None,
     reasoning_parser_kwargs: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if reasoning_ended is None and reasoning_parser_kwargs is None:
         return {}
-
-    support = _engine_generate_reasoning_support(engine_client)
-    if support is None:
-        return {}
-    accepts_reasoning_ended, accepts_reasoning_parser_kwargs = support
-
-    kwargs: dict[str, Any] = {}
-    if accepts_reasoning_ended:
-        kwargs["reasoning_ended"] = reasoning_ended
-    if accepts_reasoning_parser_kwargs:
-        kwargs["reasoning_parser_kwargs"] = reasoning_parser_kwargs
-
-    if not kwargs:
-        logger.debug(
-            "vLLM generate does not accept reasoning parser kwargs; "
-            "running without request-local reasoning parser metadata"
-        )
-    return kwargs
-
-
-def _engine_generate_reasoning_support(
-    engine_client: Any,
-) -> tuple[bool, bool] | None:
-    try:
-        cached = vars(engine_client).get(_GENERATE_REASONING_SUPPORT_CACHE_ATTR)
-    except TypeError:
-        cached = None
-    if cached is not None:
-        return cached
-
-    try:
-        parameters = inspect.signature(engine_client.generate).parameters
-    except (TypeError, ValueError):
-        logger.debug(
-            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
-        )
-        return None
-
-    accepts_kwargs = any(
-        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
-    )
-    support = (
-        accepts_kwargs or "reasoning_ended" in parameters,
-        accepts_kwargs or "reasoning_parser_kwargs" in parameters,
-    )
-    try:
-        setattr(engine_client, _GENERATE_REASONING_SUPPORT_CACHE_ATTR, support)
-    except Exception:
-        pass
-    return support
+    return {
+        "reasoning_ended": reasoning_ended,
+        "reasoning_parser_kwargs": reasoning_parser_kwargs,
+    }
 
 
 def _request_reasoning_metadata(
@@ -3538,7 +3460,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     session_id=session_id,
                     **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                     **_engine_generate_reasoning_kwargs(
-                        self.engine_client,
                         reasoning_ended,
                         reasoning_parser_kwargs,
                     ),
@@ -4659,7 +4580,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         session_id=session_id,
                         **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                         **_engine_generate_reasoning_kwargs(
-                            self.engine_client,
                             reasoning_ended,
                             reasoning_parser_kwargs,
                         ),
