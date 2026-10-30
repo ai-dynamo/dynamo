@@ -37,6 +37,7 @@ DYNAMO_ONLY_GPU_SKUS = frozenset(
         "t4",
         "v100_pcie",
         "v100_sxm",
+        "vr_nvl72",
     }
 )
 
@@ -45,10 +46,8 @@ DYNAMO_ONLY_GPU_SKUS = frozenset(
 AISIMULATE_ONLY_SYSTEM_IDS = frozenset(
     {
         "b60",
-        "gb200",
         "gb300",
         "rtx_pro_6000_server",
-        "vr200_hecate",
     }
 )
 
