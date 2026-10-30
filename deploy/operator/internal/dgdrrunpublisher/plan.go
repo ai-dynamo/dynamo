@@ -67,9 +67,10 @@ type DesiredState struct {
 	// FirstFailure is the bounded "id: error" of the first candidate whose
 	// materialization failed, for the run-failed diagnostics.
 	FirstFailure string
-	// Failed counts the candidates whose materialization failed. They are not created;
-	// the count is logged and prevents an empty terminal projection from succeeding.
+	// Failed counts renderer failures and published Candidates with Valid=False.
 	Failed int
+	// Valid counts Candidates whose complete DGD passed publisher preparation.
+	Valid int
 }
 
 // CandidateName is the DGDC name for a candidate id. It depends only on the run

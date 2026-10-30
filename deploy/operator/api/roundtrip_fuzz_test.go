@@ -534,6 +534,18 @@ func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, 
 	fuzzBeta2Workload(s.Workload, c)
 	fuzzBeta2Objective(s.Objective, c)
 
+	// Fuzz the typed partial DGD before encoding the opaque override payload.
+	if s.Overrides != nil && s.Overrides.DGD != nil {
+		var dgd v1beta1.DynamoGraphDeployment
+		c.Fill(&dgd.Spec)
+		dgd.SetGroupVersionKind(v1beta1.DynamoGraphDeploymentGVK)
+		raw, err := json.Marshal(dgd)
+		if err != nil {
+			panic(err)
+		}
+		s.Overrides.DGD = &runtime.RawExtension{Raw: raw}
+	}
+
 	// Keep the optional candidate bound inside its admitted range.
 	if s.Recommendation != nil {
 		s.Recommendation.MaxCandidates = int32(1 + c.Intn(100))

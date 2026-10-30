@@ -58,7 +58,7 @@ const (
 // runs/status patch (server-side apply); candidates get/list/watch/create/patch/delete
 // and candidates/status patch; pods get/list/watch (own pod, for Sweeper crash
 // detection; the cache narrows list/watch to it with a field selector because generated
-// Job pod names cannot be listed in resourceNames).
+// Job pod names cannot be listed in resourceNames); DGDs create for strict dry-run admission.
 //
 // Write echoes and cache lag: the publisher's own writes come back as watch events, and
 // the cache can trail them. Every pass still decides from current cached observations,
@@ -87,8 +87,9 @@ type Reconciler struct {
 	Store      *InputStore
 	Completion *Completion
 
-	pendingCandidates map[string]candidateObservation
-	pendingRun        *runObservation
+	pendingCandidates  map[string]candidateObservation
+	pendingRun         *runObservation
+	preparedCandidates map[string]dgdcreconcile.DesiredCandidate
 }
 
 // candidateObservation describes the cache echo that proves a candidate write has
@@ -159,6 +160,9 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 
 	desired := Desire(r.RunName, r.RunUID, input.Snapshot)
+	if err := r.prepareCandidates(ctx, &run, &desired); err != nil {
+		return r.retryOrFail(err)
+	}
 	quiescent, err := r.apply(ctx, &run, desired)
 	if err != nil {
 		return r.retryOrFail(err)
@@ -180,6 +184,10 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 // network failures remain retryable after the Sweeper exits because the terminal snapshot
 // is durable and the publisher Pod's lifecycle is the cancellation boundary.
 func (r *Reconciler) retryOrFail(err error) error {
+	if errors.Is(err, ErrProtocolViolation) {
+		r.Completion.Finish(err)
+		return nil
+	}
 	if _, ok := errors.AsType[*dgdcreconcile.DiffInputError](err); ok {
 		r.Completion.Finish(err) // retrying cannot fix it
 		return nil
@@ -192,7 +200,7 @@ func (r *Reconciler) retryOrFail(err error) error {
 // It is idempotent and safe to retry; existing candidate specs are never touched.
 func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) (bool, error) {
 	if desired.Failed > 0 {
-		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
+		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization or validation", "count", desired.Failed)
 	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
 	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
@@ -233,7 +241,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
 			ID:         expectedID,
-			Incomplete: item.Status.Metrics == nil,
+			Incomplete: !candidateStatusComplete(&item.Status),
 		})
 		uids[item.Name] = item.UID
 		versions[item.Name] = item.ResourceVersion
@@ -340,7 +348,7 @@ func (r *Reconciler) observeWrites(run *v1beta2.DynamoGraphDeploymentRun, candid
 		if owner == nil || owner.UID != run.UID || candidate.Labels[LabelRunUID] != r.RunUID || candidate.Labels[LabelCandidateID] != expected.ID {
 			continue
 		}
-		if !expected.Populated || candidate.Status.Metrics != nil {
+		if !expected.Populated || candidateStatusComplete(&candidate.Status) {
 			delete(r.pendingCandidates, name)
 		}
 	}
