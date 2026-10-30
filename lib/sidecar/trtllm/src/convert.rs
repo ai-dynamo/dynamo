@@ -208,6 +208,37 @@ fn max_tokens(
 
 const IMAGE_KEY: &str = "image_url";
 
+/// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
+pub(crate) fn validate_remote_media_urls(
+    request: &PreprocessedRequest,
+    allow_remote: bool,
+) -> Result<(), DynamoError> {
+    if allow_remote {
+        return Ok(());
+    }
+    for item in request
+        .multi_modal_data
+        .iter()
+        .flat_map(|media| media.values())
+        .flatten()
+    {
+        let url = match item {
+            MultimodalData::Url(url) => url.as_str(),
+            MultimodalData::RawUrl(url) => url.as_str(),
+            _ => continue,
+        };
+        if url.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }) {
+            return Err(client::invalid_argument(
+                "Remote media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); \
+                 send the media inline as a data: URL instead",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Per-modality vectors do not preserve cross-modality order.
 fn image_media(
     request: &mut PreprocessedRequest,
