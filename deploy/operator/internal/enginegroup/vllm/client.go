@@ -1,0 +1,235 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Package vllm implements the native control boundary for externally managed vLLM Elastic EP.
+// It requires the correlated operation API proposed in vllm-project/vllm#62082.
+// These controls do not establish traffic admission, physical release, or runtime conformance.
+package vllm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
+)
+
+const (
+	statusPath                = "/is_scaling_elastic_ep"
+	submitPath                = "/submit_elastic_ep"
+	defaultObservationTimeout = 5 * time.Second
+	defaultSubmissionTimeout  = 10 * time.Second
+)
+
+// Phase is the native epoch-scoped resize phase, not the controller's operation phase.
+type Phase string
+
+const (
+	// PhaseIdle means the runtime has not recorded an actual resize.
+	PhaseIdle Phase = "idle"
+	// PhasePreparing means old ranks and joiners are preparing the requested topology.
+	PhasePreparing Phase = "preparing"
+	// PhaseCommitting means membership is switching; the effective size may be only last-known evidence.
+	PhaseCommitting Phase = "committing"
+	// PhaseCompleted means the topology and all old-rank completion barriers finished.
+	PhaseCompleted Phase = "completed"
+	// PhaseFailed means the native operation failed, not necessarily without a membership mutation.
+	PhaseFailed Phase = "failed"
+)
+
+// Status preserves one API process's identity and the world's latest native operation evidence.
+// EffectiveDataParallelSize is only a last-known size when TopologyKnown is false.
+// vLLM retains only its latest operation; callers must durably consume its result before another resize.
+type Status struct {
+	InstanceID                string             `json:"instance_id"`
+	OperationID               *string            `json:"operation_id"`
+	Epoch                     *string            `json:"epoch"`
+	Phase                     Phase              `json:"phase"`
+	RequestedDataParallelSize *int32             `json:"requested_data_parallel_size"`
+	EffectiveDataParallelSize int32              `json:"effective_data_parallel_size"`
+	TopologyKnown             bool               `json:"topology_known"`
+	Error                     *string            `json:"error"`
+	AsynchronousSubmission    bool               `json:"asynchronous_submission"`
+	TopologyToken             string             `json:"topology_token"`
+	LocalSubmission           *SubmissionReceipt `json:"local_submission"`
+}
+
+// ScaleRequest carries the same operation and target to every old client, with its own instance precondition.
+// Neither identifier is optional in the Dynamo integration, even though vLLM accepts legacy uncorrelated requests.
+type ScaleRequest struct {
+	OperationID         string `json:"operation_id"`
+	ExpectedInstanceID  string `json:"expected_instance_id"`
+	NewDataParallelSize int32  `json:"new_data_parallel_size"`
+	DrainTimeout        int32  `json:"drain_timeout"`
+	BaseTopologyToken   string `json:"base_topology_token,omitempty"`
+}
+
+// SubmissionReceipt proves acceptance by this exact native client, not by its peers.
+// Started and Finished describe local participation; neither is collective commit evidence.
+type SubmissionReceipt struct {
+	Request   ScaleRequest `json:"request"`
+	FirstRank int32        `json:"first_rank"`
+	LocalSize int32        `json:"local_size"`
+	Started   bool         `json:"started"`
+	Finished  bool         `json:"finished"`
+	Error     *string      `json:"error"`
+}
+
+// Client addresses one native vLLM control process, directly or through its Dynamo worker.
+// It does not address a load-balanced service.
+// The immutable base URL is private so an observed process cannot silently be retargeted.
+type Client struct {
+	transport          *controlhttp.Client
+	routePrefix        string
+	ObservationTimeout time.Duration
+	SubmissionTimeout  time.Duration
+}
+
+// NewClient constructs one API process's control client without mutating httpClient.
+// httpClient must not be nil. The URL identifies the native API process, not a Dynamo wrapper.
+func NewClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
+	// Freeze the identity-bound transport independently of native protocol handling.
+	transport, err := controlhttp.New(rawBaseURL, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("parse vLLM control URL: %w", err)
+	}
+	return &Client{
+		transport:          transport,
+		ObservationTimeout: defaultObservationTimeout,
+		SubmissionTimeout:  defaultSubmissionTimeout,
+	}, nil
+}
+
+// NewWorkerClient addresses one Dynamo Python worker's control plane.
+// httpClient must not be nil. The worker forwards the same native AsyncLLM
+// operation and status; it is not a second membership transaction authority.
+func NewWorkerClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
+	// Resolve and freeze the endpoint exactly as for a directly addressed native API.
+	control, err := NewClient(rawBaseURL, httpClient)
+	if err != nil {
+		return nil, err
+	}
+	control.routePrefix = "/engine/control"
+	return control, nil
+}
+
+// Observe reads native status once; both vLLM control routes use POST.
+// Missing correlation or topology fields are unsupported, never implicit zero values or known topology.
+func (c *Client) Observe(ctx context.Context) (Status, error) {
+	// Bound status reads independently of a resize, preserving any shorter caller deadline.
+	if c.ObservationTimeout <= 0 {
+		return Status{}, fmt.Errorf("vLLM observation timeout must be positive")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.ObservationTimeout)
+	defer cancel()
+	return c.call(ctx, statusPath, nil)
+}
+
+// Submit requests bounded native acceptance, independently of the long-running collective.
+// Every return requires observation: HTTP refusal is not an operation rejection.
+func (c *Client) Submit(ctx context.Context, target ScaleRequest) (SubmissionReceipt, error) {
+	// Freeze the original runtime and opaque base token across ambiguous delivery and replay.
+	if err := target.validate(); err != nil {
+		return SubmissionReceipt{}, err
+	}
+	if !validIdentifier(target.BaseTopologyToken) || c.SubmissionTimeout <= 0 {
+		return SubmissionReceipt{}, fmt.Errorf("bounded vLLM submission requires a base topology token and positive request budget")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.SubmissionTimeout)
+	defer cancel()
+	payload, err := c.transport.Request(ctx, http.MethodPost, c.routePrefix+submitPath, target)
+	if err != nil {
+		return SubmissionReceipt{}, fmt.Errorf("vLLM %w", err)
+	}
+	var receipt SubmissionReceipt
+	if err := json.Unmarshal(payload, &receipt); err != nil {
+		return SubmissionReceipt{}, fmt.Errorf("decode vLLM acceptance receipt: %w", err)
+	}
+	if receipt.Request != target || receipt.FirstRank < 0 || receipt.LocalSize <= 0 {
+		return SubmissionReceipt{}, fmt.Errorf("vLLM receipt does not match the immutable request and local ownership")
+	}
+	if receipt.Error != nil {
+		return SubmissionReceipt{}, fmt.Errorf("vLLM local participation failed: %s", *receipt.Error)
+	}
+	return receipt, nil
+}
+
+func (r ScaleRequest) validate() error {
+	// Match the upstream identifier constraints without inventing an uncorrelated fallback.
+	if !validIdentifier(r.OperationID) || !validIdentifier(r.ExpectedInstanceID) {
+		return fmt.Errorf("vLLM operation and expected instance IDs must each contain 1–256 characters and not be blank")
+	}
+	if r.NewDataParallelSize <= 0 || r.DrainTimeout <= 0 {
+		return fmt.Errorf("vLLM DP target and drain timeout must be positive")
+	}
+	return nil
+}
+
+func (c *Client) call(ctx context.Context, path string, target any) (Status, error) {
+	// Native and worker transports retain the exact same evidence decoder.
+	payload, err := c.transport.Request(ctx, http.MethodPost, c.routePrefix+path, target)
+	if err != nil {
+		return Status{}, fmt.Errorf("vLLM %w", err)
+	}
+	var wire struct {
+		Status
+		TopologyKnown *bool `json:"topology_known"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return Status{}, fmt.Errorf("decode vLLM %s response: %w", path, err)
+	}
+	if wire.TopologyKnown == nil {
+		return Status{}, fmt.Errorf("vLLM %s lacks correlated topology evidence; the operation-status API is required", path)
+	}
+	wire.Status.TopologyKnown = *wire.TopologyKnown
+	if err := wire.Status.validate(); err != nil {
+		return Status{}, fmt.Errorf("invalid vLLM %s status: %w", path, err)
+	}
+	return wire.Status, nil
+}
+
+func (s Status) validate() error {
+	// A process lifetime and an effective count are required even while topology is unknown.
+	if !validIdentifier(s.InstanceID) || s.EffectiveDataParallelSize <= 0 {
+		return fmt.Errorf("a process instance ID and positive effective DP size are required")
+	}
+	if s.Phase == PhaseIdle {
+		if s.OperationID != nil || s.Epoch != nil || s.RequestedDataParallelSize != nil || s.Error != nil || !s.TopologyKnown {
+			return fmt.Errorf("idle status must describe a known topology without an operation")
+		}
+		return nil
+	}
+
+	// Preserve native phase and certainty separately: Failed is not synonymous with rejected.
+	if s.OperationID == nil || !validIdentifier(*s.OperationID) || s.Epoch == nil ||
+		!validIdentifier(*s.Epoch) || s.RequestedDataParallelSize == nil || *s.RequestedDataParallelSize <= 0 {
+		return fmt.Errorf("operation status requires operation ID, epoch, and a positive requested DP size")
+	}
+	switch s.Phase {
+	case PhasePreparing, PhaseCommitting:
+		if s.Error != nil {
+			return fmt.Errorf("an active operation cannot carry a terminal error")
+		}
+	case PhaseCompleted:
+		if s.Error != nil || !s.TopologyKnown || s.EffectiveDataParallelSize != *s.RequestedDataParallelSize {
+			return fmt.Errorf("completed status requires a known topology equal to the target and no error")
+		}
+	case PhaseFailed:
+		if s.Error == nil || strings.TrimSpace(*s.Error) == "" {
+			return fmt.Errorf("failed status requires a native error")
+		}
+	default:
+		return fmt.Errorf("unknown operation phase %q", s.Phase)
+	}
+	return nil
+}
+
+func validIdentifier(value string) bool {
+	return strings.TrimSpace(value) != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= 256
+}
