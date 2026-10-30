@@ -198,7 +198,6 @@ pub struct HeadroomPicker {
     headroom_factor: f64,
 }
 
-/// One candidate with what the picker weighs.
 struct Candidate {
     row: usize,
     worker: WorkerId,

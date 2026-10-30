@@ -38,7 +38,6 @@ impl PoolDirectory {
         Self::default()
     }
 
-    /// Replaces the directory with `pools`.
     pub fn replace(&self, pools: &[Pool]) {
         let entries = pools
             .iter()
