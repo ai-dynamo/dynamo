@@ -31,6 +31,70 @@ requests or choose a destination data center. For the producer model, see
 See [Using the Dynamo Frontend](dynamo-frontend.md) for worker KV-event configuration and
 [Runtime Configuration](../../reference/components/runtime-configuration.mdx) for shared runtime settings.
 
+## Deploy with the Operator
+
+Use `DynamoPoolRelay` for active Relay replicas managed by the operator. Install an operator that
+includes this CRD and use a Relay image built from the same revision. The image must run
+`dynamo.pool_relay` with the `--sources-file` option; an older image with only
+`dynamo.kv_dc_relay` will not start this workload.
+
+Create the resource in the same Kubernetes namespace and with the same name as an existing DGD.
+The DGD must use Kubernetes pod-mode discovery, have at least one worker, and avoid
+`globalDynamoNamespace` on its workers and frontends. Its name must start with a lowercase letter,
+contain only lowercase letters, digits, and hyphens, and be at most 52 characters so the operator
+can create a `<dgd>-pool-relay` Service.
+
+Save the following as `pool-relay-operator.yaml`. Replace the image and cluster ID, then match the
+transport settings to the DGD's workers. The [operator sample](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/samples/dynamo-pool-relay.yaml)
+has the same fields.
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoPoolRelay
+metadata:
+  name: green
+  namespace: inference
+spec:
+  clusterId: example-cluster
+  replicas: 2
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: REPLACE_WITH_RELAY_IMAGE
+          env:
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_EVENT_PLANE
+              value: zmq
+```
+
+```bash
+kubectl -n inference get dgd green
+kubectl apply -f pool-relay-operator.yaml
+kubectl -n inference wait dynamopoolrelay/green --for=condition=Ready --timeout=300s
+kubectl -n inference get dynamopoolrelay green -o jsonpath='{.status.endpoint}{"\n"}'
+```
+
+`Ready` means all requested Relay listeners are available. It does not mean that the DGD's models
+or KV pools are ready. The endpoint is cluster-local and is empty after withdrawal or a failed
+reconciliation. If `Ready` is False, inspect the condition reason with
+`kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
+serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
+
+The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
+on its `main` container. You can also set image pull secrets, resources, and sidecars there. The
+operator supplies the main command, listener ports and probes, source volume, service account,
+and Relay identity environment variables; leave those out of the template. Reserved environment
+names are `DYN_NAMESPACE`, `DYN_DISCOVERY_BACKEND`, `DYN_KUBE_DISCOVERY_MODE`, `DYN_SYSTEM_PORT`,
+`DYN_TCP_RESPONSE_STREAM_HOST`, `DYN_TCP_RESPONSE_STREAM_PORT`, `DYN_CLUSTER_ID`, `DYN_RELAY_BIND`,
+`DYN_RELAY_CONNECTION_REVISION`, `DYN_RELAY_NAMESPACES`, `DYN_RELAY_WATCH_ALL`,
+`DYN_RELAY_ENDPOINT_PREFIXES`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID`. The main container
+cannot use `envFrom` because it could override those values.
+
+The manual manifest below runs one Relay replica and is not an HA deployment. Use it when the
+operator does not manage your Relay.
+
 ## Discovery Scope
 
 The example assumes an existing Kubernetes namespace named `dynamo` and watches every Dynamo
