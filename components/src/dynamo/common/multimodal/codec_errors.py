@@ -4,7 +4,8 @@
 """Actionable errors for media the shipped images cannot decode.
 
 The runtime images deliberately omit the software media decoders (OpenCV,
-PyAV, decord) and route H.264/H.265 video to NVDEC hardware decode instead.
+PyAV, decord) and route H.264/H.265 video to NVDEC hardware decode when
+enabled.
 Any other input codec needs one of those Python packages, so without an
 explicit install the failure surfaces as a bare ``ModuleNotFoundError`` from
 deep inside the backend -- no codec, no remedy, and in one observed case the
@@ -124,34 +125,40 @@ def video_decoder_missing(
 ) -> MissingMediaDecoderError:
     """Build the error for a video whose decode path has no decoder.
 
-    Two distinct situations produce it, and the remedy differs:
+    The remedy depends on the codec and NVDEC availability:
 
-    * ``codec`` is H.264/H.265 but NVDEC is unavailable in this container --
-      the primary fix is granting the ``video`` driver capability, not
-      installing software.
-    * any other codec -- NVDEC never decodes it, so the fix is the software
-      decoder install or re-encoding the input to H.264/H.265.
+    * ``codec`` is H.264/H.265 but NVDEC is disabled or unavailable in this
+      container -- enable it with ``DYN_DISABLE_NVDEC=0`` and grant the
+      ``video`` driver capability, or install a software decoder.
+    * other known codecs -- NVDEC never decodes them, so install a software decoder.
+    * unknown codec -- when NVDEC is disabled or unavailable, include its
+      alternative for H.264/H.265 only.
     """
     codec_desc = f"codec '{codec}'" if codec else "an undetected codec"
     if codec in HW_ROUTED_CODECS and not nvdec_available():
         lead = (
-            f"this video ({codec_desc}) normally decodes in hardware via NVDEC, "
-            "but NVDEC is unavailable in this container. Grant the 'video' "
-            "driver capability (NVIDIA_DRIVER_CAPABILITIES) to enable it, or "
+            f"this video ({codec_desc}) can be decoded in hardware via NVDEC, "
+            "but NVDEC is disabled or unavailable. Enable it "
+            "with DYN_DISABLE_NVDEC=0 and grant the 'video' driver capability "
+            "(NVIDIA_DRIVER_CAPABILITIES), or "
         )
     elif _is_vllm_source_built_cv2(backend, package, module):
         lead = (
             f"this video ({codec_desc}) has no decoder in this image: shipped "
-            "images decode only H.264/H.265 (in hardware, via NVDEC), and the "
-            f"'{module}' they ship is built without a video backend. "
-            "Re-encode the input to H.264/H.265, or "
+            f"'{module}' is built without a video backend. To decode it, "
+        )
+    elif codec is None and not nvdec_available():
+        lead = (
+            "this video (an undetected codec) has no decoder in this image. "
+            "For H.264/H.265 video, enable NVDEC with DYN_DISABLE_NVDEC=0 "
+            "and grant the 'video' driver capability "
+            "(NVIDIA_DRIVER_CAPABILITIES), or "
         )
     else:
         lead = (
             f"this video ({codec_desc}) has no decoder in this image: shipped "
-            "images decode only H.264/H.265 (in hardware, via NVDEC), and the "
             f"software decoder '{module}' is deliberately not installed. "
-            "Re-encode the input to H.264/H.265, or "
+            "To decode it, "
         )
     return MissingMediaDecoderError(
         _with_cause(

@@ -1274,6 +1274,90 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_value", [None, "1", "0"])
+@pytest.mark.parametrize(
+    "video_kwargs,disabled_video_kwargs",
+    [
+        ({}, {"video_backend": "opencv"}),
+        ({"video_backend": "pynvvideocodec"}, {"video_backend": "opencv"}),
+        (
+            {"backend": "pynvvideocodec"},
+            {"video_backend": "opencv", "backend": "opencv"},
+        ),
+        ({"video_backend": "torchcodec"}, {"video_backend": "torchcodec"}),
+    ],
+)
+async def test_factory_honors_nvdec_setting_before_input_processor(
+    vllm_processor_module,
+    monkeypatch,
+    tmp_path,
+    disable_value,
+    video_kwargs,
+    disabled_video_kwargs,
+):
+    """The frontend renderer must follow the same NVDEC setting as the worker."""
+    from vllm.multimodal.media import VideoMediaIO
+
+    if disable_value is None:
+        monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+    else:
+        monkeypatch.setenv("DYN_DISABLE_NVDEC", disable_value)
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec")
+    monkeypatch.setenv("VLLM_MEDIA_CONNECTOR", "dynamo")
+    media_io_kwargs = {
+        "video": {"fps": 2, **video_kwargs},
+        "image": {"image_mode": "RGB"},
+    }
+    model_config = SimpleNamespace(
+        multimodal_config=SimpleNamespace(media_io_kwargs=media_io_kwargs)
+    )
+    monkeypatch.setattr(
+        vllm_processor_module, "ModelConfig", lambda **kwargs: model_config
+    )
+    monkeypatch.setattr(
+        vllm_processor_module, "VllmConfig", lambda **kwargs: SimpleNamespace(**kwargs)
+    )
+    monkeypatch.setattr(vllm_processor_module, "LoadConfig", lambda **kwargs: object())
+    monkeypatch.setattr(vllm_processor_module, "CacheConfig", lambda: object())
+
+    class InputProcessorReached(Exception):
+        pass
+
+    def check_input_processor(config):
+        expected = {
+            "fps": 2,
+            **(video_kwargs if disable_value == "0" else disabled_video_kwargs),
+        }
+        effective = config.model_config.multimodal_config.media_io_kwargs
+        assert effective == {"video": expected, "image": {"image_mode": "RGB"}}
+        if disable_value != "0":
+            requested = VideoMediaIO.merge_kwargs(
+                effective["video"],
+                {"video_backend": "pynvvideocodec", "backend": "pynvvideocodec"},
+            )
+            assert requested.get("video_backend") != "pynvvideocodec"
+            assert requested.get("backend") != "pynvvideocodec"
+        raise InputProcessorReached
+
+    monkeypatch.setattr(vllm_processor_module, "InputProcessor", check_input_processor)
+    factory = vllm_processor_module.EngineFactory(
+        SimpleNamespace(preprocess_workers=0, trust_remote_code=False),
+        SimpleNamespace(),
+    )
+    mdc = SimpleNamespace(
+        model_type=lambda: SimpleNamespace(supports_chat=lambda: True),
+        local_dir=lambda: str(tmp_path),
+        runtime_config=lambda: {},
+    )
+    with pytest.raises(InputProcessorReached):
+        await factory.chat_engine_factory(object(), mdc, object())
+    assert (
+        vllm_processor_module.os.environ["VLLM_VIDEO_LOADER_BACKEND"]
+        == "pynvvideocodec"
+    )
+
+
 def test_disabled_mm_transfer_omits_shm_requirement_log(
     vllm_processor_module,
     monkeypatch,

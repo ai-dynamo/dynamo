@@ -35,6 +35,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsSender,
     MmKwargsShmSender,
 )
+from dynamo.common.multimodal.nvdec_decoder import is_nvdec_disabled
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
@@ -1644,11 +1645,24 @@ class EngineFactory:
                 context_length,
             )
         model_config = ModelConfig(**model_config_kwargs)
-        # Use processor_only cache so tensor data persists across requests.
-        # The default "lru" sender cache drops tensor data on cache hits
-        # (designed for disagg where P1 holds tensors), but we need the
-        # data to pickle and send via NIXL on repeated requests.
         if model_config.multimodal_config is not None:
+            if is_nvdec_disabled():
+                # The frontend renderer selects its video decoder independently
+                # of the worker's VideoLoader.
+                media_io_kwargs = model_config.multimodal_config.media_io_kwargs
+                video_io_kwargs = media_io_kwargs.get("video", {})
+                if (
+                    video_io_kwargs.get("video_backend")
+                    or os.environ.get("VLLM_VIDEO_LOADER_BACKEND")
+                ) == "pynvvideocodec":
+                    video_io_kwargs["video_backend"] = "opencv"
+                    media_io_kwargs["video"] = video_io_kwargs
+                if video_io_kwargs.get("backend") == "pynvvideocodec":
+                    video_io_kwargs["backend"] = "opencv"
+            # Use processor_only cache so tensor data persists across requests.
+            # The default "lru" sender cache drops tensor data on cache hits
+            # (designed for disagg where P1 holds tensors), but we need the
+            # data to pickle and send via NIXL on repeated requests.
             nixl_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
             if nixl_enabled:
                 model_config.multimodal_config.mm_processor_cache_type = (

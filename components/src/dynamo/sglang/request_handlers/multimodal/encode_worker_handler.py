@@ -49,14 +49,13 @@ from dynamo.common.multimodal.media_source import (
     read_local_media_bytes,
 )
 from dynamo.common.multimodal.nvdec_decoder import (
-    DISABLE_ENV,
+    is_nvdec_disabled,
     nvdec_available,
     probe_video_codec,
     should_use_nvdec,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.common.utils.env import env_bool
 from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang._compat import (
     get_encoder_preprocessor_modules,
@@ -557,16 +556,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     def _nvdec_video_enabled(self) -> bool:
         """Whether to route video URLs through NVDEC for this encoder.
 
-        Off when explicitly disabled, when PyNvVideoCodec/CUDA is unavailable,
-        or when the model's SGLang video preprocessing cannot accept
-        pre-decoded frames (see ``_NVDEC_UNSAFE_MODEL_TYPES``).
+        Disabled by default. Also disabled when PyNvVideoCodec/CUDA is
+        unavailable or the model's SGLang video preprocessing cannot accept
+        pre-decoded frames (see ``_NVDEC_UNSAFE_MODEL_TYPES``). Set
+        ``DYN_DISABLE_NVDEC=0`` to enable NVDEC.
         """
-        # env_bool, not a truthiness test on the raw value: everywhere else this
-        # switch is read that way, and a bare os.environ.get makes
-        # DYN_DISABLE_NVDEC=0 *disable* NVDEC here while leaving it enabled in
-        # vLLM and TensorRT-LLM -- the same setting meaning opposite things
-        # depending on the backend.
-        if env_bool(DISABLE_ENV):
+        if is_nvdec_disabled():
             return False
         if not nvdec_available():
             return False
@@ -700,13 +695,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         policy-validated and normalized.
 
         Called from both the cached and uncached encode paths. The embedding
-        cache is disabled by default, so routing this only through the cached
-        path would leave hardware decode unreachable in a stock deployment.
+        cache is disabled by default, so both the NVDEC gate and decoder preflight
+        must run on the uncached path.
         """
         if modality_name != "VIDEO":
             return media_inputs
         if not self._nvdec_video_enabled():
-            # NVDEC off (CPU image, DYN_DISABLE_NVDEC, or a gated model type):
+            # NVDEC disabled (default, CPU image, or a gated model type):
             # these inputs go straight to SGLang's software path. Validate them
             # here so a source we would refuse is refused before
             # SGLang can reach it -- and before we answer with anything about
@@ -808,7 +803,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # SGLang's _encode outputs are already on CPU; use CPU as target for consistency
         target_device = torch.device("cpu")
         if uncached_inputs:
-            # H.264/H.265 video URLs are hardware-decoded to frames here;
+            # H.264/H.265 video URLs are hardware-decoded  to frames here when NVDEC is enabled;
             # decoded images and other media inputs pass through unchanged.
             # Cache keys remain based on the original media descriptors.
             encode_inputs = await self._build_encode_inputs(
@@ -1161,10 +1156,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     else:
                         # The embedding cache is off by default, so this is the
                         # path a stock deployment takes. It must apply the same
-                        # NVDEC conversion as the cached branch -- otherwise raw
-                        # URLs reach SGLang, which has no video decoder in the
-                        # codec-compliant image, and every H.264/H.265 request
-                        # fails. Not hoisted above the branch because
+                        # NVDEC gate and decoder preflight as the cached branch --
+                        # otherwise raw URLs reach SGLang, which has no video
+                        # decoder in the codec-compliant image. H.264/H.265
+                        # would then fail deep in SGLang instead of using NVDEC
+                        # when enabled or returning the missing-decoder error.
+                        # Not hoisted above the branch because
                         # _encode_with_cache converts only its uncached subset.
                         encode_inputs = await self._build_encode_inputs(
                             media_inputs, modality_name

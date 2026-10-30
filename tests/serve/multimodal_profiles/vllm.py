@@ -5,7 +5,6 @@ import os
 
 import pytest
 
-from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
@@ -25,6 +24,7 @@ from tests.utils.multimodal import (
     make_qwen35_custom_encoder_multi_image_payload,
     make_qwen35_custom_encoder_payload,
     make_video_payload,
+    nvdec_unavailable,
 )
 from tests.utils.payload_builder import (
     chat_payload,
@@ -35,11 +35,9 @@ from tests.utils.payload_builder import (
 # NVDEC H.264/H.265 serve cases hardware-decode via libnvcuvid, which needs the
 # container's driver "video" capability (NVIDIA_DRIVER_CAPABILITIES=...,video).
 # Runners without it can't decode H.264/H.265 and the codec-compliant image
-# ships no software fallback, so skip rather than fail. Evaluated once at
-# collection; mirrors the guard in
-# components/src/dynamo/common/tests/multimodal/test_nvdec_decoder_gpu.py.
-# NVDEC is still validated on gpu-ts.
-_NVDEC_UNAVAILABLE = not nvdec_available()
+# ships no software fallback, so skip rather than fail. Probe once at collection
+# with DYN_DISABLE_NVDEC=0, matching these cases' worker configuration.
+_NVDEC_UNAVAILABLE = nvdec_unavailable()
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -162,18 +160,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
             # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
             # install, unlike the VP9 agg_video case above. Clips are served over
-            # http so the NVDEC route triggers (file:// video is not
-            # hardware-decoded). Skips when the runner lacks the driver "video"
-            # capability that libnvcuvid requires (see _NVDEC_UNAVAILABLE); NVDEC
-            # is validated on gpu-ts.
+            # HTTP. Skips when the runner lacks the driver "video" capability
+            # that libnvcuvid requires (see _NVDEC_UNAVAILABLE).
             "agg_video_nvdec": TopologyConfig(
                 marks=[
                     pytest.mark.post_merge,
                     pytest.mark.skipif(
                         _NVDEC_UNAVAILABLE,
                         reason=(
-                            "NVDEC/PyNvVideoCodec unavailable; needs the driver "
-                            "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                            "NVDEC is unavailable. Grant the driver 'video' capability "
+                            "(NVIDIA_DRIVER_CAPABILITIES)"
                         ),
                     ),
                 ],
@@ -181,6 +177,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"DYN_DISABLE_NVDEC": "0"},
                 tests=[
                     MmCase(
                         suffix="h264",

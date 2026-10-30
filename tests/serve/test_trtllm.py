@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 import pytest
 import yaml
 
-from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
@@ -23,7 +22,7 @@ from tests.serve.conftest import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import make_image_payload_cached_tokens
+from tests.utils.multimodal import make_image_payload_cached_tokens, nvdec_unavailable
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
@@ -54,9 +53,9 @@ trtllm_test_engine_config_dir = os.path.join(
     SERVE_TEST_DIR, "trtllm/engine_configs/qwen3"
 )
 
-# Evaluated once at collection: NVDEC needs the container's driver "video"
-# capability, which CI runners do not grant.
-_NVDEC_UNAVAILABLE = not nvdec_available()
+# Probe once at collection with DYN_DISABLE_NVDEC=0, matching the NVDEC
+# serve case's worker configuration.
+_NVDEC_UNAVAILABLE = nvdec_unavailable()
 
 qwen3_vl_engine_config_dir = os.path.join(
     WORKSPACE_DIR,
@@ -372,13 +371,12 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            # CI runners lack the driver "video" capability libnvcuvid needs, so
-            # this skips there and is exercised on GPU hardware instead.
+            # Skip when the driver "video" capability libnvcuvid needs is unavailable.
             pytest.mark.skipif(
                 _NVDEC_UNAVAILABLE,
                 reason=(
-                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
-                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                    "NVDEC is unavailable. Grant the driver 'video' capability "
+                    "(NVIDIA_DRIVER_CAPABILITIES)"
                 ),
             ),
             pytest.mark.post_merge,
@@ -391,7 +389,7 @@ trtllm_configs = {
         timeout=900,
         delayed_start=60,
         # The clips are served from localhost by the image_server fixture.
-        env={"DYN_MM_ALLOW_INTERNAL": "1"},
+        env={"DYN_MM_ALLOW_INTERNAL": "1", "DYN_DISABLE_NVDEC": "0"},
         request_payloads=[
             chat_payload(
                 [

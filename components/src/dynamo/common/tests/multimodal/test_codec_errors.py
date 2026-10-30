@@ -34,8 +34,6 @@ def test_video_message_names_codec_and_spec(monkeypatch):
     # message and the documented install can never drift apart.
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "install_media_decoders vllm" in msg
-    # Non-hardware codec: the hardware alternative is re-encoding.
-    assert "H.264/H.265" in msg
 
 
 def test_present_but_unusable_carrier_pins_the_installed_version(
@@ -94,17 +92,13 @@ def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
 
 
 def test_hw_codec_without_nvdec_points_at_driver_capability(monkeypatch):
-    """H.264 with NVDEC unavailable is a capability problem first.
-
-    The primary remedy is granting the container the 'video' driver
-    capability, not installing a software decoder -- the message must lead
-    with that.
-    """
+    """The H.264 error explains how to enable NVDEC or install a decoder."""
     monkeypatch.setattr(codec_errors, "nvdec_available", lambda: False)
     err = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "h264")
 
     msg = str(err)
-    assert "NVDEC is unavailable" in msg
+    assert "NVDEC is disabled or unavailable" in msg
+    assert "DYN_DISABLE_NVDEC=0" in msg
     assert "NVIDIA_DRIVER_CAPABILITIES" in msg
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
 
@@ -115,7 +109,7 @@ def test_hw_codec_with_nvdec_available_uses_generic_wording(monkeypatch):
     monkeypatch.setattr(codec_errors, "nvdec_available", lambda: True)
     err = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "h264")
 
-    assert "NVDEC is unavailable" not in str(err)
+    assert "NVDEC is disabled or unavailable" not in str(err)
 
 
 def test_unknown_codec_still_actionable(monkeypatch):
@@ -125,6 +119,18 @@ def test_unknown_codec_still_actionable(monkeypatch):
     msg = str(err)
     assert "an undetected codec" in msg
     assert VALIDATED_SPECS["decord2"] in msg
+    assert "install_media_decoders sglang" in msg
+
+
+def test_unknown_codec_without_nvdec_names_setting(monkeypatch):
+    """The SGLang preflight can report NVDEC guidance before probing the codec."""
+    monkeypatch.setattr(codec_errors, "nvdec_available", lambda: False)
+    msg = str(video_decoder_missing("sglang", "decord2", "decord", None))
+
+    assert "an undetected codec" in msg
+    assert "For H.264/H.265 video" in msg
+    assert "DYN_DISABLE_NVDEC=0" in msg
+    assert "NVIDIA_DRIVER_CAPABILITIES" in msg
     assert "install_media_decoders sglang" in msg
 
 

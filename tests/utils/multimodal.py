@@ -7,7 +7,8 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any, Optional, Protocol, Type
+from unittest.mock import patch
 
 import pytest
 
@@ -36,6 +37,28 @@ AUDIO_TEST_URL = (
     "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client"
     "/main/datasets/mini_en/wav/1221-135766-0002.wav"
 )
+
+
+class _NvdecAvailabilityProbe(Protocol):
+    def __call__(self) -> bool:
+        ...
+
+    def cache_clear(self) -> None:
+        ...
+
+
+def nvdec_unavailable(probe: _NvdecAvailabilityProbe | None = None) -> bool:
+    """Probe NVDEC with the setting passed to NVDEC serve-test workers."""
+    if probe is None:
+        from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+
+        probe = nvdec_available
+    probe.cache_clear()
+    try:
+        with patch.dict(os.environ, {"DYN_DISABLE_NVDEC": "0"}):
+            return not probe()
+    finally:
+        probe.cache_clear()
 
 
 # ---------------------------------------------------------------------------
