@@ -16,6 +16,7 @@ use axum::{
 use base64::Engine as _;
 use dynamo_runtime::{
     config::parse_bool,
+    error::ErrorClass,
     pipeline::{AsyncEngineContextProvider, Context},
 };
 use futures::StreamExt;
@@ -24,6 +25,7 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::create_connection_monitor,
+    error::HttpError,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, process_response_and_observe_metrics,
         request_was_rejected,
@@ -151,11 +153,42 @@ impl TranscriptionForm {
     }
 }
 
+/// Largest request body this route accepts. The audio crosses the request plane
+/// base64-encoded, at 4/3 of its size, so a larger upload than this would pass the HTTP body
+/// limit but exceed the default 32 MiB TCP frame, and the client would get a generic 400
+/// instead of a 413.
+const MAX_UPLOAD_BYTES: usize = 23 * 1024 * 1024;
+
+// The encoded upload must leave room for the request-plane envelope below the 32 MiB frame.
+const _: () = assert!(MAX_UPLOAD_BYTES.div_ceil(3) * 4 + 1024 * 1024 < 32 * 1024 * 1024);
+
+/// The route's body limit: the HTTP body limit, capped at [`MAX_UPLOAD_BYTES`].
+fn upload_limit() -> usize {
+    get_body_limit().min(MAX_UPLOAD_BYTES)
+}
+
+/// A 413 that names whichever limit the upload exceeded.
+fn upload_too_large_error() -> ErrorResponse {
+    if get_body_limit() <= MAX_UPLOAD_BYTES {
+        return payload_too_large_error();
+    }
+    ErrorMessage::from_http_error(
+        ErrorClass::PayloadTooLarge,
+        HttpError {
+            code: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
+            message: format!(
+                "Audio upload exceeds the transcription limit of {} MiB",
+                MAX_UPLOAD_BYTES / (1024 * 1024)
+            ),
+        },
+    )
+}
+
 /// Keeps the body limit's 413 for an oversized upload; any other multipart failure is a
 /// malformed request.
 fn multipart_error(context: &str, error: MultipartError) -> ErrorResponse {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        payload_too_large_error()
+        upload_too_large_error()
     } else {
         ErrorMessage::bad_request(format!("{context}: {error}"))
     }
@@ -318,7 +351,7 @@ pub fn transcriptions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(audio_transcription))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .layer(axum::extract::DefaultBodyLimit::max(upload_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -394,7 +427,7 @@ mod tests {
         assert!(
             error["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("DYN_HTTP_BODY_LIMIT_MB")),
+                .is_some_and(|message| message.contains("limit")),
             "unexpected 413 body: {error}"
         );
 

@@ -314,6 +314,38 @@ async fn stream_field_is_parsed_strictly() {
 }
 
 #[tokio::test]
+async fn upload_too_large_for_the_request_plane_returns_payload_too_large() {
+    let service = TestService::start(false).await;
+
+    // Under the default HTTP body limit, but too large once base64-encoded for the
+    // request plane's default 32 MiB frame.
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(vec![1u8; 24 * 1024 * 1024])
+            .file_name("large.wav")
+            .mime_str("audio/wav")
+            .unwrap(),
+    );
+    let response = service
+        .client
+        .post(format!("{}/v1/audio/transcriptions", service.base_url))
+        .multipart(form)
+        .send()
+        .await
+        .expect("transcription request failed");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("transcription limit")),
+        "unexpected 413 body: {body}"
+    );
+
+    service.shutdown().await;
+}
+
+#[tokio::test]
 async fn client_disconnect_cancels_transcription() {
     let engine = Arc::new(LongRunningTranscriptionEngine::new());
     let service = TestService::start_with_engine(engine.clone()).await;
