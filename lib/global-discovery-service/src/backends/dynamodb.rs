@@ -21,7 +21,7 @@
 //! - `pk` is `POOL`, and `sk` is the pool key as
 //!   `<cluster_id>#<namespace>#<dgd_name>`, with `%` and `#` escaped in each
 //!   part;
-//! - `registration` holds the JSON the PoolRelay sent;
+//! - `registration` holds the registration as JSON, with its lists sorted;
 //! - `lease_ends_ms` is when its lease ends, in Unix milliseconds;
 //! - `expires_at`, the time-to-live attribute, is an hour later, in Unix
 //!   seconds, so that DynamoDB deletes the items of pools that stopped
@@ -99,8 +99,9 @@ pub struct TableLocation {
 }
 
 /// Pool registrations in a DynamoDB table. A pool expires the lease duration
-/// after its last registration; reads list it until the first refresh after
-/// that, within [`REFRESH_EVERY`].
+/// after its last registration; reads list it until the next read of the
+/// table after that, which comes every [`REFRESH_EVERY`] while reads work.
+/// While they fail, the last list stays, marked `Estimated`.
 ///
 /// Any caller may register any pool: V1 assumes a trusted network, and
 /// several PoolRelay replicas may register the same pool.
@@ -211,11 +212,16 @@ impl View {
         })
     }
 
-    /// Takes a read of the table and publishes what changed. The first read,
+    /// Takes the live registrations from a read of the table, and publishes
+    /// what changed. The first read,
     /// and the first after failures, publish one `Resync`, since watchers
     /// then need the whole list.
-    fn apply(&mut self, stored: Vec<Stored>, now_ms: u64, events: &broadcast::Sender<PoolEvent>) {
-        let previous = std::mem::replace(&mut self.registrations, live(stored, now_ms));
+    fn apply(
+        &mut self,
+        live: HashMap<PoolKey, PoolRegistration>,
+        events: &broadcast::Sender<PoolEvent>,
+    ) {
+        let previous = std::mem::replace(&mut self.registrations, live);
         let resync = !self.synced || self.stale;
         self.synced = true;
         self.stale = false;
@@ -281,15 +287,16 @@ async fn refresh(
             () = stop.cancelled() => return,
             read = table.read_all() => read,
         };
-        let now_ms = unix_ms_now();
+        // Sorted before the lock, which `list` and new watchers wait for.
+        let read = read.map(|stored| live(stored, unix_ms_now()));
         let mut view = view.lock().unwrap_or_else(PoisonError::into_inner);
         match read {
-            Ok(stored) => {
+            Ok(live) => {
                 if failing {
                     tracing::info!("the registrations table can be read again");
                     failing = false;
                 }
-                view.apply(stored, now_ms, &events);
+                view.apply(live, &events);
             }
             Err(error) => {
                 if failing {
@@ -321,10 +328,9 @@ fn unix_ms_now() -> u64 {
 #[async_trait]
 impl PoolRegistrar for DynamoDbPoolStore {
     /// Writes the registration with the end of its lease. It is listed from
-    /// the next read of the table, within [`REFRESH_EVERY`]. Lists in another
-    /// order, for example from another PoolRelay replica, are not a change.
+    /// the next read of the table. Lists in another order, for example from
+    /// another PoolRelay replica, are not a change.
     async fn register(&self, registration: PoolRegistration) -> Result<Lease, DiscoveryError> {
-        self.ensure_refreshing();
         let registration = sorted(registration);
         let lease_ms = u64::try_from(self.lease.duration().as_millis()).unwrap_or(u64::MAX);
         let lease_ends_ms = unix_ms_now().saturating_add(lease_ms);
@@ -332,6 +338,8 @@ impl PoolRegistrar for DynamoDbPoolStore {
             .put(&registration, lease_ends_ms)
             .await
             .map_err(DiscoveryError::Unavailable)?;
+        // After the write, so the first read already lists it.
+        self.ensure_refreshing();
         Ok(self.lease)
     }
 }
@@ -781,25 +789,23 @@ mod tests {
         assert_eq!(sort_key(&percent), "a%2523b#c#d");
     }
 
-    /// Against DynamoDB Local when `DYNAMODB_LOCAL_URL` names one, and
-    /// skipped otherwise:
+    /// Against DynamoDB Local, so it runs only when asked for:
     ///
     /// ```bash
     /// docker run --rm -d -p 8000:8000 amazon/dynamodb-local
     /// DYNAMODB_LOCAL_URL=http://localhost:8000 cargo test -p dynamo-global-discovery-service \
-    ///     --features dynamodb dynamodb_local
+    ///     --features dynamodb dynamodb_local -- --ignored
     /// ```
     #[tokio::test]
+    #[ignore = "needs DynamoDB Local: set DYNAMODB_LOCAL_URL and pass --ignored"]
     async fn dynamodb_local_lists_registrations_until_their_leases_end() {
         use aws_sdk_dynamodb::config::Credentials;
         use aws_sdk_dynamodb::types::{
             AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
         };
 
-        let Ok(url) = std::env::var("DYNAMODB_LOCAL_URL") else {
-            eprintln!("skipped: set DYNAMODB_LOCAL_URL to run it");
-            return;
-        };
+        let url =
+            std::env::var("DYNAMODB_LOCAL_URL").expect("DYNAMODB_LOCAL_URL names DynamoDB Local");
         let config = aws_sdk_dynamodb::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new("us-west-2"))

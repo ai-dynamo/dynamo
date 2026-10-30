@@ -3,7 +3,7 @@
 
 //! The memory backend: one process keeps every registration. It needs no
 //! Kubernetes, so it suits tests and a first deployment. The MCS backend keeps
-//! its registrations here too. A restarted process starts empty and fills as
+//! its registrations here too, or in DynamoDB. A restarted process starts empty and fills as
 //! PoolRelays register again, so its lists are `Estimated` until one lease has
 //! passed: by then every live pool has registered again. Router replicas come
 //! from configuration until routers register too. Run one replica: each keeps

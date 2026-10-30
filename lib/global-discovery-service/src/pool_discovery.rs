@@ -27,8 +27,8 @@
 //! - A router that's just starting and knows no pools should still use a
 //!   partial list. Some pools beat none.
 //!
-//! With DynamoDB registration storage (planned), partial lists will be rare,
-//! but this rule is extra insurance.
+//! With DynamoDB registration storage, partial lists are rare, but this rule
+//! is extra insurance.
 
 mod pools;
 mod registrar;

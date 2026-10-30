@@ -216,7 +216,8 @@ enum RegistrationStorage {
     /// In a DynamoDB table that every instance reads, such as a Global Table
     /// with a replica in each region, so instances can run in every cluster.
     /// Needs a build with the `dynamodb` feature, as the image has.
-    Dynamodb,
+    #[value(name = "dynamodb")]
+    DynamoDb,
 }
 
 fn parse_router(value: &str) -> Result<RouterReplica, String> {
@@ -261,7 +262,7 @@ where
         PoolDiscovery::Registrations => WITH_MCS,
         PoolDiscovery::Karmada | PoolDiscovery::Mcs => WITH_REGISTRATIONS,
     }];
-    if parsed.registration_storage != RegistrationStorage::Dynamodb {
+    if parsed.registration_storage != RegistrationStorage::DynamoDb {
         refused.push(WITH_DYNAMODB);
     }
     let given = command.get_arguments().find_map(|arg| {
@@ -363,7 +364,7 @@ async fn registration_storage(args: &Args, lease: Lease) -> Result<RegistrationS
                 registrar: store,
             })
         }
-        RegistrationStorage::Dynamodb => dynamodb_storage(args, lease).await,
+        RegistrationStorage::DynamoDb => dynamodb_storage(args, lease).await,
     }
 }
 
@@ -535,9 +536,10 @@ mod tests {
     }
 
     #[test]
-    fn every_flag_says_which_pool_discovery_it_works_with() {
-        // The flags that work with every --pool-discovery value. Any other
-        // flag needs one of the two headings, which `parse_args` enforces.
+    fn every_flag_says_where_it_works() {
+        // The flags that work with every --pool-discovery value and every
+        // storage. Any other flag needs the heading of the value it works
+        // with, which `parse_args` enforces.
         const EVERY_VALUE: &[&str] = &[
             "listen",
             "tls_cert_path",
@@ -716,7 +718,7 @@ mod tests {
             "--dynamodb-endpoint-url=http://localhost:8000",
         ];
         let args = parse_args(["gds"].into_iter().chain(dynamodb)).unwrap();
-        assert_eq!(args.registration_storage, RegistrationStorage::Dynamodb);
+        assert_eq!(args.registration_storage, RegistrationStorage::DynamoDb);
         assert_eq!(args.dynamodb_table.as_deref(), Some("registrations"));
         // Every --pool-discovery value takes it.
         assert!(parse_args(karmada(&dynamodb)).is_ok());
@@ -730,18 +732,21 @@ mod tests {
                 "{error}"
             );
         }
-        for wrong in [
+        let error = parse_args([
+            "gds",
+            "--registration-storage=dynamodb",
             "--dynamodb-table=",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+        let error = parse_args([
+            "gds",
+            "--registration-storage=dynamodb",
+            "--dynamodb-table=t",
             "--dynamodb-endpoint-url=localhost:8000",
-        ] {
-            let args = [
-                "gds",
-                "--registration-storage=dynamodb",
-                "--dynamodb-table=t",
-                wrong,
-            ];
-            assert!(parse_args(args).is_err(), "{wrong}");
-        }
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
     }
 
     #[test]
