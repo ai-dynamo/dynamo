@@ -31,10 +31,14 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 >   driver capability. See [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 > - **Rust frontend decoding:** aggregated workers with `--frontend-decoding`
 >   can receive VP8/VP9 frames decoded on the CPU by the in-tree FFmpeg.
->   This decoder does not support H.264, H.265, or AV1.
+>   The shipped FFmpeg build does not decode H.264, H.265, or AV1. Installing
+>   Python decoder packages does not extend this path; additional codecs require
+>   a different FFmpeg build.
 >
-> Backend software decoding requires an explicitly installed decode package;
-> see [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md).
+> **Backend software decoding** can support additional codecs without rebuilding
+> Dynamo. Explicitly install the backend's Python decoder packages using
+> [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md).
+> The installer extends backend decoding only, not Rust frontend decoding.
 > These paths depend on the deployed image and configuration; an older pinned
 > image may not provide the frontend decoder. Local `file://` reads additionally
 > require `DYN_MM_LOCAL_PATH`.
