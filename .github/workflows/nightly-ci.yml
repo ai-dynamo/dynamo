@@ -1038,7 +1038,8 @@ jobs:
     uses: $/.github/workflows/shared-test-trtllm-nightly-image.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-    secrets: inherit
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   sidecar-trtllm-test:
     name: sidecar-runtime

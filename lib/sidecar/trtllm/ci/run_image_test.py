@@ -72,6 +72,7 @@ def run_test(binary, test, env, results):
 
 
 def routing_fixture(model_path):
+    # Keep CPU harness tests importable without model-processing dependencies.
     from PIL import Image, ImageOps
     from transformers import AutoProcessor
 
@@ -105,6 +106,7 @@ def validate_image_response(caption, response, expected_ids, colors=("red", "blu
 
 
 def run(args, results):
+    # CPU harness tests import this module without the inference dependencies.
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
