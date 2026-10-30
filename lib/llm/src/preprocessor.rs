@@ -2117,10 +2117,16 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Apply the engine-published rejection policy to an exact request length.
+    /// Reject a known context overflow under the engine-published policy.
+    ///
+    /// `prompt_len` must be exact. `output_tokens` is the requested maximum, or
+    /// the required minimum when that maximum is backend-owned; `None` requires
+    /// room for one output token. Missing `token_budget` or a disabled rejection
+    /// dimension defers validation to the backend. Returns a typed invalid-argument
+    /// error on overflow without resolving or changing the request's output cap.
     fn validate_requested_token_budget(
         prompt_len: usize,
-        max_tokens: Option<u32>,
+        output_tokens: Option<u32>,
         token_budget: Option<&TokenBudget>,
     ) -> Result<()> {
         let Some(token_budget) = token_budget else {
@@ -2137,12 +2143,11 @@ impl OpenAIPreprocessor {
             return Err(Self::prompt_overflow_error(prompt_len, combined_limit).into());
         }
 
-        // Generation requires at least one output token when the cap is omitted.
-        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or(1) as usize);
+        let requested_tokens = prompt_len.saturating_add(output_tokens.unwrap_or(1) as usize);
         if requested_tokens > combined_limit && token_budget.reject_total_overflow {
-            let request_description = match max_tokens {
-                Some(max_tokens) => format!(
-                    "your request has {prompt_len} input tokens and asks for {max_tokens} output \
+            let request_description = match output_tokens {
+                Some(output_tokens) => format!(
+                    "your request has {prompt_len} input tokens and asks for {output_tokens} output \
                      tokens ({requested_tokens} tokens total)"
                 ),
                 None => format!(
@@ -2169,12 +2174,27 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Validate a preprocessed request when its frontend-visible prompt length
-    /// is exact, returning that length for other context-budget decisions.
+    /// Validate known output limits and any exact frontend-visible prompt budget.
+    ///
+    /// Reject `min_tokens > max_tokens` before dispatch, independently of prompt
+    /// representation. When prompt length is exact, also check that the maximum
+    /// (or minimum, if the maximum is omitted) fits `token_budget` under its
+    /// rejection policy. Return that exact length, or `None` when backend-owned.
+    /// An unresolved maximum stays backend-owned; this does not mutate the request.
     fn validate_preprocessed_token_budget(
         request: &PreprocessedRequest,
         token_budget: Option<&TokenBudget>,
     ) -> Result<Option<usize>> {
+        if let (Some(min_tokens), Some(max_tokens)) = (
+            request.stop_conditions.min_tokens,
+            request.stop_conditions.max_tokens,
+        ) && min_tokens > max_tokens
+        {
+            return Err(crate::protocols::common::invalid_argument_error(format!(
+                "min_tokens must be less than or equal to max_tokens={max_tokens}, got {min_tokens}."
+            )));
+        }
+
         if request.prompt_embeds.is_some() {
             return Ok(None);
         }
@@ -2190,7 +2210,10 @@ impl OpenAIPreprocessor {
         if let Some(prompt_len) = exact_prompt_len {
             Self::validate_requested_token_budget(
                 prompt_len,
-                request.stop_conditions.max_tokens,
+                request
+                    .stop_conditions
+                    .max_tokens
+                    .or(request.stop_conditions.min_tokens),
                 token_budget,
             )?;
         }
@@ -15366,6 +15389,7 @@ responses_tools: None,
         }
     }
 
+    /// Build a three-token text request with the supplied output cap and no minimum.
     fn preprocessed_budget_request(max_tokens: Option<u32>) -> PreprocessedRequest {
         let stop_conditions = crate::protocols::common::StopConditions {
             max_tokens,
@@ -15459,6 +15483,75 @@ responses_tools: None,
             affinity_only_request.image_cache_scope.as_deref(),
             Some("routing-only")
         );
+    }
+
+    /// Known output bounds apply even when the backend owns prompt length.
+    #[test]
+    fn test_preprocessed_minimum_token_budget() {
+        for (minimum, maximum, should_reject) in [
+            (None, Some(4), false),
+            (Some(0), Some(4), false),
+            (Some(4), Some(4), false),
+            (Some(5), Some(4), true),
+            (Some(5), None, false),
+        ] {
+            for prompt_embeds in [None, Some("opaque-tensor".to_string())] {
+                let mut request = preprocessed_budget_request(maximum);
+                request.stop_conditions.min_tokens = minimum;
+                request.prompt_embeds = prompt_embeds;
+                let result = OpenAIPreprocessor::validate_preprocessed_token_budget(&request, None);
+                if should_reject {
+                    let error = result.expect_err("minimum exceeds known output maximum");
+                    let semantic = error.downcast_ref::<DynamoError>().unwrap();
+                    assert_eq!(semantic.error_type(), ErrorType::InvalidArgument);
+                    assert_eq!(
+                        semantic.public_message(),
+                        Some("min_tokens must be less than or equal to max_tokens=4, got 5.")
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        if request.prompt_embeds.is_some() {
+                            None
+                        } else {
+                            Some(3)
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    /// An omitted maximum stays omitted while known minimum/context contradictions
+    /// fail early; unknown prompt lengths and engine-owned policies still defer.
+    #[test]
+    fn test_minimum_token_budget_without_maximum() {
+        for (minimum, budget, prompt_embeds, should_reject) in [
+            (0, Some(token_budget(10, true, true)), false, false),
+            (7, Some(token_budget(10, true, true)), false, false),
+            (8, Some(token_budget(10, true, true)), false, true),
+            (8, None, false, false),
+            (8, Some(token_budget(10, true, false)), false, false),
+            (8, Some(token_budget(3, false, true)), false, false),
+            (8, Some(token_budget(10, true, true)), true, false),
+        ] {
+            let mut request = preprocessed_budget_request(None);
+            request.stop_conditions.min_tokens = Some(minimum);
+            if prompt_embeds {
+                request.prompt_embeds = Some("opaque-tensor".to_string());
+            }
+            let result =
+                OpenAIPreprocessor::validate_preprocessed_token_budget(&request, budget.as_ref());
+            if should_reject {
+                let error = result.expect_err("minimum cannot fit the published context budget");
+                let semantic = error.downcast_ref::<DynamoError>().unwrap();
+                assert_eq!(semantic.error_type(), ErrorType::InvalidArgument);
+            } else {
+                assert_eq!(result.unwrap(), if prompt_embeds { None } else { Some(3) });
+            }
+            assert_eq!(request.stop_conditions.max_tokens, None);
+            assert_eq!(request.stop_conditions.min_tokens, Some(minimum));
+        }
     }
 
     #[test]
