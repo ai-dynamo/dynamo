@@ -16,13 +16,19 @@ name = "global-frontend"
 path = "src/main.rs"
 
 [dependencies]
-dynamo-global-common = { workspace = true }
+dynamo-global-common = { workspace = true, features = ["grpc"] }
+dynamo-global-view-receiver = { path = "../global-view-receiver" }
+dynamo-global-discovery-client = { workspace = true }
 dynamo-global-router = { workspace = true }
 # For the PoolRelay protocol and the session header.
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+parking_lot = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 axum = { workspace = true }
 clap = { version = "4.5.49", features = ["derive"] }
 futures = { workspace = true }
@@ -35,3 +41,6 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }

@@ -23,12 +23,28 @@ see [Pool Relay Concepts](../../developer-guide/knowledge-base/modular-component
 | `--endpoint-prefix` | `DYN_RELAY_ENDPOINT_PREFIXES` | No prefix filter | Repeat the CLI option, or use a comma-separated environment value. Match namespace/component/endpoint segments. |
 | `--expected-unique-blocks` | `DYN_RELAY_EXPECTED_UNIQUE_BLOCKS` | `1048576` | Positive expected number of unique blocks per pool; sizes the CKF, not a global Relay memory limit. |
 | `--bind` | `DYN_RELAY_BIND` | No listener | Plaintext gRPC socket address, such as `127.0.0.1:5561` or `[::1]:5561`. Requires a numeric IP and port. |
+| `--global-discovery-url` | `DYN_RELAY_GLOBAL_DISCOVERY_URL` | Unset | Root of the Global Discovery Service, such as `http://global-discovery:8080/`. The Relay reads the Global Router replica list from it every 5 seconds. When a read fails, it keeps the last list and reports why in the health field `global_routers_stale_reason`. When unset, the Relay reads no list. |
 | `--help` | None | — | Print CLI usage and exit. |
+| `--routing-pool` | `DYN_RELAY_ROUTING_POOL` | Unset | Publish this DGD's state to every discovered Global Router as `<cluster>/<Kubernetes namespace>/<DGD name>`. The cluster must match `--cluster-id`. Requires `--global-discovery-url` and `--bind`. |
 
 The protocol and gRPC server are included in the standard build. Omitting `--bind` disables only
 the WAN listener; local discovery and pool maintenance still run. Relay has no TLS flags or
 certificate configuration. Protect a listener across a trust boundary with an
 [optional external sidecar](../../kubernetes/kv-aware-routing/pool-relay.md#optional-mtls-sidecar).
+
+With `--routing-pool`, each router receives the current catalog, serving readiness,
+serving load, and KV load, followed by updates. Router endpoints returned by
+`GET /routers` must address each replica's receiving gRPC listener, rather than
+its HTTP API. Reconnecting sends a fresh snapshot.
+
+The routing pool names a Kubernetes DGD. Scope the Relay's discovery sources to
+that DGD; the routing key does not filter discovery. Dynamo runtime namespaces in
+readiness and load messages can differ from the Kubernetes namespace in this key.
+
+Configure Global Router discovery probes independently of pool availability.
+The frontend's `/live` endpoint is available before Relays connect; `/health`
+requires a routable pool. Using pool-dependent readiness to discover routers
+would prevent Relays from finding a new router.
 
 ## Precedence and Scope
 
@@ -163,7 +179,7 @@ of SHA-256 over the UTF-8 cluster ID. These are not HTTP paths or WAN RPCs.
 
 | Endpoint | Availability | Request and response |
 | --- | --- | --- |
-| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, and WAN state/errors. |
+| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, WAN state/errors, `global_discovery_enabled`, and `global_routers_stale_reason`. |
 | `stats` | `ckf-diagnostics` build feature | Empty request; returns detailed endpoint/pool statistics. |
 | `snapshot` | `ckf-diagnostics` build feature | Requires `serving_endpoint`; returns that endpoint's diagnostic snapshot. |
 

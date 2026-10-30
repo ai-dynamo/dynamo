@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use dynamo_global_common::{Lease, PoolRegistration, RouterReplica, RoutersResponse};
+use dynamo_global_common::{
+    Lease, PoolRegistration, PoolsResponse, RouterReplica, RoutersResponse,
+};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
@@ -78,6 +80,14 @@ impl GlobalDiscoveryClient {
         let response = self.send(self.http.get(url.clone()), url).await?;
         let body: RoutersResponse = read_json(response, url).await?;
         Ok(body.routers)
+    }
+
+    /// The current candidate pools. Callers must distinguish a complete list
+    /// from a partial result before withdrawing omitted pools.
+    pub async fn pools(&self) -> Result<PoolsResponse, DiscoveryClientError> {
+        let url = &self.pools_url;
+        let response = self.send(self.http.get(url.clone()), url).await?;
+        read_json(response, url).await
     }
 
     /// Calls `POST /pools` to register a pool or refresh its registration,
