@@ -207,7 +207,6 @@ mod tests {
         assert_send_sync::<HostedWorkerPicker>();
     };
 
-    /// Declares `inputs` and picks a fixed row.
     struct RowPicker {
         inputs: WorkerInputs,
         row: usize,
@@ -227,7 +226,6 @@ mod tests {
         }
     }
 
-    /// Picks the row with the fewest active requests.
     struct LeastActivePicker;
 
     impl WorkerPicker for LeastActivePicker {
