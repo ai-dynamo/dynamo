@@ -61,7 +61,6 @@ async fn serve_routers(State(fake): State<FakeDiscovery>) -> Json<Value> {
     Json(json!({ "routers": routers }))
 }
 
-/// Waits until the core's peers are exactly `expected`, in any order.
 async fn assert_peers(core: &CoreSelector, expected: &[&str]) {
     let expected: HashSet<Url> = expected.iter().map(|url| url.parse().unwrap()).collect();
     tokio::time::timeout(Duration::from_secs(5), async {

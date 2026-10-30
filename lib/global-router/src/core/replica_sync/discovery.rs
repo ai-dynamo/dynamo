@@ -74,7 +74,6 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// Waits until the hub's peers are exactly `expected`, in any order.
     async fn assert_peers(hub: &ReplicaHub, expected: &[&str]) {
         let expected: HashSet<Url> = expected.iter().map(|s| url(s)).collect();
         tokio::time::timeout(Duration::from_secs(5), async {

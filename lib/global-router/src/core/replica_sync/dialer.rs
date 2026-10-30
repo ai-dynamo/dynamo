@@ -19,6 +19,7 @@ use url::Url;
 
 use super::proto::SubscribeRequest;
 use super::proto::replica_sync_client::ReplicaSyncClient;
+use super::transport::Follow;
 use super::{CONTRACT_MARKER, ReplicaHub};
 use crate::core::ROUTING_GROUP;
 
@@ -43,7 +44,7 @@ pub async fn run_peers(
     // again until then.
     let mut following = HashMap::<Id, Url>::new();
     loop {
-        for (peer, follow) in hub.peer_tokens() {
+        for (peer, follow) in hub.follows() {
             if following.values().any(|followed| *followed == peer) {
                 continue;
             }
@@ -76,7 +77,7 @@ async fn follow_peer(
     peer: Url,
     hub: Arc<ReplicaHub>,
     service: Arc<SelectionService>,
-    cancel: CancellationToken,
+    Follow { generation, cancel }: Follow,
 ) {
     let mut retry = FIRST_RETRY;
     loop {
@@ -84,7 +85,7 @@ async fn follow_peer(
         // Stop as soon as the peer is removed, even while connecting.
         let Err(error) = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = stream_peer(&peer, &hub, &service) => result,
+            result = stream_peer(&peer, generation, &hub, &service) => result,
         };
         tracing::warn!(%peer, error = format!("{error:#}"), "replica stream ended");
         if started.elapsed() >= HEALTHY_STREAM {
@@ -101,6 +102,7 @@ async fn follow_peer(
 /// Applies each frame the peer sends until the stream fails or ends.
 async fn stream_peer(
     peer: &Url,
+    generation: u64,
     hub: &Arc<ReplicaHub>,
     service: &SelectionService,
 ) -> Result<Infallible> {
@@ -119,7 +121,7 @@ async fn stream_peer(
     let _connected = Connected::new(hub);
     loop {
         match frames.message().await.context("read a frame")? {
-            Some(frame) => hub.apply_from(peer, frame, service),
+            Some(frame) => hub.apply_from(peer, generation, frame, service),
             None => bail!("the peer closed the stream"),
         }
     }
