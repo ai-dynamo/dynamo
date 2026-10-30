@@ -334,6 +334,7 @@
 /SECURITY.md                                                                                            @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTING.md                                                                                        @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTORS.md                                                                                        @ai-dynamo/dynamo-process-codeowners
+/contributors.yaml                                                                                      @ai-dynamo/dynamo-process-codeowners
 /CODE_OF_CONDUCT.md                                                                                     @ai-dynamo/dynamo-process-codeowners
 
 # === operator  (@ai-dynamo/dynamo-operator-codeowners) ===

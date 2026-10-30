@@ -108,6 +108,7 @@ ignore:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+  - 'contributors.yaml'
   - '.coveragerc'
   # CI filter documentation does not affect any CI job, and `**` skips dotfile
   # directories, so the '**/*.md' rule above misses this one.

@@ -401,6 +401,7 @@ areas:
   - CODE_OF_CONDUCT.md
   - CONTRIBUTING.md
   - CONTRIBUTORS.md
+  - contributors.yaml
   - DCO.md
   - LICENSE
   - SECURITY.md
