@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/mcs-api/conformance"
 )
 
-// TestConformance runs the unmodified upstream suite, including DNS and connectivity.
 func TestConformance(t *testing.T) {
 	contexts := strings.Split(flag.Lookup("contexts").Value.String(), ",")
 	distinct := make(map[string]bool, len(contexts))

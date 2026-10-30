@@ -97,7 +97,6 @@ run_tests() {
     --arg upstream 32672de8605f9719b9220992c75cb263ba6f3746 \
     '{implementation_image: $image, harness_checkout_revision: $revision, upstream_commit: $upstream}' \
     >"${REPORT_DIR}/environment.json"
-  # Run every upstream specification. Reports and exit status include genuine implementation gaps.
   (
     cd "${REPORT_DIR}"
     "${CONFORMANCE_BINARY}" -test.v -test.timeout="${CONFORMANCE_TIMEOUT:-60m}" \
