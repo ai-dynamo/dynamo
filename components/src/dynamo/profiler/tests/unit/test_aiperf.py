@@ -12,6 +12,7 @@ from dynamo.profiler.utils.aiperf import (
     _get_common_aiperf_cmd,
     benchmark_decode,
     benchmark_prefill,
+    get_prefill_ttft,
 )
 
 pytestmark = [
@@ -108,3 +109,20 @@ def test_benchmark_decode_stops_when_warmup_fails(caplog):
     assert "AIPerf warm-up failed with error code: 1" in caplog.text
     assert "stdout: warmup rejected" in caplog.text
     assert "stderr: warmup failed" in caplog.text
+
+
+@pytest.mark.parametrize("attention_dp_size", [1, 2], ids=["default", "attention-dp"])
+def test_get_prefill_ttft_returns_none_when_benchmark_fails(attention_dp_size):
+    with patch(
+        "dynamo.profiler.utils.aiperf.benchmark_prefill", return_value=None
+    ) as mock_benchmark:
+        ttft = get_prefill_ttft(
+            100,
+            "artifacts",
+            "test-model",
+            "test-tokenizer",
+            attention_dp_size=attention_dp_size,
+        )
+
+    assert ttft is None
+    mock_benchmark.assert_called_once()
