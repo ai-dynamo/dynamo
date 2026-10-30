@@ -4469,6 +4469,10 @@ class SessionAffinityParityMismatch(AssertionError):
     """Observed FE versus EPP session-affinity first-selection gap."""
 
 
+class PrefillQueueRejectionParityMismatch(AssertionError):
+    """Observed FE typed queue rejection versus EPP aggregated fallback."""
+
+
 def assert_route_observations_match(
     left,
     right,
@@ -6601,20 +6605,35 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                 f"{catalog['prefill']}: {blocker_obs.prefill_worker_id}"
             )
         _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
-        epp_low, epp_high, epp_sentinel, _, _ = _prove_epp_priority_capacity(
-            stack,
-            case,
-            catalog=catalog,
-            case_name=kind,
-            blocker_obs=blocker_obs,
-            low_id=low_id,
-            high_id=high_id,
-            sentinel_id=sentinel_id,
-            low_payload=low_payload,
-            high_payload=high_payload,
-            low_headers=low_headers,
-            high_headers=high_headers,
+        (epp_low, epp_high, epp_sentinel, sentinel_kind, _) = (
+            _prove_epp_priority_capacity(
+                stack,
+                case,
+                catalog=catalog,
+                case_name=kind,
+                blocker_obs=blocker_obs,
+                low_id=low_id,
+                high_id=high_id,
+                sentinel_id=sentinel_id,
+                low_payload=low_payload,
+                high_payload=high_payload,
+                low_headers=low_headers,
+                high_headers=high_headers,
+            )
         )
+        if sentinel_kind == "aggregated":
+            epp_sentinel.release()
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(f"{kind}: EPP low/high admitted before blocker release")
+        _assert_priority_catalog(stack, catalog, "while EPP prefill blocker held")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
         epp_blocker.release()
         admitted = None
         pending = None
@@ -6819,11 +6838,19 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
                 "Loopback Kubernetes API recorded unexpected requests: "
                 + "; ".join(stack.kube_api.failures)
             )
-        if sentinel_kind != "typed":
-            raise AssertionError(
+        if sentinel_kind == "aggregated":
+            from tests.router.epp_parity import _typed_fe_queue_rejection
+
+            _typed_fe_queue_rejection(fe_sentinel)
+            raise PrefillQueueRejectionParityMismatch(
                 "FE typed 529 versus EPP aggregated fallback: FE HTTP "
                 f"{fe_sentinel.status_code} with {fe_sentinel.text[:200]!r}; "
                 f"EPP {sentinel_outcome.routing_mode!r}"
+            )
+        if sentinel_kind != "typed":
+            raise AssertionError(
+                "FE typed 529 versus unexpected EPP sentinel: "
+                f"{sentinel_kind!r} {sentinel_outcome!r}"
             )
     except BaseException as exc:
         body_error = exc

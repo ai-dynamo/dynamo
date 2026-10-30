@@ -11,7 +11,10 @@ selector together with runtime_epp, not generic runtime-image coverage.
 
 import pytest
 
-from tests.router.common import SessionAffinityParityMismatch
+from tests.router.common import (
+    PrefillQueueRejectionParityMismatch,
+    SessionAffinityParityMismatch,
+)
 from tests.utils.constants import ROUTER_MODEL_NAME
 
 pytestmark = [
@@ -93,7 +96,22 @@ def test_epp_frontend_inputs_parity(request, predownload_tokenizers, tmp_path, f
 
 @pytest.mark.parametrize(
     "kind",
-    ("body_strict", "header_strict", "header_normal", "sentinel_fallback"),
+    (
+        "body_strict",
+        "header_strict",
+        "header_normal",
+        pytest.param(
+            "sentinel_fallback",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=PrefillQueueRejectionParityMismatch,
+                reason=(
+                    "measured queue rejection→aggregated fallback: "
+                    "https://github.com/ai-dynamo/dynamo/issues/16592"
+                ),
+            ),
+        ),
+    ),
 )
 def test_epp_frontend_priority_parity(request, predownload_tokenizers, tmp_path, kind):
     """Compare FE/EPP queue admission under a held 1P+1D prefill slot."""
