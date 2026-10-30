@@ -458,16 +458,18 @@ def test_kubernetes_page_is_self_contained(kubernetes_page: _KubernetesPage) -> 
     assert not (K8S_DIR / "api-reference.data.ts").exists()
 
 
-def test_kubernetes_source_path_note_points_at_a_real_file() -> None:
-    """The rendered page tells readers where the raw crd-ref-docs Markdown
-    lives. That path is emitted as inline code rather than a link, so the
-    broken-link checker cannot catch it when the source file moves -- as it
-    did when the reference was relocated under ``pages/reference/``."""
-    quoted = kubernetes_api_rendering.SOURCE_PATH_MD
-    missing = f"SOURCE_PATH_MD does not exist on disk: {quoted}"
+def test_kubernetes_source_note_points_at_committed_sources() -> None:
+    """The rendered page tells readers which sources it is generated from.
+    Those paths are emitted as inline code rather than links, so the
+    broken-link checker cannot catch it when a source moves. They must name
+    committed sources: the raw crd-ref-docs Markdown is gitignored, so
+    pointing readers at it sends them to a file the repository lacks."""
+    api_dir = kubernetes_api_rendering.SOURCE_API_DIR
+    footer = kubernetes_api_rendering.SOURCE_FOOTER
 
-    assert (REPO_ROOT / quoted).is_file(), missing
-    assert quoted == str(K8S_SOURCE_MD.relative_to(REPO_ROOT))
+    assert (REPO_ROOT / api_dir).is_dir(), f"SOURCE_API_DIR is missing: {api_dir}"
+    assert (REPO_ROOT / footer).is_file(), f"SOURCE_FOOTER is missing: {footer}"
+    assert kubernetes_api_rendering.GENERATE_COMMAND == K8S_GENERATE
 
 
 def test_kubernetes_prose_carries_no_literal_br_markers(
@@ -561,12 +563,15 @@ def test_kubernetes_page_carries_enum_semantics(
 
 
 def test_pre_merge_gates_every_api_generator_input() -> None:
-    filters = (REPO_ROOT / ".github" / "filters.yaml").read_text(encoding="utf-8")
+    # Parsed, not grepped: the Kubernetes inputs sit in both filters, so a
+    # whole-file substring check cannot tell which filter lost one.
+    filters = yaml.safe_load(
+        (REPO_ROOT / ".github" / "filters.yaml").read_text(encoding="utf-8")
+    )
     action = (
         REPO_ROOT / ".github" / "actions" / "changed-files" / "action.yml"
     ).read_text(encoding="utf-8")
 
-    assert "\napi_docs:\n" in filters
     for source_path in (
         "lib/bindings/python/src/**",
         "components/src/dynamo/**",
@@ -581,7 +586,11 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
         "docs/fern/index.yml",
         "docs/fern/docs.yml",
     ):
-        assert source_path in filters
+        assert source_path in filters["api_docs"]
+    # fern check, broken links, and the website replay gate on `docs` and
+    # render the Kubernetes pages, so a CRD type change must trigger them too.
+    for source_path in ("deploy/operator/api/**", "deploy/operator/docs/**"):
+        assert source_path in filters["docs"]
     assert "api_docs:" in action
     assert "steps.filter.outputs.api_docs_any_modified" in action
 
@@ -609,6 +618,21 @@ def _publish_step_run(step_name: str) -> str:
     raise AssertionError(f"fern-docs.yml has no step named {step_name!r}")
 
 
+def _pre_merge_job_runs(job_id: str) -> str:
+    """Return every `run` body of one pre-merge.yml job, joined.
+
+    Parsed for the same reason as _publish_step_run, and per job so that a
+    command kept in one job cannot stand in for the copy another job lost.
+    """
+    document = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = document["jobs"][job_id]["steps"]
+    return "\n".join(step.get("run", "") for step in steps)
+
+
 def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
         encoding="utf-8"
@@ -633,7 +657,9 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
         assert f"gen_{generator}_api.py\n" in workflow
         assert f"gen_{generator}_api.py --check" not in workflow
     assert "gen_kubernetes_api.py --check" not in workflow
-    assert K8S_GENERATE in workflow
+    # Each job that reads the Kubernetes pages generates them itself.
+    for job_id in ("api-docs", "fern-check", "fern-broken-links"):
+        assert K8S_GENERATE in _pre_merge_job_runs(job_id), job_id
     # The Kubernetes tests parse the generated pages, so the job must
     # generate them before running the tests.
     assert workflow.index("Generate Kubernetes API reference") < workflow.index(

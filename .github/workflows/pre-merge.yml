@@ -214,7 +214,7 @@ jobs:
           docs/fern/scripts/tests/test_api_freshness.py \
           docs/fern/scripts/tests/test_relink_shared_reference.py \
           docs/fern/scripts/tests/test_resolve_translation_links.py
-    - name: Generate API references from source
+    - name: Generate Python/Rust API references
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
       # files, so there is no freshness to check on a PR. What a code PR CAN

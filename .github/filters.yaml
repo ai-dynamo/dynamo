@@ -61,6 +61,8 @@ docs:
   - 'skills/**'
   # The Kubernetes API reference pages are generated from these at check time,
   # so a CRD type or header/footer change must rerun fern check and broken links.
+  # It also builds a docs preview, as these PRs did when they committed the
+  # regenerated pages.
   - 'deploy/operator/api/**'
   - 'deploy/operator/docs/**'
   # Sidecar documentation is not part of the Fern docs site.

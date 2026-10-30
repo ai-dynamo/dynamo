@@ -77,10 +77,11 @@ jobs:
     if: github.ref_type != 'tag'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
-      # api_docs also matches the Python/Rust source trees. The publish job
-      # keys on it for main pushes: the API reference pages generate from
-      # source at publish time, so a code-only merge that changes a
-      # documented symbol must republish or the live pages go stale.
+      # api_docs also matches the Python/Rust source trees and the Kubernetes
+      # reference inputs under deploy/operator. The publish job keys on it for
+      # main pushes: the API reference pages generate from source at publish
+      # time, so a code-only merge that changes a documented symbol must
+      # republish or the live pages go stale.
       api_docs: ${{ steps.changes.outputs.api_docs }}
     steps:
       - name: Checkout code
@@ -146,8 +147,7 @@ jobs:
         # Python/Rust/Kubernetes references are publish-time artifacts:
         # generated here against the ref being published, never committed.
         # Generation must precede the pages-dev sync below, which rsyncs
-        # docs/fern/pages/. `make generate-api-docs` runs crd-ref-docs over the
-        # operator Go types, then gen_kubernetes_api.py over its output.
+        # docs/fern/pages/.
         run: |
           set -euo pipefail
           python3 -m pip install 'griffe==2.1.0'
@@ -816,18 +816,26 @@ jobs:
           set -euo pipefail
           gen_py="source-checkout/docs/fern/scripts/gen_python_api.py"
           gen_rs="source-checkout/docs/fern/scripts/gen_rust_api.py"
+          gen_k8s="source-checkout/docs/fern/scripts/gen_kubernetes_api.py"
+          # Assigned rather than tested inline: inside `[ -n "$(...)" ]` a
+          # failing git is invisible to set -e, and falling through would
+          # regenerate over the pages the tag committed.
+          tracked_py_rs="$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)"
+          tracked_k8s="$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx)"
           if [ ! -f "$gen_py" ] || [ ! -f "$gen_rs" ]; then
             echo "::notice::Tagged tree lacks the Python/Rust API reference generators; snapshotting committed pages as-is"
-          elif [ -n "$(git -C source-checkout ls-files -- \
-            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)" ]; then
+          elif [ -n "$tracked_py_rs" ]; then
             echo "::notice::Tagged tree commits its Python/Rust API reference pages; snapshotting them as-is"
           else
             python3 -m pip install 'griffe==2.1.0'
             python3 "$gen_py"
             python3 "$gen_rs"
           fi
-          if [ -n "$(git -C source-checkout ls-files -- \
-            docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx)" ]; then
+          if [ ! -f "$gen_k8s" ]; then
+            echo "::notice::Tagged tree lacks the Kubernetes API reference generator; snapshotting committed pages as-is"
+          elif [ -n "$tracked_k8s" ]; then
             echo "::notice::Tagged tree commits its Kubernetes API reference pages; snapshotting them as-is"
           else
             make -C source-checkout/deploy/operator generate-api-docs

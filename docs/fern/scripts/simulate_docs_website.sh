@@ -40,8 +40,9 @@
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
 #
-# Requires: git, rsync, perl, yq v4, python3 >= 3.10 (or python3.13), and the
-# fern CLI for check 1 (skipped with a warning if unavailable).
+# Requires: git, rsync, perl, yq v4, python3 >= 3.10 (or python3.13), go (to
+# generate the Kubernetes API reference), and the fern CLI for check 1
+# (skipped with a warning if unavailable).
 set -euo pipefail
 
 TAG="${1:-v9.9.9}"
