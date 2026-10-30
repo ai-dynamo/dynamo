@@ -50,6 +50,23 @@ class PriorityPoolOverride:
     target_pool: int  # pool index to route to when priority matches
 
 
+@dataclass
+class UncachedTokensPoolOverride:
+    """Override pool selection based on the client-declared uncached token count.
+
+    ``uncached_tokens`` is a client estimate carried in ``nvext.router``: the
+    number of prompt tokens expected to require fresh prefill computation,
+    i.e. tokens not served from any KV cache. Requests whose estimate falls in
+    ``[min_uncached_tokens, max_uncached_tokens]`` are routed to
+    ``target_pool`` instead of the grid result. ``max_uncached_tokens`` of
+    ``None`` means unbounded.
+    """
+
+    min_uncached_tokens: int  # inclusive lower bound
+    target_pool: int  # pool index to route to when the estimate matches
+    max_uncached_tokens: Optional[int] = None  # inclusive upper bound; None = unbounded
+
+
 def _default_pool_priorities(num_pools: int) -> List[int]:
     """Default pool priorities follow pool order: pool 0 is fastest."""
     return list(range(num_pools))
@@ -127,6 +144,23 @@ def _apply_priority_overrides(
     return base_pool
 
 
+def _apply_uncached_overrides(
+    base_pool: int,
+    uncached_tokens: Optional[int],
+    overrides: List[UncachedTokensPoolOverride],
+) -> int:
+    """Apply uncached-token pool overrides. First matching rule wins."""
+    if uncached_tokens is None or not overrides:
+        return base_pool
+    for rule in overrides:
+        if rule.max_uncached_tokens is None:
+            if uncached_tokens >= rule.min_uncached_tokens:
+                return rule.target_pool
+        elif rule.min_uncached_tokens <= uncached_tokens <= rule.max_uncached_tokens:
+            return rule.target_pool
+    return base_pool
+
+
 @dataclass
 class PrefillPoolSelectionStrategy:
     """Strategy for selecting prefill pools based on ISL and TTFT target."""
@@ -139,6 +173,7 @@ class PrefillPoolSelectionStrategy:
     isl_resolution: int
     prefill_pool_mapping: List[List[int]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    uncached_overrides: List[UncachedTokensPoolOverride] = field(default_factory=list)
 
     @property
     def ttft_step_ms(self) -> float:
@@ -155,18 +190,23 @@ class PrefillPoolSelectionStrategy:
         isl: int,
         ttft_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
+        uncached_tokens: Optional[int] = None,
     ) -> int:
         """
-        Select prefill pool based on ISL, TTFT target, and optional priority.
+        Select prefill pool based on ISL, TTFT target, and optional overrides.
 
         Args:
             isl: Input sequence length (number of tokens)
             ttft_target_ms: Target time to first token in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
+            uncached_tokens: Client-declared estimate of tokens requiring fresh
+                prefill computation (``nvext.router.uncached_tokens``). If set
+                and an uncached override rule matches, the override replaces
+                the grid result; a matching priority override still wins.
 
         Returns:
-            Pool index from prefill_pool_mapping or a priority override
+            Pool index from prefill_pool_mapping or an override rule
         """
         if ttft_target_ms is None:
             ttft_target_ms = (self.ttft_min_ms + self.ttft_max_ms) / 2
@@ -181,12 +221,15 @@ class PrefillPoolSelectionStrategy:
         )
 
         pool_idx = self.prefill_pool_mapping[isl_idx][ttft_idx]
+        pool_idx = _apply_uncached_overrides(
+            pool_idx, uncached_tokens, self.uncached_overrides
+        )
         pool_idx = _apply_priority_overrides(
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
             f"Prefill pool selection: ISL={isl}, TTFT={ttft_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx}"
+            f"uncached_tokens={uncached_tokens}, priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
 
@@ -291,6 +334,7 @@ class AggPoolSelectionStrategy:
     itl_resolution: int
     agg_pool_mapping: List[List[int]] | List[List[List[int]]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    uncached_overrides: List[UncachedTokensPoolOverride] = field(default_factory=list)
     isl_min: Optional[int] = None
     isl_max: Optional[int] = None
     isl_resolution: Optional[int] = None
@@ -311,9 +355,10 @@ class AggPoolSelectionStrategy:
         itl_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
         isl: Optional[int] = None,
+        uncached_tokens: Optional[int] = None,
     ) -> int:
         """
-        Select agg pool based on TTFT target, ITL target, optional ISL, and priority.
+        Select agg pool based on TTFT target, ITL target, optional ISL, and overrides.
 
         Args:
             ttft_target_ms: Target time to first token in ms. If None, uses middle of range.
@@ -321,9 +366,13 @@ class AggPoolSelectionStrategy:
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
             isl: Input sequence length. Used when the optional ISL grid is configured.
+            uncached_tokens: Client-declared estimate of tokens requiring fresh
+                prefill computation (``nvext.router.uncached_tokens``). If set
+                and an uncached override rule matches, the override replaces
+                the grid result; a matching priority override still wins.
 
         Returns:
-            Pool index from agg_pool_mapping or a priority override
+            Pool index from agg_pool_mapping or an override rule
         """
         if ttft_target_ms is None:
             ttft_target_ms = (self.ttft_min_ms + self.ttft_max_ms) / 2
@@ -359,14 +408,19 @@ class AggPoolSelectionStrategy:
             )
             mapping_3d = cast(List[List[List[int]]], self.agg_pool_mapping)
             pool_idx = mapping_3d[isl_idx][ttft_idx][itl_idx]
+        pool_idx = _apply_uncached_overrides(
+            pool_idx, uncached_tokens, self.uncached_overrides
+        )
         pool_idx = _apply_priority_overrides(
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            "Agg pool selection: ISL=%s, TTFT=%sms, ITL=%sms, priority=%s -> pool %s",
+            "Agg pool selection: ISL=%s, TTFT=%sms, ITL=%sms, "
+            "uncached_tokens=%s, priority=%s -> pool %s",
             isl,
             ttft_target_ms,
             itl_target_ms,
+            uncached_tokens,
             priority,
             pool_idx,
         )
@@ -513,6 +567,30 @@ class GlobalRouterConfig:
             ):
                 raise ValueError(
                     f"Prefill priority_overrides[{i}]: invalid target_pool "
+                    f"{override.target_pool} (must be 0 to {self.num_prefill_pools - 1})"
+                )
+
+        for i, override in enumerate(prefill_strategy.uncached_overrides):
+            if override.min_uncached_tokens < 0:
+                raise ValueError(
+                    f"Prefill uncached_overrides[{i}]: min_uncached_tokens "
+                    f"({override.min_uncached_tokens}) must be non-negative"
+                )
+            if (
+                override.max_uncached_tokens is not None
+                and override.max_uncached_tokens < override.min_uncached_tokens
+            ):
+                raise ValueError(
+                    f"Prefill uncached_overrides[{i}]: max_uncached_tokens "
+                    f"({override.max_uncached_tokens}) must be >= "
+                    f"min_uncached_tokens ({override.min_uncached_tokens})"
+                )
+            if (
+                override.target_pool < 0
+                or override.target_pool >= self.num_prefill_pools
+            ):
+                raise ValueError(
+                    f"Prefill uncached_overrides[{i}]: invalid target_pool "
                     f"{override.target_pool} (must be 0 to {self.num_prefill_pools - 1})"
                 )
 
@@ -694,6 +772,27 @@ class GlobalRouterConfig:
                     f"{override.target_pool} (must be 0 to {self.num_agg_pools - 1})"
                 )
 
+        for i, override in enumerate(agg_strategy.uncached_overrides):
+            if override.min_uncached_tokens < 0:
+                raise ValueError(
+                    f"Agg uncached_overrides[{i}]: min_uncached_tokens "
+                    f"({override.min_uncached_tokens}) must be non-negative"
+                )
+            if (
+                override.max_uncached_tokens is not None
+                and override.max_uncached_tokens < override.min_uncached_tokens
+            ):
+                raise ValueError(
+                    f"Agg uncached_overrides[{i}]: max_uncached_tokens "
+                    f"({override.max_uncached_tokens}) must be >= "
+                    f"min_uncached_tokens ({override.min_uncached_tokens})"
+                )
+            if override.target_pool < 0 or override.target_pool >= self.num_agg_pools:
+                raise ValueError(
+                    f"Agg uncached_overrides[{i}]: invalid target_pool "
+                    f"{override.target_pool} (must be 0 to {self.num_agg_pools - 1})"
+                )
+
 
 def load_config(config_path: str | Path) -> GlobalRouterConfig:
     """
@@ -739,6 +838,10 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         PriorityPoolOverride(**rule)
         for rule in prefill_strategy_data.get("priority_overrides", [])
     ]
+    prefill_uncached_overrides = [
+        UncachedTokensPoolOverride(**rule)
+        for rule in prefill_strategy_data.get("uncached_overrides", [])
+    ]
     prefill_strategy = PrefillPoolSelectionStrategy(
         ttft_min_ms=_get_aliased(prefill_strategy_data, "ttft_min_ms", "ttft_min"),
         ttft_max_ms=_get_aliased(prefill_strategy_data, "ttft_max_ms", "ttft_max"),
@@ -748,6 +851,7 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         isl_resolution=prefill_strategy_data["isl_resolution"],
         prefill_pool_mapping=prefill_strategy_data["prefill_pool_mapping"],
         priority_overrides=prefill_priority_overrides,
+        uncached_overrides=prefill_uncached_overrides,
     )
 
     # Parse decode selection strategy
@@ -794,6 +898,10 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
         PriorityPoolOverride(**rule)
         for rule in agg_strategy_data.get("priority_overrides", [])
     ]
+    agg_uncached_overrides = [
+        UncachedTokensPoolOverride(**rule)
+        for rule in agg_strategy_data.get("uncached_overrides", [])
+    ]
     agg_strategy = AggPoolSelectionStrategy(
         ttft_min_ms=_get_aliased(agg_strategy_data, "ttft_min_ms", "ttft_min"),
         ttft_max_ms=_get_aliased(agg_strategy_data, "ttft_max_ms", "ttft_max"),
@@ -806,6 +914,7 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
         isl_max=agg_strategy_data.get("isl_max"),
         isl_resolution=agg_strategy_data.get("isl_resolution"),
         priority_overrides=agg_priority_overrides,
+        uncached_overrides=agg_uncached_overrides,
     )
 
     config = GlobalRouterConfig(

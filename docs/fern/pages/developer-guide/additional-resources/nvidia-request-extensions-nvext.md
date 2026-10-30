@@ -44,6 +44,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
 | `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
+| `router` | object | `None` | Router | Per-request SLA targets and routing estimates. See [Router](#router). |
 
 Related root-level Dynamo output option:
 
@@ -246,6 +247,32 @@ Backend details:
     "nvext": {
         "agent_hints": {
             "priority": 5
+        }
+    }
+}
+```
+
+## Router
+
+The `router` sub-object carries per-request SLA targets and routing estimates. In multi-pool deployments served by the [Global Router](../../reference/components/global-router-configuration.mdx), these fields drive pool selection; the frontend forwards them to workers as the typed `router` field on `PreprocessedRequest`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ttft_target` | `f64` | `None` | Target time-to-first-token in milliseconds. Drives prefill pool selection. |
+| `itl_target` | `f64` | `None` | Target inter-token latency in milliseconds. Drives decode pool selection. |
+| `uncached_tokens` | `u32` | `None` | Client estimate of prompt tokens that will require fresh prefill computation, i.e. tokens not served from any KV cache. See below. |
+
+### `uncached_tokens`
+
+A client-declared estimate of the request's uncached compute volume: the number of prompt tokens expected to require fresh prefill computation, i.e. tokens not served from any KV cache. For an agent multi-turn request, this is approximately the tokens added on the current turn (new user message, tool results, and newly generated assistant turns), not the full context length.
+
+The estimate is a **routing hint only**. The router never validates it against actual cache state, and engines ignore it. Use it to steer requests toward compute-isolated pools — for example, a Global Router `uncached_overrides` rule can route cold requests above a threshold to a dedicated prefill pool while long-but-cached agent traffic keeps the grid result. Requests without the field keep the grid result.
+
+```json
+{
+    "nvext": {
+        "router": {
+            "uncached_tokens": 131072
         }
     }
 }
