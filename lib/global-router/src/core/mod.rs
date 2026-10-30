@@ -16,7 +16,9 @@
 //! each request carries its session id, the core holds the session's
 //! binding across the pick and binds it to the pool picked, and the
 //! [`policies::HeadroomPicker`] sees the binding as the request's affinity
-//! target.
+//! target. With [`ReplicaSync`] the core's bookings and session bindings
+//! replicate to the other Global Frontends over the core's own mesh, so
+//! every replica sees every replica's requests in flight and pins.
 
 mod catalog;
 mod directory;
@@ -85,6 +87,17 @@ pub struct AffinityConfig {
     pub idle: Duration,
 }
 
+/// Replicate bookings and session bindings with other Global Frontends over
+/// the core's replica mesh.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplicaSync {
+    /// The port this replica publishes on; peers subscribe to it.
+    pub port: u16,
+    /// Peers to subscribe to at start, as `tcp://host:port`. More can join
+    /// through [`CoreSelector::register_peer`].
+    pub peers: Vec<String>,
+}
+
 /// Selects a pool through the router core, then rotates over the pool's
 /// frontends.
 pub struct CoreSelector {
@@ -143,9 +156,10 @@ impl PinRefresh {
 }
 
 impl CoreSelector {
-    /// Builds a core with `policy`. Nothing is selectable until
-    /// [`Self::follow`] has applied the first pool snapshot.
-    pub async fn new(policy: CorePolicy) -> Result<Self> {
+    /// Builds a core with `policy`, replicating with peers when
+    /// `replica_sync` is given. Nothing is selectable until [`Self::follow`]
+    /// has applied the first pool snapshot.
+    pub async fn new(policy: CorePolicy, replica_sync: Option<ReplicaSync>) -> Result<Self> {
         let directory = Arc::new(PoolDirectory::new());
         let registry = policies::registry(&policy, directory.clone())
             .context("register the pool selection policies")?;
@@ -165,6 +179,9 @@ impl CoreSelector {
             builder = builder
                 .session_affinity(affinity.idle)
                 .session_affinity_mode(SessionAffinityMode::Soft);
+        }
+        if let Some(sync) = replica_sync {
+            builder = builder.replica_sync(sync.port, sync.peers);
         }
         let service = builder.build().await.context("build the router core")?;
         let books = policies::reads_bookings(&policy, &directory);
@@ -203,6 +220,15 @@ impl CoreSelector {
         (ready, reconciler.run(source, cancel))
     }
 
+    /// Subscribes to another replica's events, `endpoint` as
+    /// `tcp://host:port`. `Ok(false)` if it was already a peer.
+    pub async fn register_peer(&self, endpoint: String) -> Result<bool> {
+        self.service
+            .register_replica_peer(endpoint.clone())
+            .await
+            .with_context(|| format!("register replica peer {endpoint}"))
+    }
+
     /// Books a request on `pool`, whatever the policy would pick.
     #[cfg(test)]
     async fn reserve_on(&self, pool: &Pool) -> Reservation {
@@ -217,6 +243,7 @@ impl CoreSelector {
         Reservation::new(self.service.clone(), selected.selection_id)
     }
 
+    /// Requests booked on `pool`, this replica's and its peers'.
     #[cfg(test)]
     fn booked(&self, pool: &Pool) -> usize {
         self.service
@@ -275,6 +302,12 @@ impl RequestSelector for CoreSelector {
             return None;
         };
         let target = target(&self.frontends, pool)?;
+        tracing::trace!(
+            model = request.model,
+            session,
+            pool = %pool.name,
+            "the router core picked a pool"
+        );
         Some(Selection {
             target,
             lifecycle: reservation
@@ -471,8 +504,17 @@ mod tests {
     /// A core following `pools`, once every pool with a frontend is one of
     /// its workers.
     async fn selector(policy: CorePolicy, pools: &[Pool]) -> (CoreSelector, Catalog) {
+        synced_selector(policy, pools, None).await
+    }
+
+    /// [`selector`], replicating over `replica_sync`.
+    async fn synced_selector(
+        policy: CorePolicy,
+        pools: &[Pool],
+        replica_sync: Option<ReplicaSync>,
+    ) -> (CoreSelector, Catalog) {
         let (catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
-        let selector = CoreSelector::new(policy).await.unwrap();
+        let selector = CoreSelector::new(policy, replica_sync).await.unwrap();
         let (ready, follower) = selector.follow(subscription, CancellationToken::new());
         tokio::spawn(follower);
         ready.await.expect("the core took the first snapshot");
@@ -574,6 +616,53 @@ mod tests {
                 round
             })
             .collect()
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Two cores on the same pools, each subscribed to the other. The
+    /// subscriptions need a moment to connect before events flow.
+    async fn replicas(
+        policy: impl Fn() -> CorePolicy,
+        pools: &[Pool],
+    ) -> (CoreSelector, CoreSelector, Catalog, Catalog) {
+        let (port_a, port_b) = (free_port(), free_port());
+        let (a, catalog_a) = synced_selector(
+            policy(),
+            pools,
+            Some(ReplicaSync {
+                port: port_a,
+                peers: Vec::new(),
+            }),
+        )
+        .await;
+        let (b, catalog_b) = synced_selector(
+            policy(),
+            pools,
+            Some(ReplicaSync {
+                port: port_b,
+                peers: vec![format!("tcp://127.0.0.1:{port_a}")],
+            }),
+        )
+        .await;
+        assert!(
+            a.register_peer(format!("tcp://127.0.0.1:{port_b}"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !a.register_peer(format!("tcp://127.0.0.1:{port_b}"))
+                .await
+                .unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (a, b, catalog_a, catalog_b)
     }
 
     #[tokio::test]
@@ -896,5 +985,72 @@ mod tests {
         set_occupancy(&pools, &signals, [0.1, 1.0, 0.9, 0.2]);
         signals.forget(&pools[0].id);
         assert_eq!(host_for(&core, &pools, Some("s")).await, "oregon-a");
+    }
+
+    #[tokio::test]
+    async fn replicas_see_each_other_s_bookings() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b) = replicas(|| CorePolicy::LeastRequests, &pools).await;
+
+        // Two requests booked through A show up at B, which then avoids blue.
+        let _busy = [a.reserve_on(&blue).await, a.reserve_on(&blue).await];
+        booked_settles(&b, &blue, 2).await;
+        for _ in 0..4 {
+            assert_eq!(
+                picks(&b, "qwen", &[&blue, &green]).await,
+                Some(green.id.clone())
+            );
+        }
+        // And B's own requests reach A.
+        let _on_green = [
+            b.reserve_on(&green).await,
+            b.reserve_on(&green).await,
+            b.reserve_on(&green).await,
+        ];
+        booked_settles(&a, &green, 3).await;
+        assert_eq!(
+            picks(&a, "qwen", &[&blue, &green]).await,
+            Some(blue.id.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn replicas_agree_on_a_session_s_pool() {
+        let (pools, signals) = fleet();
+        let (a, b, _catalog_a, _catalog_b) = replicas(|| affinity(&signals), &pools).await;
+
+        // A pins the session to ohio-a while it is the emptiest local pool.
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(host_for(&a, &pools, Some("s")).await, "ohio-a");
+        // Now ohio-b is emptier, but not by twice the room. Without the
+        // replicated pin B would start the session on ohio-b.
+        set_occupancy(&pools, &signals, [0.5, 0.3, 0.5, 0.5]);
+        assert_eq!(host_for(&b, &pools, Some("fresh")).await, "ohio-b");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if host_for(&b, &pools, Some("s")).await == "ohio-a" {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("B learned A's pin");
+        // The pin moving on B is seen by A: ohio-b fills, Tokyo empties.
+        set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.1]);
+        assert_eq!(host_for(&b, &pools, Some("s")).await, "tokyo-a");
+        set_occupancy(&pools, &signals, [0.5, 0.5, 0.5, 0.5]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if host_for(&a, &pools, Some("s")).await == "tokyo-a" {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("A learned B's move");
     }
 }

@@ -5,13 +5,16 @@
 //!
 //! `--selection core` selects through the embedded router core instead of
 //! the Global Router's own selectors, with each pool as one of the core's
-//! workers and every `--router-policy` as one of its plugins:
+//! workers and every `--router-policy` as one of its plugins. With
+//! `--replica-sync-port` and `--peer`, the core shares its requests in
+//! flight and session pins with the other Global Frontends:
 //!
 //! ```bash
 //! cargo run -p dynamo-global-frontend -- --port 8000 --selection core \
 //!     --router-policy affinity --region ohio \
 //!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000 \
-//!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051
+//!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051 \
+//!     --replica-sync-port 5600 --peer tcp://10.42.1.5:5600
 //! ```
 
 use std::collections::HashSet;
@@ -26,7 +29,7 @@ use dynamo_global_frontend::{
 };
 use dynamo_global_router::{
     AffinityConfig, AffinitySelector, CorePolicy, CoreSelector, InFlightTracker,
-    LeastInFlightSelector, Pool, PoolSignals, RequestSelector, RoundRobinSelector,
+    LeastInFlightSelector, Pool, PoolSignals, ReplicaSync, RequestSelector, RoundRobinSelector,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -100,6 +103,14 @@ struct Args {
     /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
+    /// `--selection core`: the port this replica publishes its requests in
+    /// flight and session pins on, for the other Global Frontends.
+    #[arg(long)]
+    replica_sync_port: Option<u16>,
+    /// `--selection core`: another Global Frontend's `--replica-sync-port`
+    /// endpoint, as `tcp://host:port`. Repeat the flag for each peer.
+    #[arg(long = "peer", value_parser = parse_peer, requires = "replica_sync_port")]
+    peers: Vec<String>,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -131,6 +142,20 @@ fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
         return Err(format!("pool relay must be an http:// URL: {relay}"));
     }
     Ok((parse_key(key)?, relay))
+}
+
+fn parse_peer(value: &str) -> Result<String, String> {
+    let Some(address) = value.strip_prefix("tcp://") else {
+        return Err(format!("expected tcp://host:port, got {value}"));
+    };
+    match address.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0) =>
+        {
+            Ok(value.to_owned())
+        }
+        _ => Err(format!("expected tcp://host:port, got {value}")),
+    }
 }
 
 /// Gives each pool its Relay. Every Relay must name a configured pool, and
@@ -168,6 +193,13 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
     // Until pools come from Global Discovery, which reports each pool's
     // region, the cluster names it.
     Ok(Pool::new(&key, model, key.cluster_id(), frontends))
+}
+
+fn replica_sync(args: &Args) -> Option<ReplicaSync> {
+    args.replica_sync_port.map(|port| ReplicaSync {
+        port,
+        peers: args.peers.clone(),
+    })
 }
 
 /// Starts following each pool's Relay and measuring each region's round
@@ -215,6 +247,9 @@ async fn main() -> Result<()> {
     if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
         tracing::warn!("--pool-relay is used only by --router-policy affinity");
     }
+    if args.selection != SelectionPath::Core && args.replica_sync_port.is_some() {
+        bail!("--replica-sync-port needs --selection core");
+    }
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -248,7 +283,7 @@ async fn main() -> Result<()> {
                     idle,
                 }),
             };
-            let core = Arc::new(CoreSelector::new(policy).await?);
+            let core = Arc::new(CoreSelector::new(policy, replica_sync(&args)).await?);
             // Serve only once the configured pools are the core's workers;
             // a request before that would get a spurious 503.
             let (ready, follower) = core.follow(pools.clone(), shutdown.child_token());
@@ -363,12 +398,50 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_current() {
+    fn selection_defaults_to_current_and_the_core_takes_peers() {
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.selection, SelectionPath::Current);
-        let args = Args::try_parse_from(["global-frontend", pool, "--selection", "core"]).unwrap();
+        assert_eq!(replica_sync(&args), None);
+
+        let args = Args::try_parse_from([
+            "global-frontend",
+            pool,
+            "--selection",
+            "core",
+            "--replica-sync-port",
+            "5600",
+            "--peer",
+            "tcp://10.0.0.2:5600",
+            "--peer",
+            "tcp://10.0.0.3:5600",
+        ])
+        .unwrap();
         assert_eq!(args.selection, SelectionPath::Core);
+        assert_eq!(
+            replica_sync(&args),
+            Some(ReplicaSync {
+                port: 5600,
+                peers: vec![
+                    "tcp://10.0.0.2:5600".to_owned(),
+                    "tcp://10.0.0.3:5600".to_owned()
+                ],
+            })
+        );
+
+        // A peer needs the port this replica publishes on, and the mesh
+        // dials tcp:// endpoints only.
+        assert!(
+            Args::try_parse_from(["global-frontend", pool, "--peer", "tcp://10.0.0.2:5600"])
+                .is_err()
+        );
+        assert!(parse_peer("http://10.0.0.2:5600").is_err());
+        assert!(parse_peer("tcp://10.0.0.2").is_err());
+        assert!(parse_peer("tcp://:5600").is_err());
+        assert_eq!(
+            parse_peer("tcp://peer:5600").as_deref(),
+            Ok("tcp://peer:5600")
+        );
     }
 
     #[test]

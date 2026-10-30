@@ -12,7 +12,8 @@
 //! The frontend drives selectors through [`RequestSelector`], which every
 //! [`PoolSelector`] is. [`CoreSelector`] is the other kind: it selects
 //! through the embedded router core, with each pool registered as one of
-//! the core's workers and the policies as the core's plugins (see
+//! the core's workers and the policies as the core's plugins, and can
+//! replicate its bookings and session pins with other frontends (see
 //! [`core`]).
 
 mod affinity;
@@ -23,7 +24,9 @@ mod selector;
 mod signals;
 
 pub use affinity::AffinitySelector;
-pub use core::{AffinityConfig, CorePolicy, CoreSelector, MAX_SESSION_ID_BYTES, Reservation};
+pub use core::{
+    AffinityConfig, CorePolicy, CoreSelector, MAX_SESSION_ID_BYTES, ReplicaSync, Reservation,
+};
 pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;
 pub use selector::{
