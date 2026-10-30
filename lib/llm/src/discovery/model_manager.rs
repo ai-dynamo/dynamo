@@ -2603,6 +2603,16 @@ impl ModelManager {
         self.lora_domain(endpoint_id).state_tracker.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_runtime_configs(
+        &self,
+        endpoint_id: &EndpointId,
+        configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    ) {
+        let (_tx, rx) = tokio::sync::watch::channel(configs);
+        self.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
     pub fn lora_load_estimator_for(&self, endpoint_id: &EndpointId) -> Arc<LoadEstimator> {
         self.lora_domain(endpoint_id).load_estimator.clone()
     }
@@ -3191,8 +3201,7 @@ mod tests {
         endpoint_id: &EndpointId,
         configs: HashMap<WorkerId, ModelRuntimeConfig>,
     ) {
-        let (_tx, rx) = tokio::sync::watch::channel(configs);
-        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+        mm.insert_runtime_configs(endpoint_id, configs);
     }
 
     #[tokio::test]
