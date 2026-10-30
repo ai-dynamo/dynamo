@@ -146,7 +146,9 @@ _POSITIONAL_REF_RE = re.compile(
     r"\bnested_map\b|"
     r"(?:pub\s+)?mod\s+positional\b|"
     r"indexer::positional\b|"
-    r"::positional\b"
+    r"::positional\b|"
+    r"(?:\{|,)\s*positional\b|"
+    r"\buse\s+positional\b"
 )
 _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "overlap_score_credit",
