@@ -4834,8 +4834,6 @@ mod tests {
         }
     }
 
-    /// Registers one model that occupies `model_type`. Returns false when this test has no
-    /// way to occupy that unit, which is the signal the caller turns into a failure.
     #[test]
     fn test_add_get_remove_transcriptions_model_round_trip() {
         let mm = ModelManager::new();
@@ -4852,6 +4850,8 @@ mod tests {
         ));
     }
 
+    /// Registers one model that occupies `model_type`. Returns false when this test has no
+    /// way to occupy that unit, which is the signal the caller turns into a failure.
     fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
         let name = "occupancy-probe";
         let outcome = if model_type == ModelType::Chat {
