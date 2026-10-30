@@ -520,7 +520,11 @@ class KvTransferPayload(DisaggregatedChatPayload):
     def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
         body = deepcopy(super().body_for_iteration(iteration))
         message = body["messages"][0]
-        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+        prefix = f"Request {uuid.uuid4()}. "
+        if isinstance(message["content"], list):
+            message["content"].insert(0, {"type": "text", "text": prefix})
+        else:
+            message["content"] = prefix + message["content"]
         return body
 
     def before_request(self) -> None:

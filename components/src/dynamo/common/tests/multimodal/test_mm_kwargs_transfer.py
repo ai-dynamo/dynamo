@@ -617,6 +617,8 @@ class TestMmKwargsNixlReceiverPreparation:
         try:
             yield receiver, descriptors, native
         finally:
+            while not receiver._pool.empty():
+                descriptors.append(receiver._pool.get_nowait())
             for desc in descriptors:
                 if desc._connection is not None:
                     desc.deregister_with_connector(desc._connection)
@@ -761,6 +763,117 @@ class TestMmKwargsNixlReceiverPreparation:
         allocation.assert_called_once_with(128, dtype=torch.uint8)
         self.assert_pool_preserved(receiver, descriptors, native, handles)
 
+    @pytest.fixture
+    def active_reads(self, receiver, monkeypatch):
+        receiver, descriptors, native = receiver
+        native.initialize_xfer.side_effect = lambda **_: object()
+        native.transfer.return_value = "PROC"
+        native.check_xfer_state.return_value = "PROC"
+        started = asyncio.Event()
+        operations = []
+        begin_read = receiver._connector.begin_read
+
+        async def track_read(metadata, desc):
+            op = await begin_read(metadata, desc)
+            operations.append(op)
+            if len(operations) == 3:
+                started.set()
+            return op
+
+        monkeypatch.setattr(receiver._connector, "begin_read", track_read)
+        return receiver, descriptors, native, started, operations
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("failure", ["timeout", "cancel", "read-error"])
+    async def test_failed_reads_restore_pool_after_stopping_native_transfers(
+        self, active_reads, failure
+    ):
+        receiver, descriptors, native, started, operations = active_reads
+        original_ids = {id(desc) for desc in descriptors}
+        task = asyncio.create_task(receiver.receive(self.metadata([4, 8, 128])))
+        await started.wait()
+
+        def register_replacement(*_):
+            assert all(op._xfer_hndl is None for op in operations)
+            return object()
+
+        native.register_memory.side_effect = register_replacement
+        if failure == "timeout":
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(task, timeout=0.01)
+        elif failure == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            bad_handle = operations[0]._xfer_hndl
+            native.check_xfer_state.side_effect = lambda handle: (
+                "ERR" if handle is bad_handle else "PROC"
+            )
+            with pytest.raises(RuntimeError, match="NIXL transfer operation ERRORED"):
+                await task
+
+        assert all(op._xfer_hndl is None for op in operations)
+        assert native.release_xfer_handle.call_count == 3
+        assert receiver._pool.qsize() == 2
+        pooled = [receiver._pool.get_nowait() for _ in range(2)]
+        assert not original_ids.intersection(id(desc) for desc in pooled)
+        assert all(desc.size == 64 and desc.is_registered for desc in pooled)
+        for desc in pooled:
+            receiver._pool.put(desc)
+
+        # Old exception tracebacks may retain operations past the next request.
+        native.transfer.return_value = "DONE"
+        native.check_xfer_state.side_effect = None
+        results = await receiver.receive(self.metadata([4, 8]))
+        assert [len(item) for item in results["__pickled_kwargs_item__"]] == [4, 8]
+        for desc in pooled:
+            desc.register_with_connector(operations[-1].connection)
+        handles = [desc._nixl_hndl for desc in pooled]
+        for op in operations[:3]:
+            op._release()
+        assert all(desc._nixl_hndl is handle for desc, handle in zip(pooled, handles))
+        assert receiver._pool.qsize() == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("replenish_error", [None, RuntimeError, MemoryError])
+    async def test_begin_read_failure_preserves_error_and_drains_siblings(
+        self, active_reads, monkeypatch, replenish_error, caplog
+    ):
+        receiver, _, native, _, operations = active_reads
+        begin_read = receiver._connector.begin_read
+        request_error = RuntimeError("cannot start read")
+
+        async def fail_second_read(metadata, desc):
+            if metadata.notification_key == "1":
+                raise request_error
+            return await begin_read(metadata, desc)
+
+        monkeypatch.setattr(receiver._connector, "begin_read", fail_second_read)
+
+        def replenish(*_):
+            if native.register_memory.call_count >= 4:
+                assert all(op._xfer_hndl is None for op in operations)
+                if (
+                    replenish_error is not None
+                    and native.register_memory.call_count == 4
+                ):
+                    raise replenish_error("cannot replenish buffer")
+            return object()
+
+        native.register_memory.side_effect = replenish
+        with pytest.raises(RuntimeError, match="cannot start read") as exc:
+            await receiver.receive(self.metadata([4, 8, 128]))
+        assert exc.value is request_error
+        assert len(operations) == 2
+        assert all(op._xfer_hndl is None for op in operations)
+        assert native.release_xfer_handle.call_count == 2
+        assert receiver._pool.qsize() == (2 if replenish_error is None else 1)
+        if replenish_error is not None:
+            assert "Failed to replenish" in caplog.text
+
 
 class TestMmKwargsNixlReceiverOrdering:
     """Tests that NIXL receiver preserves spec order under concurrent reads."""
@@ -840,6 +953,7 @@ class TestMmKwargsNixlReceiverOrdering:
             item_data = items[idx]
 
             op = MagicMock()
+            op.__enter__.return_value = op
 
             async def mock_wait():
                 await asyncio.sleep(delays[idx])

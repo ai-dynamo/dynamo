@@ -121,6 +121,7 @@ from .multimodal_utils.custom_encoder.handoff_consumer import (
     ExternalEncoderHandoffConsumer,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+from .multimodal_utils.processed_input_handoff import VIDEO_HANDOFF_KEY
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
@@ -4563,6 +4564,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         res,
         multi_modal_data,
         mm_processor_kwargs,
+        video_handoff=None,
     ) -> "Dict[str, Any] | None":
         """The handoff field for the response, or None when there is no handoff.
 
@@ -4576,6 +4578,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             prompt_token_ids=list(res.prompt_token_ids or []),
             mm_processor_kwargs=mm_processor_kwargs,
         )
+        if video_handoff is not None:
+            state = video_handoff.state
+            if state["layout"]["prompt_token_ids"] == list(res.prompt_token_ids or []):
+                embedding_params = {
+                    **(embedding_params or {}),
+                    VIDEO_HANDOFF_KEY: state,
+                }
+            else:
+                logger.warning(
+                    "Skipping video handoff: generated prompt layout changed"
+                )
         return self._build_disaggregated_params(
             kv_protocol.decode_request_kv_transfer_params(res),
             embedding_params,
@@ -4644,7 +4657,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         session_id = session_id_from_request(request)
         kv_hints = _build_vllm_kv_hints(request)
 
-        async with self._abort_monitor(context, request_id, is_prefill=True):
+        video_handoff = None
+        if multi_modal_data and "video" in multi_modal_data:
+            (
+                prompt,
+                video_handoff,
+            ) = await self._multimodal_request_processor.prepare_prefill_video_prompt(
+                prompt, multi_modal_data
+            )
+
+        async with (
+            self._abort_monitor(context, request_id, is_prefill=True),
+            video_handoff if video_handoff is not None else nullcontext(),
+        ):
             try:
                 gen = self._generate_with_lora_admission_lock(
                     lora_request,
@@ -4683,6 +4708,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         res,
                         multi_modal_data,
                         mm_processor_kwargs,
+                        video_handoff=video_handoff,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,

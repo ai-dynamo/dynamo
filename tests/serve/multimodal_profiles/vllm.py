@@ -25,6 +25,7 @@ from tests.utils.multimodal import (
     make_qwen35_custom_encoder_multi_image_payload,
     make_qwen35_custom_encoder_payload,
     make_video_payload,
+    make_video_pd_payload,
 )
 from tests.utils.payload_builder import (
     chat_payload,
@@ -81,6 +82,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
+    "p_d_video": "disagg_multimodal_p_d.sh",
     # CustomEncoder: a custom in-process vision encoder beside the decoder
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
@@ -336,6 +338,40 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            "p_d_video": TopologyConfig(
+                health_check_workers=True,
+                marks=[pytest.mark.post_merge, pytest.mark.installs_extra_dependencies],
+                timeout_s=600,
+                single_gpu=True,
+                profiled_vram_gib=13.0,  # measured peak 12.5 GiB, both workers
+                requested_vllm_kv_cache_bytes=536_870_912,
+                env={
+                    "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
+                        "opencv-python-headless"
+                    ],
+                    "WORKER_MODULE": "tests.serve.launch.vllm_video_pd_worker",
+                    "PYTHONPATH": os.pathsep.join(
+                        (str(WORKSPACE_DIR), os.environ.get("PYTHONPATH", ""))
+                    ),
+                    "VLLM_EXTRA_ARGS": (
+                        "--max-model-len 4096 --max-num-seqs 1 "
+                        '--limit-mm-per-prompt {"image":0,"video":1,"audio":0} '
+                        "--mm-processor-cache-gb 0.25"
+                    ),
+                },
+                tests=[
+                    MmCase(
+                        payload=make_video_pd_payload(
+                            MULTIMODAL_VIDEO_EXPECTED, repeat_count=2
+                        ),
+                        followup_payloads=[
+                            make_video_pd_payload(
+                                MULTIMODAL_VIDEO_EXPECTED, prompt_logprobs=True
+                            )
+                        ],
+                    )
+                ],
             ),
         },
     ),
