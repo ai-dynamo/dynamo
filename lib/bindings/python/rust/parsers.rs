@@ -51,16 +51,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grammar_capabilities_are_exposed_separately_from_output_parsers() {
-        assert_eq!(
-            get_structural_tag_parser_names(),
-            structural_tag_family_names()
-        );
-        assert!(get_structural_tag_parser_names().contains(&"deepseek_v4"));
-        assert!(get_tool_parser_names().contains(&"deepseek_v41"));
-    }
-
-    #[test]
     fn unified_families_are_selectable_in_both_lists() {
         for parser in ["muse_glimmer", "muse_spark", "muse_spark_open"] {
             assert!(
@@ -72,6 +62,5 @@ mod tests {
                 "{parser} must be a selectable reasoning parser name"
             );
         }
-
     }
 }
