@@ -17,7 +17,9 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
     compute_block_hash_for_seq,
 };
-use dynamo_kv_router::scheduling::OverlapAnalysis;
+use dynamo_kv_router::scheduling::{
+    OverlapAnalysis, ScheduleMode, ScheduleRequest, SessionContext,
+};
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
 };
@@ -26,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
 };
 use crate::replay::router_shared::{
     ReplayScheduler, replay_router_config, replay_selector, replay_slots,
@@ -153,6 +155,18 @@ struct ReplayKvEventSink {
 }
 
 impl KvCacheEventSink for ReplayKvEventSink {
+    fn publish_batch_with_metadata(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        for event in events {
+            let mut routed =
+                RouterEvent::with_storage_tier(self.worker_id, event.event, event.storage_tier);
+            routed.session_id = event.session_id;
+            self.event_tx
+                .send(routed)
+                .map_err(|_| anyhow!("replay router event channel closed"))?;
+        }
+        Ok(())
+    }
+
     fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
@@ -241,7 +255,7 @@ pub(crate) struct KvReplayRouter {
 
 impl KvReplayRouter {
     fn new(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -266,6 +280,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             prefill_load_estimator,
+            None,
             None,
             None,
             None,
@@ -337,29 +352,36 @@ impl KvReplayRouter {
         let (priority_jump, strict_priority) = request.router_priorities();
         let response = self
             .scheduler
-            .schedule_with_policy_class_and_block_hashes(
-                Some(uuid.to_string()),
-                request.tokens.len(),
+            .schedule_request(ScheduleRequest {
+                mode: ScheduleMode::Tracked {
+                    request_id: uuid.to_string(),
+                },
                 token_seq,
-                None,
-                overlap.tier_overlap_blocks,
-                overlap.effective_overlap_blocks,
-                overlap.effective_cached_tokens,
-                None,
-                true,
-                None,
+                block_hashes: None,
+                isl_tokens: request.tokens.len(),
+                overlap,
+                kv_transfer_candidates: None,
+                retain_kv_transfer_chain: false,
+                routing_constraints: RoutingConstraints::default(),
+                router_config_override: None,
+                lora_name: None,
                 priority_jump,
                 strict_priority,
-                request.policy_class.clone(),
-                Some(
+                policy_class: request.policy_class.clone(),
+                session_context: request
+                    .replay_context
+                    .as_ref()
+                    .and_then(|context| context.session_id())
+                    .map(|id| SessionContext::new(id.to_owned(), None, None, None)),
+                expected_output_tokens: Some(
                     u32::try_from(request.max_output_tokens)
                         .context("max_output_tokens does not fit into u32")?,
                 ),
-                None,
-                None,
-                RoutingConstraints::default(),
-                None,
-            )
+                affinity_target: None,
+                pinned_worker: None,
+                allowed_worker_ids: None,
+                shared_cache_hits: None,
+            })
             .await?;
         Ok(ReplayPlacement {
             worker_idx: usize::try_from(response.best_worker.worker_id)
@@ -440,7 +462,7 @@ pub(crate) enum ReplayRouter {
 impl ReplayRouter {
     pub(crate) fn new(
         mode: ReplayRouterMode,
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -469,6 +491,14 @@ impl ReplayRouter {
         num_workers: usize,
         dp_size: usize,
     ) -> Result<ReplayPlacement> {
+        anyhow::ensure!(
+            request.kv_hints.is_none(),
+            "Dynamo online replay does not support authored KV fetch hints"
+        );
+        anyhow::ensure!(
+            request.images.is_empty(),
+            "Dynamo online replay does not support image requests"
+        );
         anyhow::ensure!(
             num_workers > 0,
             "online replay requires at least one worker"
@@ -624,21 +654,64 @@ mod tests {
             dp_rank: 0,
             preferred_dp_rank: None,
             preferred_prefill_dp_rank: None,
+            kv_hints: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
             policy_class: None,
             replay_context: None,
+            images: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn online_replay_rejects_unhandled_request_fields_before_placement() {
+        for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+            let router = ReplayRouter::new(mode, &MockerConfig::default(), None, None, 1).unwrap();
+            let mut request = priority_request(1, 0, 0);
+            request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+                source_worker: 0,
+                source_dp_rank: 0,
+            });
+            let error = router.select_worker(&request, 1, 1).await.unwrap_err();
+            assert!(error.to_string().contains("authored KV fetch hints"));
+            request.kv_hints = None;
+            request.images.push(aisimulate_core::engine::ImageSpec {
+                identity: 1,
+                token_start: 0,
+                token_end: 1,
+                encoder: aisimulate_core::engine::EncoderShape {
+                    sequences: 1,
+                    patch_tokens: 1,
+                    transformer_tokens: 1,
+                    output_tokens: 1,
+                },
+                embedding_bytes: 1,
+            });
+            let error = router.select_worker(&request, 1, 1).await.unwrap_err();
+            assert!(error.to_string().contains("image requests"));
+            request.images.clear();
+            assert_eq!(
+                router.select_worker(&request, 1, 1).await.unwrap(),
+                ReplayPlacement {
+                    worker_idx: 0,
+                    dp_rank: 0
+                }
+            );
+            router.on_complete(request.uuid.unwrap()).await.unwrap();
+            router.shutdown().await.unwrap();
         }
     }
 
     #[tokio::test]
     async fn kv_router_preserves_selected_attention_dp_rank() {
-        let mut args = MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let mut args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
         args.dp_size = 2;
         let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap();
         let request = priority_request(100, 0, 0);
@@ -667,11 +740,13 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_priorities_to_scheduler_queue() {
-        let args = MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
         let config = KvRouterConfig {
             router_queue_threshold: Some(0.5),
             router_queue_policy: RouterQueuePolicy::Fcfs,
@@ -727,11 +802,13 @@ mod tests {
 
     #[tokio::test]
     async fn free_clears_prefill_load_without_first_token() {
-        let args = MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
         let router = ReplayRouter::new(
             ReplayRouterMode::KvRouter,
             &args,
@@ -765,11 +842,13 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_policy_class_and_returns_config_errors() {
-        let args = MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
         let missing = KvRouterConfig {
             router_policy_config: Some("/definitely/missing/router-policy.yaml".to_string()),
             ..KvRouterConfig::default()
@@ -887,7 +966,12 @@ policy_classes:
 
     #[tokio::test]
     async fn online_kv_router_continues_a_device_match_into_host_pinned() {
-        let args = MockEngineArgs::builder().block_size(64).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64
+            }
+        }))
+        .unwrap();
         let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 2).unwrap();
         let mut request = priority_request(100, 0, 0);
         request.tokens = vec![100; 256];
@@ -946,7 +1030,12 @@ policy_classes:
 
     #[tokio::test]
     async fn online_kv_router_routes_to_a_host_pinned_prefix() {
-        let args = MockEngineArgs::builder().block_size(64).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64
+            }
+        }))
+        .unwrap();
         let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 2).unwrap();
         let request = priority_request(100, 0, 0);
         let tokens_hash =

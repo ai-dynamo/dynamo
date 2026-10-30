@@ -93,10 +93,32 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Whether the frontend can route at least one inference request for a model
     MODEL_READY = "model_ready"
+    # Number of discovered physical workers by router admission state
+    ROUTER_WORKERS = "router_workers"
+    # Current router admission state and reason for a discovered worker
+    ROUTER_WORKER_STATE = "router_worker_state"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Admitted requests that have not produced an output token.
+    AWAITING_FIRST_TOKEN_REQUESTS = "awaiting_first_token_requests"
+    # Known prompt tokens in inflight requests, labeled by state.
+    INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
+    # Total known input tokens of admitted requests.
+    INPUT_TOKENS_TOTAL = "input_tokens_total"
+    # Questions per admitted System One request.
+    SYSTEMONE_QUESTIONS = "systemone_questions"
+    # Expanded prompt tokens per admitted System One request.
+    SYSTEMONE_INPUT_TOKENS = "systemone_input_tokens"
+    # Requested candidate token IDs per admitted System One request.
+    SYSTEMONE_CANDIDATE_IDS = "systemone_candidate_ids"
+    # Cached prompt tokens reported by a completed System One branch.
+    SYSTEMONE_CACHED_TOKENS = "systemone_cached_tokens"
+    # Total question branches admitted for System One dispatch.
+    SYSTEMONE_ADMITTED_BRANCHES_TOTAL = "systemone_admitted_branches_total"
+    # Duration of a System One execution phase in seconds.
+    SYSTEMONE_PHASE_SECONDS = "systemone_phase_seconds"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
@@ -191,6 +213,9 @@ class frontend_service:
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
+    # Active requests booked per worker, labeled by request phase
+    # Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    WORKER_ACTIVE_REQUESTS = "worker_active_requests"
     # Last observed time to first token per worker (in seconds)
     # Gauge metric tracking the most recent TTFT for each worker
     WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
@@ -396,6 +421,10 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for where a booked request is in its lifecycle: "prefill" until it is
+    # marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    # the serving leg ("aggregated", "prefill", "decode").
+    REQUEST_PHASE = "request_phase"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
 

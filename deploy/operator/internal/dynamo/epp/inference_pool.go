@@ -10,7 +10,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
@@ -50,14 +49,12 @@ func GenerateInferencePool(
 
 	// Build InferencePool using typed API
 	pool := &gaiev1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      poolName,
-			Namespace: poolNamespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoComponent:           componentName,
-				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-			},
+		Name:      poolName,
+		Namespace: poolNamespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 		},
 		Spec: gaiev1.InferencePoolSpec{
 			TargetPorts: []gaiev1.Port{

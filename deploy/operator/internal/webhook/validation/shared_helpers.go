@@ -395,3 +395,28 @@ func effectiveNumShadows(failover *nvidiacomv1beta1.FailoverSpec) int32 {
 	}
 	return failover.NumShadows
 }
+
+// groveNativeMinimumPath locates the owning component's native availability field.
+// component and fldPath are non-nil; an omitted override uses the same path.
+func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) *field.Path {
+	if component.UsesPCSG() || component.IsLPX() {
+		return fldPath.Child("providerOverride", "value", "minAvailable")
+	}
+	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+}
+
+// hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
+// spec must not be nil.
+func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	for _, role := range spec.Roles {
+		if role.Name != nvidiacomv1alpha1.ComponentRoleLeader || role.PodTemplate == nil {
+			continue
+		}
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return true
+			}
+		}
+	}
+	return false
+}

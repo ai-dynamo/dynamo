@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! TCP end-to-end coverage for discovery-driven cancellation while establishing a
-//! response stream and graceful draining after the stream is established.
-//! QUIC also cancels active streams on discovery removal and has no drain guarantee.
+//! TCP and Velo end-to-end coverage for discovery-driven cancellation while
+//! establishing a response stream and graceful draining after the stream is
+//! established. QUIC also cancels active streams on discovery removal and has no
+//! drain guarantee.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,9 +85,10 @@ impl AsyncEngine<SingleIn<u64>, ManyOut<TestResponse>, Error> for StalledEngine 
 
 async fn assert_removal_cancels_request_waiting_for_response_stream(
     distributed: &DistributedRuntime,
+    plane: ResponsePlaneMode,
 ) {
     let endpoint = distributed
-        .namespace("worker_removal_cancellation".to_string())
+        .namespace(format!("worker_removal_cancellation_{}", plane.name()))
         .unwrap()
         .component("backend".to_string())
         .unwrap()
@@ -146,9 +148,15 @@ async fn assert_removal_cancels_request_waiting_for_response_stream(
         .unwrap();
 }
 
-async fn assert_removal_drains_established_response_stream(distributed: &DistributedRuntime) {
+async fn assert_removal_drains_established_response_stream(
+    distributed: &DistributedRuntime,
+    plane: ResponsePlaneMode,
+) {
     let endpoint = distributed
-        .namespace("active_worker_removal_cancellation".to_string())
+        .namespace(format!(
+            "active_worker_removal_cancellation_{}",
+            plane.name()
+        ))
         .unwrap()
         .component("backend".to_string())
         .unwrap()
@@ -214,19 +222,33 @@ async fn assert_removal_drains_established_response_stream(distributed: &Distrib
 }
 
 #[tokio::test]
-async fn tcp_worker_removal_cancels_pending_handshakes_but_drains_established_streams() {
-    // Both scenarios share the process-wide request-plane listener and its runtime.
-    let runtime = Runtime::from_current().unwrap();
-    let config = DistributedConfig {
-        response_plane: Some(ResponsePlaneMode::Tcp),
-        ..DistributedConfig::process_local()
-    };
-    let distributed = DistributedRuntime::new(runtime.clone(), config)
-        .await
-        .unwrap();
+async fn worker_removal_cancels_pending_handshakes_but_drains_established_streams() {
+    // The runtime's explicit response plane must also govern worker ingress,
+    // even when the process environment selects a different transport.
+    temp_env::async_with_vars(
+        [
+            ("DYN_RESPONSE_PLANE", Some("quic")),
+            ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+        ],
+        async {
+            // Every scenario shares the process-wide request-plane listener and its runtime.
+            let runtime = Runtime::from_current().unwrap();
+            for plane in [ResponsePlaneMode::Tcp, ResponsePlaneMode::Velo] {
+                let config = DistributedConfig {
+                    response_plane: Some(plane),
+                    ..DistributedConfig::process_local()
+                };
+                let distributed = DistributedRuntime::new(runtime.clone(), config)
+                    .await
+                    .unwrap();
 
-    assert_removal_cancels_request_waiting_for_response_stream(&distributed).await;
-    assert_removal_drains_established_response_stream(&distributed).await;
+                assert_removal_cancels_request_waiting_for_response_stream(&distributed, plane)
+                    .await;
+                assert_removal_drains_established_response_stream(&distributed, plane).await;
+            }
 
-    runtime.shutdown();
+            runtime.shutdown();
+        },
+    )
+    .await;
 }

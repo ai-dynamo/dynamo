@@ -149,8 +149,8 @@ mod tests {
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         engine::{AsyncEngine, AsyncEngineContext},
         pipeline::{
-            AddressedRequest, Context, Error, ManyIn, ManyOut, PushRouter, ResponseStream,
-            RouterMode, SingleIn, StreamingDispatch, context::Controller,
+            AddressedRequest, Context, Error, ManyIn, ManyOut, ResponseStream, RouterMode,
+            SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
         traits::DistributedRuntimeProvider,
@@ -338,11 +338,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
-            .await
-            .unwrap();
         let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+            RoutingHost::builder(client, mode)
+                .load_context(load_context)
+                .dispatch(dispatch as crate::kv_router::LlmDispatch)
+                .build()
+                .await
+                .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
@@ -420,14 +422,15 @@ mod tests {
             .await
             .unwrap(),
         );
-        let push_router =
-            PushRouter::<PreprocessedRequest, LlmResponse>::from_client(client, RouterMode::KV)
-                .await
-                .unwrap();
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(chooser.clone())
+            .build()
+            .await
+            .unwrap();
         let binding = Arc::new(PrefillBinding {
             target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
-            router: Arc::new(RoutingHost::new(push_router, chooser.clone(), None).unwrap()),
+            router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
         });
         (binding, chooser)
@@ -442,6 +445,85 @@ mod tests {
             std::sync::atomic::Ordering::Release,
         );
         (router, chooser)
+    }
+
+    #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let endpoint = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7, 8]);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([7, 8]))
+        );
+        chooser.client().report_instance_down(7);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([8]))
+        );
+        let mut other = endpoint.clone();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
+        router.lifecycle.store(
+            PrefillLifecycleState::Unavailable as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+        use std::sync::mpsc;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let original = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7]);
+        let (replacement, _) = tracked_binding("availability-replacement").await;
+        let mut target = router.target.lock();
+        *target = Some(crate::discovery::WorkerSetTargetId::Legacy(
+            original.clone(),
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for("legacy", &original))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.target_id.clone());
+        router.binding.store(Some(replacement));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
     }
 
     #[tokio::test]

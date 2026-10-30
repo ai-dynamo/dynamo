@@ -40,6 +40,7 @@ from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
@@ -89,7 +90,6 @@ except ImportError:
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
-_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV = "TLLM_KV_CACHE_MANAGER_V2_BACKEND"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
@@ -138,20 +138,6 @@ def _resolve_streaming_kv_events_config(
     config["endpoint"] = endpoint
     config.setdefault("topic", "")
     return config
-
-
-def _validate_streaming_kv_events_backend() -> None:
-    """Require TensorRT-LLM's Python V2 cache manager for streaming events."""
-    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV)
-    if backend == "python":
-        return
-    configured = backend if backend is not None else "unset (defaults to cpp)"
-    raise ValueError(
-        "TensorRT-LLM streaming KV events require "
-        f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python; current value is "
-        f"{configured!r}. The C++ V2 cache manager cannot host the streaming "
-        "event manager."
-    )
 
 
 def _resolve_model_dir(config: Config) -> str:
@@ -229,6 +215,21 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+def _force_snapshot_kv_cache_config(engine_args: dict) -> None:
+    """Use KV cache manager v1, the only one qualified for the KV cache sleep
+    that precedes snapshot capture.
+
+    Block reuse stays enabled: sleep discards KV cache contents but keeps the
+    reuse tree, and that tree is empty at capture because TRT-LLM never stores
+    warmup (dummy) requests for reuse and Dynamo sends no request before it.
+    """
+    kv_cache_config = engine_args["kv_cache_config"]
+    if isinstance(kv_cache_config, dict):
+        kv_cache_config["use_kv_cache_manager_v2"] = False
+    else:
+        kv_cache_config.use_kv_cache_manager_v2 = False
 
 
 def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
@@ -439,9 +440,9 @@ async def init_llm_worker(
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
-    if config.load_format == "gms":
+    # unmap/remap — and in snapshot mode, which sleeps the KV cache before
+    # capture. The default restore mode discards KV cache contents.
+    if config.load_format == "gms" or is_snapshot_enabled():
         from tensorrt_llm.llmapi.llm_args import SleepConfig
 
         arg_map["sleep_config"] = SleepConfig()
@@ -470,10 +471,12 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    if is_snapshot_enabled():
+        _force_snapshot_kv_cache_config(arg_map)
+
     streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
     if config.publish_kv_events:
         if streaming_kv_events_config is not None:
-            _validate_streaming_kv_events_backend()
             kv_event_publication_mode = KvEventPublicationMode.STREAMING
         else:
             kv_event_publication_mode = KvEventPublicationMode.POLLING
@@ -519,6 +522,17 @@ async def init_llm_worker(
                 "event_buffer_max_size"
             ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
+
+        # Polled KV cache manager v2 events do not yet match the publisher:
+        # multimodal blocks differ in digest tokens, continuation blocks and
+        # UUID identity, and cache salts are missing.
+        use_v2 = current_kv_config.setdefault("use_kv_cache_manager_v2", False)
+        if use_v2 is not False:
+            raise ValueError(
+                f"kv_cache_config.use_kv_cache_manager_v2={use_v2!r} is not supported "
+                "with polled KV events on TensorRT-LLM 1.4.0rc1; "
+                "set it to false to use KV cache manager v1."
+            )
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly
         # disabled, since without reuse events the router has no cache overlap to
@@ -790,11 +804,7 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
-        runtime_config.set_structural_tag_mode(
-            "on" if config.dyn_enable_structural_tag else "off"
-        )
-        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
-        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
+        runtime_config.set_structural_tag(config.structural_tag)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer

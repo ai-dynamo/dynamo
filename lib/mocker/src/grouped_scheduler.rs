@@ -33,8 +33,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, G2Scope, KvEventPublishers, MockEngineArgs, OutputSignal,
-    RawKvEvent,
+    DirectRequest, FpmPublisher, G2Scope, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent,
 };
 use crate::engine_adapter::{EngineComponents, engine_components, engine_factory};
 use crate::engine_observations::{
@@ -177,7 +176,7 @@ impl CompletionBoundaryTestControl {
 /// Construct one generalized engine and a rank-fixed compatibility handle for
 /// each attention-DP rank.
 pub fn create_grouped_scheduler(
-    args: MockEngineArgs,
+    args: MockerConfig,
     rank_sinks: Vec<GroupedSchedulerRankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -210,7 +209,7 @@ pub(crate) struct RankSinks {
 }
 
 pub(crate) fn create_grouped_scheduler_with_rank_sinks(
-    args: MockEngineArgs,
+    args: MockerConfig,
     rank_sinks: Vec<RankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -245,7 +244,7 @@ pub(crate) fn create_grouped_scheduler_with_rank_sinks(
 /// Construct the historical one-rank scheduler facade while retaining the
 /// caller's externally visible DP-rank identity.
 pub(crate) fn create_single_rank_scheduler_with_rank_sink(
-    args: MockEngineArgs,
+    args: MockerConfig,
     dp_rank: u32,
     rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,
@@ -297,6 +296,10 @@ fn create_grouped_scheduler_from_components(
             .as_ref()
             .is_none_or(|host| host.scope != G2Scope::ClusterShared),
         "cluster_shared native_host_offload is supported only in offline replay"
+    );
+    ensure!(
+        !components.rank.sglang.host_loop,
+        "sglang.host_loop is supported only in offline replay"
     );
     let factory = engine_factory(components.rank, components.timing)?;
     // Existing live schedulers seed every process-local worker from DP rank.
@@ -691,7 +694,7 @@ fn translate_command(
 ) -> Result<TranslatedCommand> {
     let (command, on_success, on_suppressed_output, on_error) = match command {
         SchedulerCommand::Submit(request) => {
-            let request = compatibility.native_request(request);
+            let request = compatibility.native_request(request)?;
             let request_id = request.request_id;
             (
                 Command::Submit(request),
@@ -713,8 +716,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_source(handoff_id, request_id);
             (
@@ -750,8 +753,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_destination(handoff_id, request_id);
             (

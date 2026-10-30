@@ -84,6 +84,7 @@ STUB_MODULES = [
     "yarl",
     "pytest_asyncio",
     "tabulate",
+    "tqdm",
     "prometheus_api_client",
     "huggingface_hub",
     "huggingface_hub.constants",
@@ -94,6 +95,9 @@ STUB_MODULES = [
     "transformers.models",
     "transformers.models.qwen2_vl",
     "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+    # Responses replay tests import these; marker collection never tokenizes.
+    "tokenizers",
+    "tokenizers.models",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",
@@ -109,7 +113,33 @@ STUB_MODULES = [
     "requests",
     "numpy",
     "aisimulate",
+    "aisimulate.capacity",
+    "aisimulate.config",
+    "aisimulate.config.cli",
+    "aisimulate.config.common",
+    "aisimulate.config_adapter",
+    "aisimulate.generator.api",
+    "aisimulate.generator.enumerate",
+    "aisimulate.generator.module_bridge",
+    "aisimulate.output_adapter",
+    "aisimulate.runner",
+    "aisimulate.sdk.picking",
+    "aisimulate.sweeper",
+    "aisimulate.sweeper.config",
+    "aisimulate.sweeper.deploy",
+    "aisimulate.sweeper.kv_estimate",
+    "aisimulate.sweeper.provider",
+    "aisimulate.sweeper.replay",
+    "aisimulate.sweeper.result",
+    "aisimulate.sweeper.sample",
+    "aisimulate.sweeper.sampler",
+    "aisimulate.sweeper.score",
+    "aisimulate.sweeper.search",
+    "aisimulate.sweeper.search_space",
     "aisimulate_core",
+    "aisimulate_core.datasets",
+    "pyarrow",
+    "pyarrow.parquet",
     "boto3",
     "boto3.exceptions",
     "boto3.s3",
@@ -165,6 +195,9 @@ STUB_MODULES = [
     "fsspec.implementations.dirfs",
     "sglang",
     "sglang.srt",
+    "sglang.srt.constrained",
+    "sglang.srt.constrained.reasoner_grammar_backend",
+    "sglang.srt.constrained.xgrammar_backend",
     "sglang.srt.entrypoints",
     "sglang.srt.entrypoints.openai",
     "sglang.srt.entrypoints.openai.protocol",
@@ -191,6 +224,7 @@ STUB_MODULES = [
     "sglang.srt.disaggregation.utils",
     "sglang.srt.server_args",
     "sglang.srt.server_args_config_parser",
+    "xgrammar",
     "vllm",
     "vllm.config",
     "vllm.distributed",
@@ -213,6 +247,10 @@ STUB_MODULES = [
     "vllm.entrypoints.pooling",
     "vllm.entrypoints.pooling.embed",
     "vllm.entrypoints.pooling.embed.protocol",
+    "vllm.entrypoints.serve",
+    "vllm.entrypoints.serve.utils",
+    "vllm.entrypoints.serve.utils.api_utils",
+    "vllm.envs",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
@@ -224,7 +262,11 @@ STUB_MODULES = [
     "vllm.reasoning.mistral_reasoning_parser",
     "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",
+    "vllm.renderers.chat_utils",
+    "vllm.renderers.chat_utils.chat_template",
+    "vllm.renderers.chat_utils.tool_call",
     "vllm.renderers.embed_utils",
+    "vllm.renderers.hf",
     "vllm.sampling_params",
     "vllm.tokenizers",
     "vllm.tokenizers.mistral",
@@ -309,6 +351,7 @@ STUB_MODULES = [
 # environment may contain an older, otherwise importable release, so force
 # stubs for these versioned modules during marker-only collection.
 FORCE_STUB_MODULES = {
+    "aisimulate_core.datasets",
     "aisimulate.sdk.task_v2",
     "aisimulate.legacy_cli.main",
     "aisimulate_core.sdk.models",
@@ -382,6 +425,9 @@ def _make_stub_class(name: str) -> type:
     def _init_subclass(cls, **kwargs):  # type: ignore[no-untyped-def]
         pass
 
+    def _class_getitem(cls, item):  # type: ignore[no-untyped-def]
+        return cls
+
     def _getattr(self, attr):  # type: ignore[no-untyped-def]
         if attr.startswith("__") and attr.endswith("__"):
             raise AttributeError(attr)
@@ -404,6 +450,7 @@ def _make_stub_class(name: str) -> type:
         {
             "__init__": _init,
             "__init_subclass__": classmethod(_init_subclass),
+            "__class_getitem__": classmethod(_class_getitem),
             "__getattr__": _getattr,
             "__call__": _call,
             "__get_pydantic_core_schema__": classmethod(_get_schema),
