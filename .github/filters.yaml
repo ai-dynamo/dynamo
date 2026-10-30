@@ -80,6 +80,7 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/workflows/pre-merge.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
@@ -366,6 +367,10 @@ planner:
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/aisimulate/**'
   - 'components/src/dynamo/global_router/**'
+  # Re-run the SKU contract when either compared operator input changes.
+  - 'deploy/operator/hack/test_aisimulate_hardware_catalog.py'
+  - 'deploy/operator/internal/aisimulate/hardware_skus.txt'
+  - 'deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go'
   # Keep this tombstone until the vendored-tree deletion has merged so the
   # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'

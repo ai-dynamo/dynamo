@@ -147,9 +147,19 @@ jobs:
           'pytest-benchmark>=4' \
           'pytest-timeout==2.4.0'
     - name: Install qualified Kustomize renderer
+      # kustomize-matrix.py finds kustomize on PATH, and the tests read KUSTOMIZE_BIN.
+      env:
+        KUSTOMIZE_VERSION: v5.8.1
+        KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
       run: |
-        go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
-        echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
+        dir="${RUNNER_TEMP}/kustomize"
+        mkdir -p "${dir}"
+        curl -fsSL --retry 3 -o "${dir}/kustomize.tar.gz" \
+          "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+        echo "${KUSTOMIZE_SHA256}  ${dir}/kustomize.tar.gz" | sha256sum --check --strict
+        tar -xzf "${dir}/kustomize.tar.gz" -C "${dir}" kustomize
+        echo "${dir}" >> "${GITHUB_PATH}"
+        echo "KUSTOMIZE_BIN=${dir}/kustomize" >> "${GITHUB_ENV}"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
