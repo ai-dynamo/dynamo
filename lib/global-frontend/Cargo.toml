@@ -17,9 +17,12 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-global-common = { workspace = true }
-dynamo-global-router = { workspace = true }
-# For the PoolRelay protocol and the session header.
-dynamo-llm = { workspace = true }
+# Lists the other Global Frontends (`GET /routers`) for replica sync.
+dynamo-global-discovery-client = { path = "../global-discovery-client" }
+dynamo-global-router = { path = "../global-router" }
+# For the PoolRelay protocol and the session header. The block manager is
+# for workers; a frontend that only forwards requests never uses it.
+dynamo-llm = { path = "../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
