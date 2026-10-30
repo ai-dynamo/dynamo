@@ -14,6 +14,8 @@ You'll set up:
 
 Every procedure on this page was run on a single-GPU host; the measured results are in [Verified Behavior](#verified-behavior). On a multi-GPU node, the only change is the list of GPU UUIDs or indices you pass.
 
+For an independently tested two-A100 TP2 deployment, see [Reproduce Multi-GPU GPU Fractions](deploy-tp2-gpu-fractions.md). It also covers the experimental CUDA 13.5/r620 per-device compute defaults, automatic container-startup assignment, and the memory view measured on that stack.
+
 ## Requirements
 
 | Requirement | Needed for | Check |
