@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"testing"
 
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -426,14 +428,56 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		})},
 		// Baseline create-path rules.
 		{
-			name: "engineGroup creation config is explicit but its workload pathway remains gated",
+			name:         "the checked-in one-DGD vLLM managed-growth smoke configuration is admissible",
+			deployment:   vllmEngineGroupSmokeDeployment(t),
+			wantProvider: "grove",
+		},
+		{
+			name: "Grove Engine Group release still requires an explicit retention gate",
+			deployment: vllmEngineGroupSmokeDeployment(t, func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.GetComponentByName("Worker").PodTemplate.Spec.ReadinessGates = nil
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Group podTemplate must declare exactly one dynamo.nvidia.com/retained readiness gate"},
+		},
+		{
+			name: "Grove Engine Groups reject inherited provider environment",
+			deployment: vllmEngineGroupSmokeDeployment(t, func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "GROVE_PCLQ_POD_INDEX", Value: "0"}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: environment GROVE_PCLQ_POD_INDEX is supplied by Grove and cannot be shadowed in the Pod template"},
+		},
+		{
+			name: "Engine Group admission requires a supported backend launch profile",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].engineGroup: Forbidden: Engine Groups require a supported SGLang or vLLM backend",
+				"spec.components[1].engineGroup: Forbidden: vLLM Engine Groups require the supported Python-worker profile",
 				"spec.components[1].engineGroup: Forbidden: Engine Group podTemplate must declare exactly one dynamo.nvidia.com/retained readiness gate",
 			},
+		},
+		{
+			name: "Grove vLLM Python worker opts into complete managed-growth admission",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = "vllm"
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To[int32](1)
+				worker.EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever,
+					ReadinessGates: []corev1.PodReadinessGate{{ConditionType: corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate)}}, Containers: []corev1.Container{{
+						Name: "main", Image: "example.invalid/dynamo-vllm:elastic-ep",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args: []string{"--model=model", "--elastic-ep-auto-bootstrap", "--elastic-ep-initial-dp-size=2", "--data-parallel-size-local=1", "--data-parallel-external-lb",
+							"--data-parallel-rank=$(DYNAMO_RANK)", "--data-parallel-address=$(DYNAMO_LEADER_ADDRESS)",
+							"--tensor-parallel-size=1", "--distributed-executor-backend=mp", "--elastic-ep-max-dp-size=4",
+							"--enable-expert-parallel", "--enable-eplb", "--enable-elastic-ep"},
+						Env: []corev1.EnvVar{{Name: "VLLM_ENABLE_V1_MULTIPROCESSING", Value: "1"}, {Name: "VLLM_USE_RUST_FRONTEND", Value: "0"},
+							{Name: "VLLM_ELASTIC_EP_DRAIN_REQUESTS", Value: "1"}, {Name: "DYNAMO_ENGINE_GROUP", Value: "1"}, {Name: "DYN_SYSTEM_PORT", Value: "9090"},
+							{Name: "DYNAMO_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}}},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")}},
+					}}}}
+			}),
+			wantProvider: "grove",
 		},
 		{
 			name: "initialSize must satisfy the template policy independently of world count",
@@ -4294,6 +4338,24 @@ func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]an
 		t.Fatal("request spec.services.worker.volumeMounts[0] is not an object")
 	}
 	volumeMount["name"] = ""
+}
+
+func vllmEngineGroupSmokeDeployment(t *testing.T, mutations ...func(*nvidiacomv1beta1.DynamoGraphDeployment)) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+	t.Log("load the actual managed-growth DGD through the same source-version admission chain")
+	payload, err := os.ReadFile("../../enginegroup/vllm/poc.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := yaml.UnmarshalStrict(payload, deployment); err != nil {
+		t.Fatal(err)
+	}
+	deployment.Namespace = "default"
+	for _, mutate := range mutations {
+		mutate(deployment)
+	}
+	return deployment
 }
 
 func betaDGDForAdmission(

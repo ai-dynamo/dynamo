@@ -200,6 +200,13 @@ func (v *sharedValidation) validateComponentEngineGroupSpec(
 	// Backend-owned resolvers prove the effective geometry; neither runtime is a fallback for the other.
 	var err error
 	switch dynamo.BackendFramework(options.backendFramework) {
+	case dynamo.BackendFrameworkVLLM:
+		main := dynamo.GetMainContainer(options.component)
+		if main == nil || !dynamo.IsVLLMWorkerLaunch(dynamo.VLLMProfileGeometrySource{Command: main.Command, Args: main.Args}) {
+			allErrs = append(allErrs, field.Forbidden(fldPath, "vLLM Engine Groups require the supported Python-worker profile"))
+		} else {
+			_, _, err = dynamo.ResolveVLLMComponentEngineGroup(options.component, options.parentEnv)
+		}
 	default:
 		allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Groups require a supported SGLang or vLLM backend"))
 	}

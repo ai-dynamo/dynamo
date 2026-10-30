@@ -352,6 +352,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
             else None
         )
     )
+    handler_constructor.return_value.engine_group_serving = None
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.DecodeWorkerHandler",
         handler_constructor,

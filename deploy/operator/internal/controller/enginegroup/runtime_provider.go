@@ -12,6 +12,7 @@ import (
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,6 +29,12 @@ var _ RuntimeProvider = (*runtimeProvider)(nil)
 func (p *runtimeProvider) Resolve(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (Runtime, error) {
 	// Never let one backend consume another backend's identities or control protocol.
 	switch group.Labels[consts.KubeLabelDynamoEngineGroupRuntime] {
+	case string(dynamo.BackendFrameworkVLLM):
+		world, err := p.Workload.Resolve(ctx, group)
+		if err != nil {
+			return Runtime{}, err
+		}
+		return (&vllmWorkerRuntimeResolver{Client: p.Client, HTTP: p.HTTP}).Resolve(ctx, group, world)
 	default:
 		return Runtime{}, fmt.Errorf("%w: unsupported Engine Group runtime %q", ErrRuntimeUnavailable,
 			group.Labels[consts.KubeLabelDynamoEngineGroupRuntime])

@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"os"
 	"testing"
 
 	config "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/yaml"
 )
 
 func TestVLLMEngineGroupDGDRendering(t *testing.T) {
@@ -221,6 +223,29 @@ func TestVLLMWorkerInheritedEnvironmentMatchesRendering(t *testing.T) {
 	for _, name := range []string{consts.DynamoRankEnvVar, consts.DynamoLeaderAddressEnvVar} {
 		_, _, err := ResolveVLLMComponentEngineGroup(component, []corev1.EnvVar{{Name: name, Value: "wrong"}})
 		require.ErrorContains(t, err, "operator-owned topology")
+	}
+}
+
+func TestVLLMEngineGroupManualTemplates(t *testing.T) {
+	for _, path := range []string{"../enginegroup/vllm/poc.yaml", "../enginegroup/vllm/growth-test.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			t.Log("load the user-facing DGD without adding launch defaults")
+			payload, err := os.ReadFile(path)
+			require.NoError(t, err)
+			dgd := &api.DynamoGraphDeployment{}
+			require.NoError(t, yaml.UnmarshalStrict(payload, dgd))
+			before := dgd.DeepCopy()
+
+			t.Log("validate every Engine Group against its explicitly declared bootstrap contract")
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				if component.EngineGroup != nil {
+					_, err := RenderComponentEngineGroup(dgd, component, 0)
+					require.NoError(t, err)
+				}
+			}
+			assert.Equal(t, before, dgd)
+		})
 	}
 }
 
