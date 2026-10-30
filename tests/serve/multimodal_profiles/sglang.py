@@ -30,9 +30,16 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=8.0,
+                profiled_vram_gib=9.8,  # actual peak with the mamba cap below
                 requested_sglang_kv_tokens=8192,
-                env={"SINGLE_GPU": "true"},
+                # Qwen3.5 is a hybrid (linear-attention) model. SGLang sizes its
+                # mamba state cache from free VRAM, not --max-total-tokens, so
+                # without a cap each worker takes a share of the whole card and
+                # starves co-scheduled tests in the GPU-parallel stage.
+                env={
+                    "SINGLE_GPU": "true",
+                    "SGLANG_EXTRA_ARGS": "--max-mamba-cache-size 64",
+                },
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
