@@ -182,6 +182,7 @@ impl DeltaGenerator {
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
@@ -213,6 +214,7 @@ impl DeltaGenerator {
         let usage = self.get_usage();
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
