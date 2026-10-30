@@ -32,7 +32,9 @@ use super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 /// with a `Removed` event, within one heartbeat interval.
 ///
 /// Any caller may register any pool: V1 assumes a trusted network, and
-/// several PoolRelay replicas may register the same pool.
+/// several PoolRelay replicas may register the same pool. The latest
+/// registration is the pool's listing, so replicas should send the same one:
+/// replicas that disagree replace each other's listing until they agree.
 pub struct MemoryPoolStore {
     lease: Lease,
     started: Instant,
