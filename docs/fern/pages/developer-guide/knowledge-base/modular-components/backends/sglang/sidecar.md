@@ -74,6 +74,26 @@ The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
 DGDs created by operator 1.6.0 or later. For an older DGD, see
 [Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
+## Metrics
+
+`sglang.launch_server` serves `/metrics` on `--port` only when `--enable-metrics` is set, and binds
+it to the address in `--host`. The example manifests pass both flags, bind `0.0.0.0`, and declare
+port `30000` as `engine-metrics`, the name the platform chart's `dynamo-worker` PodMonitor scrapes
+unless `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is set to `false`. Chart settings, the
+labels Prometheus adds, and verification steps are in
+[Scrape Engine Metrics in Sidecar Mode](../../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
+
+The endpoint reports the schedulers on its own node. In multi-node TP and attention-DP the leader
+runs the HTTP server. A follower node runs SGLang's health server
+(`launch_dummy_health_check_server`) on `--port`. That server adds the Prometheus middleware when
+`--enable-metrics` is set ([sgl-project/sglang#7720](https://github.com/sgl-project/sglang/pull/7720))
+and binds to `--host` since [sgl-project/sglang#12297](https://github.com/sgl-project/sglang/pull/12297),
+so it serves `/metrics` for its local schedulers. Where the embedded Rust server occupies a node's
+port instead, there is no `/metrics` on it
+([sgl-project/sglang#34430](https://github.com/sgl-project/sglang/pull/34430)). The multinode examples
+do not declare `engine-metrics` yet. Declare it on the leader, and on a follower only after
+confirming that the follower answers on the pinned image.
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event

@@ -117,6 +117,10 @@ operator does not infer a backend from a native engine command. The leader decla
 the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
 and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
 
+Engine metrics stay in `main`. The platform chart's PodMonitor scrapes them only through an opt-in
+port named `engine-metrics`; see
+[Scrape Engine Metrics in Sidecar Mode](../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP
