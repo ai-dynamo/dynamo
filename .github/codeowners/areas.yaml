@@ -584,6 +584,10 @@ shared:
   owners:
   - ops
   - runtime
+- glob: .github/review-prompts/metrics.md
+  owners:
+  - ops
+  - observability
 # CODEOWNERS stays on the process area alone. GitHub requests every team on
 # the matching line, even when one approval satisfies the gate, so listing
 # every area here pages every codeowner group for a generated-file edit.
@@ -620,6 +624,10 @@ shared:
   owners:
   - process
   - agents
+- glob: .ai/metrics-guidelines.md
+  owners:
+  - process
+  - observability
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops
