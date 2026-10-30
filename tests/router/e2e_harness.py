@@ -14,6 +14,7 @@ from tests.router.common import (
     _test_router_decisions,
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
+    _test_router_lora_isolation,
 )
 from tests.router.helper import generate_random_suffix, managed_runtime
 from tests.router.router_process import FrontendRouterProcess
@@ -403,6 +404,45 @@ def run_cache_salt_isolation_test(
             endpoint,
             model_name,
             block_size,
+        )
+
+
+def run_lora_isolation_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    component_name: str,
+    lora_name: str,
+    lora_uri: str,
+):
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
+        request_plane=request_plane,
+        default_process_kwargs={"num_workers": 2, "single_gpu": True},
+        engine_process_kwargs=None,
+    )
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
+        _test_router_lora_isolation(
+            engine_workers,
+            endpoint,
+            model_name,
+            block_size,
+            lora_name,
+            lora_uri,
         )
 
 

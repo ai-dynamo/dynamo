@@ -723,11 +723,35 @@ pub(crate) struct SelectionService {
 }
 
 #[cfg(feature = "select-service")]
+#[pyclass]
+pub(crate) struct SessionBindingStream {
+    updates: Arc<selection::SessionBindingUpdates>,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SessionBindingStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let updates = self.updates.clone();
+        crate::future_into_py(py, async move {
+            let events = updates.recv_many().await.ok_or_else(|| {
+                pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
+            })?;
+            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+}
+
+#[cfg(feature = "select-service")]
 #[pymethods]
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None, session_affinity_mode = "hard", session_replication_writer_id = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -737,7 +761,12 @@ impl SelectionService {
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
         session_affinity_ttl_secs: Option<f64>,
+        session_affinity_mode: &str,
+        session_replication_writer_id: Option<u64>,
     ) -> PyResult<Self> {
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
             return Err(PyValueError::new_err(
@@ -755,7 +784,8 @@ impl SelectionService {
         )
         .indexer_threads(indexer_threads)
         .indexer_peers(indexer_peers.unwrap_or_default())
-        .selection_cache(selection_cache.unwrap_or_default().inner);
+        .selection_cache(selection_cache.unwrap_or_default().inner)
+        .session_affinity_mode(session_affinity_mode);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -763,6 +793,9 @@ impl SelectionService {
             builder = builder.session_affinity(
                 session_affinity_ttl_from_secs(ttl).map_err(PyValueError::new_err)?,
             );
+        }
+        if let Some(writer_id) = session_replication_writer_id {
+            builder = builder.session_binding_replication(writer_id);
         }
         let inner = py
             .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
@@ -780,6 +813,26 @@ impl SelectionService {
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
         py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
+    }
+
+    /// Session bindings this replica commits or refreshes, for the host to
+    /// broadcast to its peers. Ends when the service shuts down.
+    fn session_binding_updates(&self) -> PyResult<SessionBindingStream> {
+        Ok(SessionBindingStream {
+            updates: Arc::new(
+                self.inner
+                    .session_binding_updates()
+                    .map_err(selection_to_pyerr)?,
+            ),
+        })
+    }
+
+    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+        let event =
+            depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.inner
+            .apply_session_binding(event)
+            .map_err(selection_to_pyerr)
     }
 
     /// Await service shutdown without blocking the Python event loop.
@@ -1056,9 +1109,10 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         pyo3::prepare_freethreaded_python();
-        let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None))
-                .unwrap();
+        let service = Python::with_gil(|py| {
+            SelectionService::new(py, 1, None, None, None, None, None, "hard", None)
+        })
+        .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -1369,6 +1423,7 @@ impl KvEventPublisher {
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
             video_token_id,
+            recovery: None,
         });
 
         if kv_block_size == 0 {
@@ -2342,25 +2397,23 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-                let push_router = rs::pipeline::PushRouter::<
-                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                    rs::protocols::annotated::Annotated<
-                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                    >,
-                >::from_client(
+                let kv_router = managed_router.router().clone();
+                let affinity = session_affinity_ttl_secs
+                    .map(|ttl| {
+                        kv_router
+                            .affinity_coordinator(Duration::from_secs(ttl), session_affinity_mode)
+                    })
+                    .transpose()
+                    .map_err(to_pyerr)?;
+                let routing_host = RsRoutingHost::builder(
                     managed_router.load_context().client().clone(),
                     rs::pipeline::network::egress::push_router::RouterMode::KV,
                 )
+                .kv_router(kv_router)
+                .load_context(managed_router.load_context().clone())
+                .affinity_coordinator(affinity)
+                .build()
                 .await
-                .map_err(to_pyerr)?;
-
-                let routing_host = RsRoutingHost::new_with_load_context(
-                    push_router,
-                    managed_router.router().clone(),
-                    managed_router.load_context().clone(),
-                    session_affinity_ttl_secs.map(Duration::from_secs),
-                    session_affinity_mode,
-                )
                 .map_err(to_pyerr)?;
 
                 Ok(Self {

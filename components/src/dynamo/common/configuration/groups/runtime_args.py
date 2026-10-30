@@ -141,6 +141,12 @@ class DynamoRuntimeConfig(ConfigBase):
 
         self._validate_output_modalities()
 
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
+
         if self.engine_request_limit is not None:
             if self.engine_request_limit <= 0:
                 raise ValueError(
@@ -266,7 +272,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
         )
         add_argument(
             g,

@@ -280,6 +280,7 @@ fn start_publishers(
                     video_token_id: None,
                     liveness: None,
                     expected_rank: None,
+                    recovery: None,
                 }),
                 config.enable_local_indexer,
                 source.dp_rank,
