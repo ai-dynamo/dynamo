@@ -1,0 +1,209 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.mcs.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "dynamo/mcs/v1/common.proto";
+
+option go_package = "github.com/ai-dynamo/dynamo/deploy/global-discovery-mcs/api/gen/go/dynamo/mcs/v1;mcsv1";
+
+// ClusterService registers member clusters and keeps their leases. One
+// mcs-controller per cluster is the only writer of its cluster record.
+service ClusterService
+{
+  // RegisterCluster creates or replaces the registration of a cluster and
+  // mints a new lease epoch. It is idempotent: a restarted controller
+  // registers again and keeps its exports. lease_ttl is clamped to
+  // [10 s, 5 m] and defaults to 30 s.
+  rpc RegisterCluster(RegisterClusterRequest) returns (RegisterClusterResponse)
+  {
+    option (google.api.http) = {
+      put: "/v1/clustersets/{clusterset}/clusters/{cluster}"
+      body: "*"
+    };
+  }
+
+  // HeartbeatCluster renews the lease. The epoch must be the current one;
+  // otherwise the call fails with ABORTED and reason LEASE_EPOCH_MISMATCH and
+  // the caller registers again. Controllers heartbeat every ttl/3.
+  rpc HeartbeatCluster(HeartbeatClusterRequest) returns (HeartbeatClusterResponse)
+  {
+    option (google.api.http) = {
+      post: "/v1/clustersets/{clusterset}/clusters/{cluster}:heartbeat"
+      body: "*"
+    };
+  }
+
+  // DeregisterCluster removes the cluster and cascades to its exports and
+  // endpoint sets. Deleting an unknown cluster succeeds.
+  rpc DeregisterCluster(DeregisterClusterRequest) returns (DeregisterClusterResponse)
+  {
+    option (google.api.http) = {
+      delete: "/v1/clustersets/{clusterset}/clusters/{cluster}"
+    };
+  }
+
+  // GetCluster returns one cluster with its lease evaluated now.
+  rpc GetCluster(GetClusterRequest) returns (GetClusterResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/clusters/{cluster}"
+    };
+  }
+
+  // ListClusters returns the clusters of a clusterset.
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/clusters"
+    };
+  }
+
+  // WatchClusters streams the clusters of a clusterset: a snapshot, then
+  // deltas and bookmarks. See EventType.
+  rpc WatchClusters(WatchClustersRequest) returns (stream WatchClustersResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/clusters:watch"
+    };
+  }
+
+  // ListClusterSets returns every known clusterset with object counts.
+  rpc ListClusterSets(ListClusterSetsRequest) returns (ListClusterSetsResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets"
+    };
+  }
+}
+
+// Cluster is the registration of a member cluster.
+message Cluster
+{
+  string clusterset = 1;
+  string cluster = 2;
+  // Cloud region, for example us-east-1.
+  string region = 3;
+  // Availability zones of the cluster's nodes.
+  repeated string zones = 4;
+  // Free-form provider name, for example eks or k3d.
+  string provider = 5;
+  map<string, string> labels = 6;
+  // Identity of the registering agent, for example the controller pod name.
+  string agent_id = 7;
+  string agent_version = 8;
+  Lease lease = 9;
+  // Incremented by the server on every registration.
+  uint64 generation = 10;
+  // Time of the first registration; kept across re-registrations.
+  google.protobuf.Timestamp registered_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+// ClusterSetSummary describes one clusterset.
+message ClusterSetSummary
+{
+  string clusterset = 1;
+  int32 cluster_count = 2;
+  // Clusters whose lease is active.
+  int32 active_cluster_count = 3;
+  int32 export_count = 4;
+}
+
+message RegisterClusterRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string region = 3;
+  repeated string zones = 4;
+  string provider = 5;
+  map<string, string> labels = 6;
+  string agent_id = 7;
+  string agent_version = 8;
+  // Requested lease duration; clamped to [10 s, 5 m]; 30 s when unset.
+  google.protobuf.Duration lease_ttl = 9;
+}
+
+message RegisterClusterResponse
+{
+  // The stored registration with the newly minted lease.
+  Cluster cluster = 1;
+  google.protobuf.Timestamp server_time = 2;
+}
+
+message HeartbeatClusterRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+  // The lease epoch returned by RegisterCluster.
+  uint64 epoch = 3;
+}
+
+message HeartbeatClusterResponse
+{
+  Lease lease = 1;
+  google.protobuf.Timestamp server_time = 2;
+}
+
+message DeregisterClusterRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+}
+
+message DeregisterClusterResponse {}
+
+message GetClusterRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+}
+
+message GetClusterResponse
+{
+  Cluster cluster = 1;
+}
+
+message ListClustersRequest
+{
+  string clusterset = 1;
+  // Include clusters whose lease has expired but whose records are retained.
+  bool include_expired = 2;
+}
+
+message ListClustersResponse
+{
+  repeated Cluster clusters = 1;
+  // Revision of the view the list was taken from; usable as resume_revision.
+  string revision = 2;
+}
+
+message WatchClustersRequest
+{
+  string clusterset = 1;
+  bool include_expired = 2;
+  // Revision from a previous SNAPSHOT_END, BOOKMARK or delta.
+  string resume_revision = 3;
+}
+
+// WatchClustersResponse is one watch event.
+message WatchClustersResponse
+{
+  EventType type = 1;
+  // Set for UPSERT and DELETE.
+  Cluster cluster = 2;
+  // Set for SNAPSHOT_END, BOOKMARK and every delta.
+  string revision = 3;
+}
+
+message ListClusterSetsRequest {}
+
+message ListClusterSetsResponse
+{
+  repeated ClusterSetSummary clustersets = 1;
+}

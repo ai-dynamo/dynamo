@@ -1,0 +1,1616 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "dynamo/mcs/v1/common.proto",
+    "description": "The Multi-Cluster Services (KEP-1645) registry API of the Dynamo Global\nRouter.\n\nThe API is additive only; a breaking change means a new v2 package. Every\nRPC is served over gRPC and mirrored as REST/JSON through the\ngoogle.api.http annotations. JSON follows the proto3 JSON mapping\n(lowerCamelCase field names, enums as strings, 64-bit integers as strings).\nServer streams are rendered as newline-delimited JSON objects of the form\n{\"result\": {...}}.\n\nErrors are google.rpc.Status values carrying a google.rpc.ErrorInfo with\ndomain \"mcs.dynamo.nvidia.com\" and one of these reasons:\n\n  STALE_GENERATION        FAILED_PRECONDITION. The write carried a\n                          generation that does not exceed the stored one.\n                          ErrorInfo.metadata[\"current_generation\"] holds the\n                          stored generation; a PreconditionFailure detail\n                          repeats it.\n  LEASE_EPOCH_MISMATCH    ABORTED. A heartbeat carried an epoch other than\n                          the current lease epoch. Register again.\n  CLUSTER_NOT_REGISTERED  FAILED_PRECONDITION or NOT_FOUND. The cluster has\n                          no registration in the clusterset.\n  TOO_MANY_ENDPOINTS      INVALID_ARGUMENT. An endpoint set exceeds 1000\n                          endpoints.\n  TOO_MANY_WATCHERS       RESOURCE_EXHAUSTED. The replica serves\n                          --max-watchers streams already.\n  STORE_UNAVAILABLE       UNAVAILABLE. The backing store did not answer.\n                          Retry with backoff.\n  SHUTTING_DOWN           UNAVAILABLE. The replica is draining. Reconnect;\n                          another replica serves the request.\n\nInvalid input is INVALID_ARGUMENT with a google.rpc.BadRequest detail.\n\nLimits: identifiers (clusterset, cluster, namespace, name) are DNS-1123\nlabels; 64 labels; 32 annotations totalling at most 16 KiB; 64 ports; 1000\nendpoints per export per cluster; 16 attributes per endpoint; 4 MiB per\nmessage.",
+    "version": "version not set"
+  },
+  "tags": [
+    {
+      "name": "ClusterService"
+    },
+    {
+      "name": "ServiceExportService"
+    },
+    {
+      "name": "ServiceImportService"
+    },
+    {
+      "name": "ServerInfoService"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/v1/clustersets": {
+      "get": {
+        "summary": "ListClusterSets returns every known clusterset with object counts.",
+        "operationId": "ClusterService_ListClusterSets",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListClusterSetsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "tags": [
+          "ClusterService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters": {
+      "get": {
+        "summary": "ListClusters returns the clusters of a clusterset.",
+        "operationId": "ClusterService_ListClusters",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListClustersResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "includeExpired",
+            "description": "Include clusters whose lease has expired but whose records are retained.",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters/{cluster}": {
+      "get": {
+        "summary": "GetCluster returns one cluster with its lease evaluated now.",
+        "operationId": "ClusterService_GetCluster",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetClusterResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      },
+      "delete": {
+        "summary": "DeregisterCluster removes the cluster and cascades to its exports and\nendpoint sets. Deleting an unknown cluster succeeds.",
+        "operationId": "ClusterService_DeregisterCluster",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1DeregisterClusterResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      },
+      "put": {
+        "summary": "RegisterCluster creates or replaces the registration of a cluster and\nmints a new lease epoch. It is idempotent: a restarted controller\nregisters again and keeps its exports. lease_ttl is clamped to\n[10 s, 5 m] and defaults to 30 s.",
+        "operationId": "ClusterService_RegisterCluster",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1RegisterClusterResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ClusterServiceRegisterClusterBody"
+            }
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters/{cluster}/exports": {
+      "get": {
+        "summary": "ListServiceExports returns the exports of one cluster, for controller\nresync after a restart or reconnect.",
+        "operationId": "ServiceExportService_ListServiceExports",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListServiceExportsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ServiceExportService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters/{cluster}/exports/{namespace}/{name}": {
+      "delete": {
+        "summary": "DeleteServiceExport removes the export and its endpoint set. Deleting an\nunknown export succeeds.",
+        "operationId": "ServiceExportService_DeleteServiceExport",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1DeleteServiceExportResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ServiceExportService"
+        ]
+      },
+      "put": {
+        "summary": "PutServiceExport creates or replaces the export of a Service from one\ncluster. generation must exceed the stored one; otherwise the call fails\nwith FAILED_PRECONDITION and reason STALE_GENERATION.",
+        "operationId": "ServiceExportService_PutServiceExport",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1PutServiceExportResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ServiceExportServicePutServiceExportBody"
+            }
+          }
+        ],
+        "tags": [
+          "ServiceExportService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters/{cluster}/exports/{namespace}/{name}/endpoints": {
+      "put": {
+        "summary": "ReplaceEndpoints replaces the full endpoint set of an export. It is the\nonly endpoint write: idempotent across restarts and free of tombstones.\ngeneration must exceed the stored one; a stale write fails with\nFAILED_PRECONDITION, reason STALE_GENERATION and the current generation.\nAt most 1000 endpoints per export per cluster (TOO_MANY_ENDPOINTS).",
+        "operationId": "ServiceExportService_ReplaceEndpoints",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ReplaceEndpointsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ServiceExportServiceReplaceEndpointsBody"
+            }
+          }
+        ],
+        "tags": [
+          "ServiceExportService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters/{cluster}:heartbeat": {
+      "post": {
+        "summary": "HeartbeatCluster renews the lease. The epoch must be the current one;\notherwise the call fails with ABORTED and reason LEASE_EPOCH_MISMATCH and\nthe caller registers again. Controllers heartbeat every ttl/3.",
+        "operationId": "ClusterService_HeartbeatCluster",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1HeartbeatClusterResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "cluster",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ClusterServiceHeartbeatClusterBody"
+            }
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/clusters:watch": {
+      "get": {
+        "summary": "WatchClusters streams the clusters of a clusterset: a snapshot, then\ndeltas and bookmarks. See EventType.",
+        "operationId": "ClusterService_WatchClusters",
+        "responses": {
+          "200": {
+            "description": "A successful response.(streaming responses)",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/v1WatchClustersResponse"
+                },
+                "error": {
+                  "$ref": "#/definitions/rpcStatus"
+                }
+              },
+              "title": "Stream result of v1WatchClustersResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "includeExpired",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "resumeRevision",
+            "description": "Revision from a previous SNAPSHOT_END, BOOKMARK or delta.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ClusterService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/imports": {
+      "get": {
+        "summary": "ListServiceImports returns the merged imports of a clusterset.",
+        "operationId": "ServiceImportService_ListServiceImports",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListServiceImportsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "description": "Only imports in this namespace; all namespaces when empty.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "selector.matchLabels",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "includeEndpoints",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "tags": [
+          "ServiceImportService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/imports/{namespace}/{name}": {
+      "get": {
+        "summary": "GetServiceImport returns one merged import.",
+        "operationId": "ServiceImportService_GetServiceImport",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetServiceImportResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "includeEndpoints",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "tags": [
+          "ServiceImportService"
+        ]
+      }
+    },
+    "/v1/clustersets/{clusterset}/imports:watch": {
+      "get": {
+        "summary": "WatchServiceImports streams the merged imports of a clusterset: a\nsnapshot, then deltas and bookmarks. See EventType.",
+        "operationId": "ServiceImportService_WatchServiceImports",
+        "responses": {
+          "200": {
+            "description": "A successful response.(streaming responses)",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/v1WatchServiceImportsResponse"
+                },
+                "error": {
+                  "$ref": "#/definitions/rpcStatus"
+                }
+              },
+              "title": "Stream result of v1WatchServiceImportsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "clusterset",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "selector.matchLabels",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "includeEndpoints",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "resumeRevision",
+            "description": "Revision from a previous SNAPSHOT_END, BOOKMARK or delta.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ServiceImportService"
+        ]
+      }
+    },
+    "/v1/serverinfo": {
+      "get": {
+        "summary": "GetServerInfo returns the replica's region, version and view epoch, and\nthe registry endpoints of every region from --advertise-endpoints. Clients try\nthose endpoints after their configured URLs.",
+        "operationId": "ServerInfoService_GetServerInfo",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetServerInfoResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "tags": [
+          "ServerInfoService"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "ClusterServiceHeartbeatClusterBody": {
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The lease epoch returned by RegisterCluster."
+        }
+      }
+    },
+    "ClusterServiceRegisterClusterBody": {
+      "type": "object",
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "zones": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "agentVersion": {
+          "type": "string"
+        },
+        "leaseTtl": {
+          "type": "string",
+          "description": "Requested lease duration; clamped to [10 s, 5 m]; 30 s when unset."
+        }
+      }
+    },
+    "ServiceExportServicePutServiceExportBody": {
+      "type": "object",
+      "properties": {
+        "spec": {
+          "$ref": "#/definitions/v1ServiceExportSpec"
+        },
+        "generation": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Writer generation, max(previous + 1, unix milliseconds)."
+        }
+      }
+    },
+    "ServiceExportServiceReplaceEndpointsBody": {
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Endpoint"
+          },
+          "description": "The full endpoint set; an empty list clears it."
+        },
+        "generation": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Writer generation, max(previous + 1, unix milliseconds)."
+        }
+      }
+    },
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "rpcStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    },
+    "v1AddressType": {
+      "type": "string",
+      "enum": [
+        "ADDRESS_TYPE_UNSPECIFIED",
+        "ADDRESS_TYPE_IPV4",
+        "ADDRESS_TYPE_IPV6",
+        "ADDRESS_TYPE_FQDN"
+      ],
+      "default": "ADDRESS_TYPE_UNSPECIFIED",
+      "description": "AddressType is the EndpointSlice address type."
+    },
+    "v1ClientIPConfig": {
+      "type": "object",
+      "properties": {
+        "timeoutSeconds": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "ClientIPConfig mirrors the Kubernetes ClientIPConfig."
+    },
+    "v1Cluster": {
+      "type": "object",
+      "properties": {
+        "clusterset": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string",
+          "description": "Cloud region, for example us-east-1."
+        },
+        "zones": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Availability zones of the cluster's nodes."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Free-form provider name, for example eks or k3d."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Identity of the registering agent, for example the controller pod name."
+        },
+        "agentVersion": {
+          "type": "string"
+        },
+        "lease": {
+          "$ref": "#/definitions/v1Lease"
+        },
+        "generation": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Incremented by the server on every registration."
+        },
+        "registeredAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Time of the first registration; kept across re-registrations."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "Cluster is the registration of a member cluster."
+    },
+    "v1ClusterEndpoints": {
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Endpoint"
+          }
+        },
+        "generation": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Writer generation of the endpoint set."
+        },
+        "endpointCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "readyEndpointCount": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "ClusterEndpoints is the endpoint set that one source cluster contributes to\nan import. Counts are always set; endpoints is filled only when the request\nasked for endpoints."
+    },
+    "v1ClusterSetSummary": {
+      "type": "object",
+      "properties": {
+        "clusterset": {
+          "type": "string"
+        },
+        "clusterCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "activeClusterCount": {
+          "type": "integer",
+          "format": "int32",
+          "description": "Clusters whose lease is active."
+        },
+        "exportCount": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "ClusterSetSummary describes one clusterset."
+    },
+    "v1ClusterStatus": {
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "leaseState": {
+          "$ref": "#/definitions/v1LeaseState"
+        },
+        "participating": {
+          "type": "boolean",
+          "description": "False when the cluster's lease has expired; its endpoints are then\nexcluded and its export does not take part in conflict resolution."
+        },
+        "conflict": {
+          "$ref": "#/definitions/v1Conflict",
+          "description": "Set when this cluster's export disagrees with the winning export."
+        },
+        "endpointCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "readyEndpointCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "exportGeneration": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Condition"
+          },
+          "description": "Conditions the controller of this cluster copies onto its ServiceExport\n(Ready, Conflict)."
+        }
+      },
+      "description": "ClusterStatus is the per-source-cluster status of an import."
+    },
+    "v1Condition": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/v1ConditionStatus"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "lastTransitionAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "Condition mirrors metav1.Condition. Types and reasons follow sigs.k8s.io/mcs-api\n(Valid, Ready, Conflict; NoConflicts, PortConflict, TypeConflict,\nSessionAffinityConflict, SessionAffinityConfigConflict, AnnotationsConflict,\nLabelsConflict, InternalTrafficPolicyConflict, TrafficDistributionConflict)\nplus IPFamilyConflict and ClusterLeaseExpired."
+    },
+    "v1ConditionStatus": {
+      "type": "string",
+      "enum": [
+        "CONDITION_STATUS_UNSPECIFIED",
+        "CONDITION_STATUS_TRUE",
+        "CONDITION_STATUS_FALSE",
+        "CONDITION_STATUS_UNKNOWN"
+      ],
+      "default": "CONDITION_STATUS_UNSPECIFIED",
+      "description": "ConditionStatus mirrors the Kubernetes condition status."
+    },
+    "v1Conflict": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "A Conflict condition reason, for example PortConflict."
+        },
+        "message": {
+          "type": "string"
+        },
+        "winningCluster": {
+          "type": "string",
+          "description": "Cluster whose export won (the oldest export with an active lease)."
+        }
+      },
+      "description": "Conflict reports a disagreement between exports of one Service."
+    },
+    "v1DeleteServiceExportResponse": {
+      "type": "object"
+    },
+    "v1DeregisterClusterResponse": {
+      "type": "object"
+    },
+    "v1Endpoint": {
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "addressType": {
+          "$ref": "#/definitions/v1AddressType"
+        },
+        "conditions": {
+          "$ref": "#/definitions/v1EndpointConditions"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "nodeName": {
+          "type": "string"
+        },
+        "zone": {
+          "type": "string"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1EndpointPort"
+          }
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "At most 16 entries."
+        }
+      },
+      "description": "Endpoint mirrors an EndpointSlice endpoint."
+    },
+    "v1EndpointConditions": {
+      "type": "object",
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "serving": {
+          "type": "boolean"
+        },
+        "terminating": {
+          "type": "boolean"
+        }
+      },
+      "description": "EndpointConditions mirrors the EndpointSlice endpoint conditions."
+    },
+    "v1EndpointPort": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/definitions/v1Protocol"
+        },
+        "appProtocol": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "EndpointPort mirrors an EndpointSlice port."
+    },
+    "v1EventType": {
+      "type": "string",
+      "enum": [
+        "EVENT_TYPE_UNSPECIFIED",
+        "EVENT_TYPE_SNAPSHOT_START",
+        "EVENT_TYPE_UPSERT",
+        "EVENT_TYPE_DELETE",
+        "EVENT_TYPE_SNAPSHOT_END",
+        "EVENT_TYPE_BOOKMARK"
+      ],
+      "default": "EVENT_TYPE_UNSPECIFIED",
+      "description": "EventType is the kind of a watch event.\n\nA watch sends SNAPSHOT_START, one UPSERT per object, SNAPSHOT_END with the\nrevision, then UPSERT and DELETE deltas, and a BOOKMARK every 5 s. A watch\nopened with a usable resume_revision skips the snapshot and receives only\nthe deltas after that revision; an unknown or stale revision yields a new\nsnapshot, never an error. A slow watcher is re-snapshotted, not\ndisconnected.\n\n - EVENT_TYPE_SNAPSHOT_START: Start of a full snapshot. Clients discard their local state.\n - EVENT_TYPE_UPSERT: The object was created or changed; it carries the full object.\n - EVENT_TYPE_DELETE: The object was removed; it carries the last known object.\n - EVENT_TYPE_SNAPSHOT_END: End of a full snapshot; revision is set.\n - EVENT_TYPE_BOOKMARK: Keepalive carrying the current revision; no object."
+    },
+    "v1GetClusterResponse": {
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "$ref": "#/definitions/v1Cluster"
+        }
+      }
+    },
+    "v1GetServerInfoResponse": {
+      "type": "object",
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "viewEpoch": {
+          "type": "string",
+          "description": "Epoch of this replica's view. Revisions from another view epoch are not\nresumable on this replica."
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ServerEndpoint"
+          }
+        },
+        "serverTime": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1GetServiceImportResponse": {
+      "type": "object",
+      "properties": {
+        "serviceImport": {
+          "$ref": "#/definitions/v1ServiceImport"
+        }
+      }
+    },
+    "v1HeartbeatClusterResponse": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "$ref": "#/definitions/v1Lease"
+        },
+        "serverTime": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1IPFamily": {
+      "type": "string",
+      "enum": [
+        "IP_FAMILY_UNSPECIFIED",
+        "IP_FAMILY_IPV4",
+        "IP_FAMILY_IPV6"
+      ],
+      "default": "IP_FAMILY_UNSPECIFIED",
+      "description": "IPFamily is a Kubernetes IP family."
+    },
+    "v1InternalTrafficPolicy": {
+      "type": "string",
+      "enum": [
+        "INTERNAL_TRAFFIC_POLICY_UNSPECIFIED",
+        "INTERNAL_TRAFFIC_POLICY_CLUSTER",
+        "INTERNAL_TRAFFIC_POLICY_LOCAL"
+      ],
+      "default": "INTERNAL_TRAFFIC_POLICY_UNSPECIFIED",
+      "description": "InternalTrafficPolicy is the Kubernetes Service internal traffic policy."
+    },
+    "v1LabelSelector": {
+      "type": "object",
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "LabelSelector selects objects whose labels contain every entry."
+    },
+    "v1Lease": {
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Incarnation number minted by the server on every registration as\nmax(previous + 1, unix milliseconds). Heartbeats must carry it."
+        },
+        "ttl": {
+          "type": "string",
+          "description": "Lease duration."
+        },
+        "renewedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server time of the last registration or heartbeat."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "renewed_at plus ttl."
+        },
+        "state": {
+          "$ref": "#/definitions/v1LeaseState"
+        }
+      },
+      "description": "Lease is a server-assigned liveness lease of a cluster. Nothing writes\nexpiry to the store; state is computed from renewed_at, ttl and the server\nclock when the object is read."
+    },
+    "v1LeaseState": {
+      "type": "string",
+      "enum": [
+        "LEASE_STATE_UNSPECIFIED",
+        "LEASE_STATE_ACTIVE",
+        "LEASE_STATE_EXPIRED"
+      ],
+      "default": "LEASE_STATE_UNSPECIFIED",
+      "description": "LeaseState is the state of a lease evaluated at read time.\n\n - LEASE_STATE_ACTIVE: The lease was renewed within ttl plus the skew allowance.\n - LEASE_STATE_EXPIRED: The lease is past expires_at plus the skew allowance."
+    },
+    "v1ListClusterSetsResponse": {
+      "type": "object",
+      "properties": {
+        "clustersets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ClusterSetSummary"
+          }
+        }
+      }
+    },
+    "v1ListClustersResponse": {
+      "type": "object",
+      "properties": {
+        "clusters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Cluster"
+          }
+        },
+        "revision": {
+          "type": "string",
+          "description": "Revision of the view the list was taken from; usable as resume_revision."
+        }
+      }
+    },
+    "v1ListServiceExportsResponse": {
+      "type": "object",
+      "properties": {
+        "exports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ServiceExport"
+          }
+        }
+      }
+    },
+    "v1ListServiceImportsResponse": {
+      "type": "object",
+      "properties": {
+        "serviceImports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ServiceImport"
+          }
+        },
+        "revision": {
+          "type": "string",
+          "description": "Revision of the view the list was taken from; usable as resume_revision."
+        }
+      }
+    },
+    "v1Protocol": {
+      "type": "string",
+      "enum": [
+        "PROTOCOL_UNSPECIFIED",
+        "PROTOCOL_TCP",
+        "PROTOCOL_UDP",
+        "PROTOCOL_SCTP"
+      ],
+      "default": "PROTOCOL_UNSPECIFIED",
+      "description": "Protocol is a Kubernetes port protocol."
+    },
+    "v1PutServiceExportResponse": {
+      "type": "object",
+      "properties": {
+        "export": {
+          "$ref": "#/definitions/v1ServiceExport"
+        }
+      }
+    },
+    "v1RegisterClusterResponse": {
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "$ref": "#/definitions/v1Cluster",
+          "description": "The stored registration with the newly minted lease."
+        },
+        "serverTime": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1ReplaceEndpointsResponse": {
+      "type": "object",
+      "properties": {
+        "generation": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "endpointCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "readyEndpointCount": {
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
+    "v1ServerEndpoint": {
+      "type": "object",
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "grpcUrl": {
+          "type": "string",
+          "description": "gRPC URL, for example https://registry.us-east-1.example.internal:443."
+        },
+        "httpUrl": {
+          "type": "string",
+          "description": "REST URL, for example https://registry.us-east-1.example.internal."
+        },
+        "primary": {
+          "type": "boolean",
+          "description": "True for the global entry clients should prefer."
+        }
+      },
+      "description": "ServerEndpoint is the address of the registry in one region."
+    },
+    "v1ServiceExport": {
+      "type": "object",
+      "properties": {
+        "clusterset": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/definitions/v1ServiceExportSpec"
+        },
+        "generation": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Writer generation of the spec."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "endpointsGeneration": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Writer generation of the endpoint set; 0 when none was written."
+        },
+        "endpointCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "readyEndpointCount": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "ServiceExport is the stored export of a Service from one cluster."
+    },
+    "v1ServiceExportSpec": {
+      "type": "object",
+      "properties": {
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exported annotations: spec.exportedAnnotations of the ServiceExport plus\nthe Service's dynamo.nvidia.com/mcs-* annotations."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exported labels: spec.exportedLabels of the ServiceExport plus the\nService's dynamo.nvidia.com/mcs-* labels."
+        },
+        "exportCreationTimestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "creationTimestamp of the ServiceExport; the oldest export wins conflicts."
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ServicePort"
+          }
+        },
+        "type": {
+          "$ref": "#/definitions/v1ServiceType"
+        },
+        "sessionAffinity": {
+          "$ref": "#/definitions/v1SessionAffinity"
+        },
+        "sessionAffinityConfig": {
+          "$ref": "#/definitions/v1SessionAffinityConfig"
+        },
+        "ipFamilies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/v1IPFamily"
+          }
+        },
+        "internalTrafficPolicy": {
+          "$ref": "#/definitions/v1InternalTrafficPolicy"
+        },
+        "trafficDistribution": {
+          "type": "string",
+          "description": "Kubernetes spec.trafficDistribution, for example PreferClose."
+        }
+      },
+      "description": "ServiceExportSpec is the exported shape of a Service: the fields of the\nService that take part in the merge. The controller fills it from the\nService and the ServiceExport."
+    },
+    "v1ServiceImport": {
+      "type": "object",
+      "properties": {
+        "clusterset": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/v1ServiceType"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ServicePort"
+          },
+          "description": "Union of the participating exports' ports by (port, protocol)."
+        },
+        "ipFamilies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/v1IPFamily"
+          },
+          "description": "Intersection of the participating exports' IP families."
+        },
+        "sessionAffinity": {
+          "$ref": "#/definitions/v1SessionAffinity"
+        },
+        "sessionAffinityConfig": {
+          "$ref": "#/definitions/v1SessionAffinityConfig"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exported annotations and labels of the winning export."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "conflict": {
+          "$ref": "#/definitions/v1Conflict",
+          "description": "Set when any participating export conflicts with the winner."
+        },
+        "clusters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ClusterStatus"
+          }
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ClusterEndpoints"
+          },
+          "description": "Endpoints grouped by source cluster, including the importing cluster."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "ServiceImport is the merged, clusterset-wide view of an exported Service.\nIt is computed, never stored."
+    },
+    "v1ServicePort": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/definitions/v1Protocol"
+        },
+        "appProtocol": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "description": "ServicePort is a port of an exported Service."
+    },
+    "v1ServiceType": {
+      "type": "string",
+      "enum": [
+        "SERVICE_TYPE_UNSPECIFIED",
+        "SERVICE_TYPE_CLUSTER_SET_IP",
+        "SERVICE_TYPE_HEADLESS"
+      ],
+      "default": "SERVICE_TYPE_UNSPECIFIED",
+      "description": "ServiceType is the KEP-1645 ServiceImport type.\n\n - SERVICE_TYPE_CLUSTER_SET_IP: One virtual IP per importing cluster (the Service has a cluster IP).\n - SERVICE_TYPE_HEADLESS: No virtual IP; per-endpoint records (the Service has clusterIP: None)."
+    },
+    "v1SessionAffinity": {
+      "type": "string",
+      "enum": [
+        "SESSION_AFFINITY_UNSPECIFIED",
+        "SESSION_AFFINITY_NONE",
+        "SESSION_AFFINITY_CLIENT_IP"
+      ],
+      "default": "SESSION_AFFINITY_UNSPECIFIED",
+      "description": "SessionAffinity is the Kubernetes Service session affinity."
+    },
+    "v1SessionAffinityConfig": {
+      "type": "object",
+      "properties": {
+        "clientIp": {
+          "$ref": "#/definitions/v1ClientIPConfig"
+        }
+      },
+      "description": "SessionAffinityConfig mirrors the Kubernetes SessionAffinityConfig."
+    },
+    "v1WatchClustersResponse": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/v1EventType"
+        },
+        "cluster": {
+          "$ref": "#/definitions/v1Cluster",
+          "description": "Set for UPSERT and DELETE."
+        },
+        "revision": {
+          "type": "string",
+          "description": "Set for SNAPSHOT_END, BOOKMARK and every delta."
+        }
+      },
+      "description": "WatchClustersResponse is one watch event."
+    },
+    "v1WatchServiceImportsResponse": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/v1EventType"
+        },
+        "serviceImport": {
+          "$ref": "#/definitions/v1ServiceImport",
+          "description": "Set for UPSERT and DELETE."
+        },
+        "revision": {
+          "type": "string",
+          "description": "Set for SNAPSHOT_END, BOOKMARK and every delta."
+        }
+      },
+      "description": "WatchServiceImportsResponse is one watch event."
+    }
+  }
+}
