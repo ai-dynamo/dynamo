@@ -100,6 +100,8 @@ navigation:
           path: pages/kubernetes/installation/gateway-api-routing.mdx
         - page: Operator TLS
           path: pages/kubernetes/installation/tls.md
+        - page: Observability
+          path: pages/kubernetes/installation/observability.md
         - section: RDMA Setup
           contents:
             - page: Overview
@@ -336,6 +338,8 @@ navigation:
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/kv-aware-routing.md
               - page: Observability Architecture
                 path: pages/developer-guide/knowledge-base/concepts/observability-architecture.md
+              - page: Forward Pass Metrics RFC
+                path: pages/developer-guide/knowledge-base/concepts/observability/forward-pass-metrics-rfc.md
               - section: Simulation
                 collapsed: true
                 contents:
@@ -603,6 +607,8 @@ navigation:
                     contents:
                       - page: Mocker Engine Architecture
                         path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
+                      - page: Mocker Backend (Rust)
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/rust-backend.md
       - section: Developing and Extending Dynamo
         slug: advanced-customizations
         icon: sliders
@@ -1320,6 +1326,8 @@ navigation:
             path: pages/reference/observability/operator-metrics.mdx
           - page: Local Resource Monitor (Local)
             path: pages/reference/observability/local-resource-monitor-local.mdx
+          - page: Local Resource Monitor Guide
+            path: pages/reference/observability/local-resource-monitor-guide.md
 
       - section: NIXL Connect
         icon: right-left
