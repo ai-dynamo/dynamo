@@ -154,12 +154,6 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_ROUTE_TO_ENCODER`
 </ParamField>
 
-<ParamField path="--mm-prompt-template" type="string" default="USER: <image>\n<prompt> ASSISTANT:">
-  Prompt template used to construct the final multimodal prompt sent to the model. The literal `<prompt>` token is replaced with the user's text at inference time; `<image>` marks where the image placeholder appears. Update this template to match your model's expected format.
-
-  Environment variable: `DYN_VLLM_MM_PROMPT_TEMPLATE`
-</ParamField>
-
 <ParamField path="--frontend-decoding" type="boolean" default="false">
   Enable frontend decoding of multimodal images. Images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode.
 
@@ -276,12 +270,18 @@ The sweep does not walk a fixed grid of sample counts. Each axis is derived from
 
 ## Deprecated
 
-These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+These flags are retained for backward compatibility and will be removed in a future release. See each entry for its behavior and migration path; some flags only emit a deprecation warning.
 
 <ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
   **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
 
   Environment variable: `MODEL_EXPRESS_URL`
+</ParamField>
+
+<ParamField path="--mm-prompt-template" type="string" default="null" deprecated={true}>
+  **Deprecated** — has no effect and will be removed in v1.7. The frontend renders multimodal prompts with the model's chat template, so this value is never applied. To override the chat template, use `--custom-jinja-template`.
+
+  Environment variable: `DYN_VLLM_MM_PROMPT_TEMPLATE`
 </ParamField>
 
 The five `--benchmark-*-granularity` flags below are the previous names for the benchmark sampling limits. They are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
