@@ -21,6 +21,7 @@ from tests.utils.payloads import (
     DisaggregatedKvRoutingPayload,
     ElasticEPScalePayload,
     EmbeddingPayload,
+    EngineFailurePayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
     ImagesAccountingPayload,
@@ -42,7 +43,6 @@ from tests.utils.payloads import (
     StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
-    EngineFailurePayload,
 )
 from tests.utils.router_nvext import RouterNvextExpectation, router_nvext_extra_body
 
