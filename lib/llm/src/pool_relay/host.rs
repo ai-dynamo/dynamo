@@ -3178,23 +3178,28 @@ mod tests {
 
         // Nothing serves this URL, so the first read fails and the router list
         // stays empty.
+        let unused = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
         let relay = PoolRelay::start(
             component,
             "test-dc".to_string(),
             PoolRelayConfig {
-                global_discovery_url: Some("http://127.0.0.1:9/".parse().unwrap()),
+                global_discovery_url: Some(format!("http://{unused}/").parse().unwrap()),
                 ..PoolRelayConfig::default()
             },
         )
         .await
         .unwrap();
+        let failed = format!("request to http://{unused}/routers failed: ");
         let health = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let health = relay.health().await;
                 if health
                     .global_routers_stale_reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("http://127.0.0.1:9/routers"))
+                    .is_some_and(|reason| reason.contains("/routers"))
                 {
                     return health;
                 }
@@ -3204,6 +3209,12 @@ mod tests {
         .await
         .expect("the first read did not finish");
         assert!(health.global_discovery_enabled);
+        // The reason carries the cause, not only the failed request.
+        let reason = health.global_routers_stale_reason.as_deref().unwrap();
+        assert!(
+            reason.starts_with(&failed) && reason.len() > failed.len(),
+            "{reason}"
+        );
         assert!(health.healthy);
         let mut routers = relay.subscribe_global_routers().unwrap();
         assert!(routers.borrow().is_empty());
