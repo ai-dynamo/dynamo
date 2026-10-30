@@ -57,6 +57,68 @@ fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineEr
 
 #[cfg(test)]
 mod unit_tests {
+    #[tokio::test]
+    async fn response_stream_host_falls_back_to_rpc_host() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::response_stream_host_falls_back_to_rpc_host"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{DistributedConfig, DistributedRuntime, Runtime};
+        use crate::config::environment_names::{
+            request_plane, runtime::system, tcp_response_stream,
+        };
+
+        for (response_host, rpc_host, succeeds) in [
+            (None, "127.0.0.1", true),
+            (Some(" \t "), "127.0.0.1", true),
+            (Some("127.0.0.1"), "dynamo-missing-interface", true),
+            (None, "dynamo-missing-interface", false),
+        ] {
+            temp_env::async_with_vars(
+                [
+                    (
+                        tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                        response_host,
+                    ),
+                    (request_plane::DYN_TCP_RPC_HOST, Some(rpc_host)),
+                    (system::DYN_SYSTEM_PORT, None),
+                ],
+                async {
+                    let runtime = Runtime::from_current().unwrap();
+                    let drt = DistributedRuntime::new(
+                        runtime.clone(),
+                        DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap();
+                    let result = drt.tcp_server().await;
+                    if succeeds {
+                        let server = result.unwrap();
+                        let address = server.local_address().unwrap();
+                        assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            tokio::net::TcpStream::connect(address),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    } else {
+                        assert!(result.err().unwrap().to_string().contains(rpc_host));
+                    }
+                    runtime.shutdown();
+                },
+            )
+            .await;
+        }
+    }
+
     use super::parse_tcp_response_stream_port;
     use crate::pipeline::PipelineError;
 
@@ -580,6 +642,14 @@ impl DistributedRuntime {
                     tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
                 )
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
+
+                let host = match host {
+                    Some(host) => Some(host),
+                    None => crate::utils::ip_resolver::host_override_from_env(
+                        crate::config::environment_names::request_plane::DYN_TCP_RPC_HOST,
+                    )
+                    .map_err(|error| PipelineError::Generic(error.to_string()))?,
+                };
 
                 let host_suffix = host
                     .as_ref()

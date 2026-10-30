@@ -964,7 +964,8 @@ pub mod tcp_response_stream {
     ///
     /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
     /// wildcards, and interface names. Interface aliases such as `eth0:1` are
-    /// also accepted. If unset, the server selects the first usable
+    /// also accepted. If unset or empty, falls back to `DYN_TCP_RPC_HOST`.
+    /// If both are unset, the server selects the first usable
     /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
     /// loopback. A wildcard uses a reachable address in its requested family.
     /// If only the other family has a usable non-loopback address, the server
