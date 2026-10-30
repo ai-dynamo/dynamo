@@ -75,10 +75,13 @@ pub fn registry(
 /// declares it: a picker that asks for [`WorkerInputs::LOAD`] ranks by the
 /// requests booked on each worker, so every request it places must be
 /// booked. Any other picker's picks book nothing.
-pub fn reads_bookings(policy: CorePolicy) -> bool {
+pub fn reads_bookings(policy: &CorePolicy, directory: &Arc<PoolDirectory>) -> bool {
     let inputs = match policy {
         CorePolicy::RoundRobin => RoundRobinPicker::default().required_worker_inputs(),
         CorePolicy::LeastRequests => LeastRequestsPicker::default().required_worker_inputs(),
+        CorePolicy::Affinity(affinity) => {
+            HeadroomPicker::new(affinity, directory.clone()).required_worker_inputs()
+        }
     };
     inputs.contains(WorkerInputs::LOAD)
 }
