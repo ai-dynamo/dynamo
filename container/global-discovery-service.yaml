@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Global Discovery Service with pools from Karmada, applied directly to the hub
+# cluster (not through Karmada). Replace IMAGE with the pushed image, for example:
+#   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service.yaml | kubectl apply -f -
+# It needs only read access to EndpointSlices. It lists the pools whose
+# `<DGD name>-pool-relay` Services Karmada imports, and the replicas of the
+# Global Router Service named by the --router-* arguments: set those to the
+# router's namespace, its Service and the port PoolRelays connect to.
+#
+# It reads the imported slices with the pod's credentials, so this cluster
+# needs a ServiceImport for each pool's PoolRelay Service and for the router
+# Service. To read the Karmada control plane instead, which holds every
+# exported Service's slices, mount its kubeconfig from a Secret, point
+# KUBECONFIG at it, and grant the same read access there.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: global-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: global-discovery-service
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: global-discovery-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: global-discovery-service
+subjects:
+  - kind: ServiceAccount
+    name: global-discovery-service
+    namespace: global-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: global-discovery-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: global-discovery-service
+    spec:
+      serviceAccountName: global-discovery-service
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: global-discovery
+          image: IMAGE
+          args:
+            # Takes IPv4 and IPv6. On nodes with IPv6 turned off, use
+            # 0.0.0.0:8080.
+            - --listen=[::]:8080
+            - --pool-discovery=karmada
+            - --router-namespace=global-discovery
+            - --router-service=global-router
+            - --router-port-name=http
+          env:
+            - name: DYN_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          lifecycle:
+            # Keep serving while the Pod leaves the Service's endpoints.
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  selector:
+    app.kubernetes.io/name: global-discovery-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

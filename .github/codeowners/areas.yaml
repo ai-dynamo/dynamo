@@ -19,6 +19,7 @@ areas:
   - lib/llm/src/grpc/protos/
   - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
+  - lib/http-server/
   - lib/llm/src/http.rs
   - lib/llm/src/http/
   - lib/llm/src/http/service.rs
@@ -73,6 +74,7 @@ areas:
   path_globs:
   - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
+  - container/global-discovery-service.yaml
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**
@@ -1089,6 +1091,10 @@ shared:
   owners:
   - frontend
   - observability
+- glob: lib/http-server/src/metrics.rs
+  owners:
+  - frontend
+  - observability
 - glob: lib/llm/src/kv_router/shared_cache.rs
   owners:
   - router
@@ -1288,6 +1294,10 @@ shared:
   owners:
   - operator
   - backend-vllm
+- glob: container/Dockerfile.global-discovery-service
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator

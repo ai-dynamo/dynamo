@@ -3,11 +3,16 @@
 
 //! Pool discovery for the Global Router, served over HTTP.
 //!
-//! The contract comes first: [`pool_discovery`], the traits that the
-//! service reads and writes through.
+//! The contract comes first:
+//! - [`service`]: the HTTP API, whose JSON types are in `dynamo_global_common`,
+//!   and [`PoolDiscoveryBackend`], the backend behind it.
+//! - [`pool_discovery`]: the traits that backend is built from.
 //!
 //! [`backends`] implements those traits: registrations kept in memory, and
 //! the EndpointSlices that SIG Multicluster (MCS) imports.
 
 pub mod backends;
 pub mod pool_discovery;
+pub mod service;
+
+pub use service::{PoolDiscoveryBackend, Tls, routes, serve};
