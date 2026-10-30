@@ -77,8 +77,11 @@ areas:
   - container/global-discovery-service.yaml
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+  - docs/fern/pages/developer-guide/**/multi-cluster-services-registry.md
   - lib/global-*/**
+  - docs/fern/pages/kubernetes/kv-aware-routing/multi-cluster-services.md
   - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/reference/components/global-discovery-mcs-configuration.md
   - docs/fern/pages/reference/components/pool-relay-configuration.md
   - lib/bindings/python/rust/llm/pool_relay.rs
   - lib/llm/src/pool_relay.rs
