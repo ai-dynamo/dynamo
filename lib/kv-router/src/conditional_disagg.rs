@@ -9,7 +9,10 @@
 
 use async_trait::async_trait;
 
-use crate::config::{ConditionalDisaggPolicyKind, KvRouterConfig};
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 /// Default effective-ISL absolute threshold (tokens). A request bypasses to
 /// AGG only if its net-new prefill stays under this cap.
@@ -18,6 +21,83 @@ pub const DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD: usize = 2048;
 /// Default effective-ISL ratio threshold. A request bypasses to AGG only if
 /// `eff_isl / prompt_tokens` stays under this fraction.
 pub const DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD: f64 = 0.7;
+
+/// Which conditional-disagg bypass policy to run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalDisaggPolicyKind {
+    /// Bypass when effective ISL is below both the absolute and ratio thresholds.
+    #[default]
+    IslBounding,
+    /// Bypass when the chosen prefill worker is over the prefill-busy line.
+    PrefillLoad,
+    /// Bypass when either `isl_bounding` or `prefill_load` would bypass.
+    IslOrLoad,
+}
+
+impl fmt::Display for ConditionalDisaggPolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IslBounding => f.write_str("isl_bounding"),
+            Self::PrefillLoad => f.write_str("prefill_load"),
+            Self::IslOrLoad => f.write_str("isl_or_load"),
+        }
+    }
+}
+
+impl FromStr for ConditionalDisaggPolicyKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "isl_bounding" => Ok(Self::IslBounding),
+            "prefill_load" => Ok(Self::PrefillLoad),
+            "isl_or_load" => Ok(Self::IslOrLoad),
+            _ => Err(format!(
+                "unknown conditional_disagg_policy: {s:?}, expected 'isl_bounding', 'prefill_load', or 'isl_or_load'"
+            )),
+        }
+    }
+}
+
+pub(crate) fn default_conditional_disagg_eff_isl_threshold() -> usize {
+    DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
+}
+
+pub(crate) fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
+    DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
+}
+
+/// The router configuration conditional disaggregation reads. Field names drop the
+/// `conditional_disagg_` prefix of the flat configuration they come from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConditionalDisaggConfig {
+    /// Whether the prefill leg may bypass remote prefill.
+    pub enabled: bool,
+    /// Which bypass policy decides.
+    pub policy: ConditionalDisaggPolicyKind,
+    /// Effective ISL at or above which `isl_bounding` never bypasses.
+    pub eff_isl_threshold: usize,
+    /// Effective-to-total ISL ratio at or above which `isl_bounding` never bypasses.
+    pub eff_isl_ratio_threshold: f64,
+    /// Prefill-busy fraction the `prefill_load` policy reads; `None` disables the signal.
+    pub prefill_busy_threshold: Option<f64>,
+    /// Decode-busy fraction the gate reads; `None` disables it.
+    pub decode_busy_threshold: Option<f64>,
+}
+
+impl Default for ConditionalDisaggConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            policy: ConditionalDisaggPolicyKind::default(),
+            eff_isl_threshold: default_conditional_disagg_eff_isl_threshold(),
+            eff_isl_ratio_threshold: default_conditional_disagg_eff_isl_ratio_threshold(),
+            prefill_busy_threshold: None,
+            decode_busy_threshold: None,
+        }
+    }
+}
 
 /// Inputs passed to a `ConditionalDisaggPolicy` when deciding whether to
 /// bypass remote prefill.
@@ -85,12 +165,12 @@ pub trait ConditionalDisaggPolicy: Send + Sync {
 /// Build the configured conditional-disagg policy. Returns a disabled policy
 /// when conditional disagg is not enabled.
 pub fn make_conditional_disagg_policy(
-    config: Option<&KvRouterConfig>,
+    config: Option<&ConditionalDisaggConfig>,
 ) -> Box<dyn ConditionalDisaggPolicy> {
     let Some(config) = config else {
         return Box::new(IslBoundingPolicy::disabled());
     };
-    match config.conditional_disagg_policy {
+    match config.policy {
         ConditionalDisaggPolicyKind::IslBounding => {
             Box::new(IslBoundingPolicy::from_config(config))
         }
@@ -101,7 +181,7 @@ pub fn make_conditional_disagg_policy(
     }
 }
 
-pub fn policy_needs_prefill_worker_busy(config: Option<&KvRouterConfig>) -> bool {
+pub fn policy_needs_prefill_worker_busy(config: Option<&ConditionalDisaggConfig>) -> bool {
     make_conditional_disagg_policy(config).needs_prefill_worker_busy()
 }
 
@@ -123,11 +203,11 @@ impl IslBoundingPolicy {
         }
     }
 
-    pub fn from_config(config: &KvRouterConfig) -> Self {
+    pub fn from_config(config: &ConditionalDisaggConfig) -> Self {
         Self {
-            enabled: config.conditional_disagg_enabled,
-            eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
-            eff_isl_ratio_threshold: config.conditional_disagg_eff_isl_ratio_threshold,
+            enabled: config.enabled,
+            eff_isl_threshold: config.eff_isl_threshold,
+            eff_isl_ratio_threshold: config.eff_isl_ratio_threshold,
         }
     }
 
@@ -178,9 +258,9 @@ impl PrefillLoadPolicy {
         Self { enabled }
     }
 
-    pub fn from_config(config: &KvRouterConfig) -> Self {
+    pub fn from_config(config: &ConditionalDisaggConfig) -> Self {
         Self {
-            enabled: config.conditional_disagg_enabled,
+            enabled: config.enabled,
         }
     }
 
@@ -226,7 +306,7 @@ impl IslOrLoadPolicy {
         Self { isl, load }
     }
 
-    pub fn from_config(config: &KvRouterConfig) -> Self {
+    pub fn from_config(config: &ConditionalDisaggConfig) -> Self {
         Self {
             isl: IslBoundingPolicy::from_config(config),
             load: PrefillLoadPolicy::from_config(config),

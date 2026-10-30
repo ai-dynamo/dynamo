@@ -7,6 +7,7 @@ mod config;
 mod context;
 pub(crate) mod inputs;
 mod runtime;
+pub(crate) mod selection_config;
 
 pub(crate) use runtime::RuntimePolicyState;
 pub use runtime::{
@@ -20,6 +21,7 @@ pub use inputs::{
     WorkerCapacity, WorkerCapacityExt, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
     WorkerTransferInput,
 };
+pub use selection_config::{SelectionConfig, SharedCacheType};
 
 pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
@@ -32,12 +34,12 @@ pub use crate::scheduling::{
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
-use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+use crate::{RoutingPartitionRef, WorkerType};
 use std::sync::Arc;
 
 /// Factory that creates one worker-selection policy per routing partition.
 pub type WorkerSelectionPolicyFactory = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
+    dyn for<'a> Fn(&SelectionConfig, WorkerType, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
         + Send
         + Sync,
 >;

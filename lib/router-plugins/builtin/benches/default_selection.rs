@@ -4,6 +4,7 @@
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_policy;
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::protocols::SelectionTraceSpec;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -62,9 +63,11 @@ fn bench(c: &mut Criterion) {
                 overlap_score_credit_decay: decay,
                 ..Default::default()
             };
-            let reference =
-                dynamo_kv_router::DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-            let plugin = default_policy(config, "prefill");
+            let reference = dynamo_kv_router::DefaultWorkerSelector::new(
+                Some(SelectionConfig::from(&config)),
+                "prefill",
+            );
+            let plugin = default_policy(SelectionConfig::from(&config), "prefill");
             let reference_allocs = allocations(|| {
                 black_box(
                     reference
@@ -120,10 +123,10 @@ fn bench(c: &mut Criterion) {
         ] {
             let (workers, request) = support::fixture(count, 2048);
             let plugin = default_policy(
-                KvRouterConfig {
+                SelectionConfig::from(&KvRouterConfig {
                     router_temperature: 0.0,
                     ..Default::default()
-                },
+                }),
                 "prefill",
             );
             let allocs = allocations(|| {
@@ -208,7 +211,7 @@ fn stacked(c: &mut Criterion) {
                 })
                 .collect();
             let policy = dynamo_kv_router::WorkerSelectionPolicy::new(
-                KvRouterConfig::default(),
+                SelectionConfig::default(),
                 "prefill",
                 scorers,
                 Box::new(MinimumPicker),
@@ -253,11 +256,11 @@ fn shared_cache(c: &mut Criterion) {
                             (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
                         ));
                     let policy = default_policy(
-                        KvRouterConfig {
+                        SelectionConfig::from(&KvRouterConfig {
                             shared_cache_multiplier: Some(credit),
                             overlap_score_credit_decay: 0.6,
                             ..Default::default()
-                        },
+                        }),
                         "prefill",
                     );
                     let mut select = || {
@@ -377,11 +380,11 @@ fn kv_transfer(c: &mut Criterion) {
                     });
             }
             let policy = default_policy(
-                KvRouterConfig {
+                SelectionConfig::from(&KvRouterConfig {
                     shared_cache_multiplier: Some(credit),
                     overlap_score_credit_decay: 0.6,
                     ..Default::default()
-                },
+                }),
                 "prefill",
             );
             let mut select = || {

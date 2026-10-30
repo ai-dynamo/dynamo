@@ -3940,7 +3940,7 @@ policy_classes:
     fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
             inner: crate::WorkerSelectionPolicy::new(
-                crate::KvRouterConfig::default(),
+                crate::plugins::worker_selection::SelectionConfig::default(),
                 "test",
                 vec![],
                 Box::new(LeastLoaded),

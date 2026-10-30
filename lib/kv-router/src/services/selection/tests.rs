@@ -18,6 +18,7 @@ use super::server::create_router;
 use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use crate::plugins::worker_selection::SelectionConfig;
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -291,7 +292,7 @@ impl FactoryRendezvous {
 async fn native_policy_app<F>(worker_type: crate::WorkerType, factory: F) -> Router
 where
     F: for<'a> Fn(
-            &crate::config::KvRouterConfig,
+            &SelectionConfig,
             crate::WorkerType,
             RoutingPartitionRef<'a>,
         ) -> WorkerSelectionPolicy

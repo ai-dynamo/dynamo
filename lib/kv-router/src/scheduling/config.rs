@@ -12,6 +12,20 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::WorkerType;
+pub use crate::conditional_disagg::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
+use crate::conditional_disagg::{
+    default_conditional_disagg_eff_isl_ratio_threshold,
+    default_conditional_disagg_eff_isl_threshold,
+};
+pub use crate::plugins::worker_selection::selection_config::{
+    OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
+    overlap_score_credit_error_message,
+};
+use crate::plugins::worker_selection::selection_config::{
+    default_decode_active_request_weight, default_disk_cache_hit_weight,
+    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
+    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+};
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
@@ -76,49 +90,11 @@ pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     }
 }
 
-const fn default_host_cache_hit_weight() -> f64 {
-    0.75
-}
-
-const fn default_disk_cache_hit_weight() -> f64 {
-    0.25
-}
-
-const fn default_prefill_load_scale() -> f64 {
-    1.0
-}
-
-const fn default_decode_active_request_weight() -> f64 {
-    0.0
-}
-
 // Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
 // rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
 // TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     value == &T::default()
-}
-
-const fn default_overlap_score_credit_decay() -> f64 {
-    0.0
-}
-
-pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
-    "overlap_score_credit must be a finite, non-negative number";
-
-pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
-    if value.is_finite() && value >= 0.0 {
-        None
-    } else {
-        Some(OVERLAP_SCORE_CREDIT_RANGE_ERROR)
-    }
-}
-
-fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
-    let Some(message) = overlap_score_credit_error_message(value) else {
-        return Ok(());
-    };
-    Err(message.to_string())
 }
 
 fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
@@ -132,20 +108,6 @@ fn validate_duration_secs(field: &str, value: f64) -> Result<(), String> {
     Duration::try_from_secs_f64(value)
         .map(|_| ())
         .map_err(|error| format!("{field} is not a valid duration: {error}"))
-}
-
-fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
-    if value.is_finite() && value >= 0.0 {
-        return Ok(());
-    }
-    Err(format!("{field} must be finite and non-negative"))
-}
-
-fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
-    if value >= min && value <= max {
-        return Ok(());
-    }
-    Err(format!("{field} must be between {min} and {max}"))
 }
 
 pub fn apply_deprecated_overlap_score_weight_override(
@@ -420,60 +382,7 @@ fn apply_deprecated_overlap_score_weight_override_option(
     }
 }
 
-/// Type of external shared KV cache to query during routing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SharedCacheType {
-    /// No shared cache (default).
-    #[default]
-    None,
-    /// HiCache L3 shared cache — queries sglang workers via the request plane.
-    Hicache,
-}
-
 pub use dynamo_kv_indexer::config::ApproximateCachePolicyKind;
-
-impl fmt::Display for SharedCacheType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => f.write_str("none"),
-            Self::Hicache => f.write_str("hicache"),
-        }
-    }
-}
-
-impl FromStr for SharedCacheType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "none" => Ok(Self::None),
-            "hicache" => Ok(Self::Hicache),
-            _ => Err(format!(
-                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RouterQueuePolicy {
-    #[default]
-    Fcfs,
-    Lcfs,
-    Wspt,
-}
-
-impl fmt::Display for RouterQueuePolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Fcfs => f.write_str("fcfs"),
-            Self::Lcfs => f.write_str("lcfs"),
-            Self::Wspt => f.write_str("wspt"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -517,40 +426,21 @@ impl RouterPrefillLoadModel {
     }
 }
 
-/// Which conditional-disagg bypass policy to run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConditionalDisaggPolicyKind {
-    /// Bypass when effective ISL is below both the absolute and ratio thresholds.
+#[serde(rename_all = "lowercase")]
+pub enum RouterQueuePolicy {
     #[default]
-    IslBounding,
-    /// Bypass when the chosen prefill worker is over the prefill-busy line.
-    PrefillLoad,
-    /// Bypass when either `isl_bounding` or `prefill_load` would bypass.
-    IslOrLoad,
+    Fcfs,
+    Lcfs,
+    Wspt,
 }
 
-impl fmt::Display for ConditionalDisaggPolicyKind {
+impl fmt::Display for RouterQueuePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::IslBounding => f.write_str("isl_bounding"),
-            Self::PrefillLoad => f.write_str("prefill_load"),
-            Self::IslOrLoad => f.write_str("isl_or_load"),
-        }
-    }
-}
-
-impl FromStr for ConditionalDisaggPolicyKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "isl_bounding" => Ok(Self::IslBounding),
-            "prefill_load" => Ok(Self::PrefillLoad),
-            "isl_or_load" => Ok(Self::IslOrLoad),
-            _ => Err(format!(
-                "unknown conditional_disagg_policy: {s:?}, expected 'isl_bounding', 'prefill_load', or 'isl_or_load'"
-            )),
+            Self::Fcfs => f.write_str("fcfs"),
+            Self::Lcfs => f.write_str("lcfs"),
+            Self::Wspt => f.write_str("wspt"),
         }
     }
 }
@@ -943,14 +833,6 @@ pub struct KvRouterConfig {
     /// the guard is disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
-}
-
-fn default_conditional_disagg_eff_isl_threshold() -> usize {
-    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
-}
-
-fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
-    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
 }
 
 fn is_default_conditional_disagg_eff_isl_threshold(value: &usize) -> bool {
@@ -1606,6 +1488,36 @@ impl From<&KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig {
             approximate_cache_policy: config.router_approximate_cache_policy,
             predicted_ttl_secs: config.router_predicted_ttl_secs,
             ttl_secs: config.router_ttl_secs,
+        }
+    }
+}
+
+impl From<&KvRouterConfig> for SelectionConfig {
+    fn from(config: &KvRouterConfig) -> Self {
+        Self {
+            overlap_score_credit: config.overlap_score_credit,
+            overlap_score_credit_decay: config.overlap_score_credit_decay,
+            prefill_load_scale: config.prefill_load_scale,
+            decode_active_request_weight: config.decode_active_request_weight,
+            host_cache_hit_weight: config.host_cache_hit_weight,
+            disk_cache_hit_weight: config.disk_cache_hit_weight,
+            router_temperature: config.router_temperature,
+            shared_cache_multiplier: config.shared_cache_multiplier,
+            shared_cache_type: config.shared_cache_type,
+            conditional_disagg_enabled: config.conditional_disagg_enabled,
+        }
+    }
+}
+
+impl From<&KvRouterConfig> for ConditionalDisaggConfig {
+    fn from(config: &KvRouterConfig) -> Self {
+        Self {
+            enabled: config.conditional_disagg_enabled,
+            policy: config.conditional_disagg_policy,
+            eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
+            eff_isl_ratio_threshold: config.conditional_disagg_eff_isl_ratio_threshold,
+            prefill_busy_threshold: config.conditional_disagg_prefill_busy_threshold,
+            decode_busy_threshold: config.conditional_disagg_decode_busy_threshold,
         }
     }
 }

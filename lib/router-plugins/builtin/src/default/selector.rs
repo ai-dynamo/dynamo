@@ -8,7 +8,7 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicy,
 };
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerSelectionResult};
-use dynamo_kv_router::{KvRouterConfig, KvSchedulerError, WorkerSelectionInput, WorkerSelector};
+use dynamo_kv_router::{KvSchedulerError, SelectionConfig, WorkerSelectionInput, WorkerSelector};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -21,18 +21,18 @@ use super::runtime_policy;
 /// [`Self::runtime_control`]. Updates apply between selections and keep the selector's random
 /// stream.
 pub struct DefaultWorkerSelector {
-    kv_router_config: KvRouterConfig,
+    kv_router_config: SelectionConfig,
     worker_type: &'static str,
     policy: Arc<Mutex<WorkerSelectionPolicy>>,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 impl DefaultWorkerSelector {
-    pub fn new(config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
+    pub fn new(config: Option<SelectionConfig>, worker_type: &'static str) -> Self {
         Self::with_rng(config.unwrap_or_default(), worker_type, None)
     }
     /// Construct a reproducible selector. Clones share its random stream.
     pub fn new_seeded(
-        config: Option<KvRouterConfig>,
+        config: Option<SelectionConfig>,
         worker_type: &'static str,
         seed: u64,
     ) -> Self {
@@ -43,7 +43,7 @@ impl DefaultWorkerSelector {
         )
     }
     fn with_rng(
-        config: KvRouterConfig,
+        config: SelectionConfig,
         worker_type: &'static str,
         rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {

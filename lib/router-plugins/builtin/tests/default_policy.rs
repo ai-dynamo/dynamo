@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 mod support;
 use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, default_registry};
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
@@ -35,7 +36,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
         router_temperature: 0.0,
         ..Default::default()
     };
-    let mut policy = default_policy(config, "prefill");
+    let mut policy = default_policy(SelectionConfig::from(&config), "prefill");
     let select = |policy: &WorkerSelectionPolicy| {
         policy
             .select_worker(selection_input(&workers, &request, 16))
@@ -131,7 +132,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
         (KvRouterConfig::default(), WorkerType::Decode),
     ] {
         let mut policy = dynamo_custom_policy_builtin::default_factory()(
-            &config,
+            &SelectionConfig::from(&config),
             role,
             RoutingPartitionRef::new("model", "default"),
         );
@@ -223,7 +224,7 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 ..Default::default()
             };
             let mut policy = dynamo_custom_policy_builtin::default_factory()(
-                &config,
+                &SelectionConfig::from(&config),
                 role,
                 RoutingPartitionRef::new("model", "default"),
             );
@@ -282,11 +283,15 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     _ => {}
                 }
                 let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                    Some(config.clone()),
+                    Some(SelectionConfig::from(&config)),
                     "test",
                     42,
                 );
-                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+                let plugin = DefaultWorkerSelector::new_seeded(
+                    Some(SelectionConfig::from(&config)),
+                    "test",
+                    42,
+                );
                 for _ in 0..64 {
                     let input = support::selection_input(&workers, &request, 16);
                     let expected = reference.select_worker(input).unwrap();
@@ -337,11 +342,15 @@ fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
                     ..Default::default()
                 };
                 let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                    Some(config.clone()),
+                    Some(SelectionConfig::from(&config)),
                     "prefill",
                     42,
                 );
-                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+                let plugin = DefaultWorkerSelector::new_seeded(
+                    Some(SelectionConfig::from(&config)),
+                    "prefill",
+                    42,
+                );
                 for _ in 0..32 {
                     let eligibility = request.eligibility().with_available_workers(available);
                     let expected = reference
@@ -392,7 +401,8 @@ fn empty_prompt_routes_by_load() {
             overlap_score_credit_decay,
             ..Default::default()
         };
-        let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+        let plugin =
+            DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "test", 42);
         let result = plugin
             .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap();
@@ -421,9 +431,11 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
                     router_temperature: temperature,
                     ..Default::default()
                 };
-                let reference =
-                    dynamo_kv_router::DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-                let plugin = default_policy(config, "prefill");
+                let reference = dynamo_kv_router::DefaultWorkerSelector::new(
+                    Some(SelectionConfig::from(&config)),
+                    "prefill",
+                );
+                let plugin = default_policy(SelectionConfig::from(&config), "prefill");
                 for seed in 0..64 {
                     let input = WorkerSelectionInput::configured(
                         &workers,
@@ -451,12 +463,12 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
 fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
     let (workers, mut request) = fixture(8, 17);
     let policy = default_policy(
-        KvRouterConfig {
+        SelectionConfig::from(&KvRouterConfig {
             overlap_score_credit: 0.0,
             prefill_load_scale: 0.0,
             decode_active_request_weight: 1.0,
             ..Default::default()
-        },
+        }),
         "prefill",
     );
     for best in [[0, 1], [2, 5], [6, 7]] {
@@ -490,11 +502,12 @@ fn prepared_values_follow_each_request_when_reusing_a_policy() {
                 ..Default::default()
             };
             let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                Some(config.clone()),
+                Some(SelectionConfig::from(&config)),
                 label,
                 42,
             );
-            let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+            let plugin =
+                DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), label, 42);
             for round in 0..64 {
                 let prompt = [1, 17, 127, 2048][round % 4];
                 let block_size = [8, 16, 32, 17, 3][round % 5];
@@ -558,9 +571,14 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         .tier_overlap_blocks
         .disk
         .insert(WorkerWithDpRank::from_worker_id(999), 1);
-    WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Inspect))
-        .select_worker(support::selection_input(&workers, &request, 16))
-        .unwrap();
+    WorkerSelectionPolicy::new(
+        SelectionConfig::default(),
+        "test",
+        vec![],
+        Box::new(Inspect),
+    )
+    .select_worker(support::selection_input(&workers, &request, 16))
+    .unwrap();
 }
 
 #[test]
@@ -581,7 +599,11 @@ fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
                 .resolve_for_worker_type(&config, role)
                 .unwrap()
                 .unwrap();
-            let policy = factory(&config, role, RoutingPartitionRef::new("model", "default"));
+            let policy = factory(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            );
             let inputs =
                 <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
                     &policy,
@@ -603,7 +625,7 @@ fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
 fn mandatory_pin_is_preserved() {
     let (workers, mut request) = fixture(4, 17);
     request.pinned_worker = Some(WorkerWithDpRank::new(3, 1));
-    let selected = default_policy(KvRouterConfig::default(), "test")
+    let selected = default_policy(SelectionConfig::default(), "test")
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();
     assert_eq!(Some(selected.worker), request.pinned_worker);
@@ -636,7 +658,7 @@ fn configured_parameters_replace_request_score_overrides() {
         router_temperature: 0.0,
         ..Default::default()
     };
-    let policy = default_policy(config, "prefill");
+    let policy = default_policy(SelectionConfig::from(&config), "prefill");
     for _ in 0..32 {
         let result = policy
             .select_worker(support::selection_input(&workers, &request, 16))
@@ -674,9 +696,13 @@ fn pin_does_not_advance_seeded_random_stream() {
         router_temperature: 0.7,
         ..Default::default()
     };
-    let reference =
-        dynamo_kv_router::DefaultWorkerSelector::new_seeded(Some(config.clone()), "prefill", 42);
-    let plugin = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+    let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+        Some(SelectionConfig::from(&config)),
+        "prefill",
+        42,
+    );
+    let plugin =
+        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
     for pinned in [true, false, true, false, false] {
         request.pinned_worker = pinned.then_some(WorkerWithDpRank::new(3, 1));
         let input = support::selection_input(&workers, &request, 16);
@@ -730,7 +756,7 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
         };
         let factory = registry.resolve(&config).unwrap().unwrap();
         let policy = factory(
-            &config,
+            &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
         );
@@ -787,7 +813,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         config.apply_policy_config().unwrap();
         let factory = registry.resolve(&config).unwrap().unwrap();
         let policy = factory(
-            &config,
+            &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
         );
@@ -804,7 +830,10 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
             "cache={cache_type} legacy={legacy:?} parameters={parameters}"
         );
         if parameters == "{}" {
-            assert_eq!(select(default_policy(config, "prefill")), expected_worker);
+            assert_eq!(
+                select(default_policy(SelectionConfig::from(&config), "prefill")),
+                expected_worker
+            );
         }
     }
 }
@@ -823,8 +852,10 @@ fn selector_runtime_update_keeps_the_seeded_random_stream() {
         overlap_score_credit_decay: 0.6,
         ..Default::default()
     };
-    let fixed = DefaultWorkerSelector::new_seeded(Some(config.clone()), "prefill", 42);
-    let updated = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+    let fixed =
+        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
+    let updated =
+        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
     // Sampling at a nonzero temperature draws from the seeded stream on every selection, so the
     // rebuilt policy must keep drawing from the same stream to stay in lockstep.
     let applied = updated
@@ -853,7 +884,7 @@ fn selector_controls_share_runtime_state_and_clones_start_fresh() {
         router_temperature: 0.5,
         ..Default::default()
     };
-    let selector = DefaultWorkerSelector::new(Some(config), "replay");
+    let selector = DefaultWorkerSelector::new(Some(SelectionConfig::from(&config)), "replay");
     let control = selector.runtime_control();
     let initial = control.runtime_config().unwrap();
     assert_eq!(initial.revision(), 0);
@@ -909,12 +940,12 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                 WorkerType::Decode,
             ] {
                 let policy = dynamo_custom_policy_builtin::default_factory()(
-                    &config,
+                    &SelectionConfig::from(&config),
                     role,
                     RoutingPartitionRef::new("model", "default"),
                 );
                 let expected = policy.runtime_config().unwrap();
-                let startup = startup_policy_parameters(&config, role);
+                let startup = startup_policy_parameters(&SelectionConfig::from(&config), role);
                 assert_eq!(
                     &startup,
                     expected.parameters(),

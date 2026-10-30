@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
@@ -86,7 +87,11 @@ worker_selection:
             WorkerType::Decode,
             WorkerType::Encode,
         ] {
-            factory(&config, role, RoutingPartitionRef::new("model", "default"));
+            factory(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            );
         }
     }
 }

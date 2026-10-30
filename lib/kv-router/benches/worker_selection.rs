@@ -14,7 +14,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerCandidates,
+    DefaultWorkerSelector, SchedulingRequest, SelectionConfig, WorkerCandidate, WorkerCandidates,
     WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
     WorkerSelectionPolicyError, WorkerSelector,
@@ -254,7 +254,7 @@ fn worker_selection(c: &mut Criterion) {
             for worker_count in [2, 32, 1_024, 2_048, 10_000] {
                 let (workers, request) = fixture(worker_count);
                 let selector = DefaultWorkerSelector::new(
-                    Some(KvRouterConfig {
+                    Some(SelectionConfig {
                         router_temperature: temperature,
                         overlap_score_credit_decay,
                         ..Default::default()
@@ -290,7 +290,7 @@ fn custom_worker_selection(c: &mut Criterion) {
     const WORKER_COUNT: usize = 10_000;
 
     let (workers, request) = fixture(WORKER_COUNT);
-    let config = KvRouterConfig {
+    let config = SelectionConfig {
         router_temperature: 0.0,
         ..Default::default()
     };
@@ -367,7 +367,7 @@ fn custom_worker_selection(c: &mut Criterion) {
 
 fn unused_preferred_taint_metadata(c: &mut Criterion) {
     const WORKER_COUNT: usize = 10_000;
-    let config = KvRouterConfig {
+    let config = SelectionConfig {
         router_temperature: 0.0,
         ..Default::default()
     };
@@ -408,7 +408,7 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
 }
 
 fn default_policy_wrapper(c: &mut Criterion) {
-    let config = KvRouterConfig {
+    let config = SelectionConfig {
         router_temperature: 0.0,
         ..Default::default()
     };

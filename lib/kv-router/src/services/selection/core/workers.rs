@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::plugins::worker_selection::SelectionConfig;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
@@ -339,7 +340,7 @@ impl SelectionCore {
                     ))
                 });
                 let selector = (self.worker_selection_policy_factory)(
-                    &self.kv_router_config,
+                    &SelectionConfig::from(&self.kv_router_config),
                     self.worker_type,
                     key.as_ref(),
                 );

@@ -41,7 +41,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 mod tests {
     use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, SelectionConfig, WorkerType};
 
     use super::*;
 
@@ -91,7 +91,7 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 
@@ -119,7 +119,7 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 

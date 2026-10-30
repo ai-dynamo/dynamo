@@ -15,11 +15,11 @@ use super::{
 };
 
 use crate::kv_hints::{KvTransferSourceSummary, KvTransferTarget};
+use crate::plugins::worker_selection::SelectionConfig;
 use crate::protocols::{
     SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
 };
-use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
@@ -36,14 +36,14 @@ use crate::plugins::worker_selection::{
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
     #[cfg(any(test, feature = "bench"))]
-    Reference(Box<KvRouterConfig>, DefaultWorkerPicker),
+    Reference(Box<SelectionConfig>, DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
     Composed(RefCell<ComposedPolicyState>),
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
     #[cfg(any(test, feature = "bench"))]
-    Reference(&'a KvRouterConfig, &'a DefaultWorkerPicker),
+    Reference(&'a SelectionConfig, &'a DefaultWorkerPicker),
     Composed(&'a RefCell<ComposedPolicyState>),
 }
 
@@ -87,7 +87,7 @@ impl WorkerSelectionPolicy {
     /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
     /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new(
-        kv_router_config: KvRouterConfig,
+        kv_router_config: SelectionConfig,
         worker_label: &'static str,
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
@@ -101,7 +101,7 @@ impl WorkerSelectionPolicy {
     /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
     /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new_with_filters(
-        _kv_router_config: KvRouterConfig,
+        _kv_router_config: SelectionConfig,
         worker_label: &'static str,
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
@@ -231,7 +231,7 @@ impl WorkerSelectionPolicy {
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
     #[cfg(any(test, feature = "bench"))]
-    pub fn reference(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
+    pub fn reference(kv_router_config: SelectionConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new();
         Self {
             worker_label,
@@ -735,7 +735,7 @@ mod tests {
         let mut request = base_request(16);
         request.worker_loads =
             worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 8), (worker1, 1)]));
-        let config = KvRouterConfig {
+        let config = SelectionConfig {
             router_temperature: 0.0,
             ..Default::default()
         };
@@ -799,7 +799,7 @@ mod tests {
         let mut request = base_request(33);
         request.token_seq = Some(vec![0, 1]);
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(LoadPicker),
@@ -864,7 +864,7 @@ mod tests {
             (0..8u64).map(|id| (WorkerWithDpRank::from_worker_id(id), id as usize)),
         ));
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(DecodeLoadScorer)],
             Box::new(HighestCostPicker),
@@ -935,7 +935,7 @@ mod tests {
         request.overlap.tier_overlap_blocks.device =
             FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(HighestOverlapPicker),
@@ -1046,7 +1046,7 @@ mod tests {
             request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
             request.kv_transfer_candidates = candidates;
             let policy = WorkerSelectionPolicy::new_with_filters(
-                KvRouterConfig::default(),
+                SelectionConfig::default(),
                 "test",
                 vec![Box::new(TransferFilter)],
                 vec![
@@ -1159,7 +1159,7 @@ mod tests {
         ]);
         let request = base_request(16);
         let policy = WorkerSelectionPolicy::new_with_filters(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(ReportedKvFilter)],
             vec![Box::new(BatchBudgetScorer)],
@@ -1264,7 +1264,7 @@ mod tests {
             })
             .collect();
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(EveryInputScorer)],
             Box::new(FirstPicker),
@@ -1389,7 +1389,7 @@ mod tests {
         request.routing_constraints.preferred_taints =
             HashMap::from([("preferred".to_string(), 0.5)]);
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(PreferenceScorer)],
             Box::new(PreferencePicker),
@@ -1465,7 +1465,7 @@ mod tests {
         request.routing_constraints.preferred_taints =
             HashMap::from([("preferred".to_string(), 0.5)]);
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(NoPreferencePicker),
@@ -1516,7 +1516,7 @@ mod tests {
         let mut request = base_request(16);
         request.overlap.effective_overlap_blocks.insert(worker, 3.5);
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(RawDeviceOverlapPicker),
@@ -1601,7 +1601,7 @@ mod tests {
         request.priority_jump = 3.0;
         request.strict_priority = 2;
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(ContextPicker),
@@ -1652,7 +1652,7 @@ mod tests {
         let mut request = base_request(16);
         request.affinity_target = Some(worker1.into());
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(AffinityPicker),
@@ -1707,7 +1707,7 @@ mod tests {
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
         let request = base_request(16);
         let policy = WorkerSelectionPolicy::new_with_filters(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(RejectWithoutSignals)],
             vec![Box::new(CacheScorer)],
@@ -1768,7 +1768,7 @@ mod tests {
             .insert(rejected, 6);
         request.overlap.tier_overlap_blocks.device.insert(kept, 1);
         let policy = WorkerSelectionPolicy::new_with_filters(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(RejectWorker(rejected))],
             vec![Box::new(ZeroScorer)],
@@ -1827,7 +1827,7 @@ mod tests {
         }
 
         let policy = WorkerSelectionPolicy::new_with_filters(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(CacheFilter)],
             vec![Box::new(LoadScorer)],

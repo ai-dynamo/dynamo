@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_kv_router::SelectionConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -126,8 +127,10 @@ pub(super) fn replay_selector_with_seed(
     }
 
     Ok(match selector_seed {
-        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
-        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+        Some(seed) => {
+            DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(config)), "replay", seed)
+        }
+        None => DefaultWorkerSelector::new(Some(SelectionConfig::from(config)), "replay"),
     })
 }
 

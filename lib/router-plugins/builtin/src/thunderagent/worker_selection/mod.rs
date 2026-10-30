@@ -107,7 +107,7 @@ mod tests {
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
     use dynamo_kv_router::{
-        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
+        SelectionConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
         WorkerSelector,
     };
 
@@ -163,7 +163,7 @@ mod tests {
 
     fn policy() -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(ThunderAgentScorer)],
             Box::new(ThunderAgentPicker),

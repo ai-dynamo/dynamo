@@ -3,7 +3,7 @@
 
 //! Startup parameters and provider registration for the default policy.
 
-use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::config::SharedCacheType;
 use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
@@ -38,8 +38,8 @@ pub(super) struct PolicyParameters {
     pub(super) router_temperature: f64,
 }
 
-impl From<&KvRouterConfig> for PolicyParameters {
-    fn from(config: &KvRouterConfig) -> Self {
+impl From<&SelectionConfig> for PolicyParameters {
+    fn from(config: &SelectionConfig) -> Self {
         Parameters::default().resolve(config)
     }
 }
@@ -71,7 +71,7 @@ impl Parameters {
         Ok(())
     }
 
-    fn resolve(&self, config: &KvRouterConfig) -> PolicyParameters {
+    fn resolve(&self, config: &SelectionConfig) -> PolicyParameters {
         let overlap_score_credit = self
             .overlap_score_credit
             .unwrap_or(config.overlap_score_credit);
@@ -122,7 +122,7 @@ impl PolicyParameters {
 
     pub(super) fn from_runtime(
         values: serde_json::Map<String, serde_json::Value>,
-        config: &KvRouterConfig,
+        config: &SelectionConfig,
     ) -> Result<Self, dynamo_kv_router::plugins::worker_selection::RuntimePolicyError> {
         use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
         // Runtime maps are resolved; startup parameters may be absent or null.
@@ -149,7 +149,7 @@ pub(crate) fn register(
             let parameters: Parameters = parameters.deserialize()?;
             parameters.validate()?;
             Ok(Arc::new(
-                move |config: &KvRouterConfig, role, _partition| {
+                move |config: &SelectionConfig, role, _partition| {
                     policy_for_role(config.clone(), role, parameters.resolve(config))
                 },
             ))

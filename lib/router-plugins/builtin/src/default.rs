@@ -15,13 +15,16 @@ pub use selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerType};
+use dynamo_kv_router::{SelectionConfig, WorkerType};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// Construct the builtin default from configured policy parameters.
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
-pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
+pub fn default_policy(
+    config: SelectionConfig,
+    worker_label: &'static str,
+) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
     runtime_policy(config, parameters, worker_label, None)
 }
@@ -34,7 +37,7 @@ pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> Wor
 /// Keys are the policy parameter names, and every value is a JSON number. A selected policy
 /// instance's own `parameters` are not applied: this describes the factory with no instance.
 pub fn startup_policy_parameters(
-    config: &KvRouterConfig,
+    config: &SelectionConfig,
     role: WorkerType,
 ) -> serde_json::Map<String, serde_json::Value> {
     role_parameters(config, role, PolicyParameters::from(config)).snapshot()
@@ -43,7 +46,7 @@ pub fn startup_policy_parameters(
 /// Build a runtime-configurable policy. A rebuild from patched parameters keeps `rng`, so a
 /// seeded selector continues its random stream across updates.
 fn runtime_policy(
-    config: KvRouterConfig,
+    config: SelectionConfig,
     parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
@@ -65,7 +68,7 @@ fn runtime_policy(
 }
 
 fn policy_with_rng(
-    config: KvRouterConfig,
+    config: SelectionConfig,
     parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
@@ -84,7 +87,7 @@ pub fn default_factory() -> WorkerSelectionPolicyFactory {
 }
 
 fn policy_for_role(
-    config: KvRouterConfig,
+    config: SelectionConfig,
     role: WorkerType,
     parameters: PolicyParameters,
 ) -> WorkerSelectionPolicy {
@@ -93,7 +96,7 @@ fn policy_for_role(
 }
 
 fn role_parameters(
-    config: &KvRouterConfig,
+    config: &SelectionConfig,
     role: WorkerType,
     parameters: PolicyParameters,
 ) -> PolicyParameters {

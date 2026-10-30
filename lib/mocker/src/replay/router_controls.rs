@@ -175,7 +175,10 @@ mod tests {
         let selectors = controls
             .iter()
             .map(|(worker_type, config)| {
-                let selector = DefaultWorkerSelector::new(Some(config.clone()), "replay");
+                let selector = DefaultWorkerSelector::new(
+                    Some(dynamo_kv_router::SelectionConfig::from(config)),
+                    "replay",
+                );
                 registry.register(*worker_type, selector.runtime_control());
                 selector
             })

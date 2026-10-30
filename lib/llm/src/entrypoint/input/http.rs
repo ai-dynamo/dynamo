@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::SelectionConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
+    RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
     plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -69,7 +70,7 @@ impl HttpFrontend {
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
         F: for<'a> Fn(
-                &KvRouterConfig,
+                &SelectionConfig,
                 WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
@@ -481,6 +482,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+    use dynamo_kv_router::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {

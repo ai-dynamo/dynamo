@@ -13,7 +13,7 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy};
+use dynamo_kv_router::{SelectionConfig, WorkerSelectionPolicy};
 use picker::LowestCostPicker;
 use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 
@@ -27,7 +27,7 @@ fn provider(
     let _: Parameters = parameters.deserialize()?;
 
     Ok(Arc::new(
-        |config: &KvRouterConfig, worker_type, _partition| {
+        |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),

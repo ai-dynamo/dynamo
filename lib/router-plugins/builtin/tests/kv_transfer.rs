@@ -5,6 +5,7 @@
 
 mod support;
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,
@@ -131,9 +132,10 @@ fn select(
     request: &SchedulingRequest,
     multiplier: f64,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
-    let selected = DefaultWorkerSelector::new(Some(config(multiplier)), "test")
-        .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
-        .unwrap();
+    let selected =
+        DefaultWorkerSelector::new(Some(SelectionConfig::from(&config(multiplier))), "test")
+            .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
+            .unwrap();
     (
         selected.worker.worker_id,
         selected
@@ -161,7 +163,7 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     // At half credit A costs 17 and B costs 15: B wins and fetches everything from C.
     assert_eq!(select(&workers, &request, 0.5), (1, from_c));
     // Fetch credit only scores; it does not count as cached for prefill booking.
-    let selected = DefaultWorkerSelector::new(Some(config(0.5)), "test")
+    let selected = DefaultWorkerSelector::new(Some(SelectionConfig::from(&config(0.5))), "test")
         .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
         .unwrap();
     assert_eq!(selected.cached_tokens, 0);
@@ -217,11 +219,12 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                 ..config(multiplier)
             };
             let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                Some(config.clone()),
+                Some(SelectionConfig::from(&config)),
                 "test",
                 42,
             );
-            let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+            let plugin =
+                DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "test", 42);
             for _ in 0..32 {
                 let expected = reference
                     .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))

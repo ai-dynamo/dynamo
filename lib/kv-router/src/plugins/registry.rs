@@ -327,6 +327,7 @@ mod tests {
     use super::*;
     use crate::WorkerSelectionPolicyError;
     use crate::identity::RoutingPartitionRef;
+    use crate::plugins::worker_selection::SelectionConfig;
     use crate::scheduling::selector::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
@@ -340,7 +341,7 @@ mod tests {
     }
 
     fn policy(
-        _config: &KvRouterConfig,
+        _config: &SelectionConfig,
         _worker_type: WorkerType,
         _partition: RoutingPartitionRef<'_>,
     ) -> WorkerSelectionPolicy {
@@ -528,10 +529,26 @@ worker_selection:
         let router_config = KvRouterConfig::default();
         let partition = RoutingPartitionRef::new("model", "default");
 
-        factory(&router_config, WorkerType::Prefill, partition);
-        factory(&router_config, WorkerType::Decode, partition);
-        factory(&router_config, WorkerType::Aggregated, partition);
-        factory(&router_config, WorkerType::Encode, partition);
+        factory(
+            &SelectionConfig::from(&router_config),
+            WorkerType::Prefill,
+            partition,
+        );
+        factory(
+            &SelectionConfig::from(&router_config),
+            WorkerType::Decode,
+            partition,
+        );
+        factory(
+            &SelectionConfig::from(&router_config),
+            WorkerType::Aggregated,
+            partition,
+        );
+        factory(
+            &SelectionConfig::from(&router_config),
+            WorkerType::Encode,
+            partition,
+        );
 
         assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
         assert_eq!(

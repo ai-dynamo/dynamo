@@ -16,7 +16,7 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyRegistryError,
 };
 use dynamo_kv_router::{
-    KvRouterConfig, ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker,
+    ScoredWorkerCandidate, SelectionConfig, WorkerInputView, WorkerInputs, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
 
@@ -99,7 +99,7 @@ fn provider(
     let max_active_requests = parameters.max_active_requests;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
@@ -192,7 +192,7 @@ mod tests {
 
     fn policy(max_active_requests: usize) -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(SoftPinRepinPicker {

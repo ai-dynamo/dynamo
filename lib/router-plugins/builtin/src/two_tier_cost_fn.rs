@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -166,7 +166,7 @@ fn provider(
     parameters.validate()?;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
@@ -267,7 +267,7 @@ mod tests {
         }
         let configs = HashMap::from(workers.map(|(id, _, _)| (id, TestWorker)));
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(TwoTierCostFnPicker { parameters }),
