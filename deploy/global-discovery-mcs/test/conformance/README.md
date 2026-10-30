@@ -97,3 +97,9 @@ when tests fail.
 Distinct subnet overrides supported by the e2e helpers can be supplied when
 running alongside another routed e2e deployment. Merely changing the cluster
 prefix does not change its subnet assignments.
+
+## Recorded baseline
+
+See the [complete #17615 baseline results](results/README.md) and upstream YAML
+report. That run completed all 28 specifications with 15 passing, 13 failing
+and none skipped; three failures are required API conformance checks.
