@@ -478,9 +478,9 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_legacy_and_the_core_takes_mesh_peers() {
+    fn selection_defaults_to_current_and_the_core_takes_mesh_peers() {
         let args = Args::try_parse_from(["global-frontend", POOL]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Legacy);
+        assert_eq!(args.selection, SelectionPath::Current);
         assert_eq!(replica_transport(&args).unwrap(), None);
 
         let args = Args::try_parse_from([
