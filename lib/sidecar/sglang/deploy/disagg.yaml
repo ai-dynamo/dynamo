@@ -39,7 +39,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:v0.5.23
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -126,7 +126,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:v0.5.23
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
