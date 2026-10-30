@@ -3,7 +3,9 @@
 
 """Compatibility with SGLang's recipe-based DeepSeek prompt encoder."""
 
+import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 try:
@@ -12,6 +14,21 @@ except ModuleNotFoundError as exc:
     if exc.name != "sglang.srt.parser.deepseek_recipe_renderer":
         raise
     recipe_renderer = None
+
+
+def resolve_deepseek_spec(model_path: str) -> str | None:
+    """Resolve the encoder from the downloaded checkpoint, independent of aliases."""
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    architectures = config.get("architectures") or []
+    arch = architectures[0] if architectures else ""
+    if config.get("model_type") == "deepseek_v41" or "DeepseekV41" in arch:
+        return "dsv41"
+    if config.get("model_type") == "deepseek_v4" or "DeepseekV4" in arch:
+        return "dsv4"
+    return None
 
 
 class RecipeRequestError(ValueError):
@@ -50,6 +67,7 @@ def render_recipe_prompt(
         "tools": tools,
         "tool_choice": "auto" if tools else None,
         "response_format": request.get("response_format"),
+        "continue_final_message": request.get("continue_final_message", False),
     }
     encoder = _encoder(tokenizer, spec)
     budget = None

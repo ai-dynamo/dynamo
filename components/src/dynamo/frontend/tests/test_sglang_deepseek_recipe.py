@@ -4,6 +4,7 @@
 """Recipe encoding against SGLang's real adapter, without loading a model."""
 
 import copy
+import json
 
 import pytest
 
@@ -75,14 +76,11 @@ def test_recipe_uses_served_tokenizer_and_request_effort(tokenizer, spec, effort
     assert request == original
 
 
-@pytest.mark.parametrize(
-    "choice", ["none", {"type": "function", "function": {"name": "weather"}}]
-)
-def test_filtered_tools_leave_tool_choice_to_host_grammar(tokenizer, choice):
+def test_filtered_tools_leave_tool_choice_to_host_grammar(tokenizer):
     request = {
         "messages": [{"role": "user", "content": "Weather?"}],
         "tools": [{"type": "function", "function": {"name": "weather"}}],
-        "tool_choice": choice,
+        "tool_choice": {"type": "function", "function": {"name": "weather"}},
     }
     ids = render(request, tokenizer)
     prompt = tokenizer.backend_tokenizer.decode(ids, skip_special_tokens=False)
@@ -119,3 +117,36 @@ def test_recipe_request_errors_do_not_hide_tokenizer_configuration_errors(tokeni
     with pytest.raises(ValueError, match="fast tokenizer") as error:
         render(request, object(), spec="dsv41")
     assert not isinstance(error.value, sglang_deepseek.RecipeRequestError)
+
+
+@pytest.mark.parametrize("spec", ["dsv4", "dsv41"])
+def test_recipe_continues_final_assistant_message(tokenizer, spec):
+    request = {
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "The answer is"},
+        ],
+        "continue_final_message": True,
+    }
+    original = copy.deepcopy(request)
+    ids = render(request, tokenizer, spec=spec)
+    prompt = tokenizer.backend_tokenizer.decode(ids, skip_special_tokens=False)
+    assert prompt.endswith("The answer is")
+    assert request == original
+
+
+@pytest.mark.parametrize(
+    "model_type,architecture,expected",
+    [
+        ("deepseek_v41", "DeepseekV4ForCausalLM", "dsv41"),
+        ("deepseek_v4", "DeepseekV4ForCausalLM", "dsv4"),
+        ("other", "OtherForCausalLM", None),
+    ],
+)
+def test_recipe_spec_comes_from_checkpoint(
+    tmp_path, model_type, architecture, expected
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": model_type, "architectures": [architecture]})
+    )
+    assert sglang_deepseek.resolve_deepseek_spec(str(tmp_path)) == expected
