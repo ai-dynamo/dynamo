@@ -74,7 +74,11 @@ Every case that disables thinking also asserts that none happened: an empty
 `reasoning_content` is required, and when the backend reports
 `usage.completion_tokens_details.reasoning_tokens` it must be zero
 (`unexpected_reasoning_tokens`). With thinking enabled, reasoning tokens with
-an empty `reasoning_content` are reported as `reasoning_dropped`.
+an empty `reasoning_content` are reported as `reasoning_dropped`. When a
+forced tool call comes back with thinking disabled and `content` reads like a
+thinking block, the record fails with `reasoning_text_in_content`: the
+template ignored the flag and the frontend folded the reasoning into content
+(dynamo #17521, #17578).
 
 ### Failure taxonomy
 

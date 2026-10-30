@@ -104,8 +104,24 @@ RAW_REASONING_MARKERS = (
     "<think>",
     "</think>",
     "<|channel>thought",
+    "<mm:think>",
+    "</mm:think>",
     "◁think▷",
     "◁/think▷",
+)
+# Phrases a thinking block opens with. Used only as a heuristic for
+# thinking-disabled cases whose content should be empty (a forced tool call).
+REASONING_PHRASES = (
+    "the user wants",
+    "the user is asking",
+    "the user asked",
+    "i need to",
+    "let me ",
+    "let's ",
+    "first, i",
+    "i will call",
+    "i should call",
+    "okay, the user",
 )
 FAILURE_CATEGORIES = (
     "dynamo_api",
@@ -173,6 +189,7 @@ ERROR_KIND_SUBCATEGORIES = {
     "unexpected_reasoning_content": "reasoning_routing",
     "unexpected_reasoning_tokens": "reasoning_routing",
     "reasoning_dropped": "reasoning_routing",
+    "reasoning_text_in_content": "reasoning_routing",
     "reasoning_mismatch": "reasoning_routing",
     "reasoning_mangled_function_text": "reasoning_routing",
     "reasoning_only_response": "reasoning_routing",
@@ -243,6 +260,7 @@ DYNAMO_API_ERROR_KINDS = frozenset(
         "unexpected_reasoning_content",
         "unexpected_reasoning_tokens",
         "reasoning_dropped",
+        "reasoning_text_in_content",
         "wrong_tool_type",
     }
 )
@@ -3506,6 +3524,15 @@ def find_tool_call_json_leaks(content: str, tool_names: list[str]) -> list[str]:
     return leaked
 
 
+def looks_like_reasoning(content: str) -> bool:
+    """Heuristic: long prose that opens like a thinking block."""
+    text = content.strip()
+    if len(text) < 120:
+        return False
+    head = text[:400].casefold()
+    return any(phrase in head for phrase in REASONING_PHRASES)
+
+
 def reported_reasoning_tokens(usage: Any) -> int | None:
     """Return usage.completion_tokens_details.reasoning_tokens when present."""
     if not isinstance(usage, dict):
@@ -4638,6 +4665,26 @@ def validate_result(
             error(
                 "unexpected_reasoning_content",
                 "thinking is disabled but reasoning_content is non-empty",
+            )
+        )
+    # Thinking disabled plus a forced call: the model has nothing to say in
+    # content. Reasoning-looking prose there means the template ignored the
+    # flag and the frontend folded the reasoning into content
+    # (dynamo #17521 / #17578).
+    if (
+        case.expect_reasoning is False
+        and _tool_choice_requires_call(case)
+        and result.tool_calls
+        and looks_like_reasoning(result.content or "")
+    ):
+        errors.append(
+            error(
+                "reasoning_text_in_content",
+                (
+                    "thinking is disabled and a tool call was forced, but content "
+                    "reads like a thinking block"
+                ),
+                content_chars=len(result.content or ""),
             )
         )
     # An empty reasoning_content is not proof that no thinking happened: the

@@ -1158,3 +1158,48 @@ def test_thinking_disabled_checks_reasoning_tokens_not_only_the_field() -> None:
         "dynamo_api",
         "reasoning_routing",
     )
+
+
+def test_reasoning_folded_into_content_is_caught_without_markers() -> None:
+    """dynamo #17521 / #17578: template ignores thinking=false, frontend folds
+    the parsed reasoning into content. No marker, maybe no usage detail."""
+    case = case_by_id(
+        probe.build_cases("generic"),
+        "customer_required_forces_weather_thinking_disabled",
+    )
+    folded = probe.ChatResult(
+        finish_reason="tool_calls",
+        content=(
+            "The user wants me to say hello briefly, but a tool call is required. "
+            "I need to call get_weather with some location. Let me pick Paris and "
+            "produce the call exactly as the schema asks, with no extra text."
+        ),
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+        usage={"prompt_tokens": 40, "completion_tokens": 90, "total_tokens": 130},
+    )
+    errors, _ = probe.validate_result(case, folded)
+    assert "reasoning_text_in_content" in error_kinds(errors)
+    assert "unexpected_reasoning_content" not in error_kinds(errors)
+    assert probe.classify_failure_detail(case, folded, errors) == (
+        "dynamo_api",
+        "reasoning_routing",
+    )
+
+    # MiniMax M3 markers leaking into content are caught by the marker check.
+    marked = probe.ChatResult(
+        finish_reason="tool_calls",
+        content="<mm:think>Let me think.</mm:think>",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+    )
+    errors, _ = probe.validate_result(case, marked)
+    assert "reasoning_marker_leaked_to_content" in error_kinds(errors)
+
+    # Short narration next to a forced call is not reasoning.
+    narrated = probe.ChatResult(
+        finish_reason="tool_calls",
+        content="Checking the weather now.",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+    )
+    errors, _ = probe.validate_result(case, narrated)
+    assert "reasoning_text_in_content" not in error_kinds(errors)
+    assert not probe.looks_like_reasoning("Sure, I can help with that.")
