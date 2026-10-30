@@ -227,7 +227,6 @@ def test_read_pod_logs_recovers_from_transient_tunnel_drop(monkeypatch) -> None:
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_read_pod_logs_retries_stalled_read(monkeypatch) -> None:
-    """A read that times out is retried, not returned as a partial log."""
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
     pod = _fake_pod([httpx.ReadTimeout("timed out"), _LIBFABRIC_LOG], _NO_PREVIOUS)
@@ -254,7 +253,6 @@ def test_read_pod_logs_raises_when_tunnel_stays_down(monkeypatch) -> None:
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_read_pod_logs_raises_other_previous_instance_errors() -> None:
-    """Only a missing previous instance is skipped; other read errors fail the read."""
     pod = _fake_pod([_LIBFABRIC_LOG], kr8s.ServerError("pods is forbidden"))
 
     with pytest.raises(kr8s.ServerError, match="forbidden"):
