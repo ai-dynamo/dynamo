@@ -64,6 +64,13 @@ impl SelectionCore {
         for key in &affected {
             self.publish_scheduler_config(key);
         }
+        let committed: HashSet<RoutingPartitionId> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().map(WorkerCatalogRecord::key))
+            .collect();
+        for key in &committed {
+            self.apply_held_bindings(key);
+        }
         results
     }
 
@@ -81,7 +88,9 @@ impl SelectionCore {
         let mut record = previous.clone();
         record.apply_patch(patch);
         self.prepare_worker(&mut record)?;
-        self.reconcile_worker(record, Some(previous), None).await
+        let record = self.reconcile_worker(record, Some(previous), None).await?;
+        self.apply_held_bindings(&record.key());
+        Ok(record)
     }
 
     pub async fn delete_worker(

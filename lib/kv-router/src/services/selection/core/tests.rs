@@ -4044,15 +4044,19 @@ async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
 fn core_with_binding_stream(
     writer_id: u64,
 ) -> (SelectionCore, mpsc::Receiver<AffinityBindingEvent>) {
+    core_with_binding_stream_mode(writer_id, SessionAffinityMode::Soft)
+}
+
+fn core_with_binding_stream_mode(
+    writer_id: u64,
+    mode: SessionAffinityMode,
+) -> (SelectionCore, mpsc::Receiver<AffinityBindingEvent>) {
     core_with(
         test_config(false),
         SelectionHost::default(),
         None,
         WorkerType::Aggregated,
-        Some(
-            SessionAffinityConfig::new(Duration::from_secs(10))
-                .with_mode(SessionAffinityMode::Soft),
-        ),
+        Some(SessionAffinityConfig::new(Duration::from_secs(10)).with_mode(mode)),
     )
     .with_session_binding_publisher(writer_id)
 }
@@ -4096,6 +4100,100 @@ async fn host_stream_publishes_bindings_and_refreshes() {
     assert!(peer_updates.try_recv().is_err());
 }
 
+/// The peer learns the binding before it discovers the bound worker: first
+/// with no partition at all, then with the partition known through another
+/// worker. Either way the binding waits, then steers the peer's next turn.
+#[tokio::test(start_paused = true)]
+async fn host_stream_binding_before_discovery_is_applied_on_upsert() {
+    for peer_workers in [vec![], vec![2]] {
+        let (source, mut updates) = core_with_binding_stream_mode(11, SessionAffinityMode::Hard);
+        let (peer, mut peer_updates) = core_with_binding_stream_mode(22, SessionAffinityMode::Hard);
+        source.upsert_worker(worker(1)).await.unwrap();
+        for &id in &peer_workers {
+            peer.upsert_worker(worker(id)).await.unwrap();
+        }
+        source
+            .select_and_reserve(session_reservation("turn", "s"))
+            .await
+            .unwrap();
+        let binding = updates.try_recv().unwrap();
+        assert_eq!(binding.worker_id, 1);
+
+        peer.dispatch_affinity_event(binding.clone());
+        if peer_workers.is_empty() {
+            assert!(peer.entry(&default_key()).is_none());
+        } else {
+            assert_eq!(
+                bound_worker(&peer, "s"),
+                None,
+                "worker 1 is not eligible yet"
+            );
+        }
+        assert_eq!(peer.held_bindings.lock().len(), 1);
+
+        peer.upsert_worker(worker(1)).await.unwrap();
+        assert_eq!(
+            bound_worker(&peer, "s"),
+            Some(1),
+            "workers={peer_workers:?}"
+        );
+        assert!(peer.held_bindings.lock().is_empty());
+        let next = peer
+            .select_and_reserve(session_reservation("next-turn", "s"))
+            .await
+            .unwrap();
+        assert_eq!(next.worker_id, 1);
+        peer.free_reservation("next-turn").await.unwrap();
+        while let Ok(update) = peer_updates.try_recv() {
+            assert_eq!(update.worker_id, 1);
+            assert_eq!(update.version(), binding.version(), "peer must not rebind");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_binding_expires_after_session_ttl() {
+    let (peer, _peer_updates) = core_with_binding_stream(22);
+    peer.upsert_worker(worker(2)).await.unwrap();
+    peer.dispatch_affinity_event(AffinityBindingEvent {
+        partition: default_key(),
+        session_id: "s".to_string(),
+        worker_id: 1,
+        dp_rank: Some(0),
+        sequence: 1,
+        writer_id: 11,
+    });
+    tokio::time::advance(Duration::from_secs(10)).await;
+    peer.upsert_worker(worker(1)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), None);
+    assert!(peer.held_bindings.lock().is_empty());
+}
+
+#[test]
+fn held_bindings_drop_the_oldest_past_the_limit() {
+    let start = tokio::time::Instant::now();
+    let mut held = HeldBindings::default();
+    let limit = AFFINITY_EVENT_CHANNEL_CAPACITY;
+    for index in 0..=limit {
+        held.hold(
+            AffinityBindingEvent {
+                partition: default_key(),
+                session_id: format!("s{index}"),
+                worker_id: 1,
+                dp_rank: Some(0),
+                sequence: index as u64,
+                writer_id: 11,
+            },
+            start + Duration::from_millis(index as u64),
+        );
+    }
+    assert_eq!(held.len(), limit);
+    let ready = held.take_placeable(&default_key(), Duration::from_secs(3600), start, |_| true);
+    assert_eq!(ready.len(), limit);
+    assert!(ready.iter().all(|event| event.session_id != "s0"));
+    assert!(held.is_empty());
+}
+
 #[tokio::test]
 async fn peer_bindings_converge_by_version() {
     let (source, mut source_updates) = core_with_binding_stream(11);
@@ -4133,10 +4231,25 @@ async fn peer_bindings_converge_by_version() {
     source.select_and_reserve(request).await.unwrap();
     let newer = source_updates.try_recv().unwrap();
     assert!(newer.version() > concurrent.version());
-    peer.dispatch_affinity_event(newer);
+    peer.dispatch_affinity_event(newer.clone());
     peer.free_reservation("first").await.unwrap();
     assert_eq!(bound_worker(&peer, "s"), Some(3));
     // A stale version cannot displace the newer binding.
     peer.dispatch_affinity_event(first);
     assert_eq!(bound_worker(&peer, "s"), Some(3));
+
+    // Held bindings for undiscovered workers obey the same rule once applied.
+    let mut stale = newer.clone();
+    stale.worker_id = 4;
+    stale.sequence -= 1;
+    peer.dispatch_affinity_event(stale);
+    peer.upsert_worker(worker(4)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
+    let mut early = newer.clone();
+    early.worker_id = 5;
+    early.sequence += 1;
+    peer.dispatch_affinity_event(early);
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
+    peer.upsert_worker(worker(5)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(5));
 }

@@ -53,6 +53,7 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
+mod held_bindings;
 mod hint;
 mod operation;
 mod queries;
@@ -62,6 +63,7 @@ mod run;
 mod tests;
 mod workers;
 
+use held_bindings::HeldBindings;
 use reservations::ReservationIndex;
 
 pub use operation::{
@@ -299,6 +301,8 @@ pub struct SelectionCore {
     session_affinity: Option<SessionAffinityConfig>,
     /// Writer id and publisher for session bindings the host carries to its peers.
     session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
+    /// Peer bindings waiting for this replica to discover their worker.
+    held_bindings: parking_lot::Mutex<HeldBindings>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -453,6 +457,7 @@ impl SelectionCore {
             tracking_hash,
             session_affinity,
             session_binding_tx: None,
+            held_bindings: parking_lot::Mutex::default(),
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
@@ -539,22 +544,10 @@ impl SelectionCore {
         }
     }
 
-    /// Apply a session binding a replica published.
+    /// Apply a session binding a replica published. A binding whose partition,
+    /// affinity table or worker this replica has not discovered yet is held
+    /// and applied when a worker upsert makes it placeable.
     pub(crate) fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
-        let Some(entry) = self.entry(&event.partition) else {
-            tracing::trace!(
-                key = %event.partition,
-                "Dropping session affinity replica update for unknown selector entry"
-            );
-            return;
-        };
-        let Some(table) = entry.affinity.get() else {
-            tracing::trace!(
-                key = %event.partition,
-                "Dropping session affinity replica update: no affinity table"
-            );
-            return;
-        };
         if self
             .replica_config
             .as_ref()
@@ -562,19 +555,30 @@ impl SelectionCore {
         {
             return;
         }
+        // Worker upserts commit to the catalog before draining the held
+        // bindings, so checking placement under this lock means a binding is
+        // either applied here or still held when that drain runs.
+        let mut held = self.held_bindings.lock();
+        let entry = self.entry(&event.partition);
+        let Some(table) = entry.as_ref().and_then(|entry| entry.affinity.get()) else {
+            tracing::trace!(
+                key = %event.partition,
+                "Holding session affinity replica update: no selector entry or affinity table"
+            );
+            held.hold(event, tokio::time::Instant::now());
+            return;
+        };
         table.observe_replica_sequence(event.sequence);
-        if self
-            .catalog
-            .get(event.worker_id)
-            .is_none_or(|record| record.key() != event.partition)
-        {
+        if !self.worker_in_partition(event.worker_id, &event.partition) {
             tracing::trace!(
                 key = %event.partition,
                 worker_id = event.worker_id,
-                "Dropping session affinity replica update: worker not in partition"
+                "Holding session affinity replica update: worker not in partition"
             );
+            held.hold(event, tokio::time::Instant::now());
             return;
         }
+        held.discard_superseded(&event);
         let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
         let outcome = table.apply_replica_update(event.session_id, target, version);
         tracing::trace!(
