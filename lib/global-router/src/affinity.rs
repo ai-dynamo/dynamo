@@ -184,7 +184,7 @@ mod tests {
 
     use crate::load::InFlightTracker;
     use crate::selector::tests::regional_pool;
-    use crate::signals::LoadReport;
+    use crate::signals::{LoadReport, RelaySource};
 
     use super::*;
 
@@ -214,6 +214,10 @@ mod tests {
     /// bind.
     fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
         let window = Duration::from_secs(20);
+        let source = RelaySource {
+            runtime_id: 1,
+            incarnation: 1,
+        };
         for (pool, load) in pools.iter().zip(loads) {
             let in_flight = (load * 128.0).round() as u64;
             let report = LoadReport {
@@ -222,8 +226,8 @@ mod tests {
                 max_concurrency: Some(128),
                 window,
             };
-            signals.record_load(&pool.id, report);
-            signals.record_kv(&pool.id, 0, 16384, window);
+            signals.record_load(&pool.id, source, report);
+            signals.record_kv(&pool.id, source, 0, 16384, window);
         }
     }
 
