@@ -225,6 +225,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "glm47" => false,
                             "gemma4" => thinking != Some(true),
                             // Spark's template has no reasoning-off mode; keep parsing
                             // its private channel even when thinking=false is requested.

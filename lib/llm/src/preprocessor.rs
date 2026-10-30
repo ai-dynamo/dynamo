@@ -7219,6 +7219,8 @@ impl OpenAIPreprocessor {
             return match family {
                 // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
                 "gpt_oss" => false,
+                // Thinking controls govern generation; keep emitted GLM reasoning separate.
+                "glm47" => false,
                 "gemma4" => thinking != Some(true),
                 // Spark's template cannot disable reasoning, so keep generated
                 // reasoning separate instead of folding it into visible content.

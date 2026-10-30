@@ -287,6 +287,11 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
         **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+
+        Thinking controls such as `chat_template_kwargs: {"enable_thinking": false}`
+        affect the model's chat template, not response visibility. If a GLM model
+        still generates reasoning, Dynamo keeps it in `reasoning_content` and
+        returns the answer in `content`.
       </Accordion>
     </AccordionGroup>
   </Accordion>

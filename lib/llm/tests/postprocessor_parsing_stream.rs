@@ -3794,10 +3794,10 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                         .postprocessor_parsing_stream(input, &request, false, false)
                         .unwrap();
                     let out = drain_stream(output).await;
-                    let disabled = if family == "gemma4" {
-                        thinking != Some(true)
-                    } else {
-                        thinking == Some(false)
+                    let disabled = match family {
+                        "gemma4" => thinking != Some(true),
+                        "glm47" => false,
+                        _ => thinking == Some(false),
                     };
                     assert_eq!(
                         out.reasoning,
@@ -3815,6 +3815,99 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                         },
                         "{family} {reasoning:?} {tool:?} {thinking:?} split{split}"
                     );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn glm_thinking_off_preserves_generated_reasoning() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_thinking_off_preserves_generated_reasoning"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    for (reasoning, tool) in [
+        (Some("glm45"), None),
+        (None, Some("glm47")),
+        (Some("glm45"), Some("glm47")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning, tool);
+        for controls in [
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking": false}),
+            serde_json::json!({"enable_thinking": false, "thinking": false}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "glm-model",
+                    "messages": [{"role": "user", "content": "answer"}],
+                    "chat_template_kwargs": controls,
+                    "stream": true
+                }))
+                .unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+
+            for (raw, prefilled, expected_reasoning) in [
+                ("<think>private</think>answer", false, "private"),
+                ("private</think>answer", true, "private"),
+                ("answer", false, ""),
+            ] {
+                for split in 0..=raw.len() {
+                    let input = stream::iter(
+                        vec![
+                            mock_content_chunk(&raw[..split]),
+                            mock_content_chunk(&raw[split..]),
+                            mock_final_chunk(),
+                        ]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                    );
+                    let chunks: Vec<_> = preprocessor
+                        .postprocessor_parsing_stream(input, &request, prefilled, false)
+                        .unwrap()
+                        .collect()
+                        .await;
+                    let out = drain_stream(stream::iter(chunks.clone())).await;
+                    assert_eq!(
+                        out.reasoning, expected_reasoning,
+                        "{reasoning:?} {tool:?} {controls} {prefilled} split{split}"
+                    );
+                    assert_eq!(out.content, "answer");
+                    assert!(out.tool_calls.is_empty());
+                    assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
+
+                    let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter(chunks),
+                        ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned)),
+                    )
+                    .await
+                    .unwrap();
+                    let choice = &batch.inner.choices[0];
+                    assert_eq!(
+                        choice
+                            .message
+                            .reasoning_content
+                            .as_deref()
+                            .unwrap_or_default(),
+                        expected_reasoning
+                    );
+                    assert_eq!(
+                        choice
+                            .message
+                            .content
+                            .as_ref()
+                            .map(get_text)
+                            .unwrap_or_default(),
+                        "answer"
+                    );
+                    assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
                 }
             }
         }
