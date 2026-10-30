@@ -309,7 +309,8 @@ impl FrontendReports {
         });
     }
 
-    /// One view per model a catalog pool registers or a fresh frontend serves.
+    /// One view per model a catalog pool registers, the topology serves, or a
+    /// fresh frontend serves.
     ///
     /// Frontends without an exact namespace publish in `relay_namespace` but
     /// serve every namespace's models, so their load of a model the catalog
@@ -349,6 +350,7 @@ impl FrontendReports {
             })
             .collect::<HashMap<_, _>>();
         for &(namespace, model) in capacities.keys() {
+            models.entry((namespace, model)).or_default();
             homes.entry(model).or_default().insert(namespace);
         }
         for ((namespace, _), source) in &self.frontends {
@@ -922,6 +924,42 @@ mod tests {
         assert_eq!(models[0].serving_pools, []);
         assert_eq!(
             models[0].deployment,
+            Some(PoolDeployment {
+                live_workers: 2,
+                max_concurrency: Some(16),
+            })
+        );
+    }
+
+    /// Capacity alone is worth publishing: a model with no catalog pool and no
+    /// fresh frontend frame still appears with its topology capacity.
+    #[test]
+    fn topology_capacity_publishes_a_model_without_pools_or_frontends() {
+        let reports = FrontendReports::default();
+        let capacities = HashMap::from([(
+            (NS.to_string(), "a".to_string()),
+            PoolDeployment {
+                live_workers: 2,
+                max_concurrency: Some(16),
+            },
+        )]);
+
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &capacities,
+            RELAY_NS,
+            &listed(&[]),
+            Instant::now(),
+        );
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
+        assert_eq!(model.gauges, Coverage::Missing);
+        assert_eq!(model.serving_pools, []);
+        assert_eq!(model.totals, RequestTotals::default());
+        assert_eq!((model.expected_frontends, model.ready_frontends), (0, 0));
+        assert_eq!(
+            model.deployment,
             Some(PoolDeployment {
                 live_workers: 2,
                 max_concurrency: Some(16),
