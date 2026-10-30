@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
@@ -38,6 +39,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -225,6 +227,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "beam" => false,
                             "gemma4" => thinking != Some(true),
                             // Spark's template has no reasoning-off mode; keep parsing
                             // its private channel even when thinking=false is requested.
@@ -874,6 +877,8 @@ pub enum OpenApiRouteKind {
     Completions,
     Embeddings,
     Responses,
+    Decisions,
+    SystemOne,
 }
 
 /// Documentation for a route, with optional handler-specific schema metadata.

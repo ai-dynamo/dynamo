@@ -13,6 +13,26 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 </Note>
 
+## Decision APIs
+
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+
+| Environment variable | Default | Maximum | Meaning |
+| --- | --- | --- | --- |
+| `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
+| `DYN_SYSTEMONE_MAX_INPUT_TOKENS` | 65,536 | 1,048,576 | Cumulative rendered input tokens across all questions in one request |
+| `DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS` | 300 | 3,600 | End-to-end request deadline in seconds |
+
+Positive values above a default log a warning. Values above the maximum are clamped with a warning; invalid values fall back to the default. Admission rejects excess work immediately rather than placing it in a frontend queue. Capacity responses use `DYN_HTTP_OVERLOAD_STATUS_CODE`.
+
+Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded` error code regardless of the configured HTTP status. OpenAI responses expose this code at `error.code`; Jev responses expose it at `code`. An unavailable worker returns `server_error`, not a capacity rejection. A native worker-abort HTTP 503 can also carry `Retry-After`, so the status and header alone do not identify capacity exhaustion.
+
+Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
+
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+
+Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
+
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
