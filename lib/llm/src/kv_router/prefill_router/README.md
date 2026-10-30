@@ -138,6 +138,27 @@ Cancellation and invalid-argument errors fail the request. Any other planning
 error logs a warning and continues through remote prefill, which is the
 ordinary route.
 
+### A local decision dispatches decode from the prefill router
+
+When conditional disaggregation keeps a request local, `generate` calls the
+decode `RoutingHost`'s `dispatch_kv_plan` itself instead of `next.generate`.
+The decode host still owns selection and admission:
+ai-dynamo/dynamo#13994 moved them there, as a non-admitting route preview
+followed by `plan_kv_route_from_preview`. The prefill router owns only the
+local-or-remote decision and the dispatch call.
+
+`next.generate` cannot take the admitted plan. The pipeline edge carries only a
+`PreprocessedRequest`, and its routing hints are client fields:
+`RoutingHost` validates them as client input at initial selection, and would
+select and admit the worker again. #13994 removed that hint path for those
+reasons.
+
+Known design debt: decode dispatch belongs to the decode stage. Two directions
+would fix it. One carries the admitted plan to the decode `RoutingHost` in a
+frontend-only request field, the way `migration_state` travels. The other
+reverses the stage order to decode, then prefill, then encode. Raise either
+under DEP ai-dynamo/dynamo#15457.
+
 ### A missing prefill-load signal means "do not bypass"
 
 The `prefill_load` and `isl_or_load` policies read whether the prefill worker

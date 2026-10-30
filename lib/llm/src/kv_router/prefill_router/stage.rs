@@ -194,9 +194,15 @@ impl StageRouter for PrefillRouter {
 }
 
 impl PrefillRouter {
-    /// The first activation check, before any routing work. `Ok(true)` serves
-    /// the request through prefill, `Ok(false)` passes it to decode, and an
-    /// error fails it closed while a prefill target is still activating.
+    /// The prefill availability gate, run before any routing work. It decides
+    /// whether the deployment currently serves this request through
+    /// disaggregated prefill. Discovery sets the prefill target, so this is
+    /// runtime state rather than static configuration.
+    ///
+    /// `Ok(true)` continues to the prefill hop. `Ok(false)` means there is no
+    /// prefill target: the prefill hop is skipped and the decode worker does
+    /// the whole request, aggregated. An error fails the request closed while
+    /// a prefill target is still activating.
     pub(super) fn activation_gate(&self, request_id: &str) -> Result<bool> {
         // Hot path: an active router never takes the target lock.
         if self.lifecycle_state() == PrefillLifecycleState::Active {
