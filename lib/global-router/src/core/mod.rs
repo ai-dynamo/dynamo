@@ -1200,8 +1200,6 @@ mod tests {
         (a, b, catalog_a, catalog_b, served_a, served_b)
     }
 
-    /// Two requests booked through A show up at B, which then avoids blue,
-    /// and B's own requests reach A.
     async fn assert_replicas_see_each_other_s_bookings(
         a: &CoreSelector,
         b: &CoreSelector,
@@ -1228,7 +1226,6 @@ mod tests {
         );
     }
 
-    /// A's pin of a session is honoured by B, and B's move of it by A.
     async fn assert_replicas_agree_on_a_session_s_pool(
         a: &CoreSelector,
         b: &CoreSelector,
@@ -1465,7 +1462,6 @@ mod tests {
         let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
             grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
 
-        // B stops: A's stream from B closes, and B follows nobody.
         b.stop_replication();
         connected(&a, 0).await;
         connected(&b, 0).await;
