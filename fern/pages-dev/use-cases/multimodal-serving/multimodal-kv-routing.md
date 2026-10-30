@@ -25,6 +25,12 @@ Use multimodal KV routing when:
 
 Single-worker deployments do not need routing, and workloads with entirely unique media receive little media-specific cache benefit. Exact video routing decodes and samples the video in the frontend before worker selection, so use it when the expected KV reuse offsets that frontend work.
 
+Video inference and backend prefix-cache reuse do not require video-aware router
+affinity. A video response or a backend cache hit alone does not show that the
+router used video identity to select a worker. Exact affinity requires KV-aware
+routing, matching worker KV events, and eligible model, decoder, and request
+layouts as described below.
+
 ## How It Works
 
 The routing flow in general has three steps:
@@ -164,13 +170,15 @@ Send the request twice to populate and then reuse the worker's KV cache. Exact r
 
 The vLLM and SGLang multimodal router launchers enable routing debug logs by default. For a custom launch, set `DYN_LOG=info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug`, then check for:
 
-- `exact video-aware KV routing enabled` during worker registration.
+- `video routing processor available` during worker registration. This reports
+  model-adapter availability, not active video routing. Exact routing also
+  requires KV router mode, frontend video decoding, and an eligible request.
 - `video routing metadata resolved` after the frontend decodes an eligible request.
 - `[ROUTING]` records with `worker_id`, `overlap_blocks`, and `total_blocks` for each request.
 
-With idle workers, a warm repeat should select the same worker and report more overlap than the first request. A different video should not receive the first video's full overlap. The router can still choose a less-cached worker when its combined cache-and-load cost is lower.
+Keep the text prompt fixed when comparing videos. With idle workers, a warm repeat should select the same worker and report more overlap than the first request. A different video should not receive the first video's full overlap. The router can still choose a less-cached worker when its combined cache-and-load cost is lower. Startup availability alone, or overlap attributable only to the shared text prefix, does not verify media-aware routing.
 
-If startup or request validation cannot prove that the frontend and worker produce the same token layout, Dynamo logs the reason and uses text-prefix routing. The request continues to run, but video identity does not contribute to worker selection.
+Without frontend video decoding, video requests use text-prefix routing even if a model adapter is available. If startup or request validation cannot prove that the frontend and worker produce the same token layout, Dynamo logs the reason and uses text-prefix routing. This routing fallback does not add a decoder: inference still requires a decode path that supports the input codec and deployment topology.
 
 ## Exact Video Routing Limits
 
