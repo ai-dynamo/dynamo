@@ -26,6 +26,8 @@ struct FakeService(Arc<Mutex<FakeState>>);
 struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
+    /// The body served with a non-200 `routers_status`.
+    error_body: String,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
 }
@@ -35,6 +37,7 @@ impl FakeService {
         Self(Arc::new(Mutex::new(FakeState {
             routers_status: StatusCode::OK,
             routers_body: routers_body.to_owned(),
+            error_body: "not synced".to_owned(),
             registrations: Vec::new(),
         })))
     }
@@ -62,7 +65,7 @@ async fn serve(app: axum::Router) -> std::net::SocketAddr {
 async fn serve_routers(State(fake): State<FakeService>) -> Response {
     let state = fake.0.lock().unwrap();
     if state.routers_status != StatusCode::OK {
-        return (state.routers_status, "not synced").into_response();
+        return (state.routers_status, state.error_body.clone()).into_response();
     }
     (
         [(header::CONTENT_TYPE, "application/json")],
@@ -151,6 +154,24 @@ async fn reports_a_non_2xx_status() {
         matches!(&error, DiscoveryClientError::Status { status, body, .. } if status.as_u16() == 503 && body == "not synced"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn keeps_only_the_start_of_a_long_error_body() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    {
+        let mut state = fake.0.lock().unwrap();
+        state.routers_status = StatusCode::BAD_GATEWAY;
+        // Byte 1024 falls inside an "é", so the cut must step back one byte.
+        state.error_body = format!("a{}", "é".repeat(2000));
+    }
+    let client = fake.client().await;
+
+    let error = client.routers().await.unwrap_err();
+    let DiscoveryClientError::Status { body, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(body, &format!("a{}", "é".repeat(511)));
 }
 
 #[tokio::test]
