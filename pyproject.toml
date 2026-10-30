@@ -423,6 +423,13 @@ markers = [
 line-length = 88
 indent-width = 4
 
+[tool.ruff.lint]
+# E4, E7, E9, and F are the rules that ruff 0.5.2 enabled by default. Newer ruff enables many more.
+# W605 flags invalid escape sequences, and PLW0602 flags a `global` name that is never assigned.
+# TODO: enable flake8-bugbear (B) after its findings on main are fixed. Ruff has no B950;
+# E501 (line too long) is the closest ruff rule.
+select = ["E4", "E7", "E9", "F", "W605", "PLW0602"]
+
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
 "*_inc.py" = ["F821"]

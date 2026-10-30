@@ -31,7 +31,7 @@ const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "number", "integer", "string",
 ];
 
-pub(super) fn validate_strict_function(
+pub(crate) fn validate_strict_function(
     function: &FunctionObject,
     skip_strict_schema_validation: bool,
 ) -> Result<()> {
