@@ -129,6 +129,17 @@ def _assert_dgd_outputs(
             if component["type"] in {"worker", "prefill", "decode"}
         }
         assert workers.keys() == roles.keys()
+        router = config.get("adapters", {}).get("dynamo.router")
+        if config_path.stem == "router-kustomize":
+            assert router is not None
+        if router is not None:
+            assert (
+                sum(
+                    component["type"] == "frontend"
+                    for component in dgd["spec"]["components"]
+                )
+                == 1
+            )
         used_gpus = 0
         for component in dgd["spec"]["components"]:
             if "runtime_version_override" in options:
@@ -144,6 +155,29 @@ def _assert_dgd_outputs(
                 if container["name"] == "main"
             )
             assert container["image"] == options["runtime_image"]
+            if component["type"] == "frontend" and router is not None:
+                env = {entry["name"]: entry["value"] for entry in container["env"]}
+                assert (
+                    env["DYN_ROUTER_MODE"]
+                    == {
+                        "round_robin": "round-robin",
+                        "kv_router": "kv",
+                    }[router["policy"]]
+                )
+                if router["policy"] == "kv_router":
+                    # "none" keeps static load accounting and its sampled scale.
+                    assert (
+                        env["DYN_ROUTER_PREFILL_LOAD_MODEL"]
+                        == router["prefill_load_model"]["type"]
+                    )
+                    for field, env_name in (
+                        ("temperature", "DYN_ROUTER_TEMPERATURE"),
+                        ("overlap_score_credit", "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"),
+                        ("prefill_load_scale", "DYN_ROUTER_PREFILL_LOAD_SCALE"),
+                    ):
+                        assert float(env[env_name]) == pytest.approx(
+                            router[field]
+                        ), env_name
             if component["type"] not in roles:
                 continue
             role = roles[component["type"]]
