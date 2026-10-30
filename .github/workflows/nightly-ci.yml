@@ -702,6 +702,7 @@ jobs:
       worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      dd_env: nightly
     secrets: inherit
 
   deploy-cleanup:
