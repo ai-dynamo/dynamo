@@ -1,0 +1,63 @@
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Mode: built-in ImageGen, generation followed by two targeted edits.
+
+Initial generation prompt:
+Create exactly ONE 16:9 technical comparison slide in English. High-resolution Excalidraw whiteboard style: white background, thin hand-drawn dark outlines, large handwritten-looking headings, restrained pastel blue/green/gray/yellow fills, precise labeled connectors, predominantly visual. Maintain clear readable typography. No YAML, API-version strings, code listings, paragraphs, decorative clouds, slide number, or crossing arrows.
+
+TITLE: "Global Router: batteries included, MCS replaceable"
+SUBTITLE: "Two alternative deployments — each covers the pool and router clusters."
+
+Two equal SIDE-BY-SIDE panels. They are ALTERNATIVES, not two clusters. Do NOT connect the panels with any arrows.
+LEFT header with a small meaningful battery icon: "Batteries included"
+RIGHT header with a small meaningful plug icon: "Bring your own MCS: Cilium"
+Use exactly the same node geometry and blue application layer in both panels, so swapping ONLY the green foundation is visually unmistakable.
+
+IN EACH PANEL, draw a stack of THREE horizontal ownership layers:
+TOP pastel BLUE large region labeled "Global Router subsystem — same code".
+Inside its upper-right portion place a box "Global Router + PoolRelays".
+Inside its lower-right portion place a box "Global Discovery Service", connected by a short UPWARD arrow to the Global Router + PoolRelays box labeled "discovery".
+Inside its lower-left portion place "Deployment integration / explicit manifests".
+Middle light GRAY row contains TWO distinct local Kubernetes API resource panels: LEFT "Source-cluster API", RIGHT "Consuming-cluster API".
+The LEFT local API resource panel contains short stacked document-card labels: "Service", "ServiceExport", "Local EndpointSlices". Tiny label "headless exports".
+The RIGHT local API panel contains two document-card labels: "ServiceImport" and "Imported EndpointSlices". In the latter draw two colored backend dots, each labeled "Pod IP : port"; small text "service + source cluster".
+BOTTOM pastel GREEN region is the "MCS provider" foundation. It represents the provider across BOTH clusters, not one local process.
+
+EXACT COMMON CONNECTORS WITHIN EACH PANEL, all short and noncrossing:
+1. From blue "Deployment integration / explicit manifests" DOWN into the LEFT API panel's Service + ServiceExport cards, labeled "creates".
+2. From the BOTTOM EDGE of the whole LEFT local API panel DOWN to the green MCS foundation, labeled "reads exports + endpoints".
+3. From the green MCS foundation UP into the RIGHT local API panel, a branch with two arrowheads entering ServiceImport and Imported EndpointSlices, labeled "writes local imports".
+4. From the RIGHT API panel's Imported EndpointSlices straight UP to blue Global Discovery Service, labeled "list / watch".
+5. The already-described short arrow from Global Discovery Service UP to Global Router + PoolRelays, labeled "discovery".
+No other arrows. In particular no arrows from Global Router/PoolRelays/Global Discovery Service into a provider's private registry. No connector across the comparison panels.
+
+LEFT GREEN FOUNDATION:
+Title "Bundled Dynamo MCS"
+Three small component pills with NO connecting arrows: "controllers" | "registry" | "storage"
+Short small note: "provider internals"
+Small check badge beside this foundation: "22 / 22 discovery checks — strict"
+
+RIGHT GREEN FOUNDATION:
+Title "Cilium 1.20.4 + ClusterMesh"
+Two small ON toggles: "MCS API: ON", "EndpointSlice sync: ON"
+Small red crossed-out component pill, textual absence marker rather than a node: "bundled registry + controller ABSENT"
+Small check badge beside this foundation: "22 / 22 discovery checks — strict"
+
+BOTTOM full-width pale yellow band with three compact clearly separated callouts, not a prose paragraph:
+- green check icon: "Provider swap: no bundled MCS code changes"
+- blue wrench icon: "Consumer fix: region-label reader in Global Discovery Service (#17604)"
+- amber small open-box icon: "Packaging cleanup remains: Dynamo auto-export policy is still inside bundled MCS"
+
+Very bottom tiny but readable evidence-scope note: "Validated: discovery and lifecycle with real Global Discovery Service; router and relay Pods are stand-ins."
+
+Critical truth constraints:
+The SAME Global Discovery Service binary and --pool-discovery=mcs mode are used in both choices. Do not invent provider-specific Global Router binaries. Both choices use explicit standard ServiceExports; the Dynamo auto-export label is not required for this path. No bundled MCS production/controller/registry/store code was modified for the Cilium swap. A generic consumer-only region fix from PR17604 was cherry-picked and applies to both choices. The complete generic-core packaging extraction has NOT been performed; clearly retain that remaining-cleanup callout. These are discovery tests, not proof of full inference or state-stream behavior.
+Keep each arrow's source, destination, operation, and local API ownership unmistakable. Prefer a simpler correct diagram over additional components.
+
+Creation-arrow correction prompt:
+Edit the supplied technical slide with one precise correction only. Preserve every other label, box, icon, color, position, image dimensions, and arrow. In BOTH comparison panels, the arrows labeled "creates" from "Deployment integration / explicit manifests" must end at TWO DIFFERENT resources: one at "Service", and one at "ServiceExport". Currently both arrowheads land at Service, which is technically wrong. Keep the first arrow to Service. Reroute the second arrow through the unused right-hand corridor INSIDE the "Source-cluster API" box, then turn left to point at the RIGHT EDGE of the "ServiceExport" document. Do not let this arrow cross any resource box or text. Remove the old duplicate arrow into Service. Do not add any arrow to Local EndpointSlices. All other content, geometry and arrows are invariant. The image is one 16:9 Excalidraw-style English technical presentation slide.
+
+Stray-arrow cleanup prompt:
+Make a tiny cleanup to this exact image. Keep the full slide unchanged apart from erasing TWO stray short vertical arrow fragments: one above the right half of the left-panel Service document, and the corresponding one above the right half of the right-panel Service document. These are dangling downward arrowheads with no connection to "Deployment integration"; they are approximately at (12.3% image width,48.5% height) and (62.3% image width,48.5% height). Erase only those two short dangling arrow fragments and restore the plain underlying background. Keep the long connected arrow to Service in each panel, and keep the newly routed L-shaped arrow to the right edge of ServiceExport in each panel. Do not move anything, do not alter text, do not add arrows. Preserve all other pixels and 16:9 dimensions.
+

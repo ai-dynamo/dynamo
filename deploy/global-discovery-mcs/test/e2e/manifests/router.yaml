@@ -43,6 +43,7 @@ kind: Service
 metadata:
   name: global-router
 spec:
+  clusterIP: None
   selector:
     app: global-router
   ports:

@@ -44,6 +44,7 @@ kind: Service
 metadata:
   name: demo-pool-relay
 spec:
+  clusterIP: None
   selector:
     app: demo
   ports:
@@ -56,6 +57,7 @@ kind: Service
 metadata:
   name: demo-frontend
 spec:
+  clusterIP: None
   selector:
     app: demo
   ports:
