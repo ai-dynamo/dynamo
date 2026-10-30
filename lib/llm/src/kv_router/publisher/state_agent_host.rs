@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dynamo_kv_router::identity::CacheOwnerId;
+use dynamo_kv_router::protocols::RouterHintSourceMetadata;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{
@@ -142,6 +143,7 @@ struct HostedSlot {
     indexer_domain_id: dynamo_kv_router::identity::IndexerDomainId,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
+    router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 impl HostedSlot {
@@ -151,6 +153,7 @@ impl HostedSlot {
             && self.indexer_domain_id == intent.indexer_domain_id
             && self.kv_block_size == intent.kv_block_size
             && self.ingress_protocol == intent.ingress_protocol
+            && self.router_hint_source == intent.router_hint_source
     }
 }
 
@@ -678,6 +681,7 @@ async fn reconcile_owner(
             indexer_domain_id: intent.indexer_domain_id,
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            router_hint_source: intent.router_hint_source.clone(),
         };
         slots.insert(owner, slot_shape);
         let (slot_sockets, publisher_index) = sockets.for_new_slot()?;
@@ -815,13 +819,14 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     use super::*;
+    use crate::discovery::kv_state_agent::KV_STATE_SOURCE_TOPIC_V2;
 
     #[test]
     fn failed_slot_returns_its_shared_socket_share() {
@@ -865,6 +870,7 @@ mod tests {
                         indexer_domain_id: owner.pool().indexer_domain(),
                         kv_block_size: 64,
                         ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+                        router_hint_source: None,
                     },
                 );
             }
@@ -1084,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_metadata_does_not_change_stable_slot_identity() {
+    fn router_hint_metadata_is_part_of_stable_slot_identity() {
         let host = instance("kv_state_agent", 1);
         let owner = owner(4);
         let original = intent(
@@ -1105,6 +1111,7 @@ mod tests {
             indexer_domain_id: original.indexer_domain_id,
             kv_block_size: original.kv_block_size,
             ingress_protocol: original.ingress_protocol,
+            router_hint_source: original.router_hint_source.clone(),
         };
         let mut upgraded = original.clone();
         upgraded.router_hint_source = Some(RouterHintSourceMetadata {
@@ -1114,7 +1121,7 @@ mod tests {
         });
 
         assert!(slot.matches(&original));
-        assert!(slot.matches(&upgraded));
+        assert!(!slot.matches(&upgraded));
     }
 
     fn added(
@@ -1264,6 +1271,183 @@ mod tests {
 
         let error = validate_intent(&invalid, &host, 101).unwrap_err();
         assert!(error.to_string().contains("tcp://"));
+    }
+
+    fn hint(endpoint: &str) -> RouterHintSourceMetadata {
+        RouterHintSourceMetadata {
+            source_control_endpoint: endpoint.to_string(),
+            worker_type: "aggregated".to_string(),
+            topology_domains: Default::default(),
+        }
+    }
+
+    async fn reconcile_request(
+        component: &Component,
+        request: &KvStateAttachmentIntent,
+        slots: &mut HashMap<CacheOwnerId, HostedSlot>,
+        sockets: &mut HostSockets,
+        metrics: &HostMetrics,
+    ) -> Result<()> {
+        reconcile_owner(
+            component,
+            request.cache_owner_id,
+            &HashMap::from([(
+                request.cache_owner_id,
+                HashMap::from([(request.intent_incarnation, request.clone())]),
+            )]),
+            slots,
+            1,
+            sockets,
+            &mut 0,
+            metrics,
+        )
+        .await
+    }
+
+    async fn source_advertisements(
+        component: &Component,
+        request: &KvStateAttachmentIntent,
+    ) -> Vec<DiscoveryInstance> {
+        component
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EventSources(
+                EventSourceQuery::endpoint_topic(
+                    request.kv_state_endpoint.clone(),
+                    KV_STATE_SOURCE_TOPIC_V2,
+                ),
+            ))
+            .await
+            .unwrap()
+    }
+
+    /// Attach incarnation 101 with `first`, then offer incarnation 102 with
+    /// `second`; returns what the host did with the second offer.
+    async fn reattach_with_hints(
+        first: Option<RouterHintSourceMetadata>,
+        second: Option<RouterHintSourceMetadata>,
+        mutate: impl FnOnce(&mut KvStateAttachmentIntent),
+    ) -> (Result<()>, ReattachObservation) {
+        let component = test_component().await;
+        let raw = SharedZmqPublisherSocket::bind("raw-kv").unwrap();
+        let mut request = intent(
+            &instance("kv_state_agent", 1),
+            instance("producer", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        request.raw_zmq_endpoint = raw.endpoint().to_string();
+        request.router_hint_source = first;
+        let metrics = HostMetrics::new(&component).unwrap();
+        let mut slots = HashMap::new();
+        let mut sockets = HostSockets {
+            slots_per_socket: 1,
+            share_publishers: false,
+            publishers: Vec::new(),
+            raw_pool: None,
+        };
+        reconcile_request(&component, &request, &mut slots, &mut sockets, &metrics)
+            .await
+            .unwrap();
+        let slot = &slots[&request.cache_owner_id];
+        assert_eq!(slot.lifecycle, SlotLifecycle::Active);
+        let agent = slot.agent.as_ref().unwrap().clone();
+        let generation_before = agent.status().attachment.as_ref().unwrap().generation;
+        let ads_before = source_advertisements(&component, &request).await;
+
+        request.intent_incarnation = 102;
+        request.router_hint_source = second;
+        mutate(&mut request);
+        let result =
+            reconcile_request(&component, &request, &mut slots, &mut sockets, &metrics).await;
+        let slot = &slots[&request.cache_owner_id];
+        let observation = ReattachObservation {
+            lifecycle: slot.lifecycle,
+            acked_incarnation: slot.intent_incarnation,
+            generation_before,
+            generation_after: agent.status().attachment.as_ref().map(|a| a.generation),
+            ads_before,
+            ads_after: source_advertisements(&component, &request).await,
+        };
+        agent.shutdown().await.unwrap();
+        (result, observation)
+    }
+
+    struct ReattachObservation {
+        lifecycle: SlotLifecycle,
+        acked_incarnation: Option<u64>,
+        generation_before: u64,
+        generation_after: Option<u64>,
+        ads_before: Vec<DiscoveryInstance>,
+        ads_after: Vec<DiscoveryInstance>,
+    }
+
+    #[tokio::test]
+    async fn reattach_different_hint_endpoint_rejected_fails_closed() {
+        let (result, seen) = reattach_with_hints(
+            Some(hint("tcp://10.0.20.27:19500")),
+            Some(hint("tcp://10.0.20.99:19500")),
+            |_| {},
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("immutable stable slot properties")
+        );
+        assert_eq!(seen.lifecycle, SlotLifecycle::Failed);
+        // No attach call and no ack: the accepted incarnation and the agent's
+        // attachment generation are untouched.
+        assert_eq!(seen.acked_incarnation, Some(101));
+        assert_eq!(seen.generation_after, Some(seen.generation_before));
+    }
+
+    #[tokio::test]
+    async fn advertisement_unchanged_after_rejected_reattach() {
+        let (result, seen) = reattach_with_hints(
+            Some(hint("tcp://10.0.20.27:19500")),
+            Some(hint("tcp://10.0.20.99:19500")),
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(seen.ads_before.len(), 1);
+        assert!(
+            serde_json::to_string(&seen.ads_before)
+                .unwrap()
+                .contains("10.0.20.27:19500")
+        );
+        assert_eq!(
+            serde_json::to_vec(&seen.ads_after).unwrap(),
+            serde_json::to_vec(&seen.ads_before).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reattach_same_hint_endpoint_accepted() {
+        let same = Some(hint("tcp://10.0.20.27:19500"));
+        let (result, seen) = reattach_with_hints(same.clone(), same, |_| {}).await;
+        result.unwrap();
+        assert_eq!(seen.lifecycle, SlotLifecycle::Active);
+        assert_eq!(seen.acked_incarnation, Some(102));
+        assert!(seen.generation_after.unwrap() > seen.generation_before);
+    }
+
+    #[tokio::test]
+    async fn attachment_intent_conflicts_with_immutable_slot_properties() {
+        let same = Some(hint("tcp://10.0.20.27:19500"));
+        let (result, seen) =
+            reattach_with_hints(same.clone(), same, |request| request.kv_block_size = 128).await;
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("immutable stable slot properties")
+        );
+        assert_eq!(seen.lifecycle, SlotLifecycle::Failed);
+        assert_eq!(seen.acked_incarnation, Some(101));
     }
 
     #[test]

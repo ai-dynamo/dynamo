@@ -130,7 +130,41 @@ def test_linker_hint_endpoint_rejects_loopback_with_kvcr_config_guidance():
     with pytest.raises(
         ValueError, match="advertise_host.*--hicache-storage-backend-extra-config"
     ):
-        kvcr_hint_endpoints(infos, (0, 1), require_inventory=True)
+        kvcr_hint_endpoints(infos, (0, 1), require="inventory")
+
+
+def test_guard_hint_advertisement_needs_a_guard_source():
+    args = SimpleNamespace(
+        enable_hierarchical_cache=False,
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="kvcr",
+        nnodes=1,
+        tp_size=1,
+        dp_size=1,
+        pp_size=1,
+    )
+    source = {
+        "dp_rank": 0,
+        "capabilities": ["router_hint"],
+        "source_control_endpoint": "tcp://10.0.20.27:19500",
+        "inventory_lifetime": "guard",
+    }
+    engine = _HintEngine()
+    engine._scheduler_init_result = SimpleNamespace(
+        scheduler_infos=[{"kv_hint_sources": [source]}]
+    )
+    values = {}
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda k, v: values.update({k: json.loads(v)})
+    )
+    publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Aggregated)
+    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": "tcp://10.0.20.27:19500"
+    }
+    values.clear()
+    source["inventory_lifetime"] = "process_local"
+    publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Aggregated)
+    assert values == {}
 
 
 @pytest.mark.parametrize(

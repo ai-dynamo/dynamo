@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from urllib.parse import urlsplit
@@ -30,7 +31,7 @@ from dynamo.sglang.kv_hints import (
 logger = logging.getLogger(__name__)
 
 
-def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
+def _hint_sources(engine, wanted) -> dict[int, Mapping[str, object]]:
     """Read capabilities from scheduler metadata, never backend configuration."""
     initialization = getattr(engine, "_scheduler_init_result", None)
     if initialization is None:
@@ -46,7 +47,7 @@ def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
             capabilities = source.get("capabilities", [])
             if not isinstance(capabilities, list):
                 raise TypeError("SGLang KV hint capabilities must be a list")
-            if "kvcr_inventory" not in capabilities:
+            if not wanted(source, capabilities):
                 continue
             rank = source.get("dp_rank")
             if type(rank) is not int or rank < 0:
@@ -57,8 +58,88 @@ def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
     return sources
 
 
+def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
+    return _hint_sources(engine, lambda _, caps: "kvcr_inventory" in caps)
+
+
+def guard_sources(engine) -> dict[int, Mapping[str, object]]:
+    return _hint_sources(
+        engine,
+        lambda source, caps: (
+            "router_hint" in caps and source.get("inventory_lifetime") == "guard"
+        ),
+    )
+
+
+def _guard_descriptors(engine, config, sources) -> list[dict]:
+    """One descriptor per Guard-backed hint source; the Guard owns the cache."""
+    owner = getattr(config.dynamo_args, "kvcr_state_agent_owner", None)
+    if not isinstance(owner, str) or CACHE_OWNER_PATTERN.fullmatch(owner) is None:
+        raise ValueError(
+            "KVCR Guard mode requires a canonical --kvcr-state-agent-owner"
+        )
+    server_args = resolved_server_args(config.server_args)
+    if (
+        not is_supported_kvcr_linker_topology(server_args)
+        or config.serving_mode != DisaggregationMode.AGGREGATED
+        or not config.dynamo_args.use_kv_events
+        or not filter_supported_async_generate_kwargs(engine, {"kv_hints": None})
+    ):
+        raise ValueError(
+            "KVCR Guard mode requires an aggregated TP1 hint-forwarding linker "
+            "worker with KV event emission"
+        )
+    bounds = model_card_dp_rank_bounds(server_args)
+    if set(sources) != set(range(*bounds)):
+        raise ValueError("KVCR Guard sources must cover every managed DP rank")
+    infos = engine._scheduler_init_result.scheduler_infos
+    endpoints = kvcr_hint_endpoints(infos, bounds, require="guard")
+    events = server_args.kv_events_config
+    events = json.loads(events) if isinstance(events, str) else events
+    if not isinstance(events, dict) or events.get("publisher") != "zmq":
+        raise ValueError("KVCR Guard mode requires a ZMQ event publisher")
+    if events.get("topic", "") != "":
+        raise ValueError("KVCR Guard mode requires an empty event topic")
+    event_endpoint = urlsplit(events.get("endpoint", ""))
+    if (
+        event_endpoint.scheme != "tcp"
+        or not event_endpoint.hostname
+        or not event_endpoint.port
+    ):
+        raise ValueError("KVCR Guard mode requires an explicit TCP event port")
+    descriptors = []
+    for rank in sorted(sources):
+        host = urlsplit(endpoints[str(rank)]).netloc.rsplit(":", 1)[0]
+        descriptors.append(
+            {
+                "cache_owner_id": owner,
+                "global_dp_rank": rank,
+                "kv_state_endpoint": config.dynamo_args.kv_state_endpoint
+                or f"{config.dynamo_args.namespace}/{config.dynamo_args.component}/"
+                f"{config.dynamo_args.endpoint}",
+                "indexer_domain_id": owner.split("/", 1)[0],
+                "kv_block_size": kv_event_block_size(server_args),
+                "ingress_protocol": "vllm_residency_v1",
+                "raw_zmq_endpoint": f"tcp://{host}:{event_endpoint.port}",
+                "raw_topic": "",
+                "image_token_id": None,
+                "video_token_id": None,
+                "router_hint_source": {
+                    "source_control_endpoint": endpoints[str(rank)],
+                    "worker_type": "aggregated",
+                },
+            }
+        )
+    return descriptors
+
+
 def state_agent_descriptors(engine, config) -> list[dict]:
     sources = inventory_sources(engine)
+    guards = guard_sources(engine)
+    if sources and guards:
+        raise ValueError("KVCR inventory and Guard sources cannot be mixed")
+    if guards:
+        return _guard_descriptors(engine, config, guards)
     if not sources:
         return []
     server_args = resolved_server_args(config.server_args)
@@ -101,7 +182,9 @@ def state_agent_descriptors(engine, config) -> list[dict]:
                     "KVCR linker inventory requires reset and incarnation fencing"
                 )
     infos = engine._scheduler_init_result.scheduler_infos
-    endpoints = kvcr_hint_endpoints(infos, bounds, require_inventory=linker)
+    endpoints = kvcr_hint_endpoints(
+        infos, bounds, require="inventory" if linker else None
+    )
     if set(endpoints) != {str(rank) for rank in sources}:
         raise ValueError(
             "KVCR inventory requires a router_hint source for every managed DP rank"
@@ -202,7 +285,12 @@ class StateAgentLifecycle:
                 self._close_after_start(owner, startup)
             )
             raise
+        # Registered intent is not an attachment: until the agent has subscribed,
+        # events the engine publishes are lost. Keep the owner set so a timeout
+        # or cancellation here is withdrawn by close(); the error fails the
+        # worker closed before it can become routable.
         self._owner = owner
+        await owner.await_attached()
         logger.info("Attached %d KVCR inventory owners", len(descriptors))
 
     async def _close_after_start(self, owner, startup):

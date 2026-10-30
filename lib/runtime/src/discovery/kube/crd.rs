@@ -10,6 +10,7 @@
 //! `deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
 
 use anyhow::Result;
+use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{
     Api, Client as KubeClient, CustomResource,
@@ -154,12 +155,67 @@ fn add_current_event_channel_scopes(data: &mut serde_json::Value) -> Result<()> 
     Ok(())
 }
 
-/// Apply (create or update) a DynamoWorkerMetadata CR using server-side apply
+/// The two CR operations a fenced write needs; a seam so the fencing logic is testable.
+#[async_trait]
+pub(super) trait CrApi: Send + Sync {
+    /// Current CR, or `None` if it does not exist.
+    async fn get_cr(&self, name: &str) -> Result<Option<DynamoWorkerMetadata>>;
+    /// Server-side apply of `cr`; fails with 409 if `cr.metadata.resource_version` is stale.
+    async fn apply(&self, name: &str, cr: &DynamoWorkerMetadata) -> Result<()>;
+}
+
+#[async_trait]
+impl CrApi for Api<DynamoWorkerMetadata> {
+    async fn get_cr(&self, name: &str) -> Result<Option<DynamoWorkerMetadata>> {
+        Ok(self.get_opt(name).await?)
+    }
+
+    async fn apply(&self, name: &str, cr: &DynamoWorkerMetadata) -> Result<()> {
+        // force() resolves field-manager conflicts only; staleness is fenced by the
+        // resourceVersion carried in `cr`.
+        let params = PatchParams::apply(FIELD_MANAGER).force();
+        let applied = self.patch(name, &params, &Patch::Apply(cr)).await?;
+        tracing::info!(
+            cr_name = name,
+            resource_version = ?applied.metadata.resource_version,
+            "Applied DynamoWorkerMetadata CR"
+        );
+        Ok(())
+    }
+}
+
+/// Annotation set to a fresh value on every write, so each apply changes the object.
+const WRITE_ID_ANNOTATION: &str = "nvidia.com/dynamo-discovery-write-id";
+
+/// Apply a DynamoWorkerMetadata CR, fenced by the CR's current resourceVersion.
 ///
-/// This function uses Kubernetes server-side apply which:
-/// - Creates the CR if it doesn't exist
-/// - Updates the CR if it does exist
-/// - Is idempotent and safe to call multiple times
+/// The apply carries the resourceVersion just read, so a request still in flight from an older
+/// attempt is rejected with 409 instead of landing after a newer write. The API server skips
+/// the etcd write (and the resourceVersion bump) for an apply that changes nothing, so every
+/// write also stamps a fresh `WRITE_ID_ANNOTATION`. A missing CR is created without a
+/// resourceVersion.
+pub(super) async fn apply_cr_fenced<A: CrApi>(api: &A, cr: &DynamoWorkerMetadata) -> Result<()> {
+    let cr_name = cr
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("CR must have a name"))?;
+    let wrap =
+        |e: anyhow::Error| anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {cr_name}: {e}");
+
+    let mut cr = cr.clone();
+    cr.metadata.annotations.get_or_insert_default().insert(
+        WRITE_ID_ANNOTATION.to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    if let Some(current) = api.get_cr(cr_name).await.map_err(wrap)? {
+        cr.metadata.resource_version = current.metadata.resource_version;
+    }
+    api.apply(cr_name, &cr).await.map_err(wrap)
+}
+
+/// Apply (create or update) a DynamoWorkerMetadata CR using resourceVersion-fenced
+/// server-side apply.
 ///
 /// # Arguments
 /// * `kube_client` - Kubernetes client
@@ -171,30 +227,7 @@ pub async fn apply_cr(
     cr: &DynamoWorkerMetadata,
 ) -> Result<()> {
     let api: Api<DynamoWorkerMetadata> = Api::namespaced(kube_client.clone(), namespace);
-
-    let cr_name = cr
-        .metadata
-        .name
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("CR must have a name"))?;
-
-    // force() allows us to take ownership of this field even if another controller owns it
-    // in practice the CR will only have one writer (the pod owner)
-    let params = PatchParams::apply(FIELD_MANAGER).force();
-
-    let patch = Patch::Apply(cr);
-    let applied = api.patch(cr_name, &params, &patch).await.map_err(|e| {
-        anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}: {e}")
-    })?;
-
-    tracing::info!(
-        namespace,
-        cr_name,
-        resource_version = ?applied.metadata.resource_version,
-        "Applied DynamoWorkerMetadata CR"
-    );
-
-    Ok(())
+    apply_cr_fenced(&api, cr).await
 }
 
 #[cfg(test)]

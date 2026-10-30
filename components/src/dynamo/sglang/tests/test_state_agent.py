@@ -137,6 +137,102 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(mode):
     }
 
 
+def guard_fixture():
+    engine, config, source, info = linker_fixture()
+    owner = source["cache_owner_id"]
+    source.clear()
+    source.update(
+        {
+            "dp_rank": 0,
+            "capabilities": ["router_hint"],
+            "source_control_endpoint": "tcp://10.0.20.27:19500",
+            "inventory_lifetime": "guard",
+            "reset_clears_owner_inventory": False,
+            "owner_incarnation_scoped": False,
+        }
+    )
+    del info["kv_event_sources"]
+    config.server_args.kv_events_config = json.dumps(
+        {"publisher": "zmq", "endpoint": "tcp://0.0.0.0:24020", "topic": ""}
+    )
+    config.dynamo_args.kvcr_state_agent_owner = owner
+    return engine, config, source, info
+
+
+def test_guard_source_yields_vllm_residency_descriptor():
+    engine, config, source, _ = guard_fixture()
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["cache_owner_id"] == config.dynamo_args.kvcr_state_agent_owner
+    assert descriptor["global_dp_rank"] == 0
+    assert descriptor["kv_block_size"] == 64
+    assert descriptor["ingress_protocol"] == "vllm_residency_v1"
+    assert descriptor["raw_zmq_endpoint"] == "tcp://10.0.20.27:24020"
+    assert descriptor["raw_topic"] == ""
+    assert descriptor["router_hint_source"] == {
+        "source_control_endpoint": source["source_control_endpoint"],
+        "worker_type": "aggregated",
+    }
+
+
+def test_guard_descriptor_is_accepted_by_attachment_owner():
+    # The native KvStateAttachmentOwner needs a live runtime endpoint, so the
+    # descriptor is pinned to the literal that the Rust test
+    # guard_descriptor_is_accepted_by_attachment_owner (attachment_owner.rs)
+    # feeds through the owner's own validation.
+    engine, config, _, _ = guard_fixture()
+    (descriptor,) = state_agent_descriptors(engine, config)
+    owner = f"{'01' * 16}:{'02' * 16}/{'00' * 8}/{'03' * 16}"
+    assert descriptor == {
+        "cache_owner_id": owner,
+        "global_dp_rank": 0,
+        "kv_state_endpoint": "ns/backend/generate",
+        "indexer_domain_id": owner.split("/", 1)[0],
+        "kv_block_size": 64,
+        "ingress_protocol": "vllm_residency_v1",
+        "raw_zmq_endpoint": "tcp://10.0.20.27:24020",
+        "raw_topic": "",
+        "image_token_id": None,
+        "video_token_id": None,
+        "router_hint_source": {
+            "source_control_endpoint": "tcp://10.0.20.27:19500",
+            "worker_type": "aggregated",
+        },
+    }
+
+
+def test_mixed_sources_raise():
+    engine, config, _, info = guard_fixture()
+    _, _, inventory, _ = linker_fixture()
+    info["kv_hint_sources"].append(inventory)
+    with pytest.raises(ValueError, match="cannot be mixed"):
+        state_agent_descriptors(engine, config)
+
+
+def test_guard_without_owner_id_raises():
+    engine, config, _, _ = guard_fixture()
+    config.dynamo_args.kvcr_state_agent_owner = None
+    with pytest.raises(ValueError, match="kvcr-state-agent-owner"):
+        state_agent_descriptors(engine, config)
+    config.dynamo_args.kvcr_state_agent_owner = "not-an-owner"
+    with pytest.raises(ValueError, match="kvcr-state-agent-owner"):
+        state_agent_descriptors(engine, config)
+
+
+def test_guard_owner_id_stable_across_reattach():
+    # A restarted worker reports a fresh process but the same configured owner.
+    first = state_agent_descriptors(*guard_fixture()[:2])
+    second = state_agent_descriptors(*guard_fixture()[:2])
+    assert first[0]["cache_owner_id"] == second[0]["cache_owner_id"]
+    assert first == second
+
+
+def test_process_local_unchanged():
+    engine, config, source, _ = linker_fixture()
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["ingress_protocol"] == "sglang_hicache_v1"
+    assert descriptor["cache_owner_id"] == source["cache_owner_id"]
+
+
 def test_linker_registration_uses_state_agent(monkeypatch):
     from dynamo.sglang import register
 
@@ -159,6 +255,37 @@ def test_linker_registration_uses_state_agent(monkeypatch):
             config.server_args,
             config.dynamo_args,
             worker_type=WorkerType.Prefill,
+            forwards_kv_hints=True,
+        )
+    )
+    assert runtime.kv_event_source_mode == "state_agent_v2"
+    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": source["source_control_endpoint"]
+    }
+
+
+def test_guard_registration_uses_state_agent(monkeypatch):
+    from dynamo.sglang import register
+
+    engine, config, source, _ = guard_fixture()
+    config.server_args.model_path = config.server_args.served_model_name = "test-model"
+    config.dynamo_args.use_sglang_tokenizer = False
+    config.dynamo_args.model_source_uri = None
+    config.dynamo_args.custom_jinja_template = None
+    values = {}
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda key, value: values.update({key: json.loads(value)})
+    )
+    monkeypatch.setattr(register, "get_runtime_config", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(register, "register_model", AsyncMock())
+    assert register.inventory_sources(engine) == {}
+    asyncio.run(
+        register.register_model_with_readiness_gate(
+            engine,
+            None,
+            config.server_args,
+            config.dynamo_args,
+            worker_type=WorkerType.Aggregated,
             forwards_kv_hints=True,
         )
     )
@@ -296,7 +423,9 @@ async def test_cleanup_timeout_preserves_body_exception(
 ):
     engine, config, _, _ = fixture()
     owner = SimpleNamespace(
-        start=AsyncMock(), close=AsyncMock(side_effect=asyncio.Event().wait)
+        start=AsyncMock(),
+        await_attached=AsyncMock(),
+        close=AsyncMock(side_effect=asyncio.Event().wait),
     )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
@@ -317,6 +446,47 @@ async def test_cleanup_timeout_preserves_body_exception(
 
 
 @pytest.mark.asyncio
+async def test_start_waits_for_attach_ack(monkeypatch):
+    engine, config, _, _ = fixture()
+    ack = asyncio.Event()
+
+    async def await_attached():
+        await ack.wait()
+
+    owner = SimpleNamespace(
+        start=AsyncMock(), await_attached=await_attached, close=AsyncMock()
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    lifecycle = StateAgentLifecycle()
+    endpoint = SimpleNamespace(connection_id=lambda: 17)
+    task = asyncio.create_task(lifecycle.start(engine, config, endpoint))
+    await asyncio.sleep(0.05)
+    owner.start.assert_awaited_once()
+    assert not task.done()
+    ack.set()
+    await asyncio.wait_for(task, timeout=1)
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ack_timeout_closes_retained_owner(monkeypatch):
+    engine, config, _, _ = fixture()
+    owner = SimpleNamespace(
+        start=AsyncMock(),
+        await_attached=AsyncMock(side_effect=RuntimeError("did not acknowledge")),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    lifecycle = StateAgentLifecycle()
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+    assert lifecycle._owner is owner
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
     monkeypatch, caplog
 ):
@@ -331,7 +501,9 @@ async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
     async def close():
         assert native_result.done() and not native_result.cancelled()
 
-    owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+    owner = SimpleNamespace(
+        start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+    )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
     lifecycle = StateAgentLifecycle()
@@ -369,7 +541,9 @@ def test_cancelled_start_withdraws_registered_owner(monkeypatch, native_finished
         async def close():
             assert native_result.done() and not native_result.cancelled()
 
-        owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+        owner = SimpleNamespace(
+            start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+        )
         monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
         lifecycle = StateAgentLifecycle()
         endpoint = SimpleNamespace(connection_id=lambda: 17)
