@@ -52,6 +52,18 @@ pub fn registry() -> Result<RouterPluginRegistry, WorkerSelectionPolicyRegistryE
     Ok(registry)
 }
 
+/// Whether `policy`'s picker reads the core's bookings, as the picker itself
+/// declares it: a picker that asks for [`WorkerInputs::LOAD`] ranks by the
+/// requests booked on each worker, so every request it places must be
+/// booked. Any other picker's picks book nothing.
+pub fn reads_bookings(policy: CorePolicy) -> bool {
+    let inputs = match policy {
+        CorePolicy::RoundRobin => RoundRobinPicker::default().required_worker_inputs(),
+        CorePolicy::LeastRequests => LeastRequestsPicker::default().required_worker_inputs(),
+    };
+    inputs.contains(WorkerInputs::LOAD)
+}
+
 /// The router policy configuration that selects `policy` for the
 /// aggregated pool, as the core reads it from YAML.
 pub fn policy_config(policy: CorePolicy) -> String {

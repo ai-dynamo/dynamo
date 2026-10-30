@@ -54,8 +54,9 @@ pub enum CorePolicy {
 pub struct CoreSelector {
     service: Arc<SelectionService>,
     frontends: Cursors<PoolId>,
-    /// Whether the policy reads the core's bookings. Round-robin does not,
-    /// so its picks are advisory selections with nothing booked or freed.
+    /// Whether the policy's picker reads the core's bookings, as it declares
+    /// ([`policies::reads_bookings`]). A picker that does not gets advisory
+    /// selections, with nothing booked or freed.
     books: bool,
 }
 
@@ -79,7 +80,7 @@ impl CoreSelector {
         Ok(Self {
             service: Arc::new(service),
             frontends: Cursors::default(),
-            books: !matches!(policy, CorePolicy::RoundRobin),
+            books: policies::reads_bookings(policy),
         })
     }
 
@@ -449,6 +450,12 @@ mod tests {
         assert_eq!(rounds(&from_core, 2), rounds(&from_current, 2));
         assert_eq!(from_core[0], from_core[2]);
         assert_ne!(from_core[0], from_core[1]);
+    }
+
+    #[test]
+    fn a_policy_books_only_if_its_picker_reads_load() {
+        assert!(!policies::reads_bookings(CorePolicy::RoundRobin));
+        assert!(policies::reads_bookings(CorePolicy::LeastRequests));
     }
 
     #[tokio::test]
