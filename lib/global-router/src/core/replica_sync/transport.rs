@@ -13,6 +13,7 @@
 //! the same way through the core's [`SessionBindingUpdates`] and
 //! [`SelectionService::apply_session_binding`].
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -20,7 +21,8 @@ use anyhow::{Result, bail};
 use dashmap::DashMap;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS,
+    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
+    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
 use dynamo_kv_router::services::selection::{
     HostReplicaChannels, HostReplicaSyncFactory, SelectionService, SessionBindingUpdates,
@@ -84,6 +86,15 @@ pub struct ReplicaSyncStats {
     pub bindings_rejected: u64,
     /// Frames subscribers missed for reading too slowly.
     pub subscribers_lagged: u64,
+    /// Bookings freed on this replica's behalf of peers that left
+    /// ([`ReplicaHub::remove_peer`]).
+    pub bookings_released: u64,
+}
+
+/// What a peer's `AddRequest` opened, as its `Free` would name it.
+struct OpenBooking {
+    worker: WorkerWithDpRank,
+    lora_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -95,6 +106,7 @@ struct Counters {
     events_unroutable: AtomicU64,
     bindings_rejected: AtomicU64,
     subscribers_lagged: AtomicU64,
+    bookings_released: AtomicU64,
 }
 
 /// One replica's end of the stream: the core's channels in, frames out, and
@@ -108,6 +120,12 @@ pub struct ReplicaHub {
     /// The peers to follow, each with the token that stops following it.
     peers: DashMap<Url, CancellationToken>,
     peers_changed: Notify,
+    /// The bookings each peer's events have opened and not yet freed, by
+    /// the router id the events carry (the peer's process), so a peer that
+    /// leaves can have them freed rather than left to the core's expiry.
+    open: DashMap<u64, HashMap<(RoutingPartitionId, String), OpenBooking>>,
+    /// The router ids each peer's stream has carried events for.
+    routers_of: DashMap<Url, HashSet<u64>>,
     cancel: CancellationToken,
     counters: Counters,
 }
@@ -130,6 +148,8 @@ impl ReplicaHub {
             frames,
             peers: DashMap::new(),
             peers_changed: Notify::new(),
+            open: DashMap::new(),
+            routers_of: DashMap::new(),
             cancel,
             counters: Counters::default(),
         })
@@ -156,6 +176,7 @@ impl ReplicaHub {
             events_unroutable: c.events_unroutable.load(Relaxed),
             bindings_rejected: c.bindings_rejected.load(Relaxed),
             subscribers_lagged: c.subscribers_lagged.load(Relaxed),
+            bookings_released: c.bookings_released.load(Relaxed),
         }
     }
 
@@ -194,14 +215,58 @@ impl ReplicaHub {
         added
     }
 
-    /// Stops following `peer`. `false` if it was not a peer.
+    /// Stops following `peer` and frees the bookings its events opened,
+    /// since the frees for them will never arrive: an authoritative removal
+    /// (Global Discovery no longer lists the replica) means its requests
+    /// are gone with it. `false` if it was not a peer.
     pub fn remove_peer(&self, peer: &Url) -> bool {
         let Some((_, follow)) = self.peers.remove(peer) else {
             return false;
         };
         follow.cancel();
         self.peers_changed.notify_one();
+        self.release_bookings_of(peer);
         true
+    }
+
+    /// Frees, in the core, every booking still open from the router ids
+    /// `peer`'s stream carried, unless another peer still carries them.
+    fn release_bookings_of(&self, peer: &Url) {
+        let Some((_, routers)) = self.routers_of.remove(peer) else {
+            return;
+        };
+        let mut released = 0u64;
+        for router_id in routers {
+            let still_carried = self
+                .routers_of
+                .iter()
+                .any(|entry| entry.value().contains(&router_id));
+            if still_carried {
+                continue;
+            }
+            let Some((_, bookings)) = self.open.remove(&router_id) else {
+                continue;
+            };
+            for ((partition, request_id), booking) in bookings {
+                let free = ActiveSequenceEvent {
+                    request_id,
+                    worker: booking.worker,
+                    data: ActiveSequenceEventData::Free,
+                    router_id,
+                    lora_name: booking.lora_name,
+                };
+                match self.partitions.get(&partition) {
+                    Some(inbound) if inbound.try_send(free).is_ok() => released += 1,
+                    _ => {
+                        self.counters.events_dropped.fetch_add(1, Relaxed);
+                    }
+                }
+            }
+        }
+        if released > 0 {
+            self.counters.bookings_released.fetch_add(released, Relaxed);
+            tracing::info!(%peer, released, "freed the bookings of a replica that left");
+        }
     }
 
     pub fn peers(&self) -> Vec<Url> {
@@ -244,10 +309,30 @@ impl ReplicaHub {
         self.counters.connected_peers.fetch_sub(1, Relaxed);
     }
 
-    /// Hands a frame from a peer to the core: each event to its partition's
-    /// inbound channel, each binding to the session table. The core drops
-    /// events stamped with this replica's id; they are skipped here first.
+    /// Hands a frame to the core: each event to its partition's inbound
+    /// channel, each binding to the session table. The core drops events
+    /// stamped with this replica's id; they are skipped here first.
     pub fn apply(&self, frame: proto::ReplicaFrame, service: &SelectionService) {
+        self.apply_inner(None, frame, service);
+    }
+
+    /// [`Self::apply`] for a frame read from `peer`'s stream, so the
+    /// bookings it opens can be freed if the peer leaves. A frame from a
+    /// peer no longer followed is ignored: it cannot re-book what
+    /// [`Self::remove_peer`] freed.
+    pub fn apply_from(&self, peer: &Url, frame: proto::ReplicaFrame, service: &SelectionService) {
+        if !self.peers.contains_key(peer) {
+            return;
+        }
+        self.apply_inner(Some(peer), frame, service);
+    }
+
+    fn apply_inner(
+        &self,
+        peer: Option<&Url>,
+        frame: proto::ReplicaFrame,
+        service: &SelectionService,
+    ) {
         self.counters.frames_received.fetch_add(1, Relaxed);
         let (events, bindings) = match frame.frame {
             Some(Frame::Snapshot(snapshot)) => (snapshot.open_bookings, snapshot.bindings),
@@ -271,9 +356,41 @@ impl ReplicaHub {
                 tracing::debug!(%partition, "a replica event named a partition this core has not created");
                 continue;
             };
+            let opened = match &event.data {
+                ActiveSequenceEventData::AddRequest { .. } => Some(Some(OpenBooking {
+                    worker: event.worker,
+                    lora_name: event.lora_name.clone(),
+                })),
+                ActiveSequenceEventData::Free => Some(None),
+                ActiveSequenceEventData::MarkPrefillCompleted => None,
+            };
+            let (router_id, request_id) = (event.router_id, event.request_id.clone());
             if let Err(error) = inbound.try_send(event) {
                 self.counters.events_dropped.fetch_add(1, Relaxed);
                 tracing::debug!(%partition, %error, "a replica event was dropped");
+                continue;
+            }
+            // Only what the core received is tracked, so a peer's departure
+            // frees exactly what it booked here.
+            if let Some(peer) = peer {
+                self.routers_of
+                    .entry(peer.clone())
+                    .or_default()
+                    .insert(router_id);
+            }
+            match opened {
+                Some(Some(booking)) => {
+                    self.open
+                        .entry(router_id)
+                        .or_default()
+                        .insert((partition, request_id), booking);
+                }
+                Some(None) => {
+                    if let Some(mut bookings) = self.open.get_mut(&router_id) {
+                        bookings.remove(&(partition, request_id));
+                    }
+                }
+                None => {}
             }
         }
         for binding in bindings {

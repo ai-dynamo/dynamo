@@ -1489,6 +1489,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_a_peer_that_leaves_takes_its_bookings_with_it() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        let _held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+
+        // Discovery drops B: A frees what B had booked rather than count
+        // it until the core's stale-request expiry.
+        let hub = &a.grpc.as_ref().unwrap().hub;
+        assert!(hub.remove_peer(&replica_sync::peer_url(&served_b.url()).unwrap()));
+        booked_settles(&a, &blue, 0).await;
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_released, 2);
+    }
+
+    #[tokio::test]
     async fn grpc_refuses_tls_peers_and_other_schemes() {
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
