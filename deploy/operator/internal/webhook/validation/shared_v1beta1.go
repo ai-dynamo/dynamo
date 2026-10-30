@@ -159,7 +159,6 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 }
 
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
-	backendFramework                  string
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
@@ -344,7 +343,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath, options.backendFramework)...)
+	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 

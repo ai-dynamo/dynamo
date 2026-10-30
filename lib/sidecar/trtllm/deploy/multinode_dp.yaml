@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: multinode TensorRT-LLM attention data parallelism (attention-DP) with explicit leader and worker templates.
+# One engine group spans two Pods with four attention-DP ranks. The leader
+# launches every MPI rank with mpirun over SSH and serves all four ranks. The
+# worker runs sshd and a Dynamo sidecar that relays its node-local KV events.
+# See docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes.
+# For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-engine-config-multinode-dp
+data:
+  config.yaml: |
+    # Attention DP needs untied embeddings. Qwen3 4B and below tie them, so this example serves TinyLlama.
+    tensor_parallel_size: 4
+    enable_attention_dp: true
+    # Required for tool_choice constraints.
+    guided_decoding_backend: xgrammar
+    # Batch five decode steps per gRPC chunk to reduce serialization overhead.
+    stream_interval: 5
+    kv_cache_config:
+      use_kv_cache_manager_v2: true
+      enable_block_reuse: true
+      kv_cache_event_hash_algo: v1_block_key
+      kv_events_config:
+        enable_kv_cache_events: true
+        # Each rank publishes on its own node at this port plus its global rank.
+        endpoint: tcp://127.0.0.1:5557
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-sidecar-multinode-dp
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.6.0"
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # Same nightly as the sidecar below. Only this pairing was tested.
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: "1.6.0"
+    multinode:
+      nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            # Requires OpenEngine routing discovery and the node-local KV relay (ai-dynamo/dynamo#15087),
+            # which are not in the 1.6.x releases.
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+            restartPolicy: Always
+            command: &sidecarCommand
+            - dynamo-trtllm-sidecar
+            args: &sidecarArgs
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            - --model-path
+            - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+            - --context-length
+            - "2048"
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            # Requires OpenEngine node-local discovery and KV events (NVIDIA/TensorRT-LLM#19440)
+            # and the grpc.health.v1 service used by the probes below (NVIDIA/TensorRT-LLM#20437,
+            # nightlies from 2026-10-27).
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+            # The liveness service fails only on a fatal engine error. The inference service tracks the executor.
+            startupProbe:
+              grpc:
+                port: 30001
+                service: liveness
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 360   # Up to 30 min for scheduling, MPI launch, model load, and warmup.
+            livenessProbe:
+              grpc:
+                port: 30001
+                service: liveness
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 6
+            readinessProbe:
+              grpc:
+                port: 30001
+                service: inference
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+              requests:
+                # Increase for larger models.
+                ephemeral-storage: 2Gi
+            command:
+            - /bin/bash
+            - -c
+            args:
+            # -H slots fill in order: ranks 0-1 on the leader, 2-3 on the worker.
+            # --bind-to none: mpirun's default pins each rank to one core.
+            - |
+              set -euo pipefail
+              # The operator mounts the key group-readable; ssh insists on 0600.
+              install -Dm600 /ssh-pk/private.key "$HOME/.ssh/id_rsa"
+              # Worker hostname: Grove swaps the role suffix, LeaderWorkerSet appends the
+              # worker index. For nodeCount above 2, add each extra worker to -H and raise -n.
+              case "$DYNAMO_LEADER_ADDRESS" in
+                *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
+                *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
+              esac
+              until ssh -o StrictHostKeyChecking=no "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
+              exec mpirun --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
+                --mca pml ob1 ${HF_TOKEN:+-x HF_TOKEN} \
+                bash -c 'trtllm-llmapi-launch trtllm-serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+                  --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
+                  --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
+                  --extra_llm_api_options /config/config.yaml'
+            volumeMounts: &engineMounts
+            - name: engine-config
+              mountPath: /config
+            - name: ssh-keys
+              mountPath: /ssh-pk
+              readOnly: true
+          volumes: &engineVolumes
+          - name: engine-config
+            configMap:
+              name: trtllm-engine-config-multinode-dp
+          - name: ssh-keys
+            secret:
+              secretName: mpi-run-ssh-secret  # Replicated by the operator into every multinode DGD namespace.
+    - name: worker
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+            restartPolicy: Always
+            command: *sidecarCommand
+            args: *sidecarArgs
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+            # No probes: sshd is the only process here. The leader waits for it, then
+            # launches and supervises this node's ranks through mpirun.
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+              requests:
+                ephemeral-storage: 2Gi
+            command:
+            - /bin/bash
+            - -c
+            args:
+            # The image ships no sshd, and apt does not create /run/sshd. Ranks run in
+            # sshd sessions, so export the container environment to them: Triton JIT
+            # needs the CUDA paths. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
+            - |
+              set -euo pipefail
+              command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
+              install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
+              mkdir -p /run/sshd
+              env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
+              exec /usr/sbin/sshd -D -e -o PermitUserEnvironment=yes
+            volumeMounts: *engineMounts
+          volumes: *engineVolumes

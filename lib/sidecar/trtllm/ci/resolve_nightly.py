@@ -15,7 +15,7 @@ from pathlib import Path
 
 REPOSITORY = "nvcr.io/nvidia/tensorrt-llm/release"
 REGISTRY_PATH = "https://nvcr.io/v2/nvidia/tensorrt-llm/release"
-NIGHTLY_TAG = re.compile(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?\.dev(\d{12})")
+NIGHTLY_TAG = re.compile(r"\d+\.\d+\.\d+(?:rc\d+)?\.dev(\d{12})")
 MANIFEST_TYPES = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",

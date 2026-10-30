@@ -3,13 +3,11 @@
 
 use std::time::Duration;
 
+use dynamo_global_common::{Lease, PoolRegistration, RouterReplica, RoutersResponse};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
-
-use crate::replicas::ReplicaEndpoint;
-use crate::wire::{Lease, PoolRegistration, RoutersResponse};
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -75,7 +73,7 @@ impl GlobalDiscoveryClient {
     ///
     /// Each call returns the full current set. If any entry does not parse,
     /// the whole call fails, so a caller never acts on a partial list.
-    pub async fn routers(&self) -> Result<Vec<ReplicaEndpoint>, DiscoveryClientError> {
+    pub async fn routers(&self) -> Result<Vec<RouterReplica>, DiscoveryClientError> {
         let url = &self.routers_url;
         let response = self.send(self.http.get(url.clone()), url).await?;
         let body: RoutersResponse = read_json(response, url).await?;

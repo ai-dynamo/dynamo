@@ -66,6 +66,10 @@ jobs:
       env:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        PRTE_ALLOW_RUN_AS_ROOT: '1'
+        PRTE_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
+        # Open MPI 5 singleton worker spawning fails with long K8s hostnames.
+        PMIX_HOSTNAME: mpi-node0
         PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: upb
         TRTLLM_NO_USAGE_STATS: '1'
     steps:

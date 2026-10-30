@@ -176,7 +176,7 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
         if descriptor.cache_owner_id.pool().indexer_domain() != descriptor.indexer_domain_id {
             anyhow::bail!("CacheOwnerId and indexer domain disagree");
         }
-        if descriptor.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
+        if !descriptor.ingress_protocol.supports_owned_residency() {
             anyhow::bail!("unsupported state-agent raw ingress protocol");
         }
         if descriptor.raw_zmq_endpoint.is_empty() {

@@ -80,6 +80,7 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/workflows/pre-merge.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
@@ -362,6 +363,10 @@ planner:
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/aisimulate/**'
   - 'components/src/dynamo/global_router/**'
+  # Re-run the SKU contract when either compared operator input changes.
+  - 'deploy/operator/hack/test_aisimulate_hardware_catalog.py'
+  - 'deploy/operator/internal/aisimulate/hardware_skus.txt'
+  - 'deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go'
   # Keep this tombstone until the vendored-tree deletion has merged so the
   # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'
@@ -372,22 +377,11 @@ planner:
   - '!**/*.rst'
 
 sidecar_trtllm_image:
-  - 'lib/sidecar/trtllm/**'
-  - 'lib/sidecar/common/**'
-  - 'lib/sidecar/Dockerfile'
-  - 'lib/backend-common/**'
-  - 'lib/llm/**'
-  - 'lib/runtime/**'
-  - 'Cargo.toml'
-  - 'Cargo.lock'
-  - 'rust-toolchain.toml'
-  - '.cargo/**'
-  - '.github/actions/builder-refresher/**'
+  # PR CI runs resolver CPU tests; the GPU test runs independently in nightly CI.
+  - 'lib/sidecar/trtllm/ci/**'
   - '.github/actions/changed-files/**'
   - '.github/filters.yaml'
-  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
   - '.github/workflows/pr.yaml'
-  - '.github/workflows/nightly-ci.yml'
   - '!**/*.md'
   - '!**/*.rst'
 
