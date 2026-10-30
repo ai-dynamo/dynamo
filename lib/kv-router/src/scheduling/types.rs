@@ -465,6 +465,13 @@ impl SchedulingRequest {
         device.saturating_add(host_pinned)
     }
 
+    /// Whether any rank reported per-tier overlap, so device overlap is read from the
+    /// tier blocks rather than the effective estimate.
+    pub(crate) fn has_tier_matches(&self) -> bool {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        !tiers.device.is_empty() || !tiers.host_pinned.is_empty() || !tiers.disk.is_empty()
+    }
+
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
         self.overlap
             .effective_overlap_blocks

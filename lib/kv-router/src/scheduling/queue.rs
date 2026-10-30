@@ -30,8 +30,8 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
 use super::selector::{
-    CandidatePreparer, PreparedCandidates, WorkerInputs, WorkerSelectionInput, WorkerSelector,
-    worker_input_rows,
+    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs,
+    WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,

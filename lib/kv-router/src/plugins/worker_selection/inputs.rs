@@ -9,9 +9,15 @@ use rustc_hash::FxHashMap;
 use std::ops::BitOr;
 
 /// Host-owned row materialized once for the union of component input requirements.
-pub(crate) struct CandidateData {
+/// One eligible rank's input columns: the row a [`CandidateRowSource`](crate::plugins::worker_selection::CandidateRowSource)
+/// yields and a policy's views read. Only the kernel fills it.
+pub struct CandidateData {
     pub(crate) worker: WorkerWithDpRank,
     pub(crate) inputs: WorkerInputs,
+    /// Device, host, and disk overlap in tokens, for the best eligible cache reuse a
+    /// tracked request reports; zero for untracked requests. A `u32` packs beside
+    /// `inputs`, keeping the row at 128 bytes.
+    pub(crate) raw_cached_tokens: u32,
     pub(crate) cache: WorkerCacheData,
     pub(crate) load: WorkerLoadInput,
     pub(crate) transfer: Option<WorkerTransferInput>,
@@ -455,8 +461,16 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
-            // Filled for scorers once every row is built.
-            transfer: None,
+            transfer: if inputs.contains(WorkerInputs::KV_TRANSFER) {
+                if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+                    self.transfer
+                } else {
+                    additional.transfer
+                }
+            } else {
+                None
+            },
+            raw_cached_tokens: self.raw_cached_tokens,
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),

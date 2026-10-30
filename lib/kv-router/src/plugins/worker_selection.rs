@@ -15,11 +15,11 @@ pub use runtime::{
 };
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
+pub(crate) use inputs::{CacheSnapshot, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerCapacityExt, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerTransferInput,
+    CandidateData, ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate,
+    WorkerCandidates, WorkerCapacity, WorkerCapacityExt, WorkerInfo, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerTransferInput,
 };
 pub use selection_config::{SelectionConfig, SharedCacheType};
 
@@ -27,7 +27,10 @@ pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
-pub use crate::scheduling::selector::WorkerSelectionPolicy;
+pub use crate::scheduling::selector::{
+    CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
+    SelectionFailure, WorkerSelectionPolicy,
+};
 pub use crate::scheduling::{
     SessionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };

@@ -126,24 +126,34 @@ impl KvTransferScope {
 
     /// Exactly these targets, each with its local prefix in blocks.
     pub fn of(targets: impl IntoIterator<Item = (KvTransferTarget, usize)>) -> Self {
-        let mut scope = Self {
+        let mut scope = Self::empty();
+        for (target, local_prefix_blocks) in targets {
+            scope.add_target(target, local_prefix_blocks);
+        }
+        scope
+    }
+
+    /// No targets yet; add them with [`Self::add_target`].
+    pub fn empty() -> Self {
+        Self {
             min_local_prefix_blocks: usize::MAX,
             any_island: false,
             islands: IslandScope::Unused,
-        };
-        for (target, local_prefix_blocks) in targets {
-            scope.min_local_prefix_blocks = scope.min_local_prefix_blocks.min(local_prefix_blocks);
-            scope.any_island |= target.transfer_domain.is_none() || target.preferred;
-            if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
-                let one = IslandScope::One(domain, island);
-                scope.islands = match scope.islands {
-                    IslandScope::Unused => one,
-                    islands if islands == one => one,
-                    _ => IslandScope::Any,
-                };
-            }
         }
-        scope
+    }
+
+    /// Include `target`, with its local prefix in blocks.
+    pub fn add_target(&mut self, target: KvTransferTarget, local_prefix_blocks: usize) {
+        self.min_local_prefix_blocks = self.min_local_prefix_blocks.min(local_prefix_blocks);
+        self.any_island |= target.transfer_domain.is_none() || target.preferred;
+        if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
+            let one = IslandScope::One(domain, island);
+            self.islands = match self.islands {
+                IslandScope::Unused => one,
+                islands if islands == one => one,
+                _ => IslandScope::Any,
+            };
+        }
     }
 
     /// The shortest local prefix of any target in this scope.

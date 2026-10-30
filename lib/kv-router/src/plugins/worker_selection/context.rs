@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::SessionContext;
+use super::inputs::CacheSnapshot;
 use crate::protocols::{SharedCacheHits, WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
 
@@ -23,6 +24,7 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) priority_jump: f64,
     pub(crate) strict_priority: u32,
     pub(crate) shared_cache_hits: Option<&'a SharedCacheHits>,
+    pub(crate) has_tier_matches: bool,
 }
 
 impl<'a> WorkerSelectionContext<'a> {
@@ -45,6 +47,15 @@ impl<'a> WorkerSelectionContext<'a> {
             priority_jump: request.priority_jump,
             strict_priority: request.strict_priority,
             shared_cache_hits: request.shared_cache_hits.as_ref(),
+            has_tier_matches: request.has_tier_matches(),
+        }
+    }
+
+    /// Request-wide cache facts shared by every candidate row.
+    pub(crate) fn cache_snapshot(&self) -> CacheSnapshot<'a> {
+        CacheSnapshot {
+            shared_hits: self.shared_cache_hits,
+            has_tier_matches: self.has_tier_matches,
         }
     }
 

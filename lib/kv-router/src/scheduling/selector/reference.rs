@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
-    CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
-    WorkerSelectionInput, WorkerSelector, select_worker_with_policy, source_prefix_blocks,
+    CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionContext, WorkerSelectionInput,
+    WorkerSelector, select_reference, source_prefix_blocks,
 };
 use crate::kv_hints::KvTransferScope;
 use crate::plugins::worker_selection::SelectionConfig;
@@ -268,14 +267,13 @@ impl DefaultScoringContext {
 }
 
 fn default_row<C: WorkerConfigLike>(
-    input: &MaterializedSelectionInput<'_>,
+    source: &SelectionRowSource<'_, C>,
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
     config: &C,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
-    input.track_kept_candidate(worker);
-    let mut row = input.row_with_device_overlap(
+    let mut row = source.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
         WorkerInputs::ALL,
@@ -285,24 +283,25 @@ fn default_row<C: WorkerConfigLike>(
     );
     // Like the builtin scorer, read fetchable prefixes only when they earn credit.
     if context.weights.shared_cache_multiplier != 0.0 {
-        row.transfer = kv_transfer_input(input, worker, config);
+        row.transfer = kv_transfer_input(source, worker, config);
     }
+    source.track_kept(&row);
     row
 }
 
 /// A row's fetch input from the sources [`pick_default_worker`] built before
 /// scoring; `None` when the request has no transfer candidates.
 fn kv_transfer_input<C: WorkerConfigLike>(
-    input: &MaterializedSelectionInput<'_>,
+    source: &SelectionRowSource<'_, C>,
     worker: WorkerWithDpRank,
     config: &C,
 ) -> Option<WorkerTransferInput> {
-    let sources = input.kv_transfer_sources.get()?;
+    let sources = source.kv_transfer_sources.get()?;
     let source = config.kv_transfer_keys().target().and_then(|target| {
         sources.source_for(
             worker,
             target,
-            input.request.transfer_local_prefix_blocks_for(worker),
+            source.request.transfer_local_prefix_blocks_for(worker),
         )
     });
     Some(WorkerTransferInput {
@@ -494,11 +493,12 @@ impl DefaultWorkerPicker {
 pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     scorer: &DefaultWorkerScorer<&SelectionConfig>,
     picker: &DefaultWorkerPicker,
-    input: &MaterializedSelectionInput<'_>,
-    workers: &HashMap<WorkerId, C>,
-    request: &SchedulingRequest,
-    eligibility: RoutingEligibility<'_>,
+    context: &WorkerSelectionContext<'_>,
+    source: &SelectionRowSource<'_, C>,
 ) -> Option<(WorkerWithDpRank, f64)> {
+    let workers = source.workers;
+    let request = source.request;
+    let eligibility = source.eligibility;
     let default_context = DefaultScoringContext::new(
         workers,
         request,
@@ -507,11 +507,11 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     );
     // Rows are scored as they are built, so build every fetch source first.
     if default_context.weights.shared_cache_multiplier != 0.0 {
-        input.kv_transfer_sources(workers, KvTransferScope::all);
+        source.kv_transfer_sources(KvTransferScope::all);
     }
     if let Some(worker) = eligibility.pinned_worker() {
         let row = default_row(
-            input,
+            source,
             default_context,
             worker,
             &workers[&worker.worker_id],
@@ -520,17 +520,16 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         return Some((
             worker,
             scorer.worker_logit(
-                &input.context,
+                context,
                 default_context,
                 &row,
-                input.request.transfer_local_prefix_blocks_for(worker),
+                request.transfer_local_prefix_blocks_for(worker),
                 "Pinned formula",
             ),
         ));
     }
 
-    let temperature = input
-        .context
+    let temperature = context
         .router_temperature_override
         .unwrap_or(scorer.kv_router_config.router_temperature);
     let get_score = |worker, config: &C| {
@@ -538,16 +537,16 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             .routing_constraints
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
-            &input.context,
+            context,
             default_context,
             &default_row(
-                input,
+                source,
                 default_context,
                 worker,
                 config,
                 preferred_taint_multiplier,
             ),
-            input.request.transfer_local_prefix_blocks_for(worker),
+            request.transfer_local_prefix_blocks_for(worker),
         )
     };
 
@@ -658,12 +657,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        select_worker_with_policy(
+        select_reference(
             self.worker_type,
-            WorkerSelectionPolicyStateRef::Reference(&self.kv_router_config, &self.picker),
+            &self.kv_router_config,
+            &self.picker,
             input,
-            None,
-            None,
         )
         .map(|(result, _)| result)
     }
@@ -689,15 +687,16 @@ mod tests {
         weights: LogitWeights,
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let input = MaterializedSelectionInput::new(request, block_size);
+        let source = SelectionRowSource::new(request, &workers, request.eligibility(), block_size);
+        let context = source.context();
         let default_context =
             DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
-                &input.context,
+                &context,
                 default_context,
                 &default_row(
-                    &input,
+                    &source,
                     default_context,
                     worker,
                     &workers[&worker.worker_id],
@@ -2034,12 +2033,17 @@ mod tests {
             prefill_load_scale: 1.0,
             shared_cache_multiplier: 1.0,
         };
-        let input = MaterializedSelectionInput::new(&request, 16);
+        let source = SelectionRowSource::new(&request, &workers, request.eligibility(), 16);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
         let config = &workers[&worker.worker_id];
-        let custom_row = input.row(worker, None, WorkerInputs::CACHE);
-        let default_row = default_row(&input, default_context, worker, config, None);
+        let custom_row = source.row_with_device_overlap(
+            worker,
+            None,
+            WorkerInputs::CACHE,
+            |_, device_overlap_blocks| device_overlap_blocks,
+        );
+        let default_row = default_row(&source, default_context, worker, config, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
         assert_eq!(
