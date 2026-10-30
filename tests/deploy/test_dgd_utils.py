@@ -284,7 +284,6 @@ def short_backoff(monkeypatch) -> None:
 
 
 def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) -> None:
-    """A kr8s bind failure is handled and a new forward is returned."""
     deployment = managed_deployment(tmp_path)
     short_backoff(monkeypatch)
     # A bound, non-listening socket passes kr8s's connect probe but makes its
@@ -316,7 +315,6 @@ def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) 
 def test_port_forward_replaces_unreachable_forward_with_new_object(
     monkeypatch, tmp_path
 ) -> None:
-    """An unreachable forward is stopped, not restarted on the same port."""
     deployment = managed_deployment(tmp_path)
     short_backoff(monkeypatch)
     unreachable_port = unused_local_port()
