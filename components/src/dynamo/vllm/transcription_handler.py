@@ -14,11 +14,15 @@ from typing import Any, AsyncIterator
 
 from dynamo._core import Context
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import InvalidArgument
 
 from .args import Config
 from .engine_monitor import VllmEngineMonitor
 
 _TRANSCRIPTION_IMPORT_ERROR: ImportError | None = None
+# Errors vLLM raises for a bad request. VLLMClientError (vLLM's 4xx base, which
+# includes VLLMValidationError) is not a ValueError.
+_REQUEST_ERRORS: tuple[type[Exception], ...] = (ValueError,)
 try:
     from fastapi import UploadFile  # type: ignore[import-not-found]
     from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -30,6 +34,9 @@ try:
     from vllm.entrypoints.speech_to_text.transcription.serving import (
         OpenAIServingTranscription,
     )
+    from vllm.exceptions import VLLMClientError
+
+    _REQUEST_ERRORS = (ValueError, VLLMClientError)
 except ImportError as error:
     UploadFile = None  # type: ignore[assignment, misc]
     ErrorResponse = None  # type: ignore[assignment, misc]
@@ -163,7 +170,12 @@ class TranscriptionWorkerHandler:
                 "Transcription response_format must be 'json' or 'verbose_json'"
             )
 
-        result = await self._run_with_cancellation(audio, native_request, context)
+        try:
+            result = await self._run_with_cancellation(audio, native_request, context)
+        except _REQUEST_ERRORS as error:
+            # Only InvalidArgument carries its message to the client, as in
+            # handlers.py; otherwise a VLLMClientError is reported as a 500.
+            raise InvalidArgument(str(error)) from error
         if ErrorResponse is not None and isinstance(result, ErrorResponse):
             raise HttpError(result.error.code, result.error.message)
         if not hasattr(result, "model_dump"):

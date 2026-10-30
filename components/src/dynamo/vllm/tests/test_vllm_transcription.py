@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm import transcription_handler
 from dynamo.vllm.transcription_handler import TranscriptionWorkerHandler
 
@@ -153,6 +154,36 @@ async def _assert_generate_preserves_native_vllm_error_status():
         )
 
     assert error.value.code == 404
+
+
+@pytest.mark.parametrize("error_name", ["VLLMValidationError", "ValueError"])
+def test_generate_reports_vllm_request_errors_as_invalid_argument(error_name):
+    asyncio.run(_assert_generate_reports_vllm_request_error(error_name))
+
+
+async def _assert_generate_reports_vllm_request_error(error_name):
+    # VLLMValidationError (a prompt longer than the model context, for one) is not a
+    # ValueError; both must reach the client as a 400 with their message.
+    exceptions = pytest.importorskip("vllm.exceptions")
+    error_cls = (
+        ValueError if error_name == "ValueError" else getattr(exceptions, error_name)
+    )
+    handler = make_handler()
+    handler._run_with_cancellation = AsyncMock(
+        side_effect=error_cls("bad request detail")
+    )
+
+    with pytest.raises(InvalidArgument, match="bad request detail"):
+        await anext(
+            handler.generate(
+                {
+                    "audio_b64": base64.b64encode(b"audio").decode("ascii"),
+                    "filename": "sample.wav",
+                    "response_format": "json",
+                },
+                object(),
+            )
+        )
 
 
 @pytest.mark.timeout(5)
