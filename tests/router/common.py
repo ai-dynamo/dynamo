@@ -4605,15 +4605,15 @@ def _require_cache_sensitive_policy(stack) -> dict[str, float]:
             "aggregated router_temperature must be 0 for deterministic first "
             f"selection, got {parameters['router_temperature']}"
         )
-    config = stack.provider_router_config
-    if not config.router_track_prefill_tokens:
+    config = json.loads(stack.provider_router_config.to_json())
+    if config["router_track_prefill_tokens"] is not True:
         raise AssertionError(
             "served KvRouter must retain router_track_prefill_tokens for "
             "cache-sensitive prefill accounting"
         )
-    if config.router_track_output_blocks:
+    if config["router_track_output_blocks"] is not False:
         raise AssertionError("served KvRouter must keep output-block tracking off")
-    if config.router_replica_sync:
+    if config["router_replica_sync"] is not False:
         raise AssertionError("served KvRouter must keep replica sync off")
     return parameters
 
