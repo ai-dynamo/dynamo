@@ -31,6 +31,7 @@ use crate::pool_discovery::{
 use async_trait::async_trait;
 use dynamo_global_common::{Lease, PoolKey};
 use futures::StreamExt;
+use kube::runtime::utils::Backoff;
 use kube::runtime::watcher::DefaultBackoff;
 use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -184,8 +185,7 @@ async fn join_sources(
     let warn_after = lease.duration() * 2;
     let mut ticks = tokio::time::interval(lease.heartbeat_interval());
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // From 0.8 s, doubling to 30 s, and from 0.8 s again after two minutes
-    // without a failure. It never runs out.
+    // From 0.8 s, doubling to 30 s. It never runs out.
     let mut backoff = DefaultBackoff::default();
     loop {
         let watches = tokio::try_join!(
@@ -193,26 +193,40 @@ async fn join_sources(
             registrations.list_and_watch(Some(stop.child_token())),
         );
         match watches {
-            Ok((mut from_mcs, mut from_registrations)) => loop {
-                let (source, event) = tokio::select! {
-                    biased;
-                    () = stop.cancelled() => return,
-                    event = from_mcs.next() => (Source::Mcs, event),
-                    event = from_registrations.next() => (Source::Registrations, event),
-                    _ = ticks.tick() => {
-                        join.warn_one_sided(warn_after);
-                        continue;
-                    }
-                };
-                match event {
-                    Some(Ok(event)) => join.apply(source, event),
-                    Some(Err(error)) => tracing::warn!(?error, ?source, "pool source watch error"),
-                    None => {
-                        tracing::warn!(?source, "pool source watch ended; watching again");
-                        break;
+            Ok((mut from_mcs, mut from_registrations)) => {
+                // Once the join follows both sources, the next failure waits
+                // from the shortest delay again, as kube's `StreamBackoff`
+                // does once its watch delivers.
+                let mut following = false;
+                loop {
+                    let (source, event) = tokio::select! {
+                        biased;
+                        () = stop.cancelled() => return,
+                        event = from_mcs.next() => (Source::Mcs, event),
+                        event = from_registrations.next() => (Source::Registrations, event),
+                        _ = ticks.tick() => {
+                            join.warn_one_sided(warn_after);
+                            continue;
+                        }
+                    };
+                    match event {
+                        Some(Ok(event)) => {
+                            join.apply(source, event);
+                            if !following && join.synced() {
+                                following = true;
+                                backoff.reset();
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(?error, ?source, "pool source watch error");
+                        }
+                        None => {
+                            tracing::warn!(?source, "pool source watch ended; watching again");
+                            break;
+                        }
                     }
                 }
-            },
+            }
             Err(error) => tracing::warn!(
                 ?error,
                 "cannot watch the pool sources; joining on each read until they can be watched"
@@ -261,6 +275,10 @@ impl Join {
         state.synced().then(|| state.snapshot())
     }
 
+    fn synced(&self) -> bool {
+        self.lock().synced()
+    }
+
     fn subscribe_now(
         &self,
     ) -> (
@@ -274,8 +292,17 @@ impl Join {
         )
     }
 
+    /// Until both sources list again, `list` joins them on each read, and
+    /// watchers keep the last view, marked `Estimated`, as the MCS backend's
+    /// watchers do while its watch fails.
     fn unsync(&self) {
         let mut state = self.lock();
+        if state.synced() {
+            let mut snapshot = state.snapshot();
+            snapshot.completeness = Completeness::Estimated;
+            // No subscribers is not an error.
+            let _ = self.events.send(WatchEvent::Resync(snapshot));
+        }
         state.mcs.synced = false;
         state.registered.synced = false;
     }
@@ -681,18 +708,42 @@ mod tests {
         })
     }
 
-    /// The DGD names a `Resync` lists, sorted.
-    fn resynced(event: PoolEvent) -> Vec<String> {
+    /// The snapshot a `Resync` carries.
+    fn resync_of(event: PoolEvent) -> Snapshot<PoolListing> {
         let WatchEvent::Resync(snapshot) = event else {
             panic!("expected a Resync");
         };
+        snapshot
+    }
+
+    /// The DGD names a snapshot lists, sorted.
+    fn names(snapshot: &Snapshot<PoolListing>) -> Vec<String> {
         let mut names: Vec<String> = snapshot
             .items
-            .into_iter()
+            .iter()
             .map(|listing| listing.key.dgd_name().to_owned())
             .collect();
         names.sort();
         names
+    }
+
+    /// The DGD names a `Resync` lists, sorted.
+    fn resynced(event: PoolEvent) -> Vec<String> {
+        names(&resync_of(event))
+    }
+
+    /// The watch's next event, which must come within `within`.
+    async fn next_within(
+        watch: &mut WatchStream<PoolListing, PoolKey>,
+        within: Duration,
+    ) -> PoolEvent {
+        let next = tokio::time::timeout(within, watch.next())
+            .await
+            .expect("an event in time");
+        let Some(Ok(event)) = next else {
+            panic!("the watch stream ended");
+        };
+        event
     }
 
     #[tokio::test(start_paused = true)]
@@ -904,15 +955,22 @@ mod tests {
         }
 
         // When both sources list again, as when the join watches them again,
-        // a pool that neither lists any more leaves the join too.
+        // a pool that neither lists any more leaves the join too. Until then,
+        // watchers keep the last view, marked `Estimated`.
         let join = join();
         both_list(&join);
         let mut events = join.events.subscribe();
         join.unsync();
+        let stale = resync_of(events.try_recv().unwrap());
+        assert_eq!(names(&stale), ["dropped", "kept"]);
+        assert_eq!(stale.completeness, Completeness::Estimated);
+        join.unsync();
         join.apply(Source::Mcs, resync(vec![from_mcs("kept")]));
         assert!(events.try_recv().is_err());
         join.apply(Source::Registrations, resync(vec![listed("kept", "m")]));
-        assert_eq!(resynced(events.try_recv().unwrap()), ["kept"]);
+        let fresh = resync_of(events.try_recv().unwrap());
+        assert_eq!(names(&fresh), ["kept"]);
+        assert_eq!(fresh.completeness, Completeness::Exact);
         let state = join.lock();
         assert!(!state.pools.contains_key(&key("dropped")));
         assert!(state.one_sided.is_empty());
@@ -924,19 +982,17 @@ mod tests {
         fx.mcs.fail_watches(2);
         fx.in_mcs("mocker");
         fx.register("mocker", "m1").await;
-        // Until the join can watch the sources, each read joins them.
-        assert_eq!(fx.keys().await, [key("mocker")]);
+        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
+        // The join's first attempt failed. Until it can watch the sources,
+        // each read joins them.
         settle().await;
+        assert_eq!(fx.mcs.failing_watches.load(Ordering::SeqCst), 1);
         assert!(fx.directory.join.snapshot().is_none());
+        assert_eq!(fx.keys().await, [key("mocker")]);
 
         // It tries again after a backoff, and then serves watch streams.
-        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(10), watch.next())
-            .await
-            .expect("the join watches the sources once it can");
-        assert!(
-            matches!(first, Some(Ok(WatchEvent::Upserted(listing))) if listing.key == key("mocker"))
-        );
+        let first = next_within(&mut watch, Duration::from_secs(10)).await;
+        assert!(matches!(first, WatchEvent::Upserted(listing) if listing.key == key("mocker")));
         assert!(fx.directory.join.snapshot().is_some());
     }
 
@@ -957,16 +1013,26 @@ mod tests {
         ));
 
         // The MCS watch ends, and MCS changes before the join watches it
-        // again: the next `Resync` lists the pools as they are then.
+        // again. Watchers keep the last view, marked `Estimated`, and then
+        // get the pools as they are once both sources have listed again.
         fx.mcs.end_watches();
         fx.mcs.remove(&key("old"));
         fx.in_mcs("new");
-        let next = tokio::time::timeout(Duration::from_secs(10), watch.next())
-            .await
-            .expect("the join watches the sources again");
-        let Some(Ok(event)) = next else {
-            panic!("the watch stream ended");
-        };
-        assert_eq!(resynced(event), ["new"]);
+        let stale = resync_of(next_within(&mut watch, Duration::from_secs(10)).await);
+        assert_eq!(names(&stale), ["old"]);
+        assert_eq!(stale.completeness, Completeness::Estimated);
+        let fresh = next_within(&mut watch, Duration::from_secs(10)).await;
+        assert_eq!(resynced(fresh), ["new"]);
+
+        // Once the join follows both sources again, the backoff starts over,
+        // so a watch that keeps ending is watched again within the shortest
+        // delay each time.
+        for _ in 0..4 {
+            fx.mcs.end_watches();
+            let stale = resync_of(next_within(&mut watch, Duration::from_secs(2)).await);
+            assert_eq!(stale.completeness, Completeness::Estimated);
+            let fresh = next_within(&mut watch, Duration::from_secs(2)).await;
+            assert_eq!(resynced(fresh), ["new"]);
+        }
     }
 }

@@ -87,6 +87,7 @@ impl McsPoolDirectory {
                 pool_service_suffix,
                 frontends,
                 portless: Mutex::default(),
+                frontendless: Mutex::default(),
             },
         )))
     }
@@ -113,9 +114,35 @@ struct PoolNaming {
     frontends: FrontendService,
     /// Frontend slices without the named port, so each is warned about once.
     portless: Mutex<HashSet<String>>,
+    /// Live pools without a frontend, so each is warned about once until it
+    /// has a frontend again or stops being live. Kept here rather than in
+    /// the index, since each read before the first sync builds a new index.
+    frontendless: Mutex<HashSet<PoolKey>>,
 }
 
 impl PoolNaming {
+    /// True when the live pool `key` has no frontend and was not already
+    /// warned about.
+    fn newly_frontendless(&self, key: &PoolKey, frontends: &[Url]) -> bool {
+        let mut warned = self
+            .frontendless
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !frontends.is_empty() {
+            warned.remove(key);
+            return false;
+        }
+        !warned.contains(key) && warned.insert(key.clone())
+    }
+
+    /// The pool `key` stopped being live.
+    fn forget_frontendless(&self, key: &PoolKey) {
+        self.frontendless
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+    }
+
     /// Source cluster from [`mcs::source_cluster`]; DGD name from the
     /// Service name without `suffix`. `None` for imports of other Services,
     /// and for a slice from an unknown cluster, which is logged.
@@ -334,6 +361,7 @@ impl PoolIndex {
         // the runtime also drops a pool whose Relay connection is gone.
         let state = self.pools.get_mut(key)?;
         if relays.is_empty() {
+            naming.forget_frontendless(key);
             let was_live = state.listing.take().is_some();
             if state.slices.is_empty() {
                 self.pools.remove(key);
@@ -353,11 +381,11 @@ impl PoolIndex {
         if state.listing.as_ref() == Some(&listing) {
             return None;
         }
-        if lost_frontends(state.listing.as_ref(), &listing.frontends) {
+        if naming.newly_frontendless(key, &listing.frontends) {
             // Routers have nowhere to send the pool's requests. Usually its
             // frontend Service is not exported, or its frontends are not
             // Ready yet.
-            let imported = state
+            let with_port = state
                 .slices
                 .iter()
                 .filter_map(|slice| self.slices.get(slice))
@@ -366,7 +394,7 @@ impl PoolIndex {
                 pool = ?key,
                 frontend_service = %format!("{}{}", key.dgd_name(), naming.frontends.suffix),
                 port_name = %naming.frontends.port_name,
-                frontend_slices_imported = imported,
+                frontend_slices_with_port = with_port,
                 "this pool is live but has no Ready frontend, so it is listed without frontends; \
                  check that its frontend Service is exported and its frontends are Ready"
             );
@@ -374,12 +402,6 @@ impl PoolIndex {
         state.listing = Some(listing.clone());
         Some(WatchEvent::Upserted(listing))
     }
-}
-
-/// A pool is warned about when it goes live without frontends or loses its
-/// last one, not on each slice event while it has none.
-fn lost_frontends(listed: Option<&PoolListing>, frontends: &[Url]) -> bool {
-    frontends.is_empty() && listed.is_none_or(|listing| !listing.frontends.is_empty())
 }
 
 #[cfg(test)]
@@ -395,7 +417,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow};
+    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow, slice_key};
     use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
     use super::*;
 
@@ -410,6 +432,7 @@ mod tests {
                 port_name: "http".to_owned(),
             },
             portless: Mutex::default(),
+            frontendless: Mutex::default(),
         }
     }
 
@@ -844,13 +867,40 @@ mod tests {
         assert!(after.frontends.is_empty());
         assert_eq!(after.relay_identities, before.relay_identities);
         assert!(events.try_recv().is_err());
+    }
 
-        // That is warned about once: when the pool loses its last frontend
-        // or goes live without one, not again while it has none.
-        assert!(lost_frontends(Some(&before), &after.frontends));
-        assert!(lost_frontends(None, &after.frontends));
-        assert!(!lost_frontends(Some(&after), &after.frontends));
-        assert!(!lost_frontends(None, &before.frontends));
+    #[test]
+    fn a_live_pool_without_frontends_is_warned_about_once() {
+        let naming = naming();
+        let pool = key("west", "mocker");
+        let relay = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        let frontend = frontend_slice("west", "mocker", &[("10.43.0.2", true)]);
+        let entries = |slices: &[&EndpointSlice]| {
+            slices
+                .iter()
+                .map(|slice| (slice_key(slice), naming.slice(slice).unwrap()))
+                .collect::<HashMap<_, _>>()
+        };
+        let warned = || naming.frontendless.lock().unwrap().contains(&pool);
+
+        // Each read before the first sync builds a new index from the same
+        // rules, as `SliceDirectory::list` does. The first read records the
+        // pool, so later ones do not warn again.
+        for _ in 0..2 {
+            PoolIndex::default().replace(&naming, entries(&[&relay]));
+        }
+        assert!(warned());
+        assert!(!naming.newly_frontendless(&pool, &[]));
+
+        // A frontend clears the record, so losing it warns again, and so does
+        // the pool no longer being live.
+        let mut index = PoolIndex::default();
+        index.replace(&naming, entries(&[&relay, &frontend]));
+        assert!(!warned());
+        let _ = index.upsert(&naming, slice_key(&frontend), None);
+        assert!(warned());
+        let _ = index.upsert(&naming, slice_key(&relay), None);
+        assert!(!warned());
     }
 
     #[test]
