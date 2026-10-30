@@ -94,6 +94,8 @@ pub(super) struct ModelServingLoad {
     pub(super) observed_frontends: u64,
     pub(super) ready_frontends: u64,
     pub(super) serving_pools: Vec<PoolId>,
+    /// Capacity of the model's topology members, with or without a pool.
+    pub(super) deployment: Option<PoolDeployment>,
 }
 
 /// Builds [`ServingLoadSnapshot`]s from the pool registry and frontend frames.
@@ -166,6 +168,7 @@ impl ServingLoadAggregator {
             }
             let catalog = self.pools.catalog();
             let topology = self.topology.snapshot();
+            let capacities = self.topology.model_capacities();
             let namespaces = frontend_namespaces(&catalog, &topology, &self.relay_namespace);
             sync_subscriptions(&mut subscriptions, &namespaces, |namespace| {
                 frontend_events(self.drt.clone(), namespace.to_string()).boxed()
@@ -200,6 +203,7 @@ impl ServingLoadAggregator {
                     .serving_pool_loads(&scheduler_rosters.recent(SCHEDULER_FRESHNESS, now), now),
                 models: reports.model_loads(
                     &catalog,
+                    &capacities,
                     &self.relay_namespace,
                     &frontend_rosters.recent(FRONTEND_FRESHNESS, now),
                     now,

@@ -17,6 +17,7 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, KvQuerySemantics, ModelTarget,
     PoolCatalogSnapshot, WorkerRole,
 };
+use super::load::PoolDeployment;
 use crate::discovery::readiness::{ReadinessUnit, evaluate_readiness};
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
@@ -143,6 +144,16 @@ impl TopologyPublisher {
 
     pub(crate) fn snapshot(&self) -> Arc<TopologySnapshot> {
         self.sender.borrow().clone()
+    }
+
+    /// Serving capacity per (namespace, base model) over every topology
+    /// member, from the members' runtime configurations. Membership alone
+    /// decides it: a member that has not materialized a pool, because no
+    /// worker publishes KV events yet, still counts. The catalog stays free
+    /// of phantom pools while the serving-load stream can still say how
+    /// many requests the model's workers run at once.
+    pub(crate) fn model_capacities(&self) -> HashMap<(String, String), PoolDeployment> {
+        model_capacities(&self.state.lock().membership)
     }
 
     pub(crate) fn replace_membership(&self, membership: DcMembershipView) {
@@ -361,6 +372,45 @@ fn derive_topology(
         .collect()
 }
 
+/// Sums each endpoint's [`PoolDeployment`] into its (namespace, base model)
+/// groups, the groups of [`derive_topology`]. `max_concurrency` is `None` as
+/// soon as one member worker does not declare its limit, as within a pool.
+fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), PoolDeployment> {
+    let mut capacities = HashMap::<(String, String), PoolDeployment>::new();
+    for endpoint_membership in membership.endpoints.values() {
+        if endpoint_membership.has_serving_topology_conflict() {
+            continue;
+        }
+        let deployment = PoolDeployment::from_runtime_configs(&endpoint_membership.runtime_configs);
+        let base_models = endpoint_membership
+            .registrations
+            .iter()
+            .filter_map(|registration| match registration.target() {
+                ModelTarget::Base { base_model } => Some(base_model.as_str().to_string()),
+                ModelTarget::Lora { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for base_model in base_models {
+            let key = (endpoint_membership.namespace.clone(), base_model);
+            match capacities.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    let total = entry.get_mut();
+                    total.live_workers = total.live_workers.saturating_add(deployment.live_workers);
+                    total.max_concurrency =
+                        match (total.max_concurrency, deployment.max_concurrency) {
+                            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+                            _ => None,
+                        };
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(deployment);
+                }
+            }
+        }
+    }
+    capacities
+}
+
 fn compatible_pool_id(
     membership: &EndpointMembership,
     base_model: &CanonicalModelId,
@@ -507,6 +557,7 @@ mod tests {
     };
     use super::super::resolution::resolve_indexer_domain;
     use super::*;
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
 
     fn model(value: &str) -> CanonicalModelId {
@@ -1616,5 +1667,61 @@ mod tests {
         let after = publisher.snapshot();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.entries[0].members[0].pool_id, pool_id);
+    }
+
+    /// Capacity follows membership, not the catalog: endpoints without a pool
+    /// link still count, grouped by (namespace, base model), and one worker
+    /// without a declared limit makes the group's limit unknown.
+    #[test]
+    fn model_capacities_sum_members_with_or_without_pools() {
+        let limited = |max_num_seqs: Option<u64>, ranks: u32| ModelRuntimeConfig {
+            max_num_seqs,
+            data_parallel_size: ranks,
+            ..ModelRuntimeConfig::default()
+        };
+        let mut decode = endpoint(
+            "ns.decode.generate",
+            "llama",
+            1,
+            Some(WorkerType::Decode),
+            vec![],
+        );
+        decode.runtime_configs =
+            HashMap::from([(1, limited(Some(8), 2)), (2, limited(Some(4), 1))]);
+        let mut prefill = endpoint(
+            "ns.prefill.generate",
+            "llama",
+            3,
+            Some(WorkerType::Prefill),
+            vec![],
+        );
+        prefill.runtime_configs = HashMap::from([(3, limited(Some(16), 1))]);
+        let mut other = endpoint(
+            "other.agg.generate",
+            "llama",
+            4,
+            Some(WorkerType::Aggregated),
+            vec![],
+        );
+        other.runtime_configs = HashMap::from([(4, limited(None, 1))]);
+        let view = view(vec![decode, prefill, other]);
+        let publisher = TopologyPublisher::new(view, &catalog(&DcMembershipView::default(), 1));
+
+        let capacities = publisher.model_capacities();
+        assert_eq!(
+            capacities.get(&("ns".to_string(), "llama".to_string())),
+            Some(&PoolDeployment {
+                live_workers: 3,
+                max_concurrency: Some(36),
+            })
+        );
+        assert_eq!(
+            capacities.get(&("other".to_string(), "llama".to_string())),
+            Some(&PoolDeployment {
+                live_workers: 1,
+                max_concurrency: None,
+            })
+        );
+        assert_eq!(capacities.len(), 2);
     }
 }

@@ -99,6 +99,10 @@ fn model_to_wire(model: &ModelServingLoad) -> proto::ModelServingLoad {
                 .copied()
                 .map(pool_id_to_wire)
                 .collect(),
+            live_workers: model.deployment.map(|deployment| deployment.live_workers),
+            max_concurrency: model
+                .deployment
+                .and_then(|deployment| deployment.max_concurrency),
         }),
     }
 }
@@ -145,6 +149,10 @@ mod tests {
             observed_frontends: 1,
             ready_frontends: 1,
             serving_pools: vec![producer(1).pool_id()],
+            deployment: Some(PoolDeployment {
+                live_workers: 3,
+                max_concurrency: Some(24),
+            }),
         }
     }
 

@@ -159,7 +159,10 @@ conflict also removes the endpoint from the topology projection. A
 `ServingBinding` conflict omits only the registration that cannot be resolved;
 other valid endpoint bindings remain eligible. This is why there are no phantom
 pools: an endpoint that never publishes KV events — a surface-less encode
-worker, for example — never appears in the catalog at all.
+worker, for example — never appears in the catalog at all. Such an endpoint
+is still a topology member, and its workers' declared capacity still reaches
+`SubscribeServingLoad` through `ModelDeploymentStatus`, so request load can be
+sized against capacity without a pool.
 
 Each materialized pool owns exactly one CKF actor. Restart and failure produce
 a new producer generation (`ProducerIdentity`); subscriptions are bound to the
