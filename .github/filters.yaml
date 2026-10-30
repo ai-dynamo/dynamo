@@ -59,6 +59,12 @@ docs:
   - '.codex/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
+  # The Kubernetes API reference pages are generated from these at check time,
+  # so a CRD type or header/footer change must rerun fern check and broken links.
+  # It also builds a docs preview, as these PRs did when they committed the
+  # regenerated pages.
+  - 'deploy/operator/api/**'
+  - 'deploy/operator/docs/**'
   # Sidecar documentation is not part of the Fern docs site.
   - '!lib/sidecar/**'
 
@@ -72,9 +78,11 @@ api_docs:
   - 'docs/fern/pages/reference/api/**'
   - 'docs/fern/index.yml'
   - 'docs/fern/docs.yml'
-  - 'docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx'
-  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
-  - 'deploy/operator/docs/footer.md'
+  # Kubernetes reference inputs: CRD Go types, the crd-ref-docs config and
+  # header/footer, and the make target that runs them.
+  - 'deploy/operator/api/**'
+  - 'deploy/operator/docs/**'
+  - 'deploy/operator/Makefile'
   - 'lib/bindings/python/src/**'
   - 'components/src/dynamo/**'
   - '**/Cargo.toml'
@@ -235,7 +243,6 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'

@@ -402,8 +402,9 @@ without committing, pushing, or publishing:
 docs/fern/scripts/simulate_docs_website.sh v1.2.1
 ```
 
-The script requires `git`, `fern`, `yq`, `jq`, `rsync`, and Python 3.10 or
-newer. Set `PYTHON=.venv/bin/python` to select a non-default interpreter, and
+The script requires `git`, `fern`, `yq`, `jq`, `rsync`, Go (to generate the
+Kubernetes API reference), and Python 3.10 or newer. Set
+`PYTHON=.venv/bin/python` to select a non-default interpreter, and
 set `KEEP=1` to retain the temporary worktrees for inspection.
 
 ### Start a local preview server

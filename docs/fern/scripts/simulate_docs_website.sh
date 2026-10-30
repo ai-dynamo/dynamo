@@ -40,8 +40,9 @@
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
 #
-# Requires: git, rsync, perl, yq v4, python3 >= 3.10 (or python3.13), and the
-# fern CLI for check 1 (skipped with a warning if unavailable).
+# Requires: git, rsync, perl, yq v4, python3 >= 3.10 (or python3.13), go (to
+# generate the Kubernetes API reference), and the fern CLI for check 1
+# (skipped with a warning if unavailable).
 set -euo pipefail
 
 TAG="${1:-v9.9.9}"
@@ -84,15 +85,21 @@ assert() { # assert <label> <ok|FAIL>
 GEN_SEL='.navigation[] | select(.tab == "reference") | .layout[] | select([.. | select(has("path")) | .path] | all_c(test("/reference/general/")))'
 
 echo "=== SYNC JOB (replayed) ==="
-# The Python/Rust API references are publish-time artifacts (gitignored in the
-# source tree); the real sync job generates them before the pages-dev rsync,
-# so the replay must too or the synced nav dangles. Requires griffe, like CI.
+# The Python/Rust/Kubernetes API references are publish-time artifacts
+# (gitignored in the source tree); the real sync job generates them before the
+# pages-dev rsync, so the replay must too or the synced nav dangles. Requires
+# griffe and Go, like CI.
 if ! "$PY" -c 'import griffe' 2>/dev/null; then
   echo "error: griffe is required to generate the API references (python3 -m pip install 'griffe==2.1.0')" >&2
   exit 1
 fi
+if ! command -v go >/dev/null 2>&1; then
+  echo "error: Go is required to generate the Kubernetes API reference (make -C deploy/operator generate-api-docs)" >&2
+  exit 1
+fi
 "$PY" "$SRC/scripts/gen_python_api.py"
 "$PY" "$SRC/scripts/gen_rust_api.py"
+make -C "$REPO_ROOT/deploy/operator" generate-api-docs
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"

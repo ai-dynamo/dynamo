@@ -12,6 +12,7 @@ docs/fern/pages/community/contributing/documentation/documentation-style-guide.m
              no hardcoded docs.nvidia.com self-links
   NAV        docs/fern/index.yml `path:` entries resolve, and every page file is in the nav
   INTERNAL   no NVBug/JIRA-style IDs, internal hosts, or TODO/FIXME in shipped docs
+  GENERATED  no publish-time generated page is committed (reads `git ls-files`)
 
 Usage:
   python3 docs/fern/scripts/docs_lint.py [--scan docs,examples,recipes] [--json]
@@ -26,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 
@@ -78,22 +80,31 @@ PATH_RE = re.compile(r"^\s*path:\s*(\S+)\s*$", re.M)
 # repository gates in direct contradiction -- whichever you satisfied, the other failed.
 NON_PAGE_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
 
-# Generated at publish time by docs/fern/scripts/gen_python_api.py and its Rust
-# counterpart. #13556 stopped committing them and gitignored both trees, so they
-# are absent from a clean checkout and present in the published site. A nav entry
-# or link that targets them is correct even though the file is not on disk, so
-# resolution checks treat these prefixes as satisfied. Keep in sync with the
-# ignore entries in docs/fern/.gitignore.
-GENERATED_PAGE_DIRS = (
+# Generated at publish time by docs/fern/scripts/gen_python_api.py, its Rust
+# counterpart, and `make -C deploy/operator generate-api-docs` for Kubernetes.
+# They are gitignored, so they are absent from a clean checkout and present in
+# the published site. A nav entry or link that targets them is correct even though
+# the file is not on disk, so resolution checks treat these paths as satisfied.
+# Keep in sync with the ignore entries in docs/fern/.gitignore.
+GENERATED_PAGE_PATHS = (
     os.path.join("pages", "reference", "api", "python"),
     os.path.join("pages", "reference", "api", "rust"),
+    os.path.join("pages", "reference", "kubernetes-api", "full-api-reference.mdx"),
+    os.path.join(
+        "pages",
+        "reference",
+        "kubernetes-api",
+        "additional-resources",
+        "api-reference-k8s.md",
+    ),
 )
 
 
 def is_generated(fern_rel: str) -> bool:
-    """True for a docs/fern-relative path inside a publish-time generated tree."""
+    """True for a docs/fern-relative path that is, or sits under, a publish-time
+    generated page path."""
     norm = os.path.normpath(fern_rel)
-    return any(norm == d or norm.startswith(d + os.sep) for d in GENERATED_PAGE_DIRS)
+    return any(norm == p or norm.startswith(p + os.sep) for p in GENERATED_PAGE_PATHS)
 
 
 # Docs on how to fix each rule, surfaced in the CI failure output.
@@ -104,6 +115,7 @@ RULE_HELP = {
     "NAV": "every `path:` in docs/fern/index.yml must resolve to a real file, and every page "
     "file needs a `path:` entry",
     "INTERNAL": "remove tracker IDs, internal hosts, and TODO/FIXME from shipped docs",
+    "GENERATED": "untrack it with `git rm --cached`; edit the page's source instead",
 }
 STYLE_GUIDE = (
     "docs/fern/pages/community/contributing/documentation/documentation-style-guide.md"
@@ -378,6 +390,30 @@ def check_nav(repo: str, out: list) -> None:
                 )
 
 
+def check_generated_untracked(repo: str, out: list) -> None:
+    """No publish-time generated page may be committed.
+
+    The ignore entries do not stop a re-add: resolving a modify/delete conflict on
+    one of these pages with `git add` tracks it again. The release job snapshots a
+    tag's tracked pages as-is instead of generating them, so a stale copy would ship.
+    """
+    paths = [os.path.join(FERN_DIR, p) for p in GENERATED_PAGE_PATHS]
+    try:
+        listed = subprocess.run(
+            ["git", "-C", repo, "ls-files", "--", *paths],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        reason = getattr(exc, "stderr", None) or exc
+        message = f"could not list tracked files: {str(reason).strip()}"
+        out.append(Finding(FERN_DIR, 1, "GENERATED", "warn", message))
+        return
+    for rel in listed.splitlines():
+        out.append(Finding(rel, 1, "GENERATED", "error", "generated page is committed"))
+
+
 class MissingScanTree(Exception):
     """A requested scan tree does not exist."""
 
@@ -480,6 +516,7 @@ def main() -> int:
     out: list = []
     if not args.no_nav:
         check_nav(repo, out)
+    check_generated_untracked(repo, out)
     for abspath in files:
         rel = os.path.relpath(abspath, repo)
         try:
