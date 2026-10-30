@@ -483,6 +483,8 @@ requirements.txt                                                                
 /lib/llm/src/lora/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
 /tests/benchmarks/                                                                                      @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/kvbm/                                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
+# Exclude this specific file which is often changed in non-kvbm-specific PRs:
+/lib/bindings/kvbm/Cargo.lock
 /lib/llm/src/grpc.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners

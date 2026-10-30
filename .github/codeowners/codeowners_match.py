@@ -114,12 +114,13 @@ class ResolvedModel:
     shared: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
     meta: dict = field(default_factory=dict)
+    exemptions: dict[str, str] = field(default_factory=dict)
 
     def label_to_team(self) -> dict[str, str]:
         return {a.label: a.github_team for a in self.areas}
 
     def owned_patterns(self) -> list[str]:
-        """Every glob that contributes to explicit (non-catch-all) ownership.
+        """Every glob contributing explicit coverage, including exemptions.
 
         The set used by the coverage gate -- if some pattern here matches a
         path, the path is "owned" and won't be reported as catch-all-only.
@@ -139,6 +140,7 @@ class ResolvedModel:
         # keep them unanchored in the coverage set too.
         for fs in self.filetype_shared:
             pats.append(fs.glob)
+        pats.extend(anchor(path) for path in self.exemptions)
         return pats
 
     def unmatched_paths(self, tree: Iterable[str]) -> list[str]:
@@ -247,8 +249,7 @@ def parse_codeowners(text: str) -> list[tuple[str, list[str]]]:
         if not stripped:
             continue
         pattern, *owners = stripped.split()
-        if owners:
-            rules.append((pattern, owners))
+        rules.append((pattern, owners))
     return rules
 
 
@@ -442,6 +443,8 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``required_owners`` -- validated owner-presence contracts; not emitted.
+    * ``exemptions`` -- exact file paths mapped to explanatory comments;
+      emitted ownerless immediately after their last matching ownership rule.
     * ``shared``      -- one complete owner list per co-owned glob; the
       strict gate rejects a list that drops an enclosing rule's owner.
     * ``advisory``    -- no longer supported. Every owner in CODEOWNERS blocks,
@@ -532,6 +535,25 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     # ``shared`` with a path glob.
     filetype_shared = _normalize_filetype_rules(filetype_rules, areas)
 
+    # Exemptions are exact files with a single-line explanation, never globs.
+    exemptions = spec.get("exemptions", {})
+    if not isinstance(exemptions, dict):
+        raise SystemExit("areas.yaml: exemptions must map file paths to comments")
+    for path, comment in exemptions.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or any(c.isspace() or c in "*?[]!#" for c in path)
+            or any(part in ("", ".", "..") for part in path.split("/"))
+            or not isinstance(comment, str)
+            or not comment.strip()
+            or len(comment.splitlines()) != 1
+        ):
+            raise SystemExit(
+                "areas.yaml: exemptions require exact relative file paths "
+                "and non-empty single-line comments"
+            )
+
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
@@ -539,6 +561,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         shared=normalized_shared,
         filetype_shared=filetype_shared,
         meta=dict(spec.get("meta", {})),
+        exemptions=dict(exemptions),
     )
 
 

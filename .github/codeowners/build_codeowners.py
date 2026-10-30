@@ -458,7 +458,7 @@ def _print_summary(
     pct = (100 * n_owned / n_tree) if n_tree else 100.0
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
     print(
-        f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
+        f"explicitly covered: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
     )
     if unmatched:
         print("catch-all-only sample (add an explicit glob to cover these):")
