@@ -155,6 +155,8 @@ impl RuntimeConfig {
 /// Per-worker runtime configuration.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
+    /// Require a controller grant before an observed engine may join discovery.
+    pub controller_managed: bool,
     /// Dynamo namespace for discovery routing.
     pub namespace: String,
     /// Component name within the namespace.
@@ -244,6 +246,7 @@ impl WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
+            controller_managed: false,
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
@@ -308,6 +311,25 @@ pub(crate) enum EngineKind {
 }
 
 impl EngineKind {
+    pub(crate) async fn verify_serving_admission(
+        &self,
+        expected: &crate::admission::AdmissionIdentity,
+    ) -> Result<(), DynamoError> {
+        match self {
+            Self::Llm(engine) => engine.verify_serving_admission(expected).await,
+            Self::Raw(_) => Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "raw engines do not support controller admission",
+            )),
+        }
+    }
+    fn serving_states(&self) -> Option<crate::serving::EngineServingStates> {
+        match self {
+            Self::Llm(engine) => engine.serving_states(),
+            Self::Raw(_) => None,
+        }
+    }
+
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.start(worker_id).await,
@@ -415,6 +437,12 @@ impl EngineKind {
             EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
             // Raw media engines publish no discovery records of their own.
             EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
+    async fn begin_shutdown(&self) {
+        if let EngineKind::Llm(engine) = self {
+            engine.begin_shutdown().await;
         }
     }
 
@@ -917,6 +945,8 @@ impl Worker {
         let _mutation = self.engine_route_mutation.lock().await;
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
+        drop(lifecycle);
+        self.engine.begin_shutdown().await;
     }
 
     /// Register the Dynamo-owned model taint update on the runtime system server.
@@ -939,12 +969,36 @@ impl Worker {
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
         endpoint.drt().runtime().mark_shutting_down();
-        if let Err(e) = endpoint.unregister_endpoint_instance().await {
+        let timeout = self
+            .engine
+            .serving_states()
+            .is_some()
+            .then(discovery_operation_timeout);
+        self.orchestrator_steps_with_withdrawal(
+            endpoint.unregister_endpoint_instance(),
+            timeout,
+            grace_period_secs(),
+        )
+        .await;
+    }
+
+    async fn orchestrator_steps_with_withdrawal(
+        &mut self,
+        withdrawal: impl std::future::Future<Output = anyhow::Result<()>>,
+        timeout: Option<Duration>,
+        grace: f64,
+    ) {
+        let result = if let Some(timeout) = timeout {
+            crate::serving::bounded_discovery(timeout, withdrawal).await
+        } else {
+            withdrawal.await
+        };
+        if let Err(e) = result {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
             tracing::info!("Endpoint unregistered from discovery");
         }
-        self.run_engine_shutdown_steps().await;
+        self.run_engine_shutdown_steps_with_grace(grace).await;
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -1016,6 +1070,19 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
+        let serving_states = self.engine.serving_states();
+        if self.config.controller_managed && serving_states.is_none() {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "controller admission requires an observation source",
+            ));
+        }
+        if serving_states.is_some() && self.config.enable_rl {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "engine-observed membership does not yet manage the separate RL endpoint",
+            ));
+        }
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
@@ -1196,7 +1263,14 @@ impl Worker {
         // endpoint also covers the RL endpoint registered further down.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
 
-        let start_fut = builder.start_with_registration();
+        let defer_registration = serving_states.is_some();
+        let start_fut = async move {
+            if defer_registration {
+                builder.start_without_registration().await
+            } else {
+                builder.start_with_registration().await
+            }
+        };
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
             biased;
@@ -1281,8 +1355,36 @@ impl Worker {
         // hold taken before registration is what kept the runtime from reporting
         // ready before this point; drop it here, because the write below
         // publishes readiness through the very signal it suppresses.
-        drop(readiness_hold);
-        set_worker_health(&endpoint, HealthStatus::Ready);
+        let mut membership_task = if let Some(states) = serving_states {
+            set_worker_health(&endpoint, HealthStatus::NotReady);
+            let admission = self.config.controller_managed.then(|| {
+                let admission = crate::admission::ControllerAdmission::new(&endpoint);
+                admission.register_routes(
+                    &endpoint,
+                    self.engine.clone(),
+                    states.clone(),
+                    self.engine_route_mutation.clone(),
+                    self.engine_route_shutdown.clone(),
+                );
+                admission
+            });
+            Some(tokio::spawn(crate::serving::follow_engine_state(
+                crate::serving::EndpointMembership::new(
+                    endpoint.clone(),
+                    primary_endpoint.instance(),
+                    discovery_operation_timeout(),
+                ),
+                states,
+                self.engine_route_mutation.clone(),
+                self.engine_route_shutdown.clone(),
+                readiness_hold,
+                admission,
+            )))
+        } else {
+            drop(readiness_hold);
+            set_worker_health(&endpoint, HealthStatus::Ready);
+            None
+        };
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
@@ -1313,12 +1415,27 @@ impl Worker {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
                 Ok(())
             }
+            result = async {
+                match membership_task.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                membership_task = None;
+                Err(err(ErrorType::Backend(BackendError::Unknown),
+                    format!("engine membership task exited unexpectedly: {result:?}")))
+            }
         };
 
         // Cancel accepted Rust route futures, wait for their shared lifecycle
         // guards and any discovery-mutation critical section, then close the
         // routes. No resume callback can re-register after the final unregister.
         self.begin_engine_route_shutdown().await;
+        if let Some(task) = membership_task
+            && let Err(error) = task.await
+        {
+            tracing::warn!(%error, "engine membership task failed during shutdown");
+        }
 
         // Symmetric with the ready write: stop advertising ready before the
         // orchestrator drains and unregisters.
@@ -1338,13 +1455,8 @@ impl Worker {
     /// `engine.is_quiescent()` → `cleanup_once()`. Each engine step swallows
     /// non-fatal failures so a misbehaving engine can't block the worker
     /// from exiting.
-    async fn run_engine_shutdown_steps(&mut self) {
-        self.run_engine_shutdown_steps_with_grace(grace_period_secs())
-            .await
-    }
-
-    /// Same as [`run_engine_shutdown_steps`] but with an explicit grace
-    /// period. Lets unit tests assert on call ordering without setting
+    ///
+    /// An explicit grace period lets unit tests assert on call ordering without setting
     /// `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (which is process-global
     /// and would race other parallel tests).
     async fn run_engine_shutdown_steps_with_grace(&mut self, grace: f64) {
@@ -1370,14 +1482,22 @@ impl Worker {
     /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
     /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
     /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
-    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`, less the discovery
+    /// withdrawal allowance for observed engines.
     async fn drain_until_idle_or_deadline(&self) {
         if !self.config.disaggregation_mode.is_prefill() {
             return;
         }
-        let configured = drain_timeout_secs();
-        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
-        let budget = configured.min(cap);
+        let discovery_reserve = if self.engine.serving_states().is_some() {
+            discovery_operation_timeout()
+        } else {
+            Duration::ZERO
+        };
+        let budget = drain_budget_secs(
+            drain_timeout_secs(),
+            graceful_shutdown_timeout(),
+            discovery_reserve,
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
         let start = std::time::Instant::now();
         let mut last_heartbeat = start;
@@ -1439,7 +1559,10 @@ impl Worker {
 /// `Ready` goes through `set_endpoint_registered`, which skips the endpoint
 /// layer whenever that endpoint owns a canary target. Writing the target
 /// `Ready` here instead would report readiness the canary has not yet verified.
-fn set_worker_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
+pub(crate) fn set_worker_health(
+    endpoint: &dynamo_runtime::component::Endpoint,
+    status: HealthStatus,
+) {
     let system_health = endpoint.drt().system_health();
     let mut system_health = system_health.lock();
     match status {
@@ -1507,6 +1630,16 @@ fn graceful_shutdown_timeout() -> Duration {
     let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
     let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
     Duration::from_secs(secs)
+}
+
+fn discovery_operation_timeout() -> Duration {
+    // Discovery must not consume the drain/cleanup budget, even with a short
+    // configured shutdown deadline. This applies only to observed engines.
+    (graceful_shutdown_timeout() / 4).min(Duration::from_secs(5))
+}
+
+fn drain_budget_secs(configured: f64, shutdown: Duration, discovery: Duration) -> f64 {
+    configured.min((shutdown.saturating_sub(discovery).as_secs_f64() - CLEANUP_RESERVE_S).max(0.0))
 }
 
 fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
@@ -1836,7 +1969,13 @@ fn wrap_engine_control_callback(
     route_mutation: Arc<tokio::sync::Mutex<()>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
-    let policy = engine_control_policy(&control_name);
+    // An observed engine owns pause/health facts. Its shared reconciler is the
+    // sole registration writer; a successful resume RPC is not an admission ack.
+    let policy = if engine.serving_states().is_some() {
+        EngineControlPolicy::Direct
+    } else {
+        engine_control_policy(&control_name)
+    };
     Arc::new(move |body| {
         let callback = callback.clone();
         let engine = engine.clone();
@@ -3297,6 +3436,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stalled_final_withdrawal_does_not_skip_drain_or_cleanup() {
+        let (engine, log) = OrderingMockEngine::new(false);
+        let mut worker = worker_with_prefill(engine);
+        worker.start_engine(0).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.orchestrator_steps_with_withdrawal(
+                std::future::pending(),
+                Some(Duration::from_millis(20)),
+                0.0,
+            ),
+        )
+        .await
+        .expect("discovery must leave time for engine cleanup");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["start", "is_quiescent", "cleanup"]
+        );
+        assert_eq!(worker.state, LifecycleState::Stopped);
+    }
+
+    #[test]
+    fn observed_drain_preserves_cleanup_budget_after_discovery_timeout() {
+        assert_eq!(
+            drain_budget_secs(30.0, Duration::from_secs(30), Duration::from_secs(5)),
+            20.0
+        );
+        assert_eq!(
+            drain_budget_secs(30.0, Duration::from_secs(30), Duration::ZERO),
+            25.0
+        );
+        assert_eq!(
+            drain_budget_secs(30.0, Duration::from_secs(5), Duration::from_secs(1)),
+            0.0
+        );
+    }
+
     // ENV_LOCK must span the `.await` below: it serializes the env set/restore
     // window against other env-mutating drain tests, and the value must stay
     // pinned while the awaited drain loop reads it. No code reachable from the
@@ -3355,8 +3532,8 @@ mod tests {
     // The "drain skipped when engine never started" scenario isn't
     // reachable through the public `Worker::run` flow — pre-start
     // shutdown returns from `run_inner` before `serve_with_orchestrator`
-    // (and therefore `run_engine_shutdown_steps`) ever runs. So we don't
-    // pin a contract for run_engine_shutdown_steps in the Stopped state.
+    // (and therefore `run_engine_shutdown_steps_with_grace`) ever runs. So we don't
+    // pin a contract for run_engine_shutdown_steps_with_grace in the Stopped state.
 
     #[test]
     fn grace_period_default_when_unset() {

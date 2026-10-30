@@ -243,6 +243,28 @@ fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, Dynam
 }
 
 impl NativeHttp {
+    pub(crate) fn with_api_key(
+        mut self,
+        api_key: Option<&str>,
+        connect_timeout: Duration,
+    ) -> Result<Self, DynamoError> {
+        if let Some(key) = api_key {
+            let mut value = header::HeaderValue::from_str(&format!("Bearer {key}"))
+                .map_err(|_| client::invalid_arg("invalid SGLang API key header"))?;
+            value.set_sensitive(true);
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value);
+            self.client = reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .default_headers(headers)
+                .build()
+                .map_err(|_| {
+                    client::invalid_arg("could not configure authenticated SGLang HTTP client")
+                })?;
+        }
+        Ok(self)
+    }
+
     pub(crate) fn discover(
         grpc_endpoint: &GrpcEndpoint,
         discovery: &Discovery,
@@ -780,6 +802,57 @@ mod tests {
             native.body["sampling_params"]
                 .get("min_new_tokens")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_covers_readiness_generation_and_abort() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for path in ["/health", "/generate", "/abort_request"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0_u8; 8192];
+                let size = socket.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]).to_lowercase();
+                assert!(request.contains(path));
+                assert!(request.contains("authorization: bearer local-test-key\r\n"));
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let native = native_http(port)
+            .with_api_key(Some("local-test-key"), Duration::from_secs(1))
+            .unwrap();
+        native
+            .await_ready(
+                tokio::time::Instant::now() + Duration::from_secs(2),
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+        native
+            .clone()
+            .open(serde_json::json!({"input_ids": [1], "stream": true}))
+            .await
+            .unwrap();
+        native
+            .client
+            .post(native.endpoint.with_path("/abort_request"))
+            .json(&serde_json::json!({"abort_all": true}))
+            .send()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            native_http(port)
+                .with_api_key(Some("invalid\r\nkey"), Duration::from_secs(1))
+                .is_err()
         );
     }
 

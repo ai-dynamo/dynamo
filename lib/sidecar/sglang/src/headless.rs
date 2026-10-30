@@ -30,6 +30,7 @@ const METADATA_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) struct HeadlessSidecar {
     grpc_endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
+    grpc_auth: client::ApiKeyAuth,
     common: CommonArgs,
 }
 
@@ -47,6 +48,7 @@ impl HeadlessSidecar {
             ));
         }
         Ok(Self {
+            grpc_auth: client::ApiKeyAuth::new(args.sglang_api_key.as_deref())?,
             grpc_endpoint: args.sidecar.grpc_endpoint,
             transport: args.sidecar.grpc.config(),
             common: args.sidecar.common,
@@ -80,8 +82,14 @@ impl HeadlessSidecar {
         &self,
     ) -> Result<(client::Client, NodeMetadata, DisaggregationMode)> {
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let mut client =
-            client::connect(&self.grpc_endpoint, &self.transport, deadline, false).await?;
+        let mut client = client::connect(
+            &self.grpc_endpoint,
+            &self.transport,
+            deadline,
+            false,
+            &self.grpc_auth,
+        )
+        .await?;
         let info = client::get_server_info(&mut client, deadline).await?;
         let (metadata, mode) = follower_metadata(&info)?;
         Ok((client, metadata, mode))
@@ -322,6 +330,7 @@ mod tests {
         info: Arc<Mutex<Value>>,
         calls: Arc<Mutex<Vec<String>>>,
         unavailable: Arc<AtomicBool>,
+        require_auth: Arc<AtomicBool>,
     }
 
     impl tonic::server::NamedService for MetadataService {
@@ -332,10 +341,18 @@ mod tests {
         type Response = pb::GetServerInfoResponse;
         type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
 
-        fn call(&mut self, _: tonic::Request<pb::GetServerInfoRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<pb::GetServerInfoRequest>) -> Self::Future {
             let json_info = self.info.lock().unwrap().to_string();
             let unavailable = self.unavailable.load(Ordering::Relaxed);
+            let authorized = !self.require_auth.load(Ordering::Relaxed)
+                || request
+                    .metadata()
+                    .get("authorization")
+                    .is_some_and(|value| value == "Bearer follower-key");
             Box::pin(async move {
+                if !authorized {
+                    return Err(tonic::Status::unauthenticated("Unauthorized"));
+                }
                 if unavailable {
                     return Err(tonic::Status::unavailable("local engine stopped"));
                 }
@@ -383,6 +400,7 @@ mod tests {
                 info: Arc::new(Mutex::new(follower_info())),
                 calls: Arc::default(),
                 unavailable: Arc::default(),
+                require_auth: Arc::default(),
             };
             let incoming = futures::stream::unfold(listener, |listener| async move {
                 let connection = listener.accept().await.map(|(stream, _)| stream);
@@ -444,7 +462,13 @@ mod tests {
                 startup_deadline: Duration::from_secs(5),
                 ..Default::default()
             };
-            let result = client::bootstrap_discover(&endpoint, &transport, false).await;
+            let result = client::bootstrap_discover(
+                &endpoint,
+                &transport,
+                false,
+                &client::ApiKeyAuth::default(),
+            )
+            .await;
             let mut expected = vec!["/sglang.runtime.v1.SglangService/GetServerInfo"];
             if follower {
                 assert!(matches!(
@@ -457,6 +481,61 @@ mod tests {
             }
             assert_eq!(*server.service.calls.lock().unwrap(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn follower_authenticates_bootstrap_and_metadata_monitoring() {
+        let server = MetadataServer::start().await;
+        server.service.require_auth.store(true, Ordering::Relaxed);
+        for key in [None, Some("wrong-key"), Some("follower-key")] {
+            let mut argv = vec![
+                "sidecar",
+                "--grpc-endpoint",
+                &server.endpoint,
+                "--grpc-startup-deadline-secs",
+                "5",
+            ];
+            if let Some(key) = key {
+                argv.extend(["--sglang-api-key", key]);
+            }
+            let args = Args::try_parse_from(argv).unwrap();
+            let auth = client::ApiKeyAuth::new(args.sglang_api_key.as_deref()).unwrap();
+            let startup = client::bootstrap_discover(
+                &args.sidecar.grpc_endpoint,
+                &args.sidecar.grpc.config(),
+                false,
+                &auth,
+            )
+            .await;
+            let sidecar = HeadlessSidecar::from_args(args).unwrap();
+            let connection = sidecar.connect_local_engine().await;
+            if key == Some("follower-key") {
+                assert!(matches!(
+                    startup.unwrap(),
+                    client::StartupDiscovery::Follower
+                ));
+                let (mut client, metadata, mode) = connection.unwrap();
+                check_local_engine(&mut client, &metadata, mode, Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            } else {
+                assert!(startup.unwrap_err().to_string().contains("Unauthenticated"));
+                let error = match connection {
+                    Ok(_) => panic!("unauthenticated follower connected"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("Unauthenticated"));
+            }
+        }
+        assert!(
+            server
+                .service
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|path| path == "/sglang.runtime.v1.SglangService/GetServerInfo")
+        );
     }
 
     #[tokio::test]

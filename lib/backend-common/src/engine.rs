@@ -194,10 +194,31 @@ pub struct EngineConfig {
 ///   5. `cleanup()` — called once on shutdown, release all resources.
 #[async_trait]
 pub trait LLMEngine: Send + Sync + 'static {
+    /// Opt into engine-observed serving membership. The worker starts deferred
+    /// and is the sole discovery writer; `None` preserves the legacy lifecycle.
+    fn serving_states(&self) -> Option<crate::serving::EngineServingStates> {
+        None
+    }
+
+    /// Re-read engine facts before accepting a controller's scoped admission.
+    /// Implementations must not mutate pause state or discovery here.
+    async fn verify_serving_admission(
+        &self,
+        _expected: &crate::admission::AdmissionIdentity,
+    ) -> Result<(), DynamoError> {
+        Err(DynamoError::builder()
+            .error_type(crate::error::ErrorType::Backend(
+                crate::error::BackendError::InvalidArgument,
+            ))
+            .message("engine does not support controller admission verification")
+            .build())
+    }
+
     /// Start the engine and return registration metadata.
     ///
     /// After this returns, the engine MUST be ready to accept `generate()`
-    /// calls. `Worker` will register the model and begin serving immediately.
+    /// calls unless it supplies `serving_states()`. Observed engines can remain
+    /// paused: `Worker` starts deferred and waits for an eligible observation.
     /// Use interior mutability for any state allocated here.
     ///
     /// `worker_id` is an opaque, runtime-allocated unique identifier for
@@ -422,6 +443,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     ) -> Result<(), DynamoError> {
         Ok(())
     }
+
+    /// Stop engine-owned serving lifecycle tasks before the worker removes
+    /// its endpoint from discovery. Implementations must make this idempotent.
+    async fn begin_shutdown(&self) {}
 }
 
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].

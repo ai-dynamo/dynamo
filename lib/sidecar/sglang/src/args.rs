@@ -20,6 +20,10 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
+    /// Bearer token for the local SGLang HTTP and native gRPC servers.
+    #[arg(long, env = "DYN_SGLANG_API_KEY", hide_env_values = true)]
+    pub sglang_api_key: Option<String>,
+
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local
@@ -27,6 +31,21 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    /// Remove this worker from Dynamo discovery while SGLang generation is
+    /// paused. Disable this when pause is used without draining routed traffic.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_UNREGISTER_ON_PAUSE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub unregister_on_pause: bool,
+
+    /// Start outside discovery and require explicit controller admission.
+    /// Requires unregister-on-pause; healthy/resumed alone never grants admission.
+    #[arg(long, env = "DYN_SGLANG_CONTROLLER_MANAGED")]
+    pub controller_managed: bool,
 
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.
