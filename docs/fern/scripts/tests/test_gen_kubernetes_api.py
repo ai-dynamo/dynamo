@@ -52,7 +52,7 @@ EXPECTED_TYPE_COUNTS = {
     "nvidia.com/v1alpha1": 71,
     "nvidia.com/v1beta1": 76,
     "nvidia.com/v1beta2": 35,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 29,
+    "operator.config.dynamo.nvidia.com/v1alpha1": 31,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
