@@ -155,6 +155,14 @@ def _retune_inputs(
     AISimulate setting.
     """
 
+    retune = config.retune
+    if retune is not None and retune.executor != "local":
+        # Replay runs local sweeps only; executor 'dgdr' needs a live
+        # Planner, so do not silently replay it as a local sweep.
+        raise ValueError(
+            f"planner.retune executor {retune.executor!r} is not supported in "
+            "replay; replay retune runs executor 'local'"
+        )
     if trace_format != "dynamo":
         raise ValueError(
             "planner.retune replays a Dynamo request trace: it requires "

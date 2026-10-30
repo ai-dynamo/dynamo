@@ -171,6 +171,17 @@ class SweepRequest:
     ``retune.domains`` expands ``retune.planner.load_predictor``; its
     winner's predictor fields are fixed into every non-baseline candidate.
     ``objective`` is the metric ``score_summary`` scores each replay on.
+
+    The remaining fields are set only by a live controller (``launch_gate``
+    set) and keep their defaults in replay, where ``run_sweep`` ignores them:
+    ``router_domain`` is the controller's router domain (live knob name ->
+    values), ``deadline_s`` the absolute epoch deadline ``D_k = L_k +
+    timeout``, ``spec_replicas`` the DGD spec replicas by worker type the
+    gate reported, ``replicas_verified`` whether the recorded ready counts
+    cover the whole window (``False`` when the window began before the
+    controller started), and ``generation`` the launching controller's
+    generation. Abort events are passed to the sweep function, never stored
+    here, so the request stays picklable.
     """
 
     window_index: int
@@ -192,6 +203,11 @@ class SweepRequest:
     max_parallel: int
     timeout_s: float
     history_paths: tuple[str, ...] = ()
+    router_domain: dict[str, tuple[float, ...]] | None = None
+    deadline_s: float | None = None
+    spec_replicas: dict[str, int] | None = None
+    replicas_verified: bool = True
+    generation: int = 0
 
     def __post_init__(self) -> None:
         keys = [candidate.key() for candidate in self.candidates]
@@ -207,6 +223,8 @@ class SweepRequest:
             raise ValueError("max_parallel must be at least 1")
         if not self.timeout_s > 0:
             raise ValueError("timeout_s must be positive")
+        if self.deadline_s is not None and not math.isfinite(self.deadline_s):
+            raise ValueError("deadline_s must be finite")
         if self.predictor_candidates:
             labels = [label for label, _ in self.predictor_candidates]
             if len(set(labels)) != len(labels):
@@ -238,7 +256,11 @@ class SweepResult:
     prepares it on ``warmup_observations`` as a host does before a swap;
     ``predictor_warmup_error`` is that preparation's error, if any.
     ``row_counts`` holds the window reader's counts and, when the history
-    was read, ``history_requests``.
+    was read, ``history_requests``. ``failure_reason`` is a stable,
+    machine-readable reason a live executor sets next to the free-text
+    ``error`` (``retune.live.contracts.NON_DECISION_FAILURES`` mean the
+    window was abandoned, not failed); ``details`` carries JSON-shaped
+    executor facts for the decision record. ``run_sweep`` sets neither.
     """
 
     status: SweepStatus
@@ -251,6 +273,8 @@ class SweepResult:
     predictor_warmup_error: str | None = None
     wall_s: float = 0.0
     error: str | None = None
+    failure_reason: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 def with_predictor_fields(
