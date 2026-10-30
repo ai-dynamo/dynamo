@@ -64,6 +64,7 @@ from dynamo.sglang._compat import (
     mm_encode,
 )
 from dynamo.sglang.args import Config
+from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -107,6 +108,50 @@ class _ModalityBatch:
     token_id: Optional[int]
     grid_attr: str
     url_attr: str
+
+
+# Owned by the frontend/encode/PD pipeline; never forwarded from the client body.
+_NATIVE_PIPELINE_KEYS = frozenset(
+    {
+        "input_ids",
+        "rid",
+        "stream",
+        "text",
+        "input_embeds",
+        "image_data",
+        "video_data",
+        "audio_data",
+    }
+)
+
+
+def _native_media_inputs(request: Dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(image URLs, video URLs) from an SGLang-native /generate body."""
+    payload = native_generate_payload(request)
+    if payload is None:
+        return [], []
+    if payload.get("audio_data"):
+        raise ValueError(
+            "/generate on the multimodal encode worker has no audio support"
+        )
+    urls = []
+    for key in ("image_data", "video_data"):
+        value = payload.get(key)
+        if value is None:
+            value = []
+        elif isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or not all(isinstance(u, str) for u in value):
+            raise ValueError(f"{key} must be a URL/data-URL string or a list of them")
+        urls.append(value)
+    return urls[0], urls[1]
+
+
+def _native_generate_options(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    payload = native_generate_payload(request)
+    if payload is None:
+        return None
+    return {k: v for k, v in payload.items() if k not in _NATIVE_PIPELINE_KEYS}
 
 
 def _software_video_decoder_imports() -> bool:
@@ -913,6 +958,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         mm_data = request.get("multi_modal_data")
         if not mm_data:
+            native_media = _native_media_inputs(request)
+            if any(native_media):
+                return native_media
             raise ValueError("multi_modal_data is required for the encode worker.")
         if not isinstance(mm_data, dict):
             raise ValueError("multi_modal_data must be an object.")
@@ -1101,6 +1149,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         request = SglangMultimodalRequest(
             request=preprocessed_request,
             multimodal_inputs=multimodal_groups,
+            native_generate=_native_generate_options(raw_request),
         )
 
         try:
