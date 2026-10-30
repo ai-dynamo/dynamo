@@ -162,7 +162,7 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
         dynamo_kv_router::WorkerInputs::LOAD
     }
     fn score(
-        &mut self,
+        &self,
         _: &dynamo_kv_router::WorkerSelectionContext<'_>,
         candidates: dynamo_kv_router::WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -177,7 +177,7 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
 struct MinimumPicker;
 impl dynamo_kv_router::WorkerPicker for MinimumPicker {
     fn pick(
-        &mut self,
+        &self,
         _: &dynamo_kv_router::WorkerSelectionContext<'_>,
         input: dynamo_kv_router::WorkerInputView<'_>,
     ) -> Result<usize, dynamo_kv_router::WorkerSelectionPolicyError> {

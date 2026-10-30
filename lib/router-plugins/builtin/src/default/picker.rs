@@ -4,9 +4,11 @@
 //! Minimum-cost selection, tie-breaking, and temperature sampling of scored candidates.
 
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    ScoredWorkerCandidate, WorkerInputView, WorkerPicker, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
 };
 use parking_lot::Mutex;
+use std::cell::Cell;
 use std::sync::Arc;
 
 fn softmax_sample_index<T>(
@@ -60,27 +62,38 @@ fn softmax_sample_index<T>(
     entries.len() - 1
 }
 
-pub(super) struct DefaultPicker {
-    temperature: f64,
-    rng: Option<Arc<Mutex<fastrand::Rng>>>,
+/// Sampling buffers reused across picks. Each call clears what it uses.
+#[derive(Default)]
+struct Scratch {
     entries: Vec<(usize, f64)>,
     probabilities: Vec<f64>,
 }
 
-impl DefaultPicker {
-    pub(super) fn new(temperature: f64, rng: Option<Arc<Mutex<fastrand::Rng>>>) -> Self {
-        Self {
-            temperature,
-            rng,
+thread_local! {
+    // One slot per thread, shared by every picker instance. A pick takes the buffers out and
+    // puts them back, so a nested pick on this thread allocates its own instead of panicking.
+    static SCRATCH: Cell<Scratch> = const {
+        Cell::new(Scratch {
             entries: Vec::new(),
             probabilities: Vec::new(),
-        }
+        })
+    };
+}
+
+pub(super) struct DefaultPicker {
+    temperature: f64,
+    rng: Option<Arc<Mutex<fastrand::Rng>>>,
+}
+
+impl DefaultPicker {
+    pub(super) fn new(temperature: f64, rng: Option<Arc<Mutex<fastrand::Rng>>>) -> Self {
+        Self { temperature, rng }
     }
 }
 
 impl WorkerPicker for DefaultPicker {
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -110,24 +123,33 @@ impl WorkerPicker for DefaultPicker {
             }
             return Ok(best_row);
         }
+        let mut scratch = SCRATCH.take();
+        let row = self.sample(candidates, &mut scratch);
+        SCRATCH.set(scratch);
+        Ok(row)
+    }
+}
+
+impl DefaultPicker {
+    fn sample(&self, candidates: &[ScoredWorkerCandidate], scratch: &mut Scratch) -> usize {
         let Some(rng) = &self.rng else {
-            return Ok(softmax_sample_index(
+            return softmax_sample_index(
                 candidates,
                 |candidate| candidate.cost(),
                 self.temperature,
                 fastrand::f64(),
-                &mut self.probabilities,
-            ));
+                &mut scratch.probabilities,
+            );
         };
-        self.entries.clear();
-        self.entries.extend(
+        scratch.entries.clear();
+        scratch.entries.extend(
             candidates
                 .iter()
                 .enumerate()
                 .map(|(row, candidate)| (row, candidate.cost())),
         );
         // Canonical order is required only for deterministic replay, never for production ties.
-        self.entries.sort_unstable_by_key(|(row, _)| {
+        scratch.entries.sort_unstable_by_key(|(row, _)| {
             let worker = candidates[*row].worker();
             (worker.worker_id, worker.dp_rank)
         });
@@ -136,7 +158,7 @@ impl WorkerPicker for DefaultPicker {
             let mut best = 0;
             let mut best_cost = f64::INFINITY;
             let mut ties = 0;
-            for (index, (_, cost)) in self.entries.iter().enumerate() {
+            for (index, (_, cost)) in scratch.entries.iter().enumerate() {
                 if *cost < best_cost {
                     best = index;
                     best_cost = *cost;
@@ -151,13 +173,13 @@ impl WorkerPicker for DefaultPicker {
             best
         } else {
             softmax_sample_index(
-                &self.entries,
+                &scratch.entries,
                 |(_, cost)| *cost,
                 self.temperature,
                 rng.f64(),
-                &mut self.probabilities,
+                &mut scratch.probabilities,
             )
         };
-        Ok(self.entries[selected].0)
+        scratch.entries[selected].0
     }
 }

@@ -407,7 +407,7 @@ impl RoutingHost {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
             RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
             RoutingPolicy::Direct => WorkerInputs::NONE,
-            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
+            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::ACTIVE_REQUESTS,
         }
     }
 
