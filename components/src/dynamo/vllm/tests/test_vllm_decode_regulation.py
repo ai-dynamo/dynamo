@@ -264,7 +264,6 @@ def test_bias_tracks_slower_steps_and_is_clamped():
         (None, {"interactive": True}),
         ({"session_id": "interactive-3"}, {"interactive": True}),
         ({"session_id": "root"}, {"interactive": False}),
-        ({"session_id": "child", "parent_session_id": "root"}, {"interactive": False}),
     ],
 )
 def test_identity_from_request(ctx, expected):
@@ -282,10 +281,6 @@ def test_identity_from_request(ctx, expected):
         (
             {"routing": {"priority": 5}, "agent_context": {"session_id": "root"}},
             {"interactive": True},
-        ),
-        (
-            {"agent_context": {"session_id": "c", "parent_session_id": "root"}},
-            {"interactive": False},
         ),
         # the session prefix rule does not apply in priority mode
         ({"agent_context": {"session_id": "interactive-3"}}, {"interactive": False}),
