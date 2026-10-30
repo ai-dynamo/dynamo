@@ -2,30 +2,6 @@
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
   "entries": [
     {
-      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
-      "baseline_tag": "13.0.2-base-ubuntu24.04",
-      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
-      "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
-      "layer_prefix_check_skipped": true,
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
-      "baseline_tag": "13.0.2-base-ubuntu24.04",
-      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
-      "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
-      "layer_prefix_check_skipped": true,
-      "platform": "linux/arm64"
-    },
-    {
       "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
       "baseline_image": "nvcr.io/nvidia/base/ubuntu",
       "baseline_sbom": "ubuntu@7291df36-amd64.cdx.json",
@@ -91,9 +67,9 @@
       "baseline_sbom": "cuda@0230b7f2-amd64.cdx.json",
       "baseline_tag": "13.0.3-cudnn-devel-ubuntu24.04",
       "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; the vendor image layout is not layer-prefix preserving, so layer-prefix validation was skipped. Registry digest and CUDA 13.0.3 metadata were verified locally; full from-image delta policy validation runs in CI.",
-      "from_digest": "sha256:c3d99f078c329a5b2d0c0c02c4237cf8b0dcd1dc6f875a943ae163c1720854cb",
+      "from_digest": "sha256:6c9e19a08f30ef8472f3c2ae2d01de99b452cf1fed77f720cd3b6fec61625770",
       "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.22-cu130-runtime",
+      "from_tag": "mistral-large-4",
       "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
@@ -103,9 +79,9 @@
       "baseline_sbom": "cuda@0230b7f2-arm64.cdx.json",
       "baseline_tag": "13.0.3-cudnn-devel-ubuntu24.04",
       "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; the vendor image layout is not layer-prefix preserving, so layer-prefix validation was skipped. Registry digest and CUDA 13.0.3 metadata were verified locally; full from-image delta policy validation runs in CI.",
-      "from_digest": "sha256:c3d99f078c329a5b2d0c0c02c4237cf8b0dcd1dc6f875a943ae163c1720854cb",
+      "from_digest": "sha256:6c9e19a08f30ef8472f3c2ae2d01de99b452cf1fed77f720cd3b6fec61625770",
       "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.22-cu130-runtime",
+      "from_tag": "mistral-large-4",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
@@ -148,6 +124,28 @@
       "from_image": "nvcr.io/nvidia/distroless/python",
       "from_tag": "3.13-v4.1.6",
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@7c7413a5-amd64.cdx.json",
+      "baseline_tag": "13.0.3-base-ubuntu24.04",
+      "capture_note": "delta-validation skipped, validated at runtime in CI",
+      "from_digest": "sha256:83a52c97e78b284d031e98135f17a448789358be31aa246237d6ad0130ef7657",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "mistral-large-4",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@7c7413a5-arm64.cdx.json",
+      "baseline_tag": "13.0.3-base-ubuntu24.04",
+      "capture_note": "delta-validation skipped, validated at runtime in CI",
+      "from_digest": "sha256:83a52c97e78b284d031e98135f17a448789358be31aa246237d6ad0130ef7657",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "mistral-large-4",
+      "platform": "linux/arm64"
     }
   ],
   "entry_schema": {
@@ -162,6 +160,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-08T22:35:46+00:00",
+  "generated_at": "2026-10-30T05:02:00+00:00",
   "schema_version": 2
 }

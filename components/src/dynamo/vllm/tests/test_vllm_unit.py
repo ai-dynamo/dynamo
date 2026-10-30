@@ -534,6 +534,24 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
 
 
 @pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("auto", True), ("guidance", True), ("xgrammar", False), ("outlines", False)],
+)
+def test_vllm_publishes_llguidance_lark_grammar(backend: str, expected: bool) -> None:
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(backend=backend)
+    )
+
+    vllm_main.publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, json.dumps(expected)
+    )
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),

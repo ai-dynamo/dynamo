@@ -26,6 +26,7 @@ use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
+use dynamo_protocols::types::ReasoningEffort;
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -334,7 +335,9 @@ struct ArchMaxContextTextConfig {
 ///
 /// `config.json` is authoritative when it declares `max_position_embeddings`;
 /// multimodal configs may instead nest it under `text_config`; tokenizer
-/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// `model_max_length` is only a last resort. Mistral-native checkpoints have no
+/// `config.json`, so their `params.json` `max_position_embeddings` is used,
+/// best effort. Missing fields fall through to the
 /// next source, but malformed present fields return an error so bad model
 /// metadata cannot silently resize request validation and planner limits.
 ///
@@ -359,7 +362,13 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
         }
     };
     let Some(config_json) = config_json else {
-        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+        // Mistral-native checkpoints keep the context length in params.json.
+        let params_context_length = || {
+            crate::file_json_field(&local_path.join("params.json"), "max_position_embeddings").ok()
+        };
+        return Ok(params_context_length()
+            .or_else(tokenizer_context_length)
+            .filter(|context_length| *context_length > 0));
     };
     // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
     // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
@@ -419,29 +428,132 @@ impl ModelInfoType {
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
     TikTokenModel(CheckedFile),
+    /// Mistral `tekken.json` (v13/v15), paired with the native Mistral renderer.
+    TekkenJson(CheckedFile),
 }
 
 impl TokenizerKind {
-    pub fn checksum(&self) -> String {
+    pub(crate) fn checked_file(&self) -> &CheckedFile {
         match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
-                c.checksum().to_string()
-            }
+            TokenizerKind::HfTokenizerJson(c)
+            | TokenizerKind::TikTokenModel(c)
+            | TokenizerKind::TekkenJson(c) => c,
         }
+    }
+
+    pub(crate) fn checked_file_mut(&mut self) -> &mut CheckedFile {
+        match self {
+            TokenizerKind::HfTokenizerJson(c)
+            | TokenizerKind::TikTokenModel(c)
+            | TokenizerKind::TekkenJson(c) => c,
+        }
+    }
+
+    pub fn checksum(&self) -> String {
+        self.checked_file().checksum().to_string()
     }
 
     pub fn is_local(&self) -> bool {
-        match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => c.is_local(),
-        }
+        self.checked_file().is_local()
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
-        match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
-                c.update_dir(dir)
-            }
-        }
+        self.checked_file_mut().update_dir(dir)
+    }
+}
+
+/// The parts of a Mistral `tekken.json` the card needs without building the BPE.
+#[derive(Deserialize)]
+pub(crate) struct TekkenMetadata {
+    config: TekkenMetadataConfig,
+    special_tokens: Vec<TekkenMetadataSpecialToken>,
+    model_settings_builder: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct TekkenMetadataConfig {
+    default_vocab_size: usize,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct TekkenMetadataSpecialToken {
+    rank: TokenIdType,
+    token_str: String,
+}
+
+impl TekkenMetadata {
+    /// Parse the tekken file behind a card's tokenizer slot.
+    pub(crate) fn from_checked_file(checked_file: &CheckedFile) -> Result<Self> {
+        let Some(path) = checked_file.path() else {
+            anyhow::bail!("tekken tokenizer is not a local path: {checked_file:?}");
+        };
+        Self::from_file(path)
+    }
+
+    pub(crate) fn from_file(path: &Path) -> Result<Self> {
+        let contents = std::fs::read(path)
+            .with_context(|| format!("Failed to read tekken file {}", path.display()))?;
+        serde_json::from_slice(&contents)
+            .with_context(|| format!("Failed to parse tekken file {}", path.display()))
+    }
+
+    /// The tokenizer version number, such as `15` for `v15`.
+    pub(crate) fn version(&self) -> Option<u32> {
+        self.config.version.strip_prefix('v')?.parse().ok()
+    }
+
+    /// The `[MODEL_SETTINGS]` builder of v15 tokenizers.
+    pub(crate) fn model_settings_builder(&self) -> Option<&serde_json::Value> {
+        self.model_settings_builder.as_ref()
+    }
+
+    /// Whether the builder lists `none` among its `reasoning_effort` values. Without a
+    /// `reasoning_effort` builder the renderer ignores the field, so `none` has no effect.
+    pub(crate) fn accepts_reasoning_effort_none(&self) -> bool {
+        self.model_settings_builder
+            .as_ref()
+            .and_then(|builder| builder.get("reasoning_effort"))
+            .and_then(|setting| setting.get("values"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value == "none"))
+    }
+
+    fn special_token_id(&self, token: &str) -> Option<TokenIdType> {
+        self.special_tokens
+            .iter()
+            .find(|special| special.token_str == token)
+            .map(|special| special.rank)
+    }
+}
+
+/// Model info for Mistral-native checkpoints, which have no `config.json`:
+/// BOS/EOS and the vocabulary size come from `tekken.json`.
+struct TekkenModelInfo {
+    bos_token_id: Option<TokenIdType>,
+    eos_token_ids: Vec<TokenIdType>,
+    vocab_size: usize,
+}
+
+impl ModelInfo for TekkenModelInfo {
+    fn model_type(&self) -> String {
+        "mistral".to_string()
+    }
+
+    fn bos_token_id(&self) -> Option<TokenIdType> {
+        self.bos_token_id
+    }
+
+    fn eos_token_ids(&self) -> Vec<TokenIdType> {
+        self.eos_token_ids.clone()
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        None
+    }
+
+    fn vocab_size(&self) -> Option<usize> {
+        Some(self.vocab_size)
     }
 }
 
@@ -1410,6 +1522,48 @@ impl ModelDeploymentCard {
         self.tokenizer.is_some()
     }
 
+    /// Whether prompts render through the native Mistral formatter: a Mistral-native
+    /// checkpoint ships `tekken.json` and no chat template (see `prompt_formatter_from_mdc`).
+    pub fn uses_native_mistral_renderer(&self) -> bool {
+        matches!(self.tokenizer, Some(TokenizerKind::TekkenJson(_)))
+    }
+
+    /// The `reasoning_effort` Anthropic disabled thinking selects on the native Mistral
+    /// renderer: `none` when the tekken builder lists it, else `low`, as upstream vLLM's
+    /// `DisabledThinkingEffortResolver` resolves a renderer that rejects or ignores `none`.
+    /// `None` for other cards. Reads `tekken.json`, so call it once on a downloaded card.
+    pub(crate) fn mistral_disabled_thinking_effort(&self) -> Result<Option<ReasoningEffort>> {
+        let Some(TokenizerKind::TekkenJson(checked_file)) = &self.tokenizer else {
+            return Ok(None);
+        };
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        Ok(Some(if metadata.accepts_reasoning_effort_none() {
+            ReasoningEffort::None
+        } else {
+            ReasoningEffort::Low
+        }))
+    }
+
+    /// Model info from `config.json`, or from `tekken.json` for Mistral-native
+    /// checkpoints, which have no `config.json`.
+    pub fn resolved_model_info(&self) -> Result<Option<Arc<dyn ModelInfo>>> {
+        if let Some(model_info) = &self.model_info {
+            return model_info.get_model_info().map(Some);
+        }
+        let Some(TokenizerKind::TekkenJson(checked_file)) = &self.tokenizer else {
+            return Ok(None);
+        };
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        let Some(eos_token_id) = metadata.special_token_id("</s>") else {
+            anyhow::bail!("tekken tokenizer has no </s> token");
+        };
+        Ok(Some(Arc::new(TekkenModelInfo {
+            bos_token_id: metadata.special_token_id("<s>"),
+            eos_token_ids: vec![eos_token_id],
+            vocab_size: metadata.config.default_vocab_size,
+        })))
+    }
+
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
@@ -1686,6 +1840,23 @@ impl ModelDeploymentCard {
                     raw
                 }
             }
+            Some(TokenizerKind::TekkenJson(checked_file)) => {
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
+                let path_str = p.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
+                })?;
+                let tokenizer = crate::tokenizers::TekkenTokenizer::from_file(path_str)
+                    .with_context(|| {
+                        format!("Failed to load tekken tokenizer from {}", p.display())
+                    })?;
+                self.tokenizer_id_bound
+                    .get_or_init(|| crate::tokenizers::traits::Tokenizer::vocab_size(&tokenizer));
+                // Not wrapped in the L1 prefix cache: it splits text at special-token
+                // strings, which tekken encodes as ordinary text.
+                Arc::new(tokenizer)
+            }
             None => {
                 anyhow::bail!(
                     "ModelDeploymentCard for '{}' does not have a tokenizer. \
@@ -1747,10 +1918,8 @@ impl ModelDeploymentCard {
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
             out.push((cf, false));
         }
-        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
-            self.tokenizer.as_ref()
-        {
-            out.push((cf, false));
+        if let Some(tokenizer) = self.tokenizer.as_ref() {
+            out.push((tokenizer.checked_file(), false));
         }
         if let Some(p) = self.prompt_formatter.as_ref() {
             out.push((pf_checked_file(p), p.is_custom()));
@@ -1774,10 +1943,8 @@ impl ModelDeploymentCard {
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
             out.push((cf, false));
         }
-        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
-            self.tokenizer.as_mut()
-        {
-            out.push((cf, false));
+        if let Some(tokenizer) = self.tokenizer.as_mut() {
+            out.push((tokenizer.checked_file_mut(), false));
         }
         if let Some(p) = self.prompt_formatter.as_mut() {
             let is_custom = p.is_custom();
@@ -1943,9 +2110,10 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfTokenizerConfigJson
         );
 
-        // tokenizer.json or tiktoken.model
+        // tokenizer.json, tiktoken.model or tekken.json
         change!(self.tokenizer, TokenizerKind::HfTokenizerJson);
         change!(self.tokenizer, TokenizerKind::TikTokenModel);
+        change!(self.tokenizer, TokenizerKind::TekkenJson);
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
@@ -2025,7 +2193,14 @@ impl ModelDeploymentCard {
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
         } else {
-            (None, None, None, None)
+            // Mistral-native checkpoints carry tekken.json and params.json; the
+            // native Mistral renderer replaces the chat template.
+            (
+                None,
+                TokenizerKind::tekken_from_disk(local_path)?,
+                None,
+                None,
+            )
         };
 
         // Load chat template - either custom or from repo
@@ -2512,6 +2687,37 @@ impl PromptFormatterArtifact {
 }
 
 impl TokenizerKind {
+    /// Discover a Mistral `tekken.json` the Rust frontend can serve (v13/v15).
+    /// Other versions keep the Python chat processors as their only path.
+    pub fn tekken_from_disk(directory: &Path) -> Result<Option<Self>> {
+        let path = directory.join("tekken.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        // Anything the Rust frontend cannot serve keeps the card loadable for
+        // the Python chat processors, as before tekken support existed.
+        let metadata = match TekkenMetadata::from_file(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::info!(path = %path.display(), %error, "tekken.json not usable by the Rust frontend");
+                return Ok(None);
+            }
+        };
+        let version = metadata.version();
+        if version
+            .and_then(dynamo_renderer::mistral::MistralTokenizerVersion::from_number)
+            .is_none()
+        {
+            tracing::info!(
+                path = %path.display(),
+                ?version,
+                "Rust frontend renders tekken v13 and v15 only; this model needs a Python chat processor"
+            );
+            return Ok(None);
+        }
+        Ok(Some(Self::TekkenJson(CheckedFile::from_disk(path)?)))
+    }
+
     /// Try to discover a tokenizer in the given directory.
     ///
     /// Returns `Ok(Some(..))` when a supported tokenizer is found,
@@ -2600,9 +2806,32 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HFConfig, ModelDeploymentCard};
+    use super::{HFConfig, ModelDeploymentCard, TekkenMetadata};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn tekken_reasoning_effort_none_follows_the_builder() {
+        let metadata = |builder: serde_json::Value| -> TekkenMetadata {
+            serde_json::from_value(serde_json::json!({
+                "config": {"default_vocab_size": 1, "version": "v15"},
+                "special_tokens": [],
+                "model_settings_builder": builder,
+            }))
+            .unwrap()
+        };
+        let effort = |values: serde_json::Value| {
+            metadata(serde_json::json!({"reasoning_effort": {
+                "type": "enum", "accepts_none": true, "default": "high", "values": values
+            }}))
+        };
+        assert!(effort(serde_json::json!(["none", "high"])).accepts_reasoning_effort_none());
+        assert!(
+            !effort(serde_json::json!(["low", "medium", "high"])).accepts_reasoning_effort_none()
+        );
+        // Without a reasoning_effort builder, `none` renders like any other level.
+        assert!(!metadata(serde_json::Value::Null).accepts_reasoning_effort_none());
+    }
 
     #[test]
     fn tokenizer_cache_token_observer_records_per_model_totals() {

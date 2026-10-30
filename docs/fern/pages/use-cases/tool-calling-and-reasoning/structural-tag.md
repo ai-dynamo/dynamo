@@ -183,7 +183,7 @@ Currently tested and supported:
 - `glm47` with parsers v2
 
 The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
-`DYN_PARSER_VERSION=2` in the worker and frontend processes.
+a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
 
 Contributions adding structural tag support for new parsers are welcome.
 

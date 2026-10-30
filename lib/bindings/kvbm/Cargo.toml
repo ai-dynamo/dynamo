@@ -60,3 +60,12 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+# Separate Cargo workspace: the frontend crates arrive through dynamo-llm and
+# must resolve to the same sources as the root workspace's [patch.crates-io].
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }

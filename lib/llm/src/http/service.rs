@@ -88,7 +88,10 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        parsing_options.tool_call_parser.as_deref(),
+        (
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,
@@ -217,16 +220,65 @@ mod tests {
                     let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
                     assert_eq!(
                         result.reasoning_disabled,
-                        if family == "gemma4" {
-                            thinking != Some(true)
-                        } else {
-                            thinking == Some(false)
+                        match family {
+                            "gemma4" => thinking != Some(true),
+                            "mistral" => false,
+                            _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
                     );
                 }
             }
         }
+    }
+
+    // A non-streaming forced choice on the Unified mistral family must re-read
+    // the aggregated native output, not hand it to the guided-JSON reader.
+    #[tokio::test]
+    async fn unified_mistral_forced_choices_batch_native_calls() {
+        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_forced_choices_batch_native_calls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let raw =
+            r#"[THINK]need the weather[/THINK][TOOL_CALLS]get_weather[ARGS]{"location":"Paris"}"#;
+        let options = apply_request_tool_call_parsing_options(
+            ParsingOptions::new(Some("mistral".into()), Some("mistral".into())),
+            &request(json!({"type": "function", "function": {"name": "get_weather"}})),
+        )
+        .unwrap();
+        assert_eq!(options.guided_tool_constraint, GuidedToolConstraint::None);
+        let chunk = serde_json::from_value(json!({"id":"test", "object":"chat.completion.chunk",
+            "created":0, "model":"test", "choices":[{"index":0,
+            "delta":{"content":raw}, "finish_reason":"stop"}]}))
+        .unwrap();
+
+        let result = DeltaAggregator::apply(
+            futures::stream::iter([Annotated::from_data(chunk)]),
+            options,
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("need the weather")
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+            json!({"location": "Paris"})
+        );
     }
 
     #[test]

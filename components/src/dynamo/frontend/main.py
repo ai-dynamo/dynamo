@@ -304,7 +304,10 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
             from vllm.engine.arg_utils import AsyncEngineArgs
 
             if Version(importlib.metadata.version("vllm")).release >= (0, 29):
-                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+                try:
+                    from vllm.entrypoints.common.cli_args import FrontendArgs
+                except ModuleNotFoundError:  # before vllm-project/vllm#62390
+                    from vllm.entrypoints.launchers.cli_args import FrontendArgs
             else:
                 from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
