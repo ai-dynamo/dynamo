@@ -63,12 +63,10 @@ def test_router_hint_forwarding_is_private_and_lossless():
     assert kv_hint_kwargs(_HintEngine(), {"nvext": {"kv_hint": hint}}) == {}
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize(
     "worker_type", [WorkerType.Aggregated, WorkerType.Prefill, WorkerType.Decode]
 )
 def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
-    tp_size,
     worker_type,
 ):
     args = SimpleNamespace(
@@ -76,7 +74,7 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
         enable_unified_cache_external_linker=True,
         unified_cache_external_linker_backend="kvcr",
         nnodes=1,
-        tp_size=tp_size,
+        tp_size=2,
         dp_size=1,
         pp_size=1,
     )

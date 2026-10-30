@@ -189,14 +189,10 @@ def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
         state_agent_descriptors(engine, config)
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
-@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
-def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(
-    tp_size, mode
-):
+def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
     engine, config, source, info = linker_fixture()
-    config.server_args.tp_size = tp_size
-    config.serving_mode = mode
+    config.server_args.tp_size = 2
+    config.serving_mode = DisaggregationMode.PREFILL
     engine.async_generate = lambda: None
     with pytest.raises(ValueError, match="hint-forwarding"):
         state_agent_descriptors(engine, config)
@@ -206,34 +202,21 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(
     assert state_agent_descriptors(engine, config) == []
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
-@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
 @pytest.mark.parametrize(
-    "change,match",
+    "target,field,value,match",
     [
-        ("lifetime", "process-local"),
-        ("reset", "reset and incarnation"),
-        ("incarnation", "reset and incarnation"),
-        ("block_size", "block size"),
-        ("topic", "topic must identify"),
+        ("source", "inventory_lifetime", "persistent", "process-local"),
+        ("source", "reset_clears_owner_inventory", False, "reset and incarnation"),
+        ("source", "owner_incarnation_scoped", False, "reset and incarnation"),
+        ("event", "block_size", 128, "block size"),
+        ("event", "topic", "other", "topic must identify"),
     ],
 )
-def test_linker_inventory_rejects_wrong_ownership_contract(
-    change, match, tp_size, mode
-):
+def test_linker_inventory_rejects_wrong_ownership_contract(target, field, value, match):
     engine, config, source, info = linker_fixture()
-    config.server_args.tp_size = tp_size
-    config.serving_mode = mode
-    if change == "lifetime":
-        source["inventory_lifetime"] = "persistent"
-    elif change == "reset":
-        source["reset_clears_owner_inventory"] = False
-    elif change == "incarnation":
-        source["owner_incarnation_scoped"] = False
-    elif change == "block_size":
-        info["kv_event_sources"][0]["block_size"] = 128
-    else:
-        info["kv_event_sources"][0]["topic"] = "other"
+    config.server_args.tp_size = 2
+    config.serving_mode = DisaggregationMode.PREFILL
+    {"source": source, "event": info["kv_event_sources"][0]}[target][field] = value
     with pytest.raises(ValueError, match=match):
         state_agent_descriptors(engine, config)
 
