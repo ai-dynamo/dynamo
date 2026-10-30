@@ -117,7 +117,10 @@ async def test_capture_handoff_and_verified_managed_result(
     )
     rows = np.asarray([[[1, 2]], [[2, 3]], [[3, 4]]], dtype=np.int64)
     session.observe(
-        SimpleNamespace(index=0, token_ids=[12, 13], routed_experts=rows), [10, 11]
+        SimpleNamespace(
+            index=0, token_ids=[12, 13], logprobs=None, routed_experts=rows
+        ),
+        [10, 11],
     )
     pending = await session.finalize()
     assert pending["state"] == "pending"
