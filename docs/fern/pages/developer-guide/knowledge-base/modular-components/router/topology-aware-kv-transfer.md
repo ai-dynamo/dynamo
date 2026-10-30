@@ -163,9 +163,9 @@ Worker selection and the fetch source are one decision. For every candidate, the
 
 KVCR caches are hint sources through their cache owners. A vLLM worker publishes its topology with each cache owner it creates, because KVCR runs in the worker's pod. An owner without published topology, for example one created by an older worker, takes the island of the worker it is attached to. An unattached owner without published topology is in no island.
 
-**Experimental.** Continuation fetch hints are disabled by default. To let one source extend a target worker's existing device/host-pinned prefix, set `router_fetch_continuation: true` under `router` in `--router-policy-config`, or use `--router-fetch-continuation` / `DYN_ROUTER_FETCH_CONTINUATION=true`. An explicit YAML value overrides the CLI and environment settings.
+A source may hold only the continuation beyond the target's existing device/host-pinned prefix. It must cover every missing block through the credited end and satisfy the same topology rules as root-prefix sources. For example, a worker holding blocks 1–10 can fetch 11–15 from one source even if that source does not hold 1–10. The hint carries the root-aligned hashes 1–15; the receiver skips blocks it already holds.
 
-The source must hold a contiguous continuation from the target's prefix and satisfy the same topology rules as prefix fetch hints; the router does not combine multiple sources. This requires hint-capable workers and a local event-driven indexer without predict-on-route. The setting also applies when queued requests refresh their cache lookup. Existing prefix fetch hints remain enabled when continuation fetch hints are disabled.
+The router selects one source against the target's original local prefix; it does not combine sources or use hypothetical fetched progress to qualify another source. Continuation discovery requires hint-capable workers and a local event-driven indexer without predict-on-route. It also runs when queued requests refresh their cache lookup.
 
 A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
 

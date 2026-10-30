@@ -207,7 +207,6 @@ fn log_env_config(config: &KvRouterConfig) {
         router_event_threads = config.router_event_threads,
         router_queue_policy = %config.router_queue_policy,
         use_remote_indexer = config.use_remote_indexer,
-        router_fetch_continuation = config.router_fetch_continuation,
         shared_cache_multiplier = ?config.shared_cache_multiplier,
         shared_cache_type = %config.shared_cache_type,
         host_cache_hit_weight = config.host_cache_hit_weight,
@@ -391,9 +390,6 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
         config.use_remote_indexer = value;
-    }
-    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_FETCH_CONTINUATION") {
-        config.router_fetch_continuation = value;
     }
     config.shared_cache_multiplier = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER");
     if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
@@ -735,7 +731,6 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     #[serde(default)]
     enable_session_prefix_index: bool,
-    router_fetch_continuation: bool,
     shared_cache_multiplier: Option<f64>,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
@@ -781,7 +776,6 @@ impl Default for KvRouterConfigSerde {
             use_remote_indexer: config.use_remote_indexer,
             serve_indexer: config.serve_indexer,
             enable_session_prefix_index: config.enable_session_prefix_index,
-            router_fetch_continuation: config.router_fetch_continuation,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
@@ -934,11 +928,6 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
-    /// Allow a single fetch source to extend a target's existing device/host-pinned prefix.
-    /// Requires retained transfer candidates; existing prefix fetch hints remain enabled.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub router_fetch_continuation: bool,
-
     /// Deprecated default-policy parameter. `None` lets the policy choose its default.
     // TODO(v1.7): Remove with the deprecated flag after the v1.6 migration window.
     // Omit absent values so older readers continue to receive numbers, never null.
@@ -1041,7 +1030,6 @@ impl Default for KvRouterConfig {
             use_remote_indexer: false,
             serve_indexer: false,
             enable_session_prefix_index: false,
-            router_fetch_continuation: false,
             shared_cache_multiplier: None,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
@@ -1107,7 +1095,6 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             use_remote_indexer: compat.use_remote_indexer,
             serve_indexer: compat.serve_indexer,
             enable_session_prefix_index: compat.enable_session_prefix_index,
-            router_fetch_continuation: compat.router_fetch_continuation,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
@@ -1669,7 +1656,6 @@ mod tests {
         assert_eq!(config.router_predicted_ttl_secs, None);
         assert!(!config.router_assume_kv_reuse);
         assert!(config.router_track_output_blocks);
-        assert!(config.router_fetch_continuation);
         assert_eq!(config.router_prefill_policy.as_deref(), Some("default"));
         assert_eq!(config.policy_model_name.as_deref(), Some("model"));
         assert!(
@@ -2493,52 +2479,6 @@ worker_selection:
     }
 
     #[test]
-    fn fetch_continuation_defaults_off_and_survives_opt_in_configuration() {
-        assert!(!KvRouterConfig::default().router_fetch_continuation);
-        let from_legacy: KvRouterConfig = serde_json::from_str("{}").unwrap();
-        assert!(!from_legacy.router_fetch_continuation);
-        assert!(
-            serde_json::to_value(from_legacy)
-                .unwrap()
-                .get("router_fetch_continuation")
-                .is_none()
-        );
-
-        let enabled = config_from_values(&[("DYN_ROUTER_FETCH_CONTINUATION", "true")]);
-        assert!(enabled.router_fetch_continuation);
-        let encoded = serde_json::to_value(&enabled).unwrap();
-        assert_eq!(encoded["router_fetch_continuation"], true);
-        let decoded: KvRouterConfig = serde_json::from_value(encoded).unwrap();
-        assert!(decoded.router_fetch_continuation);
-
-        let disabled = config_from_values(&[("DYN_ROUTER_FETCH_CONTINUATION", "false")]);
-        assert!(!disabled.router_fetch_continuation);
-        assert!(
-            serde_json::from_str::<KvRouterConfig>(r#"{"router_fetch_continuation":"true"}"#)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn fetch_continuation_yaml_overrides_environment() {
-        let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
-            "router:\n  router_fetch_continuation: false\n",
-        )
-        .unwrap();
-        let config = config_from_values(&[
-            ("DYN_ROUTER_FETCH_CONTINUATION", "true"),
-            (
-                "DYN_ROUTER_POLICY_CONFIG",
-                policy_file.path().to_str().unwrap(),
-            ),
-        ]);
-
-        assert!(!config.router_fetch_continuation);
-    }
-
-    #[test]
     fn kv_router_config_preserves_v1_3_wire_compatibility() {
         let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
             "durable_kv_events": false,
@@ -2560,7 +2500,6 @@ worker_selection:
             "conditional_disagg_prefill_busy_threshold",
             "conditional_disagg_decode_busy_threshold",
             "enable_session_prefix_index",
-            "router_fetch_continuation",
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }

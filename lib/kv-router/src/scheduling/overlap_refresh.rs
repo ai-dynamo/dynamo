@@ -98,8 +98,6 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
                 block_hashes,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain,
-                    fetch_continuation: retain_kv_transfer_chain
-                        && self.config.router_fetch_continuation,
                 },
             )
             .await
@@ -112,7 +110,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
+            .then(|| tiered.into_kv_transfer_candidates())
             .flatten();
         Some(RefreshedOverlap {
             overlap,
@@ -231,7 +229,7 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -244,29 +242,6 @@ mod tests {
     struct FakeProvider {
         calls: Arc<AtomicUsize>,
         fail: bool,
-    }
-
-    struct OptionsProvider {
-        options: Arc<Mutex<Option<LowerTierQueryOptions>>>,
-    }
-
-    #[async_trait]
-    impl TieredMatchProvider for OptionsProvider {
-        async fn find_tiered_matches(
-            &self,
-            _sequence: &[LocalBlockHash],
-        ) -> Result<TieredMatchDetails, KvRouterError> {
-            panic!("refresh must forward lookup options")
-        }
-
-        async fn find_tiered_matches_with_options(
-            &self,
-            _sequence: &[LocalBlockHash],
-            options: LowerTierQueryOptions,
-        ) -> Result<TieredMatchDetails, KvRouterError> {
-            *self.options.lock().unwrap() = Some(options);
-            Ok(TieredMatchDetails::default())
-        }
     }
 
     #[async_trait]
@@ -350,37 +325,6 @@ mod tests {
             .is_none()
         );
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn tiered_refresher_preserves_fetch_continuation_only_with_retained_hints() {
-        for enabled in [false, true] {
-            for retain_kv_transfer_chain in [false, true] {
-                let observed = Arc::new(Mutex::new(None));
-                let refresher = TieredOverlapRefresher::new(
-                    OptionsProvider {
-                        options: Arc::clone(&observed),
-                    },
-                    KvRouterConfig {
-                        router_fetch_continuation: enabled,
-                        ..Default::default()
-                    },
-                    16,
-                );
-
-                let refreshed = refresher
-                    .refresh(&[LocalBlockHash(1)], retain_kv_transfer_chain)
-                    .await;
-
-                assert!(refreshed.is_some());
-                let options = observed.lock().unwrap().take().unwrap();
-                assert_eq!(options.retain_kv_transfer_chain, retain_kv_transfer_chain);
-                assert_eq!(
-                    options.fetch_continuation,
-                    enabled && retain_kv_transfer_chain
-                );
-            }
-        }
     }
 
     #[tokio::test]

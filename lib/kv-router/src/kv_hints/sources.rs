@@ -372,24 +372,25 @@ impl KvTransferSourceSummary {
             scope,
         };
         let snapshot = candidates.routing_snapshot.as_deref();
+        let usable = |start, end| {
+            end > min_local_prefix_blocks && end <= candidates.block_hashes.len() && start < end
+        };
         let roots = candidates
             .owner_prefix_blocks
             .iter()
-            .map(|&(source, end)| (source, 0, end));
-        let mut intervals: Vec<_> = candidates.source_intervals.iter().collect();
+            .map(|&(source, end)| (source, 0, end))
+            .filter(|&(_, start, end)| usable(start, end));
+        let mut intervals: Vec<_> = candidates
+            .source_intervals
+            .iter()
+            .filter(|interval| usable(interval.start, interval.end))
+            .collect();
         intervals.sort_unstable_by_key(|interval| interval.start);
         for (source, start, prefix_blocks) in roots.chain(
             intervals
                 .into_iter()
                 .map(|interval| (interval.source, interval.start, interval.end)),
         ) {
-            // A source cannot share more of the prompt than the retained chain.
-            if prefix_blocks <= min_local_prefix_blocks
-                || prefix_blocks > candidates.block_hashes.len()
-                || start >= prefix_blocks
-            {
-                continue;
-            }
             let worker_keys;
             let attached_worker_keys;
             let (worker_type, attachment, topology) = match source {
@@ -645,6 +646,15 @@ mod tests {
                         .source_for(target, keys.target().unwrap(), local)
                         .map(|choice| (choice.source, choice.prefix_blocks));
                     assert_eq!(actual, expected, "target={target:?}, local={local}");
+                    let scoped = KvTransferSourceSummary::new(
+                        &candidates,
+                        &workers,
+                        KvTransferScope::of([(keys.target().unwrap(), local)]),
+                    );
+                    let actual = scoped
+                        .source_for(target, keys.target().unwrap(), local)
+                        .map(|choice| (choice.source, choice.prefix_blocks));
+                    assert_eq!(actual, expected, "scoped target={target:?}, local={local}");
                 }
             }
         }
