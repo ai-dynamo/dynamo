@@ -4440,19 +4440,15 @@ async fn ttft_includes_session_affinity_wait() {
         } else {
             RouterMode::RoundRobin
         };
-        let inner = PushRouter::from_client_with_dispatch(client.clone(), mode, dispatch)
-            .await
-            .unwrap();
-        if is_kv {
-            router.inner = inner;
+        let builder = RoutingHost::builder(client.clone(), mode)
+            .affinity_coordinator(router.affinity.clone())
+            .dispatch(dispatch as LlmDispatch);
+        let builder = if is_kv {
+            builder.kv_router(Arc::clone(router.kv_router()))
         } else {
-            router = RoutingHost::new_builtin_with_coordinator(
-                inner,
-                test_load_context(&client).await,
-                router.affinity.clone(),
-            )
-            .unwrap();
-        }
+            builder.load_context(test_load_context(&client).await)
+        };
+        router = builder.build().await.unwrap();
 
         let model = if is_kv {
             "ttft-kv-wait"

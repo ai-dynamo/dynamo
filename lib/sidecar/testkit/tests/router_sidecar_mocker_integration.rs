@@ -1301,13 +1301,13 @@ async fn changed_role_never_registers() {
         },
     )
     .await;
-    // Keep bootstrap retries on the original role until readiness is reached.
-    peer.set_health(None);
+    peer.override_discovery(
+        Value::Null,
+        vec![json!({}), json!({"disaggregation_mode": "prefill"})],
+    );
     let mut child =
         env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
     peer.health_check_received().await;
-    peer.override_discovery(Value::Null, vec![json!({"disaggregation_mode": "prefill"})]);
-    peer.set_health(Some(true));
     assert!(!child.exit().await.success(), "{}", child.logs());
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
