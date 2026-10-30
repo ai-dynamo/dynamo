@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 211 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 214 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">35 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
@@ -38,6 +38,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
+<Card title="DynamoPoolRelay" href="#dynamopoolrelay" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -1291,6 +1292,93 @@ TotalEndpoints is the total count of endpoints
 
 <ParamField path="conditions" type="Condition array">
 Conditions represents the latest available observations of the model's state
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelay" title="DynamoPoolRelay">
+DynamoPoolRelay deploys active-active Relay Pods for one DGD.
+The resource name matches its DGD; the Service name adds the -pool-relay suffix.
+The DGD needs Kubernetes pod-mode discovery and at least one worker component.
+Worker and frontend components cannot use globalDynamoNamespace. The DGD name
+must produce a DNS-1035 Service name, so it starts with a lowercase letter,
+uses only lowercase letters, digits, and hyphens, and is at most 52 characters.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1alpha1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoPoolRelay`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoPoolRelaySpec">
+See [DynamoPoolRelaySpec](#dynamopoolrelayspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoPoolRelayStatus">
+See [DynamoPoolRelayStatus](#dynamopoolrelaystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelayspec" title="DynamoPoolRelaySpec">
+DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="clusterId" type="string">
+ClusterID is the Relay's stable logical cluster ID across restarts.
+**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec" required={true}>
+PodTemplate configures Relay Pods. Its main container needs an image with dynamo.pool_relay and --sources-file support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay identity and discovery environment variables. Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND, DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST, DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND, DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL, DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID. The main container cannot use envFrom because it could override those values.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+**Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicas" type="integer" default="2">
+Replicas sets the number of active Relay Pods. Each watches the DGD.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaystatus" title="DynamoPoolRelayStatus">
+DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the Relay resource generation last reconciled by the operator.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address. It is empty after withdrawal or a failed reconciliation.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+AvailableReplicas is the number of Relay Pods the Deployment reports available.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2786,7 +2874,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate supplies the Pod configuration shared by this component's roles. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components without a podTemplate may retain that omission on update. By default, the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode. The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty image and restartPolicy: Always. Sidecar mode supports worker, prefill, and decode components. Multinode sidecars currently support backendFramework: sglang and vllm. Multinode support for TensorRT-LLM is planned. Multinode sidecars require complete leader and worker roles[].podTemplate definitions instead of this shared template. The leader must declare a runtime init container. The worker may omit it. Each role's template supplies the engine command and topology arguments. Declared runtime init containers still receive Dynamo defaults. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Graph-level env applies to podTemplate.spec.containers[name=main] and any declared podTemplate.spec.initContainers[name=runtime]. Compilation cache and shared memory apply to the main container. Other containers require their own configuration, including an image. See runtimeVersionOverride for runtime image version requirements.
+PodTemplate supplies the Pod configuration shared by this component's roles. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components without a podTemplate may retain that omission on update. By default, the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode. The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty image and restartPolicy: Always. Sidecar mode supports worker, prefill, and decode components. Multinode sidecars support backendFramework: sglang, vllm, and trtllm. Multinode sidecars require complete leader and worker roles[].podTemplate definitions instead of this shared template. The leader must declare a runtime init container. The worker may omit it. Each role's template supplies the engine command and topology arguments. Declared runtime init containers still receive Dynamo defaults. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Graph-level env applies to podTemplate.spec.containers[name=main] and any declared podTemplate.spec.initContainers[name=runtime]. Compilation cache and shared memory apply to the main container. Other containers require their own configuration, including an image. See runtimeVersionOverride for runtime image version requirements.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2901,7 +2989,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate supplies the Pod configuration shared by this component's roles. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components without a podTemplate may retain that omission on update. By default, the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode. The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty image and restartPolicy: Always. Sidecar mode supports worker, prefill, and decode components. Multinode sidecars currently support backendFramework: sglang and vllm. Multinode support for TensorRT-LLM is planned. Multinode sidecars require complete leader and worker roles[].podTemplate definitions instead of this shared template. The leader must declare a runtime init container. The worker may omit it. Each role's template supplies the engine command and topology arguments. Declared runtime init containers still receive Dynamo defaults. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Graph-level env applies to podTemplate.spec.containers[name=main] and any declared podTemplate.spec.initContainers[name=runtime]. Compilation cache and shared memory apply to the main container. Other containers require their own configuration, including an image. See runtimeVersionOverride for runtime image version requirements.
+PodTemplate supplies the Pod configuration shared by this component's roles. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components without a podTemplate may retain that omission on update. By default, the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode. The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty image and restartPolicy: Always. Sidecar mode supports worker, prefill, and decode components. Multinode sidecars support backendFramework: sglang, vllm, and trtllm. Multinode sidecars require complete leader and worker roles[].podTemplate definitions instead of this shared template. The leader must declare a runtime init container. The worker may omit it. Each role's template supplies the engine command and topology arguments. Declared runtime init containers still receive Dynamo defaults. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Graph-level env applies to podTemplate.spec.containers[name=main] and any declared podTemplate.spec.initContainers[name=runtime]. Compilation cache and shared memory apply to the main container. Other containers require their own configuration, including an image. See runtimeVersionOverride for runtime image version requirements.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

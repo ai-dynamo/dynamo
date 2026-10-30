@@ -1733,9 +1733,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "role pod templates reject native sidecars in unsupported multinode layouts",
+			name: "role pod templates with a leader runtime are admitted without backendFramework",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = admissionTRTLLMBackend
+				dgd.Spec.BackendFramework = ""
 				worker := betaWorkerComponent(dgd)
 				setBetaExplicitMultinodeRoleTemplates(worker, 4)
 				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
@@ -1743,7 +1743,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
 		},
 		{
 			name: "role pod templates require a 1.6 or later Planner",
@@ -4131,7 +4130,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
 	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
-	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {
 		tests = append(tests,
 			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
@@ -4912,6 +4911,10 @@ func multinodeSidecarDGDForAdmission(t *testing.T, backend string, alpha, roles,
 		if workerRuntime {
 			main.Args = append(main.Args, "--data-parallel-hybrid-lb", "--data-parallel-size", "4", "--data-parallel-size-local", "2")
 		}
+	case admissionTRTLLMBackend:
+		// The authored launch is an opaque shell script around mpirun and trtllm-serve.
+		main.Command = []string{"/bin/bash", "-c"}
+		main.Args = []string{"mpirun -n 2 bash -c 'trtllm-llmapi-launch trtllm-serve model --grpc --grpc-protocol openengine --extra_llm_api_options /config/config.yaml'"}
 	default:
 		t.Fatalf("unsupported multinode sidecar backend %q", backend)
 	}

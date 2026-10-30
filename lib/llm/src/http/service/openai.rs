@@ -1391,7 +1391,11 @@ async fn completions_single(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -1678,6 +1682,10 @@ async fn completions_batch(
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
+                // The echo names its choice by index too; keep them together.
+                if let Some(echo) = data.echo.as_mut() {
+                    echo.choice_index += prompt_idx_u32 * n_u32;
+                }
             }
             response
         });
@@ -1748,7 +1756,11 @@ async fn completions_batch(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -3356,7 +3368,7 @@ fn deduplicate_stream_roles(
 
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
-    if resp.nvext.is_some() {
+    if resp.nvext.is_some() || resp.echo.is_some() {
         return false;
     }
     resp.inner.usage.is_none()
@@ -3568,6 +3580,36 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    // Selected once: the Beam request normalization below reads this engine's parsing
+    // options and dispatch uses this same engine, so the two cannot disagree on the
+    // worker set when one served name fronts Beam and non-Beam pools.
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    // Beam route, before generic validation (which rejects what these normalize): a
+    // `strict` tool whose schema is outside OpenAI's strict subset is served as
+    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
+    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
+    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3581,17 +3623,6 @@ async fn chat_completions(
     if request.inner.max_completion_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
 
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
@@ -8472,6 +8503,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8503,6 +8535,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8757,6 +8790,7 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8791,6 +8825,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8824,6 +8859,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8857,6 +8893,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8890,6 +8927,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -8925,6 +8963,7 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
@@ -11182,6 +11221,7 @@ mod tests {
                 usage,
             },
             nvext: None,
+            echo: None,
         }
     }
 
@@ -11238,6 +11278,7 @@ mod tests {
                 usage: Some(usage),
             },
             nvext: None,
+            echo: None,
         }
     }
 
