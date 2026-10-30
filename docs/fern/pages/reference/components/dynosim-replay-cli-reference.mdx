@@ -363,6 +363,24 @@ hardware offload recipe.
 - `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
   are mutually exclusive.
 
+### Conversation Affinity
+
+For AgentX trace replay, `router.conversation_affinity` uses Dynamo's native hard binding
+with `kv_router` and fixed aggregated or disaggregated worker pools. Online replay and
+Planner-enabled replay are unsupported. Omitting the field preserves normal routing.
+
+```yaml
+router:
+  policy: kv_router
+  conversation_affinity: {mode: session, ttl_seconds: 300}
+planner: {policy: disabled}
+```
+
+`session` (the default) binds each conversation. `sibling_group` binds siblings sharing a parent
+within the same play and requires unambiguous lineage; the parent keeps its own binding.
+Prefill and decode pools bind independently. `ttl_seconds` is the idle expiry in simulated
+seconds, defaults to 300, and must be finite and between 1 and 31,536,000 inclusive.
+
 ## Overrides
 
 `--set` accepts dot-separated, schema-valid paths. The field does not need to be present in the
