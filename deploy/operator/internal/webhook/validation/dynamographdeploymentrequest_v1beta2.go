@@ -60,10 +60,43 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	if spec.Hardware != nil {
 		allErrs = append(allErrs, v.validateHardwareSpecV1beta2(spec.Hardware, fldPath.Child("hardware"))...)
 	}
-	if spec.AISimulate == nil {
-		return allErrs
+	if spec.AISimulate != nil {
+		allErrs = append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
 	}
-	return append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
+	if spec.Overrides != nil {
+		allErrs = append(allErrs, v.validateOverridesSpecV1beta2(spec.Overrides, fldPath.Child("overrides"))...)
+	}
+	return allErrs
+}
+
+// validateOverridesSpecV1beta2 validates the partial resource envelope. spec and fldPath must not be nil.
+func (v *dynamoGraphDeploymentRequestValidation) validateOverridesSpecV1beta2(
+	spec *nvidiacomv1beta2.OverridesSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.DGD == nil {
+		return nil
+	}
+
+	// Nested DGD values are checked on the complete generated deployment in the publisher.
+	var override map[string]json.RawMessage
+	path := fldPath.Child("dgd")
+	if err := json.Unmarshal(spec.DGD.Raw, &override); err != nil || override == nil {
+		return field.ErrorList{field.Invalid(path, "<redacted>", "must be a partial DGD object")}
+	}
+	allErrs := field.ErrorList{}
+	for _, member := range []struct{ name, expected string }{
+		{"apiVersion", "nvidia.com/v1beta1"}, {"kind", "DynamoGraphDeployment"},
+	} {
+		var value string
+		if err := json.Unmarshal(override[member.name], &value); err != nil || value != member.expected {
+			allErrs = append(allErrs, field.NotSupported(path.Child(member.name), value, []string{member.expected}))
+		}
+	}
+	if _, found := override["status"]; found {
+		allErrs = append(allErrs, field.Forbidden(path.Child("status"), "DGD status cannot be overridden"))
+	}
+	return allErrs
 }
 
 // validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.

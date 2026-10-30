@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -66,8 +67,9 @@ type memWriter struct {
 	server map[string]bool
 	// failOn makes the named operation ("create", "populate", "status", "delete") fail;
 	// once, unless sticky.
-	failOn map[string]error
-	sticky bool
+	failOn  map[string]error
+	sticky  bool
+	invalid map[string]bool
 }
 
 func (w *memWriter) fail(op string) error {
@@ -106,6 +108,7 @@ func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGrap
 		UID:             types.UID("uid-" + name),
 		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
+		Spec:            runtime.RawExtension{Raw: []byte(`{}`)},
 	}
 	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
@@ -113,7 +116,46 @@ func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGrap
 // createdVersion is the resourceVersion the fake API server "returns" for a new candidate.
 func createdVersion(name string) string { return "created-" + name }
 
-func (w *memWriter) PopulateStatus(ctx context.Context, name, resourceVersion string, _ dgdcreconcile.DesiredCandidate) error {
+func (w *memWriter) PrepareCandidate(_ context.Context, _ *v1beta2.DynamoGraphDeploymentRun, candidate dgdcreconcile.DesiredCandidate) (dgdcreconcile.DesiredCandidate, error) {
+	candidate.Validity = metav1.Condition{Type: v1beta2.DGDCConditionValid, Status: metav1.ConditionTrue, Reason: "ValidationSucceeded", LastTransitionTime: metav1.Now()}
+	if w.invalid[candidate.ID] {
+		candidate.Validity.Status = metav1.ConditionFalse
+		candidate.Validity.Reason = "OverrideTargetNotFound"
+		candidate.Validity.Message = "override target is absent"
+	}
+	return candidate, nil
+}
+
+func TestInvalidCandidatesRemainRankedAndCountTowardTheLimit(t *testing.T) {
+	for _, allInvalid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allInvalid=%t", allInvalid), func(t *testing.T) {
+			t.Log("Reconcile a terminal ranked result containing invalid Candidates")
+			f := newFixture(t)
+			f.w.invalid = map[string]bool{"a": allInvalid, "b": true}
+			f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "a"}, cand{id: "b"}))
+			f.mustReconcile()
+			f.mustReconcile()
+
+			t.Log("Keep every selected Candidate in search order, including invalid ones")
+			status := f.lastStatus()
+			if status.Published != 2 || !reflect.DeepEqual(status.CandidateNames, []string{cn("a"), cn("b")}) {
+				t.Fatalf("published result = %+v", status)
+			}
+			if !f.r.Completion.Finished() || errors.Is(f.r.Completion.Err(), ErrRunFailed) != allInvalid {
+				t.Fatalf("completion = %v, want Run failure only when all Candidates are invalid", f.r.Completion.Err())
+			}
+			var invalid v1beta2.DynamoGraphDeploymentCandidate
+			if err := f.c.Get(t.Context(), types.NamespacedName{Namespace: testNamespace, Name: cn("b")}, &invalid); err != nil {
+				t.Fatal(err)
+			}
+			if len(invalid.Status.Conditions) != 1 || invalid.Status.Conditions[0].Status != metav1.ConditionFalse {
+				t.Fatalf("invalid Candidate was lost: %+v", invalid.Status)
+			}
+		})
+	}
+}
+
+func (w *memWriter) PopulateStatus(ctx context.Context, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) error {
 	if err := w.record("populate:"+name, w.fail("populate")); err != nil {
 		return err
 	}
@@ -127,6 +169,8 @@ func (w *memWriter) PopulateStatus(ctx context.Context, name, resourceVersion st
 		return err
 	}
 	object.Status.Metrics = &runtime.RawExtension{Raw: []byte("{}")}
+	object.Status.Parameters = &runtime.RawExtension{Raw: []byte("{}")}
+	object.Status.Conditions = []metav1.Condition{candidate.Validity}
 	return w.c.Update(ctx, &object)
 }
 
@@ -182,6 +226,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	run := &v1beta2.DynamoGraphDeploymentRun{Namespace: testNamespace, Name: testRunName, UID: testRunUID}
+	run.Spec.Recommendation = &v1beta2.RecommendationSpec{MaxCandidates: 100}
 	pod := &corev1.Pod{Namespace: testNamespace, Name: testPodName}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run, pod).Build()
 	store := &InputStore{}
@@ -506,6 +551,9 @@ func TestTerminalCompletionWaitsForWritesFromThePreviousSnapshot(t *testing.T) {
 	candidate := candidateForRun(cn("a"), "a", run)
 	candidate.UID = types.UID("uid-" + cn("a"))
 	candidate.Status.Metrics = &runtime.RawExtension{Raw: []byte("{}")}
+	candidate.Spec = runtime.RawExtension{Raw: []byte(`{}`)}
+	candidate.Status.Parameters = &runtime.RawExtension{Raw: []byte(`{}`)}
+	candidate.Status.Conditions = []metav1.Condition{{Type: v1beta2.DGDCConditionValid, Status: metav1.ConditionTrue}}
 	if err := f.c.Create(context.Background(), candidate); err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +592,7 @@ func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.
 	err := f.r.Completion.Err()
 	var failure *RunFailedError
 	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed ||
-		!strings.Contains(err.Error(), "1 candidate materialization failure") || !strings.HasPrefix(failure.Outcome.Error, "x: ") {
+		!strings.Contains(err.Error(), "1 candidate failure") || !strings.HasPrefix(failure.Outcome.Error, "x: ") {
 		t.Fatalf("err = %v", err)
 	}
 	if ops := f.takeOps(); len(ops) != 0 {

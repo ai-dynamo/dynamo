@@ -37,6 +37,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -480,7 +481,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Len(t, candidates.Items, 1)
 			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
 			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
-			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+			var candidateSpec nvidiacomv1beta1.DynamoGraphDeploymentSpec
+			require.NoError(t, json.Unmarshal(candidates.Items[0].Spec.Raw, &candidateSpec))
+			require.NotEmpty(t, candidateSpec.Components, "Candidate has no materialized DGD components")
+			require.True(t, meta.IsStatusConditionTrue(candidates.Items[0].Status.Conditions, nvidiacomv1beta2.DGDCConditionValid))
 			require.LessOrEqual(t, candidateUsedGPUs(t, candidates.Items[0].Status.Metrics), int64(8),
 				"Candidate exceeds the selected-shape GPU budget")
 

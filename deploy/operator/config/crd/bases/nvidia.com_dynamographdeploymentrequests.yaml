@@ -9757,6 +9757,25 @@ spec:
                       rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                overrides:
+                  description: Overrides customizes the generated DGD without changing AISimulate execution.
+                  properties:
+                    dgd:
+                      description: |-
+                        DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+                        using the DGD structural merge rules. Other API versions are not supported.
+                        Application is atomic: a merge failure retains the unchanged generated deployment
+                        with Valid=False. A successful merge is checked by strict server-side dry-run;
+                        the dry-run response and its defaults are discarded. The Candidate retains the
+                        unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+                        Overrides may change any deployment configuration. Evaluation metrics are not
+                        recomputed and continue to describe the original AISimulate configuration.
+                        DGD labels and annotations become Candidate labels and annotations. Other metadata
+                        and publisher-owned keys cannot be overridden; such attempts fail atomically.
+                      type: object
+                      x-kubernetes-embedded-resource: true
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
                 recommendation:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
@@ -9868,7 +9887,7 @@ spec:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation) || has(self.overrides))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:

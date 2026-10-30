@@ -12,10 +12,16 @@ metadata:
     nvidia.com/dgdr-run-uid: $ignore
 spec:
   $strict: false
+  backendFramework: vllm
+status:
   parameters:
     $strict: false
     backend: vllm
-status:
+  conditions:
+    - $strict: false
+      type: Valid
+      status: "True"
+      reason: ValidationSucceeded
   metrics:
     $strict: false
     score: $ignore

@@ -50,6 +50,8 @@ type StoredCandidate struct {
 // writer is every write the reconciler makes to the API server. It is a seam so the
 // reconciler's behavior can be tested without server-side apply support in a fake client.
 type writer interface {
+	// PrepareCandidate applies the frozen override and strictly dry-runs a copy of the DGD.
+	PrepareCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, candidate dgdcreconcile.DesiredCandidate) (dgdcreconcile.DesiredCandidate, error)
 	// CreateCandidate atomically creates a missing candidate or reapplies one already
 	// controlled by the Run, then returns the API server's own copy. It must never adopt
 	// an object that is not controlled by the Run.
@@ -137,7 +139,7 @@ func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoG
 	return StoredCandidate{
 		UID:             stored.UID,
 		ResourceVersion: stored.ResourceVersion,
-		Populated:       stored.Status.Metrics != nil,
+		Populated:       candidateStatusComplete(&stored.Status),
 	}, nil
 }
 
@@ -163,25 +165,34 @@ func (w *clientWriter) DeleteCandidate(ctx context.Context, name string, uid typ
 }
 
 // buildCandidateApply is the server-side-apply payload that creates a candidate: labels
-// and controller owner reference, the DGD spec with the resolved parameters, and the
+// and controller owner reference, the exact unpruned DGD spec, and the
 // companion resources as an annotation. The status goes through the status subresource.
 func buildCandidateApply(scheme *runtime.Scheme, namespace, runUID string, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (*unstructured.Unstructured, error) {
-	spec, companions, err := decodeManifest(candidate.ID, candidate.Spec)
+	dgd, companions, err := decodeManifest(candidate.ID, candidate.Spec)
 	if err != nil {
 		return nil, err
 	}
-	parameters, err := normalizeJSON(candidate.Parameters)
+	spec, err := json.Marshal(dgd.Object["spec"])
 	if err != nil {
 		return nil, err
 	}
 	object := &v1beta2.DynamoGraphDeploymentCandidate{
-		Namespace: namespace,
-		Name:      name,
-		Labels:    map[string]string{LabelRunUID: runUID, LabelCandidateID: candidate.ID},
-		Spec:      v1beta2.DynamoGraphDeploymentCandidateSpec{DynamoGraphDeploymentSpec: *spec},
+		Namespace:   namespace,
+		Name:        name,
+		Labels:      dgd.GetLabels(),
+		Annotations: dgd.GetAnnotations(),
+		Spec:        runtime.RawExtension{Raw: spec},
 	}
+	if object.Labels == nil {
+		object.Labels = map[string]string{}
+	}
+	object.Labels[LabelRunUID] = runUID
+	object.Labels[LabelCandidateID] = candidate.ID
 	if companions != "" {
-		object.Annotations = map[string]string{AnnotationAdditionalResources: companions}
+		if object.Annotations == nil {
+			object.Annotations = map[string]string{}
+		}
+		object.Annotations[AnnotationAdditionalResources] = companions
 	}
 	if err := controllerutil.SetControllerReference(run, object, scheme); err != nil {
 		return nil, err
@@ -192,9 +203,6 @@ func buildCandidateApply(scheme *runtime.Scheme, namespace, runUID string, run *
 	}
 	delete(content, "status")
 	unstructured.RemoveNestedField(content, "metadata", "creationTimestamp")
-	if err := unstructured.SetNestedField(content, parameters, "spec", "parameters"); err != nil {
-		return nil, err
-	}
 	apply := &unstructured.Unstructured{Object: content}
 	apply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentCandidateGVK)
 	return apply, nil
@@ -209,18 +217,25 @@ func withResourceVersion(metadata map[string]any, resourceVersion string) map[st
 	return metadata
 }
 
-// buildCandidateStatusApply is the status payload of a candidate: the metrics. Metrics are
-// always written, even when empty, because their presence is what marks the candidate as
-// populated. Candidate status is written once and then stays immutable, so the payload
+// buildCandidateStatusApply writes the original evaluation and final validity verdict.
+// Parameters and metrics are always objects, including when empty. The payload
 // carries the resourceVersion the "not populated yet" decision was based on.
 func buildCandidateStatusApply(namespace, name, resourceVersion string, candidate dgdcreconcile.DesiredCandidate) (*unstructured.Unstructured, error) {
 	metrics, err := normalizeJSON(candidate.Metrics)
 	if err != nil {
 		return nil, err
 	}
+	parameters, err := normalizeJSON(candidate.Parameters)
+	if err != nil {
+		return nil, err
+	}
+	validity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&candidate.Validity)
+	if err != nil {
+		return nil, err
+	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": withResourceVersion(map[string]any{"namespace": namespace, "name": name}, resourceVersion),
-		"status":   map[string]any{"metrics": metrics},
+		"status":   map[string]any{"metrics": metrics, "parameters": parameters, "conditions": []any{validity}},
 	}}
 	apply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentCandidateGVK)
 	return apply, nil

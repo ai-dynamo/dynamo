@@ -259,6 +259,24 @@ type RecommendationSpec struct {
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
 }
 
+// OverridesSpec patches the generated deployment independently for every selected Candidate.
+type OverridesSpec struct {
+	// DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+	// using the DGD structural merge rules. Other API versions are not supported.
+	// Application is atomic: a merge failure retains the unchanged generated deployment
+	// with Valid=False. A successful merge is checked by strict server-side dry-run;
+	// the dry-run response and its defaults are discarded. The Candidate retains the
+	// unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+	// Overrides may change any deployment configuration. Evaluation metrics are not
+	// recomputed and continue to describe the original AISimulate configuration.
+	// DGD labels and annotations become Candidate labels and annotations. Other metadata
+	// and publisher-owned keys cannot be overridden; such attempts fail atomically.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	DGD *runtime.RawExtension `json:"dgd,omitempty"`
+}
+
 // NativeSearchInput defines the v1beta2 search input shared by Requests and
 // immutable Runs.
 type NativeSearchInput struct {
@@ -303,6 +321,10 @@ type NativeSearchInput struct {
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+
+	// Overrides customizes the generated DGD without changing AISimulate execution.
+	// +optional
+	Overrides *OverridesSpec `json:"overrides,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
@@ -313,7 +335,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`

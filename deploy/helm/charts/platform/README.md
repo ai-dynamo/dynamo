@@ -48,6 +48,22 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Experimental DGDR v1beta2 API
+
+**Change:** Candidate `spec` is now the opaque, immutable DGD spec. Resolved simulation
+parameters move from `spec.parameters` to `status.parameters`; metrics remain in status,
+and `status.conditions[type=Valid]` reports atomic DGD override application and strict
+server-side dry-run validation. Invalid DGD payloads are retained without pruning.
+
+**Action:** Upgrade the operator, CRDs, and validating webhook configuration together.
+Update experimental Candidate consumers to read `status.parameters` and check `Valid`
+before using the DGD spec. The publisher's Run-scoped role now requires DGD `create`
+permission for dry-run admission. Existing DGDR v1beta1 resources are unaffected.
+
+**Existing deployments:** This change affects the opt-in `dgdrV1Beta2.enabled` API.
+Complete or cancel active experimental Runs before upgrading, then recreate their
+Requests to generate Candidates in the new shape. Existing Candidates are not migrated.
+
 #### Runtime Compatibility
 
 ##### Frontend Startup Probe Defaults
