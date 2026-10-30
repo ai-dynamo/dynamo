@@ -206,6 +206,7 @@ impl TopologyPublisher {
         state.availability.clear();
         state.availability_owners.clear();
         state.pools.clear();
+        state.capacities.clear();
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -1752,6 +1753,9 @@ mod tests {
             }))
         );
         assert_eq!(capacities.len(), 2);
+
+        publisher.clear();
+        assert!(publisher.model_capacities().is_empty());
     }
 
     /// A config the pool view rejects (here a zero data-parallel size) makes
