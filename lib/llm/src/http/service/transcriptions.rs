@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Multipart, State, multipart::MultipartRejection},
+    extract::{
+        Multipart, State,
+        multipart::{MultipartError, MultipartRejection},
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -28,7 +31,7 @@ use super::{
     openai::{
         ErrorMessage, ErrorResponse, check_model_serving_ready, check_ready, context_from_headers,
         error_is_invalid_argument, extract_error_type_from_response, get_body_limit,
-        get_or_create_request_id,
+        get_or_create_request_id, payload_too_large_error,
     },
     service_v2,
 };
@@ -51,15 +54,18 @@ struct TranscriptionForm {
 impl TranscriptionForm {
     async fn parse(mut multipart: Multipart) -> Result<Self, ErrorResponse> {
         let mut form = Self::default();
-        while let Some(field) = multipart.next_field().await.map_err(|error| {
-            ErrorMessage::bad_request(format!("Invalid multipart body: {error}"))
-        })? {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|error| multipart_error("Invalid multipart body", error))?
+        {
             let name = field.name().unwrap_or_default().to_string();
             if name == "file" {
                 form.filename = Some(field.file_name().unwrap_or("audio").to_string());
-                let bytes = field.bytes().await.map_err(|error| {
-                    ErrorMessage::bad_request(format!("Failed to read audio file: {error}"))
-                })?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| multipart_error("Failed to read audio file", error))?;
                 if bytes.is_empty() {
                     return Err(ErrorMessage::bad_request(
                         "The audio file must not be empty",
@@ -70,7 +76,7 @@ impl TranscriptionForm {
             }
 
             let value = field.text().await.map_err(|error| {
-                ErrorMessage::bad_request(format!("Failed to read form field `{name}`: {error}"))
+                multipart_error(&format!("Failed to read form field `{name}`"), error)
             })?;
             match name.as_str() {
                 "model" => form.model = nonempty(value),
@@ -142,6 +148,16 @@ impl TranscriptionForm {
             timestamp_granularities: (!self.timestamp_granularities.is_empty())
                 .then_some(self.timestamp_granularities),
         })
+    }
+}
+
+/// Keeps the body limit's 413 for an oversized upload; any other multipart failure is a
+/// malformed request.
+fn multipart_error(context: &str, error: MultipartError) -> ErrorResponse {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        payload_too_large_error()
+    } else {
+        ErrorMessage::bad_request(format!("{context}: {error}"))
     }
 }
 
@@ -310,6 +326,81 @@ pub fn transcriptions_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        extract::DefaultBodyLimit,
+        http::{Request, header::CONTENT_TYPE},
+    };
+    use bytes::Bytes;
+    use tower::ServiceExt;
+
+    fn multipart_body(audio: &[u8], closed: bool) -> Vec<u8> {
+        let mut body = b"--audio-boundary\r\nContent-Disposition: form-data; name=\"file\"; \
+            filename=\"sample.wav\"\r\n\r\n"
+            .to_vec();
+        body.extend_from_slice(audio);
+        if closed {
+            body.extend_from_slice(b"\r\n--audio-boundary--\r\n");
+        }
+        body
+    }
+
+    /// Parse the form behind `body_limit`, streamed without a Content-Length.
+    async fn parse_status(body: Vec<u8>, body_limit: usize) -> (StatusCode, serde_json::Value) {
+        let app = Router::new()
+            .route(
+                "/",
+                post(|multipart: Multipart| async move {
+                    match TranscriptionForm::parse(multipart).await {
+                        Ok(_) => StatusCode::OK.into_response(),
+                        Err(error) => error.into_response(),
+                    }
+                }),
+            )
+            .layer(DefaultBodyLimit::max(body_limit));
+        let chunks = body
+            .chunks(17)
+            .map(Bytes::copy_from_slice)
+            .map(Ok::<_, std::io::Error>)
+            .collect::<Vec<_>>();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(CONTENT_TYPE, "multipart/form-data; boundary=audio-boundary")
+                    .body(Body::from_stream(futures::stream::iter(chunks)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn oversized_upload_is_payload_too_large_and_malformed_is_bad_request() {
+        let (status, _) = parse_status(multipart_body(&[1; 32], true), 1024).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, error) = parse_status(multipart_body(&[1; 4096], true), 1024).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("DYN_HTTP_BODY_LIMIT_MB")),
+            "unexpected 413 body: {error}"
+        );
+
+        let (status, _) = parse_status(multipart_body(&[1; 32], false), 1024).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn rejects_non_json_response_formats() {
