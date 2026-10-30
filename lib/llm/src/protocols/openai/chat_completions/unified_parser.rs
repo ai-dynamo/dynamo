@@ -1362,6 +1362,40 @@ pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
     }
 }
 
+/// Additional adapter state, selected once for the native grammar. A shared
+/// `<tool_call>` spelling does not establish shared grammar semantics: reuse a
+/// variant only when its full behavior matches, otherwise document a new variant.
+enum NativeGrammarState {
+    /// These adapter mechanisms are inactive; the selected parser remains active.
+    None,
+    /// Qwen's XML tool-call dialect, also used by Nemotron. Parameter delimiters
+    /// and literal-marker rules require dialect-specific handling.
+    QwenXml(QwenXmlStreamState),
+    /// GLM's native EOF truncation check uses its grammar to distinguish unfinished
+    /// calls from literal argument text.
+    Glm(GlmNativeStreamState),
+}
+
+/// Adapter ordering state for the Qwen XML dialect; source responses live longer
+/// than a parser instance and remain in `ChoiceRecord`.
+#[derive(Default)]
+struct QwenXmlStreamState {
+    lexical_state: QwenNativeLexicalState,
+    /// Buffered text whose interpretation is unresolved, rather than a source position.
+    pending_opener: String,
+    /// Must follow recovered opener text on mismatch and precede completed call events.
+    deferred_reasoning: Vec<String>,
+    /// Entries in event/output lists, not XML character offsets: these preserve
+    /// deferred reasoning's original response metadata through projection.
+    deferred_reasoning_event_indices: HashSet<usize>,
+    deferred_reasoning_choice_indices: HashSet<usize>,
+}
+
+#[derive(Default)]
+struct GlmNativeStreamState {
+    input_for_truncation_check: String,
+}
+
 /// Per-choice streaming state: one parser instance plus the bookkeeping the OpenAI
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
@@ -1702,21 +1736,12 @@ impl QuotedControlMarkerProbe {
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
 pub(crate) struct ChoiceState {
-    glm_native_input: Option<String>,
+    native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
     family: String,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
     tool_output_mode: UnifiedToolOutputMode,
-    qwen_native_lexical_state: QwenNativeLexicalState,
-    /// Qwen's native tool opener is held until it is complete or disproven.
-    pending_qwen_opener_text: String,
-    /// Reasoning chunks arriving while a split Qwen block opener is ambiguous.
-    /// They must follow recovered opener text on mismatch and precede call events
-    /// when the opener completes.
-    pending_qwen_opener_reasoning: Vec<String>,
-    qwen_reasoning_event_positions: HashSet<usize>,
-    qwen_reasoning_choice_positions: HashSet<usize>,
     /// Tool indices that have emitted at least one `tool_calls` delta.
     opened_calls: HashSet<usize>,
     /// Upstream IDs and types may arrive after an index opens. Names remain fragments.
@@ -1822,19 +1847,22 @@ impl ChoiceState {
             );
         }
         Ok(Self {
-            glm_native_input: (family == GLM47_UNIFIED_FAMILY
-                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native))
-            .then(String::new),
+            native_grammar_state: if matches!(&tool_output_mode, UnifiedToolOutputMode::Native) {
+                if uses_qwen_xml_grammar(family) {
+                    NativeGrammarState::QwenXml(QwenXmlStreamState::default())
+                } else if family == GLM47_UNIFIED_FAMILY {
+                    NativeGrammarState::Glm(GlmNativeStreamState::default())
+                } else {
+                    NativeGrammarState::None
+                }
+            } else {
+                NativeGrammarState::None
+            },
             incomplete_native_call: false,
             family: family.to_string(),
             message_boundaries: Vec::new(),
             parser,
             tool_output_mode,
-            qwen_native_lexical_state: QwenNativeLexicalState::default(),
-            pending_qwen_opener_text: String::new(),
-            pending_qwen_opener_reasoning: Vec::new(),
-            qwen_reasoning_event_positions: HashSet::new(),
-            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -1882,9 +1910,11 @@ impl ChoiceState {
         if self.failed {
             return text_delta(text.to_string());
         }
-        if self.is_qwen_native_outside_block() {
-            let held = std::mem::take(&mut self.pending_qwen_opener_text);
-            if !self.pending_qwen_opener_reasoning.is_empty() && !held.is_empty() {
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state
+            && qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+        {
+            let held = std::mem::take(&mut qwen.pending_opener);
+            if !qwen.deferred_reasoning.is_empty() && !held.is_empty() {
                 if let Some((_resolution_end, opener_completed)) =
                     qwen_opener_resolution(&held, text)
                 {
@@ -1901,18 +1931,16 @@ impl ChoiceState {
                     }
                     return events;
                 }
-                self.pending_qwen_opener_text = held;
-                self.pending_qwen_opener_text.push_str(text);
+                qwen.pending_opener = held;
+                qwen.pending_opener.push_str(text);
                 return Vec::new();
             }
 
             let mut combined = held;
             combined.push_str(text);
-            if let Some(start) =
-                qwen_partial_opener_suffix_start(&self.qwen_native_lexical_state, &combined)
-            {
+            if let Some(start) = qwen_partial_opener_suffix_start(&qwen.lexical_state, &combined) {
                 let safe_text = combined[..start].to_string();
-                self.pending_qwen_opener_text = combined[start..].to_string();
+                qwen.pending_opener = combined[start..].to_string();
                 return if safe_text.is_empty() {
                     Vec::new()
                 } else {
@@ -1925,24 +1953,29 @@ impl ChoiceState {
     }
 
     fn qwen_resumed_marker_can_start_call(&self) -> bool {
-        self.qwen_native_lexical_state.mode != QwenNativeLexicalMode::ParameterValue
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.lexical_state.mode != QwenNativeLexicalMode::ParameterValue)
     }
 
-    fn is_qwen_native_outside_block(&self) -> bool {
-        uses_qwen_xml_grammar(&self.family)
-            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
-            && self.qwen_native_lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+    fn has_pending_qwen_xml_opener(&self) -> bool {
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+                && !qwen.pending_opener.is_empty())
+    }
+
+    fn is_deferred_qwen_xml_reasoning_choice(&self, index: usize) -> bool {
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.deferred_reasoning_choice_indices.contains(&index))
     }
 
     fn parse_segment(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
-        if let Some(input) = &mut self.glm_native_input {
-            // EOF recovery needs source context; scan once there, not on every push.
-            input.push_str(text);
-        }
-        if uses_qwen_xml_grammar(&self.family)
-            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
-        {
-            self.qwen_native_lexical_state.observe(text);
+        match &mut self.native_grammar_state {
+            NativeGrammarState::Glm(glm) => {
+                // EOF recovery needs source context; scan once there, not on every push.
+                glm.input_for_truncation_check.push_str(text);
+            }
+            NativeGrammarState::QwenXml(qwen) => qwen.lexical_state.observe(text),
+            NativeGrammarState::None => {}
         }
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
@@ -1960,25 +1993,34 @@ impl ChoiceState {
     }
 
     fn queue_qwen_opener_reasoning(&mut self, reasoning: String) {
-        self.pending_qwen_opener_reasoning.push(reasoning);
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        qwen.deferred_reasoning.push(reasoning);
     }
 
     fn prepend_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
-        let mut reasoning = std::mem::take(&mut self.pending_qwen_opener_reasoning)
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        let mut reasoning = std::mem::take(&mut qwen.deferred_reasoning)
             .into_iter()
             .map(UnifiedParserEvent::Reasoning)
             .collect::<Vec<_>>();
-        self.qwen_reasoning_event_positions
+        qwen.deferred_reasoning_event_indices
             .extend(0..reasoning.len());
         reasoning.append(events);
         *events = reasoning;
     }
 
     fn append_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
-        self.qwen_reasoning_event_positions
-            .extend(events.len()..events.len() + self.pending_qwen_opener_reasoning.len());
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        qwen.deferred_reasoning_event_indices
+            .extend(events.len()..events.len() + qwen.deferred_reasoning.len());
         events.extend(
-            std::mem::take(&mut self.pending_qwen_opener_reasoning)
+            std::mem::take(&mut qwen.deferred_reasoning)
                 .into_iter()
                 .map(UnifiedParserEvent::Reasoning),
         );
@@ -1989,7 +2031,10 @@ impl ChoiceState {
         held: &str,
         events: &mut Vec<UnifiedParserEvent>,
     ) {
-        let pending = std::mem::take(&mut self.pending_qwen_opener_reasoning);
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        let pending = std::mem::take(&mut qwen.deferred_reasoning);
         let mut ordered = Vec::new();
         let mut inserted = false;
         for event in std::mem::take(events) {
@@ -2000,7 +2045,7 @@ impl ChoiceState {
                 if !held.is_empty() {
                     ordered.push(UnifiedParserEvent::Text(held.to_string()));
                 }
-                self.qwen_reasoning_event_positions
+                qwen.deferred_reasoning_event_indices
                     .extend(ordered.len()..ordered.len() + pending.len());
                 ordered.extend(pending.iter().cloned().map(UnifiedParserEvent::Reasoning));
                 if !remainder.is_empty() {
@@ -2015,7 +2060,7 @@ impl ChoiceState {
             // TODO(frontend-crates): parser 0.7.17 malformed-call recovery still needs
             // a source-order barrier. Recovered text can span this thought at EOF;
             // matching a repeated opener cannot recover its original position.
-            self.qwen_reasoning_event_positions
+            qwen.deferred_reasoning_event_indices
                 .extend(ordered.len()..ordered.len() + pending.len());
             ordered.extend(pending.into_iter().map(UnifiedParserEvent::Reasoning));
         }
@@ -2027,7 +2072,8 @@ impl ChoiceState {
         if self.failed {
             return Vec::new();
         }
-        if let Some(input) = &self.glm_native_input {
+        if let NativeGrammarState::Glm(glm) = &self.native_grammar_state {
+            let input = &glm.input_for_truncation_check;
             match glm_unfinished_call(input) {
                 Ok(Some(start)) => {
                     self.incomplete_native_call = true;
@@ -2046,7 +2092,10 @@ impl ChoiceState {
                 }
             }
         }
-        let pending_qwen_opener = std::mem::take(&mut self.pending_qwen_opener_text);
+        let pending_qwen_opener = match &mut self.native_grammar_state {
+            NativeGrammarState::QwenXml(qwen) => std::mem::take(&mut qwen.pending_opener),
+            _ => String::new(),
+        };
         let mut events = if pending_qwen_opener.is_empty() {
             Vec::new()
         } else {
@@ -2083,7 +2132,9 @@ impl ChoiceState {
             // TODO: Preserve the parser's consumed offset so a partial-commit error cannot replay input.
             recovered.push_str(fallback);
         }
-        recovered.push_str(&std::mem::take(&mut self.pending_qwen_opener_text));
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+            recovered.push_str(&std::mem::take(&mut qwen.pending_opener));
+        }
         text_delta(recovered)
     }
 
@@ -2177,8 +2228,14 @@ impl ChoiceState {
         let terminal_tool_call_delta = finish_reason_closes_tool_calls(finish_reason.as_ref());
         // Queued reasoning belongs to its earlier source response. Coalescing it
         // with parser reasoning would erase the source envelope's event boundary.
-        let source_positions = std::mem::take(&mut self.qwen_reasoning_event_positions);
-        self.qwen_reasoning_choice_positions.clear();
+        let source_positions = match &mut self.native_grammar_state {
+            NativeGrammarState::QwenXml(qwen) => {
+                let indices = std::mem::take(&mut qwen.deferred_reasoning_event_indices);
+                qwen.deferred_reasoning_choice_indices.clear();
+                indices
+            }
+            _ => HashSet::new(),
+        };
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
@@ -2187,7 +2244,10 @@ impl ChoiceState {
             }
             if source_positions.contains(&position) {
                 projected.extend(coalesce(std::mem::take(&mut run)));
-                self.qwen_reasoning_choice_positions.insert(projected.len());
+                if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+                    qwen.deferred_reasoning_choice_indices
+                        .insert(projected.len());
+                }
                 projected.push(delta);
             } else {
                 run.push(delta);
@@ -2196,7 +2256,7 @@ impl ChoiceState {
         projected.extend(coalesce(run));
         let deltas = projected;
         let envelope_position = (0..deltas.len())
-            .find(|position| !self.qwen_reasoning_choice_positions.contains(position));
+            .find(|position| !self.is_deferred_qwen_xml_reasoning_choice(*position));
         let mut original = original.clone();
         if let Some(original_calls) = original.delta.tool_calls.as_mut() {
             for call in original_calls {
@@ -2247,7 +2307,7 @@ impl ChoiceState {
                     choice.delta.tool_calls = Some(original_calls);
                 }
             }
-            if position + 1 == count && !self.qwen_reasoning_choice_positions.contains(&position) {
+            if position + 1 == count && !self.is_deferred_qwen_xml_reasoning_choice(position) {
                 choice.finish_reason = self.normalize_finish_reason(finish_reason);
             }
             choices.push(choice);
@@ -2256,7 +2316,7 @@ impl ChoiceState {
         if !choices.is_empty()
             && (envelope_position.is_none()
                 || (finish_reason.is_some()
-                    && self.qwen_reasoning_choice_positions.contains(&(count - 1))))
+                    && self.is_deferred_qwen_xml_reasoning_choice(count - 1)))
         {
             let mut choice = empty_choice(index);
             if envelope_position.is_none() {
@@ -2687,7 +2747,7 @@ struct ChoiceRecord {
     /// whether generation starts with reasoning prose or bare guided JSON.
     pending_guided_prefill_whitespace: String,
     /// Source envelopes for Qwen reasoning held until a split native opener resolves.
-    pending_qwen_opener_responses: VecDeque<PendingQwenReasoningResponse>,
+    deferred_qwen_xml_reasoning_responses: VecDeque<DeferredQwenXmlReasoningResponse>,
     tool_emitted: bool,
     finished: bool,
     /// Whether an already-parsed chunk has EVER interrupted this choice. An
@@ -2701,7 +2761,7 @@ struct ChoiceRecord {
     detoured: bool,
 }
 
-struct PendingQwenReasoningResponse {
+struct DeferredQwenXmlReasoningResponse {
     text: String,
     choice: ChatChoiceStream,
     response: Annotated<NvCreateChatCompletionStreamResponse>,
@@ -2717,7 +2777,7 @@ fn take_qwen_reasoning_response(
     record: &mut ChoiceRecord,
 ) -> Annotated<Box<NvCreateChatCompletionStreamResponse>> {
     let pending = record
-        .pending_qwen_opener_responses
+        .deferred_qwen_xml_reasoning_responses
         .pop_front()
         .expect("queued reasoning event must have a source response");
     let mut response = pending.response;
@@ -2733,7 +2793,7 @@ fn take_qwen_reasoning_response(
     response.map_data(|data| Ok(Box::new(data)))
 }
 
-fn qwen_chunks_for_choices(
+fn stream_chunks_for_choices(
     state: &ChoiceState,
     record: &mut ChoiceRecord,
     choices: Vec<ChatChoiceStream>,
@@ -2742,7 +2802,7 @@ fn qwen_chunks_for_choices(
         .into_iter()
         .enumerate()
         .map(|(position, choice)| {
-            if state.qwen_reasoning_choice_positions.contains(&position) {
+            if state.is_deferred_qwen_xml_reasoning_choice(position) {
                 FinishedStreamChunk::Source(take_qwen_reasoning_response(record))
             } else if let Some(boundary) = state.message_boundaries.get(position).cloned().flatten()
             {
@@ -2832,10 +2892,7 @@ fn finish_unterminated_choices(
                 state.resolve_complete_parsed_tool_calls_at_eof();
                 if let Some(reason) = state.unterminated_finish_reason() {
                     if let Some(last_position) = flushed.len().checked_sub(1) {
-                        if state
-                            .qwen_reasoning_choice_positions
-                            .contains(&last_position)
-                        {
+                        if state.is_deferred_qwen_xml_reasoning_choice(last_position) {
                             let mut terminal = empty_choice(index);
                             terminal.finish_reason = Some(reason);
                             flushed.push(terminal);
@@ -2846,7 +2903,7 @@ fn finish_unterminated_choices(
                         flushed.extend(state.choices_for(&base, Vec::new(), true, Some(reason)));
                     }
                 }
-                chunks.extend(qwen_chunks_for_choices(state, record, flushed));
+                chunks.extend(stream_chunks_for_choices(state, record, flushed));
             }
             None => {
                 let pending_whitespace =
@@ -2856,7 +2913,7 @@ fn finish_unterminated_choices(
                     choice.delta.reasoning_content = Some(pending_whitespace);
                     chunks.push(FinishedStreamChunk::Choice(choice));
                 }
-                while !record.pending_qwen_opener_responses.is_empty() {
+                while !record.deferred_qwen_xml_reasoning_responses.is_empty() {
                     chunks.push(FinishedStreamChunk::Source(take_qwen_reasoning_response(
                         record,
                     )));
@@ -3365,11 +3422,7 @@ where
                             .as_ref()
                             .is_some_and(|reasoning| !reasoning.is_empty())
                         && uses_qwen_xml_grammar(family)
-                        && states.get(&original.index).is_some_and(|state| {
-                            state.qwen_native_lexical_state.mode
-                                == QwenNativeLexicalMode::OutsideBlock
-                                && !state.pending_qwen_opener_text.is_empty()
-                        });
+                        && states.get(&original.index).is_some_and(ChoiceState::has_pending_qwen_xml_opener);
                     if preserve_reasoning_only_state {
                         // Reasoning is an ordered event between generated bytes, not a
                         // replacement parser input. Keep the parser state alive so a
@@ -3396,8 +3449,8 @@ where
                                 source_data.nvext = None;
                                 source_data.llm_metrics = None;
                             }
-                            record.pending_qwen_opener_responses.push_back(
-                                PendingQwenReasoningResponse {
+                            record.deferred_qwen_xml_reasoning_responses.push_back(
+                                DeferredQwenXmlReasoningResponse {
                                     text: reasoning,
                                     choice: original.clone(),
                                     response: Annotated {
@@ -3483,7 +3536,7 @@ where
                             true,
                             None,
                         );
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
@@ -3543,7 +3596,7 @@ where
                             &empty_choice(original.index), deltas, true, None,
                         );
                         let record = records.entry(original.index).or_default();
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
@@ -3779,7 +3832,7 @@ where
                 }
                 let mut parsed = Vec::new();
                 let record = records.entry(original.index).or_default();
-                for output in qwen_chunks_for_choices(state, record, choices) {
+                for output in stream_chunks_for_choices(state, record, choices) {
                     match output {
                         FinishedStreamChunk::Source(response) => {
                             deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
@@ -5235,6 +5288,60 @@ pub(crate) mod tests {
             ArgumentFraming::default(),
         )
         .expect("qwen3 unified parser")
+    }
+
+    #[test]
+    fn native_grammar_state_matches_family_and_output_mode() {
+        for family in [
+            QWEN3_UNIFIED_FAMILY,
+            NEMOTRON_V3_UNIFIED_FAMILY,
+            GLM47_UNIFIED_FAMILY,
+            KIMI_K2_UNIFIED_FAMILY,
+        ] {
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("get_weather".to_string()),
+                },
+            ] {
+                let state = ChoiceState::new(
+                    family,
+                    &[],
+                    UnifiedParserStartingState::None,
+                    mode.clone(),
+                    true,
+                    ArgumentFraming::default(),
+                )
+                .unwrap();
+                match (&state.native_grammar_state, &mode, family) {
+                    (
+                        NativeGrammarState::QwenXml(qwen),
+                        UnifiedToolOutputMode::Native,
+                        QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY,
+                    ) => {
+                        assert!(qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock);
+                        assert!(qwen.pending_opener.is_empty());
+                        assert!(qwen.deferred_reasoning.is_empty());
+                        assert!(qwen.deferred_reasoning_event_indices.is_empty());
+                        assert!(qwen.deferred_reasoning_choice_indices.is_empty());
+                    }
+                    (
+                        NativeGrammarState::Glm(glm),
+                        UnifiedToolOutputMode::Native,
+                        GLM47_UNIFIED_FAMILY,
+                    ) => assert!(glm.input_for_truncation_check.is_empty()),
+                    (NativeGrammarState::None, UnifiedToolOutputMode::GuidedJson { .. }, _)
+                    | (
+                        NativeGrammarState::None,
+                        UnifiedToolOutputMode::Native,
+                        KIMI_K2_UNIFIED_FAMILY,
+                    ) => {}
+                    _ => panic!("wrong adapter grammar state for {family} / {mode:?}"),
+                }
+                assert!(!state.is_deferred_qwen_xml_reasoning_choice(0));
+            }
+        }
     }
 
     #[test]
@@ -9470,18 +9577,13 @@ pub(crate) mod tests {
     fn a_failed_push_keeps_committed_events_before_recovered_bytes() {
         let mut state = ChoiceState {
             message_boundaries: Vec::new(),
-            glm_native_input: None,
+            native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,
             family: "test".to_string(),
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),
             }),
             tool_output_mode: UnifiedToolOutputMode::Native,
-            qwen_native_lexical_state: QwenNativeLexicalState::default(),
-            pending_qwen_opener_text: String::new(),
-            pending_qwen_opener_reasoning: Vec::new(),
-            qwen_reasoning_event_positions: HashSet::new(),
-            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -10222,8 +10324,8 @@ pub(crate) mod tests {
                 let mut records = HashMap::from([(
                     0,
                     ChoiceRecord {
-                        pending_qwen_opener_responses: VecDeque::from([
-                            PendingQwenReasoningResponse {
+                        deferred_qwen_xml_reasoning_responses: VecDeque::from([
+                            DeferredQwenXmlReasoningResponse {
                                 text: "detour".into(),
                                 choice: expected.clone(),
                                 response: source.clone(),
