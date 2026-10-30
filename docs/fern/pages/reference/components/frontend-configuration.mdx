@@ -902,8 +902,37 @@ accepted fields, limits, errors, and rolling upgrades.
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
-| `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+
+### Admin
+
+Admin routes are off by default and are served on a separate listener (`127.0.0.1:8002` by
+default), never on the inference port. They have no authentication; see
+[Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md#frontend-extensions-and-admin-api).
+When frontend TLS is configured, the admin listener uses the same certificate and client CA
+settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
+routes; `generate-frontend-openapi` does.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
+| `GET`, `POST` | `/router_policy/busy_threshold` | Get or set busy thresholds for a discovered model |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model |
+| `GET` | `/busy_threshold` | Get stored busy thresholds |
+
+<ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy (`1`, `true`, `yes`, or `on`), the frontend starts the admin listener and serves the
+  routes above.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_HOST" type="string" default="127.0.0.1">
+  Address the admin listener binds to. If you widen it, restrict the admin port at the network
+  boundary.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_PORT" type="integer" default="8002">
+  Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
+  frontend fails to start. A value that is not a valid port number falls back to `8002`.
+</ParamField>
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
@@ -948,11 +977,6 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
-</ParamField>
-
-<ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
-  When truthy, `GET /busy_threshold` and `POST /busy_threshold` are not registered and return 404.
-  Inference, metrics, models, health, and liveness routes are unaffected.
 </ParamField>
 
 ### Endpoint path customization

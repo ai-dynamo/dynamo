@@ -2,13 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from dynamo.common import kv_state_agent
-from dynamo.common.constants import DisaggregationMode
+from dynamo.common.constants import (
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    DisaggregationMode,
+)
+from dynamo.llm import WorkerType
 
 pytest.importorskip("sglang")
 
@@ -26,6 +31,12 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+LINKER_WORKER_MODES = (
+    DisaggregationMode.AGGREGATED,
+    DisaggregationMode.PREFILL,
+    DisaggregationMode.DECODE,
+)
 
 
 def fixture():
@@ -87,6 +98,150 @@ def test_descriptors_use_only_reported_sources(monkeypatch, wide_pad_values):
     assert result["engine_owned_mm_identity"] is wide_pad_values
     source["capabilities"] = ["router_hint"]
     assert state_agent_descriptors(engine, config) == []
+
+
+def linker_fixture():
+    engine, config, source, info = fixture()
+    config.server_args.enable_hierarchical_cache = False
+    config.server_args.enable_unified_cache_external_linker = True
+    config.server_args.unified_cache_external_linker_backend = "kvcr"
+    config.server_args.tp_size = 1
+    config.server_args.page_size = 64
+    source["inventory_lifetime"] = "process_local"
+    source["reset_clears_owner_inventory"] = True
+    source["owner_incarnation_scoped"] = True
+    info["kv_event_sources"][0]["topic"] = kv_state_agent.worker_raw_topic(
+        [source["cache_owner_id"]]
+    )
+
+    async def async_generate(*, kv_hints=None):
+        return kv_hints
+
+    engine.async_generate = async_generate
+    return engine, config, source, info
+
+
+@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
+@pytest.mark.parametrize("wide_pad_values", [False, True])
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(
+    monkeypatch, mode, wide_pad_values
+):
+    monkeypatch.setattr(
+        state_agent, "sglang_has_wide_mm_pad_values", lambda: wide_pad_values
+    )
+    engine, config, source, _ = linker_fixture()
+    config.serving_mode = mode
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["cache_owner_id"] == source["cache_owner_id"]
+    assert descriptor["raw_zmq_endpoint"] == "tcp://worker:24020"
+    assert descriptor["raw_topic"] == kv_state_agent.worker_raw_topic(
+        [source["cache_owner_id"]]
+    )
+    assert descriptor["kv_block_size"] == 64
+    assert descriptor["engine_owned_mm_identity"] is wide_pad_values
+    assert descriptor["router_hint_source"] == {
+        "source_control_endpoint": "tcp://worker:24100",
+        "worker_type": {
+            DisaggregationMode.AGGREGATED: "aggregated",
+            DisaggregationMode.PREFILL: "prefill",
+            DisaggregationMode.DECODE: "decode",
+        }[mode],
+    }
+
+
+def test_linker_registration_uses_state_agent(monkeypatch):
+    from dynamo.sglang import register
+
+    engine, config, source, _ = linker_fixture()
+    config.server_args.model_path = config.server_args.served_model_name = "test-model"
+    config.dynamo_args.use_sglang_tokenizer = False
+    config.dynamo_args.model_source_uri = None
+    config.dynamo_args.custom_jinja_template = None
+    values = {}
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda key, value: values.update({key: json.loads(value)})
+    )
+    monkeypatch.setattr(register, "get_runtime_config", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(register, "register_model", AsyncMock())
+    assert list(register.inventory_sources(engine).values()) == [source]
+    asyncio.run(
+        register.register_model_with_readiness_gate(
+            engine,
+            None,
+            config.server_args,
+            config.dynamo_args,
+            worker_type=WorkerType.Prefill,
+            forwards_kv_hints=True,
+        )
+    )
+    assert runtime.kv_event_source_mode == "state_agent_v2"
+    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": source["source_control_endpoint"]
+    }
+
+
+@pytest.mark.parametrize(
+    "change,mode,match",
+    [
+        ({"tp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
+        ({}, DisaggregationMode.ENCODE, "hint-forwarding LLM worker"),
+    ],
+)
+def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
+    engine, config, _, _ = linker_fixture()
+    vars(config.server_args).update(change)
+    config.serving_mode = mode
+    with pytest.raises(ValueError, match=match):
+        state_agent_descriptors(engine, config)
+
+
+def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
+    engine, config, source, info = linker_fixture()
+    config.serving_mode = DisaggregationMode.PREFILL
+    engine.async_generate = lambda: None
+    with pytest.raises(ValueError, match="hint-forwarding"):
+        state_agent_descriptors(engine, config)
+    source["capabilities"] = ["router_hint"]
+    assert state_agent_descriptors(engine, config) == []
+    del info["kv_hint_sources"]
+    assert state_agent_descriptors(engine, config) == []
+
+
+@pytest.mark.parametrize(
+    "target,field,value,match",
+    [
+        ("source", "inventory_lifetime", "persistent", "process-local"),
+        ("source", "reset_clears_owner_inventory", False, "reset and incarnation"),
+        ("source", "owner_incarnation_scoped", False, "reset and incarnation"),
+        ("event", "block_size", 128, "block size"),
+        ("event", "topic", "other", "topic must identify"),
+    ],
+)
+def test_linker_inventory_rejects_wrong_ownership_contract(target, field, value, match):
+    engine, config, source, info = linker_fixture()
+    config.serving_mode = DisaggregationMode.PREFILL
+    {"source": source, "event": info["kv_event_sources"][0]}[target][field] = value
+    with pytest.raises(ValueError, match=match):
+        state_agent_descriptors(engine, config)
+
+
+def test_linker_event_block_size_matches_router_block_size(monkeypatch):
+    engine, config, _, info = linker_fixture()
+    info["kv_event_sources"][0]["block_size"] = 128
+    monkeypatch.setattr(state_agent, "kv_event_block_size", lambda args: 128)
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["kv_block_size"] == 128
+
+
+@pytest.mark.asyncio
+async def test_linker_invalid_inventory_fails_before_attachment(monkeypatch):
+    engine, config, source, _ = linker_fixture()
+    source["reset_clears_owner_inventory"] = False
+    owner = Mock()
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", owner)
+    with pytest.raises(ValueError, match="reset and incarnation"):
+        await StateAgentLifecycle().start(engine, config, None)
+    owner.assert_not_called()
 
 
 @pytest.mark.parametrize(
