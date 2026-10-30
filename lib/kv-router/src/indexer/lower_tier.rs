@@ -1117,7 +1117,8 @@ impl LowerTierIndexer {
             breakpoints.sort_unstable_by_key(|(pos, _)| *pos);
         }
 
-        let mut final_states = FinalStates::default();
+        let mut final_states =
+            FinalStates::with_capacity_and_hasher(continuations.len(), FxBuildHasher);
 
         // Process breakpoints front-to-back. Each group walks forward until it
         // hits the next breakpoint or runs out of matching edges. Workers that
@@ -1163,6 +1164,11 @@ impl LowerTierIndexer {
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
         let mut results = LowerTierMatchDetails {
+            hits: FxHashMap::with_capacity_and_hasher(continuations.len(), FxBuildHasher),
+            next_continuations: FxHashMap::with_capacity_and_hasher(
+                continuations.len(),
+                FxBuildHasher,
+            ),
             kv_transfer_extensions,
             ..Default::default()
         };
