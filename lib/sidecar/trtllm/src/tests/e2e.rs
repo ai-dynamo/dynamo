@@ -3,6 +3,10 @@
 
 //! Ignored by default: these drive a live TensorRT-LLM OpenEngine server.
 
+use std::collections::HashMap;
+
+use dynamo_backend_common::{MultimodalData, MultimodalItemRef};
+
 use super::*;
 
 /// Drives a real disaggregated prefill -> decode handoff against two live
@@ -417,5 +421,95 @@ async fn e2e_real_openengine_image() {
     assert!(
         usage.prompt_tokens > token_ids.len() as u32,
         "the engine's expanded image prompt usage must replace Dynamo's unexpanded token count"
+    );
+}
+
+/// `TRTLLM_E2E_VIDEO_DATA_URI` must contain a complete `data:video/...` URI.
+#[tokio::test]
+#[ignore = "requires a live video-capable TensorRT-LLM OpenEngine server"]
+async fn e2e_real_openengine_video() {
+    let endpoint = std::env::var("TRTLLM_E2E_ENDPOINT")
+        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
+    let model = std::env::var("TRTLLM_E2E_MODEL")
+        .unwrap_or_else(|_| "Qwen/Qwen3-VL-2B-Instruct".to_string());
+    let video = std::env::var("TRTLLM_E2E_VIDEO_DATA_URI")
+        .expect("set TRTLLM_E2E_VIDEO_DATA_URI to a video data URI");
+    let engine = TrtllmSidecarEngine::new(
+        GrpcEndpoint::parse(&endpoint, "--grpc-endpoint").expect("valid endpoint"),
+        transport(1),
+        ConfiguredModel {
+            source: model.clone(),
+            context_length: None,
+            ..Default::default()
+        },
+        AGG,
+    );
+    engine
+        .start(0)
+        .await
+        .expect("start against the live video-capable server");
+
+    let token_ids = vec![
+        151644, 872, 198, 151652, 151656, 151653, 74785, 279, 6083, 323, 1181, 11379, 304, 419,
+        2766, 13, 151645, 198, 151644, 77091, 198,
+    ];
+    let mut request = PreprocessedRequest::builder()
+        .model(model)
+        .token_ids(token_ids.clone())
+        .stop_conditions(StopConditions {
+            max_tokens: Some(64),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions {
+            temperature: Some(0.0),
+            ..Default::default()
+        })
+        .output_options(OutputOptions::default())
+        .build()
+        .expect("request");
+    request.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(video)],
+    )]));
+    request.multi_modal_order = Some(vec![MultimodalItemRef {
+        modality: "video_url".to_string(),
+        index: 0,
+    }]);
+
+    let outputs = collect(&engine, request).await;
+    let generated = outputs
+        .iter()
+        .flat_map(|output| output.token_ids.iter().copied())
+        .collect::<Vec<_>>();
+    let terminal = outputs
+        .iter()
+        .find(|output| output.finish_reason.is_some())
+        .expect("terminal output");
+    let usage = terminal.completion_usage.as_ref().expect("terminal usage");
+    eprintln!(
+        "[e2e-video] generated={generated:?}; usage: prompt={}, completion={}",
+        usage.prompt_tokens, usage.completion_tokens
+    );
+
+    if let Ok(path) = std::env::var("TRTLLM_E2E_RESULT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "token_ids": generated,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            }))
+            .expect("serialize video result"),
+        )
+        .expect("write video result");
+    }
+    assert!(
+        usage.completion_tokens > 0,
+        "expected completion token usage"
+    );
+    assert!(!generated.is_empty(), "expected video-conditioned output");
+    assert!(
+        usage.prompt_tokens > token_ids.len() as u32,
+        "the engine must report the expanded video prompt"
     );
 }

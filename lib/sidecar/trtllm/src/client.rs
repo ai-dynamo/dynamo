@@ -33,6 +33,23 @@ use crate::proto::inference_client::InferenceClient;
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Media modalities confirmed by both OpenEngine capability signals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedMedia {
+    pub(crate) image: bool,
+    pub(crate) video: bool,
+}
+
+impl SupportedMedia {
+    pub(crate) fn contains(self, modality: &str) -> bool {
+        match modality {
+            "image" => self.image,
+            "video" => self.video,
+            _ => false,
+        }
+    }
+}
+
 /// Startup metadata from `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelLimits {
@@ -45,9 +62,9 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
-    /// Whether both portable and engine-specific capabilities advertise images.
-    /// `None` is reserved for unresolved/test metadata; startup always resolves this.
-    pub(crate) supports_image: Option<bool>,
+    /// Modalities advertised by both the portable and engine-specific capabilities.
+    /// `None` is unresolved metadata; startup always resolves this.
+    pub(crate) supported_media: Option<SupportedMedia>,
 }
 
 #[derive(Clone, Debug)]
@@ -189,31 +206,32 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        let supports_image = info.supports_multimodal == Some(true)
-            && info.extra.as_ref().is_some_and(|extra| {
-                extra
-                    .fields
-                    .get("trtllm_supported_modalities")
-                    .and_then(|value| value.kind.as_ref())
-                    .is_some_and(|kind| match kind {
-                        prost_types::value::Kind::ListValue(modalities) => {
-                            modalities.values.iter().any(|value| {
-                                matches!(
-                                    value.kind.as_ref(),
-                                    Some(prost_types::value::Kind::StringValue(modality))
-                                        if modality == "image"
-                                )
-                            })
-                        }
-                        _ => false,
-                    })
-            });
+        let mut supported_media = SupportedMedia::default();
+        if info.supports_multimodal == Some(true)
+            && let Some(prost_types::value::Kind::ListValue(modalities)) = info
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.fields.get("trtllm_supported_modalities"))
+                .and_then(|value| value.kind.as_ref())
+        {
+            for value in &modalities.values {
+                let Some(prost_types::value::Kind::StringValue(modality)) = value.kind.as_ref()
+                else {
+                    continue;
+                };
+                match modality.as_str() {
+                    "image" => supported_media.image = true,
+                    "video" => supported_media.video = true,
+                    _ => {}
+                }
+            }
+        }
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-                supports_image: Some(supports_image),
+                supported_media: Some(supported_media),
             },
             served_model_name: info.served_model_name,
         })

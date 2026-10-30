@@ -38,6 +38,22 @@ fn image_request() -> PreprocessedRequest {
     request
 }
 
+fn video_request() -> PreprocessedRequest {
+    let mut req = image_request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".into(),
+        vec![
+            MultimodalData::RawUrl("https://example.com/first.mp4".into()),
+            MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".into()),
+        ],
+    )]));
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "video_url".into(),
+        vec![Some("first-video".into()), None],
+    )]));
+    req
+}
+
 fn finished() -> pb::GenerateResponse {
     pb::GenerateResponse {
         event: Some(pb::generate_response::Event::Finished(
@@ -59,7 +75,7 @@ fn finished() -> pb::GenerateResponse {
 fn advertise_images(fixture: &Fixture) {
     fixture
         .discovery
-        .portable_image
+        .portable_multimodal
         .store(true, Ordering::SeqCst);
     fixture
         .discovery
@@ -118,32 +134,204 @@ async fn images_preserve_order_uuids_and_engine_expanded_usage() {
 }
 
 #[tokio::test]
-async fn both_image_capability_signals_are_required() {
-    for (portable, image) in [(true, false), (false, true)] {
-        let control = Controller::<Adapter>::default();
-        let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-        fixture
-            .discovery
-            .portable_image
-            .store(portable, Ordering::SeqCst);
-        fixture
-            .discovery
-            .advertises_image
-            .store(image, Ordering::SeqCst);
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
+async fn formatter_regrouped_tool_media_reaches_openengine_in_rendered_order() {
+    use dynamo_llm::common::checked_file::CheckedFile;
+    use dynamo_llm::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct");
+    let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config.json");
+    std::fs::write(
+        &config,
+        r#"{"architectures":[],"model_type":"","eos_token_id":128009}"#,
+    )
+    .unwrap();
+    card.model_info = Some(ModelInfoType::HfConfigJson(
+        CheckedFile::from_disk(&config).unwrap(),
+    ));
+    let tokenizer = root.path().join("tokenizer.json");
+    std::fs::write(&tokenizer, r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"Result":1,"A":2,"B":3},"unk_token":"[UNK]"}}"#).unwrap();
+    card.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+        CheckedFile::from_disk(&tokenizer).unwrap(),
+    ));
+    card.display_name = "DeepSeek-V4.1-Flash".into();
+    let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+    // The real formatter regroups tool replies by call order, not arrival order.
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model":"mocker-model", "max_tokens":16, "messages":[
+            {"role":"assistant","tool_calls":[
+                {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+            ]},
+            {"role":"tool","tool_call_id":"b","content":[
+                {"type":"image_url","image_url":{"url":"https://example.com/b.png"},"uuid":"b"},
+                {"type":"text","text":"Result B"}
+            ]},
+            {"role":"tool","tool_call_id":"a","content":[
+                {"type":"image_url","image_url":{"url":"https://example.com/a.png"},"uuid":"a"},
+                {"type":"text","text":"Result A"}
+            ]}
+        ]
+    }))
+    .unwrap();
+    let (mut prepared, _, _) = preprocessor
+        .preprocess_request(&request, None)
+        .await
+        .unwrap();
+    let prompt = prepared.extra_args.as_ref().unwrap()["formatted_prompt"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.find("Result A").unwrap() < prompt.find("Result B").unwrap());
+    assert_eq!(prompt.matches("<｜deepseek_image｜>").count(), 2);
+    let expected_tokens = prepared.token_ids.clone();
+    assert!(!expected_tokens.is_empty());
+    prepared.model = "mocker-model".into();
+
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    advertise_images(&fixture);
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    fixture.respond(ctx.id(), vec![finished()]);
+    let outputs = collect(&engine, prepared, GenerateContext::new(ctx, None)).await;
+    assert_eq!(
+        outputs.last().unwrap().as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    let native = handle.native_request().unwrap();
+    assert_eq!(
+        native.input,
+        Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+            ids: expected_tokens.to_vec()
+        }))
+    );
+    assert_eq!(native.media.len(), 2);
+    for (item, id) in native.media.iter().zip(["a", "b"]) {
+        assert_eq!(item.modality, pb::Modality::Image as i32);
+        assert_eq!(item.uuid, id);
+        assert_eq!(
+            item.source,
+            Some(pb::media_item::Source::Url(format!(
+                "https://example.com/{id}.png"
+            )))
+        );
+    }
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn both_media_capability_signals_are_required() {
+    for video in [false, true] {
+        for (portable, advertised) in [(true, false), (false, true)] {
+            let control = Controller::<Adapter>::default();
+            let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+            fixture
+                .discovery
+                .portable_multimodal
+                .store(portable, Ordering::SeqCst);
+            let (target, other) = if video {
+                (
+                    &fixture.discovery.advertises_video,
+                    &fixture.discovery.advertises_image,
+                )
+            } else {
+                (
+                    &fixture.discovery.advertises_image,
+                    &fixture.discovery.advertises_video,
+                )
+            };
+            target.store(advertised, Ordering::SeqCst);
+            other.store(true, Ordering::SeqCst);
+            let engine = fixture.engine().await;
+            engine.start(0).await.unwrap();
+            let ctx = mock_context();
+            let handle = control.request(ctx.id(), RequestPlan::default());
+            assert!(
+                engine
+                    .generate(
+                        if video {
+                            video_request()
+                        } else {
+                            image_request()
+                        },
+                        GenerateContext::new(ctx, None)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(handle.native_request().is_none());
+            engine.cleanup().await.unwrap();
+            fixture.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn videos_recover_discovery_and_preserve_sources_uuids_and_usage() {
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    fixture.discovery.unavailable.store(true, Ordering::SeqCst);
+    fixture
+        .discovery
+        .portable_multimodal
+        .store(true, Ordering::SeqCst);
+    fixture
+        .discovery
+        .advertises_video
+        .store(true, Ordering::SeqCst);
+    let mut startup = tokio::spawn(bootstrap(&fixture, Some(32768), 5));
+    wait_for_calls(&fixture, 2).await;
+    assert!(!startup.is_finished());
+    fixture.discovery.unavailable.store(false, Ordering::SeqCst);
+    let (engine, _) = bounded("recover video startup discovery", &mut startup)
+        .await
+        .unwrap()
+        .unwrap();
+    engine.start(0).await.unwrap();
+    let calls = fixture.discovery.calls.load(Ordering::SeqCst);
+    fixture.discovery.unavailable.store(true, Ordering::SeqCst);
+    for _ in 0..2 {
         let ctx = mock_context();
         let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(ctx.id(), vec![finished()]);
+        let outputs = collect(&engine, video_request(), GenerateContext::new(ctx, None)).await;
+        let output = outputs.last().unwrap().as_ref().unwrap();
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(output.completion_usage.as_ref().unwrap().prompt_tokens, 131);
+        let native = handle.native_request().unwrap();
+        assert_eq!(native.stopping.unwrap().max_tokens, None);
+        assert_eq!(native.media.len(), 2);
         assert!(
-            engine
-                .generate(image_request(), GenerateContext::new(ctx, None))
-                .await
-                .is_err()
+            native
+                .media
+                .iter()
+                .all(|item| item.modality == pb::Modality::Video as i32)
         );
-        assert!(handle.native_request().is_none());
-        engine.cleanup().await.unwrap();
-        fixture.shutdown().await;
+        assert_eq!(native.media[0].uuid, "first-video");
+        assert_eq!(native.media[1].uuid, "");
+        assert_eq!(
+            native.media[0].source,
+            Some(pb::media_item::Source::Url(
+                "https://example.com/first.mp4".into()
+            ))
+        );
+        assert_eq!(
+            native.media[1].source,
+            Some(pb::media_item::Source::DataUri(
+                "data:video/mp4;base64,dmlkZW8=".into()
+            ))
+        );
     }
+    assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), calls);
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
 }
 
 fn bootstrap(
@@ -167,11 +355,15 @@ fn bootstrap(
 }
 
 #[tokio::test]
-async fn startup_recovers_image_capabilities_before_registration() {
+async fn startup_recovers_media_capabilities_before_registration() {
     for omit_window in [false, true] {
         let control = Controller::<Adapter>::default();
         let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
         advertise_images(&fixture);
+        fixture
+            .discovery
+            .advertises_video
+            .store(true, Ordering::SeqCst);
         fixture
             .discovery
             .omit_context_length
@@ -194,12 +386,12 @@ async fn startup_recovers_image_capabilities_before_registration() {
         // Serving must use startup metadata, including image support when the
         // engine supplied no window. No Generate may rediscover capabilities.
         fixture.discovery.unavailable.store(true, Ordering::SeqCst);
-        for _ in 0..2 {
+        for req in [image_request(), video_request()] {
             let ctx = mock_context();
             let handle = control.request(ctx.id(), RequestPlan::default());
             if omit_window {
                 let error = engine
-                    .generate(image_request(), GenerateContext::new(ctx, None))
+                    .generate(req, GenerateContext::new(ctx, None))
                     .await
                     .err()
                     .expect("media still needs a reported engine window");
@@ -210,8 +402,7 @@ async fn startup_recovers_image_capabilities_before_registration() {
                 assert!(handle.native_request().is_none());
             } else {
                 fixture.respond(ctx.id(), vec![finished()]);
-                let outputs =
-                    collect(&engine, image_request(), GenerateContext::new(ctx, None)).await;
+                let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
                 assert_eq!(
                     outputs.last().unwrap().as_ref().unwrap().finish_reason,
                     Some(FinishReason::Stop)
@@ -314,16 +505,29 @@ async fn shutdown_cancels_retrying_and_stalled_bootstrap_discovery() {
 }
 
 #[tokio::test]
-async fn image_window_override_is_rejected_before_dispatch() {
+async fn media_window_override_is_rejected_before_dispatch() {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     advertise_images(&fixture);
+    fixture
+        .discovery
+        .advertises_video
+        .store(true, Ordering::SeqCst);
     let engine = fixture.engine_with_context_length(4096);
     engine.start(0).await.unwrap();
-    for max_tokens in [None, Some(1)] {
+    for (video, max_tokens) in [
+        (false, None),
+        (false, Some(1)),
+        (true, None),
+        (true, Some(1)),
+    ] {
         let ctx = mock_context();
         let handle = control.request(ctx.id(), RequestPlan::default());
-        let mut req = image_request();
+        let mut req = if video {
+            video_request()
+        } else {
+            image_request()
+        };
         req.stop_conditions.max_tokens = max_tokens;
         let result = engine.generate(req, GenerateContext::new(ctx, None)).await;
         let error = result.err().expect("window mismatch must fail");
@@ -387,17 +591,49 @@ async fn check_remote_url_policy(allow_remote: bool) {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     advertise_images(&fixture);
+    fixture
+        .discovery
+        .advertises_video
+        .store(true, Ordering::SeqCst);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
-    for image in [
-        MultimodalData::RawUrl("http://example.com/image.png".into()),
-        MultimodalData::RawUrl("HTTPS://example.com/image.png".into()),
-        MultimodalData::Url("https://example.com/image.png".parse().unwrap()),
-        MultimodalData::RawUrl("data:image/png;base64,aW1hZ2U=".into()),
+    for (key, media) in [
+        (
+            "image_url",
+            MultimodalData::RawUrl("http://example.com/image.png".into()),
+        ),
+        (
+            "image_url",
+            MultimodalData::RawUrl("HTTPS://example.com/image.png".into()),
+        ),
+        (
+            "image_url",
+            MultimodalData::Url("https://example.com/image.png".parse().unwrap()),
+        ),
+        (
+            "image_url",
+            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2U=".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("http://example.com/video.mp4".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("HTTPS://example.com/video.mp4".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::Url("https://example.com/video.mp4".parse().unwrap()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".into()),
+        ),
     ] {
-        let inline = matches!(&image, MultimodalData::RawUrl(url) if url.starts_with("data:"));
+        let inline = matches!(&media, MultimodalData::RawUrl(url) if url.starts_with("data:"));
         let mut req = image_request();
-        req.multi_modal_data = Some(HashMap::from([("image_url".into(), vec![image])]));
+        req.multi_modal_data = Some(HashMap::from([(key.into(), vec![media])]));
         req.multi_modal_uuids = None;
         let ctx = mock_context();
         let handle = control.request(ctx.id(), RequestPlan::default());

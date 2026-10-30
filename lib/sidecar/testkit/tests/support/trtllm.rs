@@ -41,8 +41,9 @@ pub struct Discovery {
     pub calls: AtomicUsize,
     pub unavailable: AtomicBool,
     pub hold: AtomicBool,
-    pub portable_image: AtomicBool,
+    pub portable_multimodal: AtomicBool,
     pub advertises_image: AtomicBool,
+    pub advertises_video: AtomicBool,
     pub omit_context_length: AtomicBool,
     pub error: Mutex<Option<tonic::Code>>,
     release: tokio::sync::Notify,
@@ -200,12 +201,20 @@ impl Control for ControlledControl {
         if self.discovery.omit_context_length.load(Ordering::SeqCst) {
             info.max_context_length = None;
         }
-        info.supports_multimodal = Some(self.discovery.portable_image.load(Ordering::SeqCst));
-        let modalities = if self.discovery.advertises_image.load(Ordering::SeqCst) {
-            vec!["image"]
-        } else {
-            vec![]
-        };
+        info.supports_multimodal = Some(self.discovery.portable_multimodal.load(Ordering::SeqCst));
+        let modalities: Vec<_> = [
+            (
+                self.discovery.advertises_image.load(Ordering::SeqCst),
+                "image",
+            ),
+            (
+                self.discovery.advertises_video.load(Ordering::SeqCst),
+                "video",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, modality)| enabled.then_some(modality))
+        .collect();
         info.extra = Some(
             dynamo_sidecar_common::json_to_struct(
                 serde_json::json!({"trtllm_supported_modalities": modalities}),
