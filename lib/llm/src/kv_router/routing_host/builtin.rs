@@ -369,6 +369,7 @@ impl RoutingHost {
             occupancy_reservation,
             lora_load,
             &request,
+            phase,
         )
         .with_started_at(started_at);
         let tracker = request.tracker.clone();
@@ -379,8 +380,7 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
-        guard.start_dispatch(&phase_label);
-        guard.record_prefill_start(request.content());
+        guard.begin_dispatch(&phase_label, request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             await_with_cleanup_policy(
@@ -412,7 +412,7 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    guard.abort().await;
+                    guard.abort(Some(error.as_ref())).await;
                     return Err(error);
                 }
             };
@@ -487,7 +487,7 @@ impl RoutingHost {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                guard.abort(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
@@ -525,9 +525,14 @@ impl RoutingHost {
             };
             tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
         }
-        guard.mark_dispatched();
-        let stream = into_monitored_response(response_stream, guard);
-        Ok((metadata, self.bind_affinity(operation, target, stream)?))
+        self.accept_dispatch(
+            &mut guard,
+            operation.take(),
+            target,
+            &response_stream.context(),
+        )
+        .await?;
+        Ok((metadata, into_monitored_response(response_stream, guard)))
     }
 }
 

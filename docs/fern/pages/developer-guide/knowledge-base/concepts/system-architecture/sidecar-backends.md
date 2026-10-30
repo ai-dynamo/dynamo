@@ -109,10 +109,13 @@ port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes it
 template declares. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components,
 and LPX components through their role templates.
-SGLang multinode deployments require explicit leader and worker role PodTemplates
-and `backendFramework: sglang`. The leader declares `runtime`; worker placement
-depends on the engine topology. Other backends do not yet support operator-managed
-multinode sidecars. See the [SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
+SGLang, vLLM, and TensorRT-LLM multinode deployments require explicit leader and
+worker role PodTemplates. Set `backendFramework` explicitly, as the examples do: the
+operator does not infer a backend from a native engine command. The leader declares
+`runtime`. Worker placement depends on the engine topology. See the
+[SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 

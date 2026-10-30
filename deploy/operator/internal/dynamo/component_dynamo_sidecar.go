@@ -22,7 +22,7 @@ import (
 // passes the selected role template as component.PodTemplate.
 // Components without a runtime init container have no sidecar-specific requirements.
 // component and fldPath must not be nil.
-func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
+func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	var hasSidecar bool
 	detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
@@ -78,11 +78,11 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 	}
 
 	// Multinode sidecars require complete role templates; users own engine launches and placement.
+	// The backend is not required here: sidecar mode skips the backend hooks, and the value
+	// selects only provider startup ordering and compilation-cache defaults.
 	if component.Multinode != nil {
-		if backendFramework != string(BackendFrameworkSGLang) {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang"))
-		} else if !HasCompleteMultinodeRolePodTemplates(component) {
-			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "SGLang multinode sidecars require complete leader and worker podTemplates"))
+		if !HasCompleteMultinodeRolePodTemplates(component) {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "multinode sidecars require complete leader and worker podTemplates"))
 		} else if GetComponentDynamoSidecar(component) == nil {
 			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
 		}
