@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Component toggles: the controller is on and the registry off by default;
+# each renders nothing when disabled. Every rendered document keeps its
+# apiVersion although the templates start with the SPDX comment (the
+# whitespace-trim regression power-agent's api_version_whitespace_test.yaml
+# guards against).
+
+suite: component toggles
+release:
+  name: mcs
+  namespace: mcs-system
+set:
+  controller.registryUrls:
+    - https://mcs.example.internal
+
+tests:
+  - it: renders the controller and not the registry by default
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/controller/deployment.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/controller/serviceaccount.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/controller/metrics-service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/servicemonitor.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/registry/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/registry/service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/registry/serviceaccount.yaml
+
+  - it: renders only the registry with controller.enabled=false
+    set:
+      registry.enabled: true
+      controller.enabled: false
+      controller.registryUrls: []
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/registry/deployment.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/registry/service.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/registry/serviceaccount.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/serviceaccount.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/metrics-service.yaml
+
+  - it: renders both components in one release
+    set:
+      registry.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/registry/deployment.yaml
+      - hasDocuments:
+          count: 1
+        template: templates/controller/deployment.yaml
+
+  - it: skips the ServiceAccounts with serviceAccount.create=false
+    set:
+      registry.enabled: true
+      registry.serviceAccount.create: false
+      controller.serviceAccount.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/registry/serviceaccount.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/serviceaccount.yaml
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: default
+        template: templates/controller/deployment.yaml
+
+  - it: keeps apiVersion on the Deployments
+    set:
+      registry.enabled: true
+    asserts:
+      - isAPIVersion:
+          of: apps/v1
+        template: templates/registry/deployment.yaml
+      - isAPIVersion:
+          of: apps/v1
+        template: templates/controller/deployment.yaml
+
+  - it: prefixes resource names with fullnameOverride and pins an image tag
+    set:
+      fullnameOverride: mcs-east
+      image.repository: registry.example.com/global-discovery-mcs
+      image.tag: dev
+      image.pullPolicy: Always
+    template: templates/controller/deployment.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mcs-east-controller
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/global-discovery-mcs:dev
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: runs both containers as the nonroot user with a read-only root
+    set:
+      registry.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 65532
+        template: templates/registry/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+        template: templates/registry/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 65532
+        template: templates/controller/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+        template: templates/controller/deployment.yaml
