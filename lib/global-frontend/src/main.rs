@@ -46,8 +46,8 @@ enum RouterPolicy {
 /// What implements the router policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum SelectionPath {
-    /// The Global Router's own selectors.
-    Legacy,
+    /// The Global Router's own selectors, as today.
+    Current,
     /// The embedded router core, with each pool as one of its workers.
     Core,
 }
@@ -82,7 +82,7 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
-    #[arg(long, value_enum, default_value_t = SelectionPath::Legacy)]
+    #[arg(long, value_enum, default_value_t = SelectionPath::Current)]
     selection: SelectionPath,
     /// The region this process runs in, named as `--pool` names clusters.
     /// `affinity` tries pools in it first, and metrics tell requests kept in
@@ -218,11 +218,11 @@ async fn main() -> Result<()> {
                 .context("the router core stopped before taking the first pool snapshot")?;
             core
         }
-        (SelectionPath::Legacy, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
-        (SelectionPath::Legacy, RouterPolicy::LeastInFlight) => {
+        (SelectionPath::Current, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
+        (SelectionPath::Current, RouterPolicy::LeastInFlight) => {
             Arc::new(LeastInFlightSelector::new(in_flight.clone()))
         }
-        (SelectionPath::Legacy, RouterPolicy::Affinity) => {
+        (SelectionPath::Current, RouterPolicy::Affinity) => {
             let region = args.region.clone().context("--region is required")?;
             if args.pool_relays.is_empty() {
                 tracing::warn!(
@@ -341,10 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_legacy_and_the_core_has_no_affinity_yet() {
+    fn selection_defaults_to_current_and_the_core_has_no_affinity_yet() {
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Legacy);
+        assert_eq!(args.selection, SelectionPath::Current);
         let args = Args::try_parse_from(["global-frontend", pool, "--selection", "core"]).unwrap();
         assert_eq!(args.selection, SelectionPath::Core);
 

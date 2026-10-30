@@ -344,7 +344,7 @@ mod tests {
     }
 
     /// The pool `selector` routes a `model` request to, with the booking
-    /// freed again before returning, as the legacy selectors count nothing
+    /// freed again before returning, as the current selectors count nothing
     /// per selection.
     async fn picks(selector: &CoreSelector, model: &str, candidates: &[&Pool]) -> Option<PoolId> {
         let selection = selector
@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_robin_visits_every_pool_once_per_round_like_the_legacy_selector() {
+    async fn round_robin_visits_every_pool_once_per_round_like_the_current_selector() {
         let blue = pool(
             "blue",
             "qwen",
@@ -393,12 +393,12 @@ mod tests {
         let green = pool("green", "qwen", &["http://green-0:8000"]);
         let (core, _catalog) =
             selector(CorePolicy::RoundRobin, &[blue.clone(), green.clone()]).await;
-        let legacy = RoundRobinSelector::new();
+        let current = RoundRobinSelector::new();
 
         let from_core = sequence(&core, "qwen", &[&blue, &green], 6).await;
-        let from_legacy = (0..6)
+        let from_current = (0..6)
             .map(|_| {
-                legacy
+                current
                     .select(&RoutingRequest::new("qwen"), &[&blue, &green])
                     .unwrap()
                     .pool
@@ -407,9 +407,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        // The core orders a round by worker id and the legacy selector by
+        // The core orders a round by worker id and the current selector by
         // catalog order, so rounds compare as sets.
-        assert_eq!(rounds(&from_core, 2), rounds(&from_legacy, 2));
+        assert_eq!(rounds(&from_core, 2), rounds(&from_current, 2));
         assert_eq!(from_core[0], from_core[2]);
         assert_ne!(from_core[0], from_core[1]);
     }
@@ -458,31 +458,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn least_requests_picks_the_pool_with_fewest_bookings_like_the_legacy_selector() {
+    async fn least_requests_picks_the_pool_with_fewest_bookings_like_the_current_selector() {
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let green = pool("green", "qwen", &["http://green:8000"]);
         let (core, _catalog) =
             selector(CorePolicy::LeastRequests, &[blue.clone(), green.clone()]).await;
         let in_flight = Arc::new(InFlightTracker::new());
-        let legacy = LeastInFlightSelector::new(in_flight.clone());
+        let current = LeastInFlightSelector::new(in_flight.clone());
 
         let _busy = [core.reserve_on(&blue).await, core.reserve_on(&blue).await];
         let _one = core.reserve_on(&green).await;
-        let _legacy_busy = [in_flight.start(&blue.id), in_flight.start(&blue.id)];
-        let _legacy_one = in_flight.start(&green.id);
+        let _current_busy = [in_flight.start(&blue.id), in_flight.start(&blue.id)];
+        let _current_one = in_flight.start(&green.id);
         assert_eq!((core.booked(&blue), core.booked(&green)), (2, 1));
 
         for _ in 0..10 {
-            let from_legacy = legacy
+            let from_current = current
                 .select(&RoutingRequest::new("qwen"), &[&blue, &green])
                 .unwrap()
                 .pool
                 .id
                 .clone();
-            assert_eq!(from_legacy, green.id);
+            assert_eq!(from_current, green.id);
             assert_eq!(
                 picks(&core, "qwen", &[&blue, &green]).await,
-                Some(from_legacy)
+                Some(from_current)
             );
         }
     }
@@ -497,12 +497,12 @@ mod tests {
             &[empty.clone(), blue.clone(), green.clone()],
         )
         .await;
-        let legacy = LeastInFlightSelector::new(Arc::new(InFlightTracker::new()));
+        let current = LeastInFlightSelector::new(Arc::new(InFlightTracker::new()));
 
         let from_core = sequence(&core, "qwen", &[&empty, &blue, &green], 4).await;
-        let from_legacy = (0..4)
+        let from_current = (0..4)
             .map(|_| {
-                legacy
+                current
                     .select(&RoutingRequest::new("qwen"), &[&empty, &blue, &green])
                     .unwrap()
                     .pool
@@ -511,7 +511,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(rounds(&from_core, 2), rounds(&from_legacy, 2));
+        assert_eq!(rounds(&from_core, 2), rounds(&from_current, 2));
         assert_eq!(from_core[0], from_core[2]);
         assert_ne!(from_core[0], from_core[1]);
         assert_eq!(picks(&core, "qwen", &[&empty]).await, None);
