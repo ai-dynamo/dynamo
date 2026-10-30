@@ -622,7 +622,7 @@ class DisaggMockerProcess:
     @property
     def owned_popen(self):
         """Return this wrapper's live python -m dynamo.mocker Popen."""
-        proc = getattr(self._process, "proc", None)
+        proc = self._process.proc
         if proc is None or proc.poll() is not None:
             raise AssertionError(f"{self.worker_type} mocker owned Popen is not live")
         argv = [str(item) for item in (proc.args or [])]

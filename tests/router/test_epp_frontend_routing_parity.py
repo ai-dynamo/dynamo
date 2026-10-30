@@ -11,6 +11,10 @@ selector together with runtime_epp, not generic runtime-image coverage.
 
 import pytest
 
+from tests.router.common import (
+    frontend_epp_first_selection_cases,
+    run_frontend_epp_first_selection_parity,
+)
 from tests.utils.constants import ROUTER_MODEL_NAME
 
 pytestmark = [
@@ -31,10 +35,8 @@ def test_epp_frontend_first_selection_parity(request, predownload_tokenizers, tm
     Each paired comparison then starts a fresh FE/EPP consumer pair and checks
     typed worker/rank plus tokens. A live negative compares FE R_A with EPP R_B.
     """
-    from tests.router.common import (
-        frontend_epp_first_selection_cases,
-        run_frontend_epp_first_selection_parity,
-    )
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendRoutingParityStack
 
     _ = predownload_tokenizers

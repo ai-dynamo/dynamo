@@ -4669,11 +4669,12 @@ def _assert_provider_snapshot_unchanged(
 
 
 def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
+    # Unrelated router tests import common; keep epp_parity/grpc_tools
+    # selected-test-only so ordinary collection does not require them.
     from tests.router.epp_parity import (
         READINESS_DEADLINE_S,
         collect_frontend_query_token_ids,
     )
-    from tests.router.helper import send_request_via_python_kv_router
 
     if stack.provider_router is None:
         raise AssertionError("first-selection readiness requires a served KvRouter")

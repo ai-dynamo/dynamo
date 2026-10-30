@@ -15,6 +15,14 @@ from tests.router.common import (
     PrefillQueueRejectionParityMismatch,
     PriorityHeaderParityMismatch,
     SessionAffinityParityMismatch,
+    frontend_epp_cache_salt_case,
+    frontend_epp_constraints_cold_case,
+    frontend_epp_first_selection_cases,
+    run_frontend_epp_cache_salt_parity,
+    run_frontend_epp_priority_parity,
+    run_frontend_epp_priority_sentinel_fallback,
+    run_frontend_epp_routing_constraints_parity,
+    run_frontend_epp_session_id_parity,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -49,14 +57,8 @@ pytestmark = [
 )
 def test_epp_frontend_inputs_parity(request, predownload_tokenizers, tmp_path, family):
     """Compare native Frontend and Runtime EPP on cache salt, taints, and session."""
-    from tests.router.common import (
-        frontend_epp_cache_salt_case,
-        frontend_epp_constraints_cold_case,
-        frontend_epp_first_selection_cases,
-        run_frontend_epp_cache_salt_parity,
-        run_frontend_epp_routing_constraints_parity,
-        run_frontend_epp_session_id_parity,
-    )
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import (
         INDEXER_MODE_APPROXIMATE,
         EppFrontendRoutingParityStack,
@@ -138,10 +140,8 @@ def test_epp_frontend_inputs_parity(request, predownload_tokenizers, tmp_path, f
 )
 def test_epp_frontend_priority_parity(request, predownload_tokenizers, tmp_path, kind):
     """Compare FE/EPP queue admission under a held 1P+1D prefill slot."""
-    from tests.router.common import (
-        run_frontend_epp_priority_parity,
-        run_frontend_epp_priority_sentinel_fallback,
-    )
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendPriorityParityStack
 
     _ = predownload_tokenizers

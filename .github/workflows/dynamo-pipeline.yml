@@ -146,7 +146,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(${{ inputs.cpu_parallel_test_markers }}) and not runtime_epp'
+      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers != '' && format('({0}) and not runtime_epp', inputs.cpu_parallel_test_markers) || '' }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false

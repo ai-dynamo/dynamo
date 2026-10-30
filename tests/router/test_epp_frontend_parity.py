@@ -11,6 +11,12 @@ selector together with runtime_epp, not generic runtime-image coverage.
 
 import pytest
 
+from tests.router.common import (
+    frontend_epp_token_parity_cases,
+    frontend_epp_tools_token_parity_cases,
+    run_frontend_epp_token_parity,
+    run_frontend_epp_tools_token_parity,
+)
 from tests.utils.constants import ROUTER_MODEL_NAME
 
 pytestmark = [
@@ -33,10 +39,8 @@ def test_epp_frontend_token_parity(request, predownload_tokenizers, tmp_path):
     Uses TCP request plane and ZMQ event plane so nats-server/etcd binaries
     are not prerequisites.
     """
-    from tests.router.common import (
-        frontend_epp_token_parity_cases,
-        run_frontend_epp_token_parity,
-    )
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendParityStack
 
     _ = predownload_tokenizers
@@ -52,10 +56,8 @@ def test_epp_frontend_tools_token_parity(request, predownload_tokenizers, tmp_pa
     tool reply history. The runner also checks same-arm schema/omission
     sensitivity and live negative controls. This covers input rendering only.
     """
-    from tests.router.common import (
-        frontend_epp_tools_token_parity_cases,
-        run_frontend_epp_tools_token_parity,
-    )
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendParityStack
 
     _ = predownload_tokenizers

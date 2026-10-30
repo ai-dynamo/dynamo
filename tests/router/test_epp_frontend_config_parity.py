@@ -109,6 +109,8 @@ def test_effective_config_profile(
     load_aware_preset and conditional_json are measured strict gaps.
     Setup, parse, warning, and FE sentinel failures stay hard AssertionError.
     """
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendParityStack
 
     _ = predownload_tokenizers
@@ -153,6 +155,8 @@ def test_overlap_refresh_effective_config(
     request, predownload_tokenizers, tmp_path, monkeypatch
 ):
     """Disable overlap refresh on both owned processes and compare queue INFO."""
+    # epp_parity imports gRPC/grpc_tools; pytest imports this module before
+    # marker deselection, so keep that import selected-test-only.
     from tests.router.epp_parity import EppFrontendParityStack
 
     _ = predownload_tokenizers
