@@ -124,6 +124,7 @@ python -m dynamo.frontend --router-mode kv &
 CUDA_VISIBLE_DEVICES="$VLLM_DECODE1_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_DECODE1_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host "$VLLM_HOST" \
     --port "$VLLM_DECODE1_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE1_GRPC_PORT" \
@@ -141,6 +142,7 @@ vllm-rs serve "$MODEL" \
 CUDA_VISIBLE_DEVICES="$VLLM_DECODE2_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_DECODE2_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host "$VLLM_HOST" \
     --port "$VLLM_DECODE2_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE2_GRPC_PORT" \
@@ -158,6 +160,7 @@ vllm-rs serve "$MODEL" \
 CUDA_VISIBLE_DEVICES="$VLLM_PREFILL1_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host "$VLLM_HOST" \
     --port "$VLLM_PREFILL1_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL1_GRPC_PORT" \
@@ -176,6 +179,7 @@ vllm-rs serve "$MODEL" \
 CUDA_VISIBLE_DEVICES="$VLLM_PREFILL2_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host "$VLLM_HOST" \
     --port "$VLLM_PREFILL2_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL2_GRPC_PORT" \

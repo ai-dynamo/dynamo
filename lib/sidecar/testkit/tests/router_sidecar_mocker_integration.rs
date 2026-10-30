@@ -670,6 +670,119 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     peer.shutdown().await;
 }
 
+#[tokio::test]
+async fn vllm_fresh_engine_without_kv_events_serves() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        fresh_engine_without_kv_events_serves(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A fresh sidecar connects to a fresh engine that publishes no KV events,
+/// registers, and serves.
+async fn fresh_engine_without_kv_events_serves() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = vllm::Fixture::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            has_kv_events: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(peer.kv_event_sources().await.is_empty());
+    let mut child = env.spawn::<vllm::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let cards = env.cards().await;
+    let [card] = cards.as_slice() else {
+        panic!("expected one model card, got {}", cards.len());
+    };
+    <vllm::Fixture as ProcessFixture>::assert_registration(card);
+    healthy::<vllm::Fixture>(&env, &router, &control, "without-kv-events").await;
+    assert!(
+        !child.logs().contains(r#""level":"ERROR""#),
+        "{}",
+        child.logs()
+    );
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn vllm_engine_loss_withdraws_until_recovery() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        engine_loss_withdraws_until_recovery(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// vLLM reporting NOT_SERVING withdraws the worker without cutting its running
+/// request. A reset connection to the same engine is an engine loss; the
+/// sidecar reconnects and registers again.
+async fn engine_loss_withdraws_until_recovery() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = vllm::Fixture::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            speedup_ratio: 0.1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let gate = Gate::new(&peer.endpoint()).await;
+    gate.release();
+    let mut child =
+        env.spawn_with_grace::<vllm::Fixture>(&gate.endpoint, DisaggregationMode::Aggregated, 1);
+    let router = env.ready("backend").await;
+
+    let held = control.request("held", hold_after_token());
+    let mut stream = router.generate(env.request("held", 3)).await.unwrap();
+    let first = bounded("held first token", stream.next())
+        .await
+        .unwrap()
+        .into_data()
+        .unwrap()
+        .unwrap();
+    bounded("held native checkpoint", held.wait(Event::Checkpoint)).await;
+    peer.set_inference_serving(false).await;
+    env.withdrawn("backend", &router).await;
+    held.release();
+    let mut held_outputs = vec![Ok(first)];
+    held_outputs.extend(outputs(stream).await);
+    terminal(held_outputs, &held.tokens(), 4, FinishReason::Length);
+
+    peer.set_inference_serving(true).await;
+    let router = env.ready("backend").await;
+    healthy::<vllm::Fixture>(&env, &router, &control, "after-not-serving").await;
+
+    // Hold reconnects until the withdrawal is observed.
+    gate.hold();
+    gate.reset();
+    env.withdrawn("backend", &router).await;
+    gate.release();
+    let router = env.ready("backend").await;
+    healthy::<vllm::Fixture>(&env, &router, &control, "after-reset").await;
+    assert!(
+        child.logs().contains("vLLM engine lost"),
+        "{}",
+        child.logs()
+    );
+
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    gate.shutdown().await;
+    peer.shutdown().await;
+}
+
 /// Load that stays unavailable past the LPX sidecar's 30 s staleness limit
 /// withdraws the worker, and the sidecar then exits with an error.
 async fn load_loss_withdraws_worker_and_fails_the_process() {

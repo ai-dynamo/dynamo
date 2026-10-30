@@ -22,6 +22,8 @@ pub struct FixtureConfig {
     pub connections: usize,
     pub speedup_ratio: f64,
     pub disaggregation_mode: DisaggregationMode,
+    /// Whether the vLLM fixture publishes KV events.
+    pub has_kv_events: bool,
 }
 
 impl Default for FixtureConfig {
@@ -31,6 +33,7 @@ impl Default for FixtureConfig {
             connections: 1,
             speedup_ratio: 0.0,
             disaggregation_mode: DisaggregationMode::Aggregated,
+            has_kv_events: true,
         }
     }
 }
