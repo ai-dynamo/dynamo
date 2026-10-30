@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Redesign the attached technical architecture slide to fix its confusing arrows and mixed cluster placement. Keep the same Excalidraw hand-drawn visual language, white background, thin dark outlines, restrained pastel fills and large handwritten-looking English labels. Exactly ONE 16:9 slide. The new composition must be diagram-led, extremely clear, with NO crossing arrows and NO interleaved provider alternatives. Replace the previous diagram layout completely with the following precise cluster-by-layer matrix.
+
+TITLE: "Global Router over a replaceable MCS layer"
+SUBTITLE: "Pool discovery across two clusters — one MCS provider, one Kubernetes API boundary."
+
+TWO FIXED VERTICAL COLUMNS, separated by a thin dashed line:
+LEFT header: "Pool cluster A"
+RIGHT header: "Router cluster / hub"
+Everything inside a column is deployed in THAT cluster. Never draw the bundled provider as local and Cilium as remote. There is only ONE chosen provider across both clusters.
+
+THREE HORIZONTAL ROWS, top to bottom:
+TOP ROW pastel blue ownership region, spanning both columns, labeled "Global Router subsystem". This contains the Dynamo actors.
+MIDDLE ROW white/light-gray, labeled "Local Kubernetes APIs — standard discovery contract". It contains one separate local API resource panel in EACH column, with resource-card shapes.
+BOTTOM ROW pastel green ownership region, spanning both columns, labeled "MCS provider — generic service discovery". It contains exactly one local MCS controller per cluster and the cross-cluster metadata synchronization connector.
+
+EXACT NODES AND POSITIONS:
+- Top-left, upper part: a purple-outlined "PoolRelay" box.
+- Top-right, upper part: two adjacent boxes "Global Router replica 1" and "Global Router replica 2".
+- Top-left, lower part: "Dynamo deployment integration".
+- Top-right, lower part: "Global Discovery Service".
+- Middle-left local API panel: three small distinct resource cards, labels "Service", "ServiceExport", "Local EndpointSlices". Under the last card draw two backend-dot entries with addresses 10.242.0.10:8080 and 10.242.0.11:8080. Add tiny label "Pod endpoints maintained by Kubernetes". The actual data in these endpoint cards is read by the exporting controller; the deployment integration creates only Service + ServiceExport.
+- Middle-right local API panel: "ServiceImport" and "Imported EndpointSlices". In the imported EndpointSlice card show those SAME TWO address entries, 10.242.0.10:8080 and 10.242.0.11:8080, plus short labels "service = demo-pool-relay" and "source cluster = A". IMPORTANT: these object cards exist in the HUB Kubernetes API, though their backend addresses belong to pool cluster A.
+- Bottom-left: "MCS controller in A".
+- Bottom-right: "MCS controller in hub".
+
+EXACT ARROWS — ONLY THESE, and keep every arrow clear of all boxes and labels:
+1. A downward arrow from "Dynamo deployment integration" into ONLY the Service and ServiceExport resource cards in LEFT API panel. Label "creates Service + ServiceExport". Do NOT point this arrow to Local EndpointSlices.
+2. A downward arrow from LEFT API panel into "MCS controller in A". Label "reads local export + endpoints".
+3. A single horizontal green arrow from "MCS controller in A" to "MCS controller in hub", wholly in the bottom green MCS row. Label above it "synchronizes service + endpoint metadata"; small text below "transport / registry / storage are provider internals".
+4. An upward green arrow from "MCS controller in hub" into RIGHT API panel, explicitly ending on the ServiceImport / Imported EndpointSlices cards. Label "writes imported objects into hub API".
+5. A short upward blue arrow from Imported EndpointSlices to "Global Discovery Service". Label "list / watch".
+6. A short upward blue arrow from Global Discovery Service into the Global Router replica pair. Label "pool discovery".
+7. A single horizontal purple state-stream line from PoolRelay across the upper top-row corridor that BRANCHES to TWO arrowheads, one entering each of Global Router replica 1 and replica 2. Label "state stream to EACH replica". Use a dedicated clear corridor above/below the replica pair so this line never crosses GDS's pool-discovery arrow.
+There is NO arrow from GDS to any MCS controller, registry or provider-internal storage. There is NO arrow from PoolRelay into any MCS controller or registry. The provider changes metadata objects, while the state streams belong solely to Global Router.
+
+Keep the scope explicit with a short small note: "Shown: pool-discovery direction. Router Service exports use the same MCS mechanism."
+A SINGLE footer, with NO arrows and NO miniature second architecture:
+"Choose ONE provider for both clusters: Bundled MCS  OR  Cilium + EndpointSlice synchronization"
+Under that, three compact capability badges: "individual backends" | "reachable addresses" | "service + source-cluster identity".
+Do not include the previous acceptance-test strip, API version snippets, registry/storage process mini-diagrams, trophies, decorative icons, generic cloud silhouettes, paragraphs, numbered sections, or any unlabeled arrows.
+Technical accuracy and clear local ownership matter more than symmetry. This image must make it immediately obvious who reads what and which cluster's Kubernetes API receives each write.
+
+Final accuracy edit:
+Make ONLY these small accuracy fixes to the attached slide. Preserve its entire two-cluster / three-row matrix, all other text, colors, shapes, spacing, addresses, aspect ratio and visual style.
+1. REMOVE the apiVersion and kind snippets from the three cards Service, ServiceExport, ServiceImport. Do not show API versions anywhere. Beneath their document icons use only: Service -> "ports + selector"; ServiceExport -> "export intent"; ServiceImport -> "imported service". The card titles stay unchanged.
+2. The green downward "reads local export + endpoints" arrow currently starts inside the ServiceExport card. Remove that part inside the API panel. Start the arrow at the BOTTOM OUTER EDGE of the whole LEFT local Kubernetes API panel, directly above MCS controller in A. The arrow means the controller reads the panel's Service, ServiceExport, and Local EndpointSlices; it must not imply reading only the ServiceExport. Keep it short, straight and downward.
+3. The green "writes imported objects into hub API" arrow must branch to TWO arrowheads at the BOTTOM of ServiceImport and Imported EndpointSlices respectively. Keep the branch inside the right local API panel in its bottom margin; no crossing any labels, cards or the list/watch arrow.
+4. The blue "pool discovery" arrow from Global Discovery Service must branch below the Global Router boxes to TWO blue arrowheads entering the BOTTOM of replica 1 and replica 2. Both replicas consume the GDS pool directory. Keep the purple state-stream branches above the replica boxes unchanged. Use separate clear corridors, no crossing arrows.
+Do not add any boxes, decorative lines, YAML, version strings, new concepts or other changes. Technical labels must remain legible in English.

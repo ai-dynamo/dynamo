@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Reuse the e2e deployment and routing helpers with a separate pair of clusters.
+E2E_PROVIDER=dynamo
 E2E_PREFIX="${CONFORMANCE_PREFIX:-mcs-conformance}"
 E2E_WORK_DIR="${CONFORMANCE_WORK_DIR:-${MODULE_ROOT}/bin/conformance}"
 E2E_CLUSTER_KEYS="hub a"

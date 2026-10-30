@@ -33,6 +33,13 @@ Global Discovery Service reads the imports.
 - A new assertion is a check function that returns 0 when satisfied and sets
   `LAST_OBSERVED`, run through `expect` (polls up to `E2E_TIMEOUT`) or `once`
   (steps that write). No fixed sleeps.
+- Phase 3 is the shared provider compatibility suite. Keep its cases,
+  manifests and GDS image identical for Dynamo MCS and Cilium; new cases run
+  against both. Do not branch on the provider or use private registry APIs,
+  auto-export labels or provider-specific object patches to make discovery
+  pass. Provider installation, readiness and diagnostics belong in the setup
+  adapter. Run `make e2e-discovery E2E_PROVIDER=dynamo` and the same command
+  with `E2E_PROVIDER=cilium`; neither mode may skip discovery cases.
 - Never touch anything but the clusters `<E2E_PREFIX>-hub|a|b`. Every kubectl and
   helm call goes through `kc KEY` or `hm KEY`, which pass the kubeconfig file in
   `bin/e2e` and the kind context, never the default kubeconfig. Never change

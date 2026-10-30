@@ -1,0 +1,11 @@
+{
+  "provider": "cilium",
+  "cilium_version": "1.20.4",
+  "gds_image": "global-discovery-service:e2e-10958618f218",
+  "bundled_mcs_image": null,
+  "source_revision": "5ccd7b6e1a214448c5ff21e28f885f25ed2c5af7",
+  "source_dirty": true,
+  "wall_time_seconds": 209,
+  "strict": true,
+  "summary": "\n===== SUMMARY =====\nPASS  Cilium 1.20.4 installed in hub a; bundled MCS image and chart unused\nPASS  no bundled mcs-registry or mcs-controller in any test cluster\nPASS  Global Discovery Service (--pool-discovery mcs) in the hub, router gr/global-router (2 pods) in the hub, pool demo (2 pods) in a\nPASS  ServiceExport global-router in the hub: Valid=True and Ready=True (1s)\nPASS  ServiceExports demo-pool-relay (v1alpha1) and demo-frontend (v1beta1) in a\nPASS  ServiceExport demo-pool-relay in a (applied as v1alpha1) is Valid=True and Ready=True (8s)\nPASS  ServiceExport demo-frontend in a is Valid=True and Ready=True (0s)\nPASS  ServiceImports demo-pool-relay and demo-frontend in the hub (44s)\nPASS  GET /pools lists one complete pool: cluster_id a, namespace demo, dgd_name demo (demo-frontend is not a pool) (1s)\nPASS  the pool has a location.region (0s)\nPASS  pool location.region is its source cluster id a\nPASS  pool relay_identities name the relay pods or one bound relay pod by address (0s)\nPASS  GET /routers lists hub/<pod> for the 2 global-router pods, with http://<pod IP>:8080 URLs (0s)\nPASS  scale the relay Deployment demo in a to 0\nPASS  GET /pools no longer lists the pool (4s)\nPASS  GET /routers still lists the 2 routers (1s)\nPASS  scale the relay Deployment demo in a back to 2\nPASS  GET /pools lists the pool again (2s)\nPASS  delete the ServiceExport demo-pool-relay in a\nPASS  GET /pools no longer lists the pool (0s)\nPASS  the ServiceImport demo-pool-relay is gone from the hub (0s)\nPASS  GET /routers still lists the 2 routers (0s)\n---------------------------------------------\nphase 3: 22 passed, 0 failed, 0 known gaps, 0 skipped\n---------------------------------------------\nRESULT: PASS (22 passed, 0 failed, 0 known gaps, 0 skipped)\n"
+}
