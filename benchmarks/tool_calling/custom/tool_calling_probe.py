@@ -171,6 +171,8 @@ ERROR_KIND_SUBCATEGORIES = {
     "reasoning_marker_leaked_to_content": "marker_leak",
     "tool_call_json_leaked_to_content": "marker_leak",
     "unexpected_reasoning_content": "reasoning_routing",
+    "unexpected_reasoning_tokens": "reasoning_routing",
+    "reasoning_dropped": "reasoning_routing",
     "reasoning_mismatch": "reasoning_routing",
     "reasoning_mangled_function_text": "reasoning_routing",
     "reasoning_only_response": "reasoning_routing",
@@ -239,6 +241,8 @@ DYNAMO_API_ERROR_KINDS = frozenset(
         "tool_id_changed",
         "tool_name_changed",
         "unexpected_reasoning_content",
+        "unexpected_reasoning_tokens",
+        "reasoning_dropped",
         "wrong_tool_type",
     }
 )
@@ -1295,6 +1299,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             min_tool_calls=0,
             max_tokens=32,
             request_overrides=thinking_disabled,
+            expect_reasoning=disabled_reasoning_expectation,
         ),
         Case(
             case_id="customer_required_forces_weather",
@@ -2226,6 +2231,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             min_tool_calls=0,
             max_tokens=24,
             request_overrides=thinking_disabled,
+            expect_reasoning=disabled_reasoning_expectation,
         ),
         Case(
             case_id="none_with_tool_history_answers_in_text",
@@ -2462,6 +2468,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
                 "max_tokens": None,
                 "max_completion_tokens": 24,
             },
+            expect_reasoning=disabled_reasoning_expectation,
         ),
         Case(
             case_id="followup_tool_result_as_content_parts",
@@ -3497,6 +3504,19 @@ def find_tool_call_json_leaks(content: str, tool_names: list[str]) -> list[str]:
         if re.search(r'"name"\s*:\s*"' + re.escape(name) + r'"', content):
             leaked.append(name)
     return leaked
+
+
+def reported_reasoning_tokens(usage: Any) -> int | None:
+    """Return usage.completion_tokens_details.reasoning_tokens when present."""
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    value = details.get("reasoning_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def validate_usage(usage: Any) -> list[dict[str, Any]]:
@@ -4618,6 +4638,41 @@ def validate_result(
             error(
                 "unexpected_reasoning_content",
                 "thinking is disabled but reasoning_content is non-empty",
+            )
+        )
+    # An empty reasoning_content is not proof that no thinking happened: the
+    # parser may have dropped or re-routed it. When the backend reports
+    # reasoning tokens, they must be zero with thinking disabled.
+    reasoning_tokens = reported_reasoning_tokens(result.usage)
+    if (
+        case.expect_reasoning is False
+        and reasoning_tokens is not None
+        and reasoning_tokens > 0
+    ):
+        errors.append(
+            error(
+                "unexpected_reasoning_tokens",
+                (
+                    "thinking is disabled but usage reports "
+                    f"{reasoning_tokens} reasoning tokens"
+                ),
+                reasoning_tokens=reasoning_tokens,
+            )
+        )
+    if (
+        case.expect_reasoning is True
+        and not (result.reasoning_content or "").strip()
+        and reasoning_tokens is not None
+        and reasoning_tokens > 0
+    ):
+        errors.append(
+            error(
+                "reasoning_dropped",
+                (
+                    f"usage reports {reasoning_tokens} reasoning tokens but "
+                    "reasoning_content is empty"
+                ),
+                reasoning_tokens=reasoning_tokens,
             )
         )
 

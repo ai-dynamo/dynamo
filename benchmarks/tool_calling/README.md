@@ -70,6 +70,12 @@ reasoning delimiters in `content`, OpenAI-shaped tool-call JSON leaked into
 `content`, reasoning-only or empty final messages, typed scalars returned as
 strings, and tool call IDs reused from the conversation history.
 
+Every case that disables thinking also asserts that none happened: an empty
+`reasoning_content` is required, and when the backend reports
+`usage.completion_tokens_details.reasoning_tokens` it must be zero
+(`unexpected_reasoning_tokens`). With thinking enabled, reasoning tokens with
+an empty `reasoning_content` are reported as `reasoning_dropped`.
+
 ### Failure taxonomy
 
 Each failed record carries one ownership `failure_category` (which decides the

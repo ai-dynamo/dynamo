@@ -241,6 +241,10 @@ def test_reasoning_expectations_cover_every_inline_profile() -> None:
     disabled_case_ids = (
         "customer_required_forces_weather_thinking_disabled",
         "customer_named_calculator_choice_thinking_disabled",
+        "customer_truncated_tool_markup_hidden",
+        "followup_after_tool_result_thinking_disabled",
+        "required_truncated_call_reports_length",
+        "required_max_completion_tokens_alias_truncates",
     )
 
     for profile in probe.INLINE_CASE_PROFILES:
@@ -1076,3 +1080,81 @@ def test_fourth_batch_request_shapes() -> None:
         "call_round_1",
         "call_round_2",
     }
+
+
+def test_every_thinking_disabled_case_asserts_no_reasoning() -> None:
+    """A case that turns thinking off must also assert that none happened."""
+    for profile in probe.INLINE_CASE_PROFILES:
+        expected = None if profile == "gpt_oss" else False
+        for case in probe.build_cases(profile):
+            overrides = case.request_overrides or {}
+            kwargs = overrides.get("chat_template_kwargs") or {}
+            disabled = any(
+                kwargs.get(key) is False for key in ("thinking", "enable_thinking")
+            )
+            if disabled:
+                assert case.expect_reasoning is expected, (profile, case.case_id)
+
+
+def test_thinking_disabled_checks_reasoning_tokens_not_only_the_field() -> None:
+    cases = probe.build_cases("generic")
+    case = case_by_id(cases, "customer_required_forces_weather_thinking_disabled")
+    assert case.expect_reasoning is False
+
+    hidden_thinking = probe.ChatResult(
+        finish_reason="tool_calls",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+        usage={
+            "prompt_tokens": 50,
+            "completion_tokens": 300,
+            "total_tokens": 350,
+            "completion_tokens_details": {"reasoning_tokens": 280},
+        },
+    )
+    errors, _ = probe.validate_result(case, hidden_thinking)
+    assert "unexpected_reasoning_tokens" in error_kinds(errors)
+    assert "unexpected_reasoning_content" not in error_kinds(errors)
+    assert probe.classify_failure_detail(case, hidden_thinking, errors) == (
+        "dynamo_api",
+        "reasoning_routing",
+    )
+
+    clean = probe.ChatResult(
+        finish_reason="tool_calls",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+        usage={
+            "prompt_tokens": 50,
+            "completion_tokens": 20,
+            "total_tokens": 70,
+            "completion_tokens_details": {"reasoning_tokens": 0},
+        },
+    )
+    errors, _ = probe.validate_result(case, clean)
+    assert errors == []
+
+    # Backends that report no usage details are not penalized.
+    no_details = probe.ChatResult(
+        finish_reason="tool_calls",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+        usage={"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
+    )
+    errors, _ = probe.validate_result(case, no_details)
+    assert errors == []
+
+    enabled = case_by_id(cases, "customer_required_forces_weather")
+    dropped = probe.ChatResult(
+        finish_reason="tool_calls",
+        tool_calls=[_call("get_weather", {"location": "Paris"})],
+        usage={
+            "prompt_tokens": 50,
+            "completion_tokens": 300,
+            "total_tokens": 350,
+            "completion_tokens_details": {"reasoning_tokens": 280},
+        },
+    )
+    errors, _ = probe.validate_result(enabled, dropped)
+    assert {"missing_reasoning_content", "reasoning_dropped"} <= error_kinds(errors)
+    assert probe.classify_failure_detail(enabled, dropped, errors) == (
+        "dynamo_api",
+        "reasoning_routing",
+    )
