@@ -28,7 +28,7 @@ use super::concurrent_radix_tree_compressed::mix_worker;
 use super::{
     EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
-use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
@@ -579,6 +579,40 @@ impl EdgeOwnersEntry {
         }
     }
 
+    fn collect_transfer_sources(
+        &self,
+        snapshot: &ResidencyRoutingSnapshot,
+        view: OwnerView<'_>,
+        sources: &mut Vec<KvTransferCandidateSource>,
+    ) {
+        let mut insert = |owner| match owner {
+            IndexedResidencyOwner::Worker(worker) => {
+                sources.push(KvTransferCandidateSource::Worker(worker));
+            }
+            IndexedResidencyOwner::Exact(owner) if snapshot.has_router_hint_source(owner) => {
+                sources.push(KvTransferCandidateSource::CacheOwner(owner));
+            }
+            IndexedResidencyOwner::Exact(_) => {}
+        };
+        match self {
+            Self::Single { owner, .. } => {
+                if let Some(owner) = view.owner(*owner) {
+                    insert(owner);
+                }
+            }
+            Self::Pair(pair) => {
+                for owner in pair.owners.iter().filter_map(|&owner| view.owner(owner)) {
+                    insert(owner);
+                }
+            }
+            Self::Multi(multi) => {
+                for owner in multi.owners() {
+                    insert(owner);
+                }
+            }
+        }
+    }
+
     fn collect_matching_router_hint_sources(
         &self,
         view: OwnerView<'_>,
@@ -921,6 +955,79 @@ impl LowerTierIndexer {
             edge.collect_router_hint_sources(snapshot, view, &mut sources);
         }
         sources
+    }
+
+    /// Walk the shared hash chain once, retaining each exact source's contiguous
+    /// intervals independently of worker attachment and per-worker tier progress.
+    /// The selector tests these against the destination's original local depth;
+    /// discovering a later interval does not imply a multi-source transfer plan.
+    pub(super) fn extend_fetch_continuations(
+        &self,
+        sequence: &[LocalBlockHash],
+        candidates: &mut KvTransferCandidates,
+        snapshot: &ResidencyRoutingSnapshot,
+    ) {
+        let owners = self.owners.snapshot.load();
+        let view = OwnerView::new(&owners, snapshot.projection());
+        let mut intervals: FxHashMap<KvTransferCandidateSource, (usize, usize)> =
+            FxHashMap::default();
+        let KvTransferCandidates {
+            block_hashes,
+            source_intervals,
+            ..
+        } = candidates;
+        let mut record_run = |sources: &[KvTransferCandidateSource], start, end| {
+            for &source in sources {
+                let interval = intervals.entry(source).or_insert((start, start));
+                if interval.1 != start {
+                    if interval.0 > 0 {
+                        source_intervals.push(KvTransferSourceInterval {
+                            source,
+                            start: interval.0,
+                            end: interval.1,
+                        });
+                    }
+                    interval.0 = start;
+                }
+                interval.1 = end;
+            }
+        };
+        let mut sources = Vec::new();
+        let mut next_sources = Vec::new();
+        let mut previous_owners = None;
+        let mut run_start = 0;
+        let mut run_end = 0;
+        for (pos, &local_hash) in sequence.iter().enumerate() {
+            let parent = pos.checked_sub(1).map(|prev| block_hashes[prev]);
+            next_sources.clear();
+            if let Some(edge) = self.edges.get(&TransitionKey::new(parent, local_hash)) {
+                if pos == block_hashes.len() {
+                    block_hashes.push(edge.child_hash());
+                }
+                let owners = edge.owner_set();
+                // Same accepted fingerprint bound as the local continuation walk.
+                // Coalesce before enumerating owners or updating their intervals.
+                if owners.is_some() && owners == previous_owners {
+                    run_end = pos + 1;
+                    continue;
+                }
+                previous_owners = owners;
+                edge.collect_transfer_sources(snapshot, view, &mut next_sources);
+            } else if pos == block_hashes.len() {
+                // Without a known device/host hash, later edges cannot be anchored.
+                break;
+            } else {
+                previous_owners = None;
+            }
+            record_run(&sources, run_start, run_end);
+            std::mem::swap(&mut sources, &mut next_sources);
+            run_start = pos;
+            run_end = pos + 1;
+        }
+        record_run(&sources, run_start, run_end);
+        source_intervals.extend(intervals.into_iter().filter_map(|(source, (start, end))| {
+            (start > 0).then_some(KvTransferSourceInterval { source, start, end })
+        }));
     }
 
     /// Reconstruct store events from the per-worker block index. Each block

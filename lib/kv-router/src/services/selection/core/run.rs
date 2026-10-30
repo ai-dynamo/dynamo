@@ -736,6 +736,8 @@ impl SelectionCore {
                         &normalized.block_hashes,
                         LowerTierQueryOptions {
                             retain_kv_transfer_chain,
+                            fetch_continuation: retain_kv_transfer_chain
+                                && self.kv_router_config.router_fetch_continuation,
                         },
                     )
                     .instrument(tracing::info_span!("kv_router.find_matches"))

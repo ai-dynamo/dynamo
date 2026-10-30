@@ -20,5 +20,6 @@ router:
   use_remote_indexer: false
   serve_indexer: false
   enable_session_prefix_index: true
+  router_fetch_continuation: true
   shared_cache_type: none
   router_predicted_ttl_secs: null
