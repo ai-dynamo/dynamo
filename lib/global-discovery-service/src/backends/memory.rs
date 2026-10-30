@@ -3,7 +3,7 @@
 
 //! The memory backend: one process keeps every registration. It needs no
 //! Kubernetes, so it suits tests and a first deployment. The MCS backend keeps
-//! its registrations here too. A restarted process starts empty and fills as
+//! its registrations here too, or in DynamoDB. A restarted process starts empty and fills as
 //! PoolRelays register again, so its lists are `Estimated` until one lease has
 //! passed: by then every live pool has registered again. Router replicas come
 //! from configuration until routers register too. Run one replica: each keeps
@@ -172,7 +172,7 @@ async fn sweep(
 
 /// Sorts a registration's lists and drops repeats, so the same lists in
 /// another order are not a change.
-fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
+pub(super) fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
     registration.capabilities.sort_unstable();
     registration.capabilities.dedup();
     registration.frontends.sort_unstable();
@@ -184,7 +184,7 @@ fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
 
 /// A registration as listed. The store does not know the PoolRelay's
 /// addresses.
-fn listing(registration: &PoolRegistration) -> PoolListing {
+pub(super) fn listing(registration: &PoolRegistration) -> PoolListing {
     PoolListing {
         key: registration.key.clone(),
         location: registration.location.clone(),

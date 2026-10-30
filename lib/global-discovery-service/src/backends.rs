@@ -4,6 +4,8 @@
 //! Implementations of [`crate::pool_discovery`], one module per
 //! backend.
 
+#[cfg(feature = "dynamodb")]
+pub mod dynamodb;
 pub mod kubernetes;
 pub mod memory;
 pub mod registered;

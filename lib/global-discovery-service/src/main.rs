@@ -8,8 +8,9 @@
 //!   the registrations PoolRelays send (`registrations`), or the
 //!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
 //!   the standard way (`mcs`), joined with registrations.
-//! - `--registration-storage`: where registrations are kept. Only `memory`
-//!   for now.
+//! - `--registration-storage`: where registrations are kept: in this process
+//!   (`memory`), or in a DynamoDB table that every instance reads
+//!   (`dynamodb`, in builds with the `dynamodb` feature).
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
@@ -29,6 +30,8 @@ use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
+#[cfg(feature = "dynamodb")]
+use dynamo_global_discovery_service::backends::dynamodb::{DynamoDbPoolStore, TableLocation};
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
     McsPoolDirectory, McsReplicaDirectory,
@@ -66,6 +69,10 @@ const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs
 /// than being ignored.
 const WITH_REGISTRATIONS: &str = "With --pool-discovery registrations";
 const WITH_MCS: &str = "With --pool-discovery karmada or mcs";
+
+/// The `--help` heading for the flags of `--registration-storage dynamodb`.
+/// Such a flag fails at startup with another storage.
+const WITH_DYNAMODB: &str = "With --registration-storage dynamodb";
 
 #[derive(Debug, Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
@@ -149,6 +156,25 @@ struct Args {
         required_if_eq_any = MCS_VALUES
     )]
     router_port_name: Option<String>,
+    /// The DynamoDB table that keeps registrations.
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_DYNAMODB,
+        required_if_eq("registration_storage", "dynamodb")
+    )]
+    dynamodb_table: Option<String>,
+    /// The table's AWS region. Without it, the region comes from the AWS
+    /// environment, such as `AWS_REGION`.
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_DYNAMODB
+    )]
+    dynamodb_region: Option<String>,
+    /// Another DynamoDB endpoint than AWS's, such as DynamoDB Local's.
+    #[arg(long, value_parser = parse_http_url, help_heading = WITH_DYNAMODB)]
+    dynamodb_endpoint_url: Option<Url>,
 }
 
 /// The `--pool-discovery` values that read MCS, for clap's
@@ -187,6 +213,11 @@ enum RegistrationStorage {
     /// In this process. Run one replica: each keeps only the registrations it
     /// receives.
     Memory,
+    /// In a DynamoDB table that every instance reads, such as a Global Table
+    /// with a replica in each region, so instances can run in every cluster.
+    /// Needs a build with the `dynamodb` feature, as the image has.
+    #[value(name = "dynamodb")]
+    DynamoDb,
 }
 
 fn parse_router(value: &str) -> Result<RouterReplica, String> {
@@ -196,22 +227,27 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
     if id.is_empty() {
         return Err("the replica id is empty".to_owned());
     }
-    let url = Url::parse(url).map_err(|error| error.to_string())?;
-    // Without `http://`, `Url` reads a host such as `localhost:50051` as the
-    // scheme.
+    Ok(RouterReplica {
+        replica: RouterReplicaId(id.to_owned()),
+        url: parse_http_url(url)?,
+    })
+}
+
+/// An http or https URL. Without `http://`, `Url` reads a host such as
+/// `localhost:50051` as the scheme.
+fn parse_http_url(value: &str) -> Result<Url, String> {
+    let url = Url::parse(value).map_err(|error| error.to_string())?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!(
             "expected an http or https URL, such as http://10.42.0.5:50051, not {url}"
         ));
     }
-    Ok(RouterReplica {
-        replica: RouterReplicaId(id.to_owned()),
-        url,
-    })
+    Ok(url)
 }
 
 /// Parses the flags. A flag set under the `--help` heading of another
-/// `--pool-discovery` value fails, as clap's own errors do. A flag left at
+/// `--pool-discovery` value, or of another `--registration-storage`, fails,
+/// as clap's own errors do. A flag left at
 /// its default is not refused. The checks that span flags are here too, so
 /// that every flag mistake gets clap's usage and exit code.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
@@ -222,23 +258,30 @@ where
     let mut command = Args::command();
     let matches = command.try_get_matches_from_mut(args)?;
     let parsed = Args::from_arg_matches(&matches)?;
-    let refused = match parsed.pool_discovery {
+    let mut refused = vec![match parsed.pool_discovery {
         PoolDiscovery::Registrations => WITH_MCS,
         PoolDiscovery::Karmada | PoolDiscovery::Mcs => WITH_REGISTRATIONS,
-    };
-    let given = command
-        .get_arguments()
-        .find(|arg| {
-            arg.get_help_heading() == Some(refused)
-                && matches
-                    .value_source(arg.get_id().as_str())
-                    .is_some_and(|source| source != ValueSource::DefaultValue)
-        })
-        .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned());
-    if let Some(flag) = given {
+    }];
+    if parsed.registration_storage != RegistrationStorage::DynamoDb {
+        refused.push(WITH_DYNAMODB);
+    }
+    let given = command.get_arguments().find_map(|arg| {
+        let heading = refused
+            .iter()
+            .copied()
+            .find(|heading| arg.get_help_heading() == Some(*heading))?;
+        matches
+            .value_source(arg.get_id().as_str())
+            .is_some_and(|source| source != ValueSource::DefaultValue)
+            .then(|| {
+                let flag = arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned();
+                (flag, heading)
+            })
+    });
+    if let Some((flag, heading)) = given {
         return Err(command.error(
             ErrorKind::ArgumentConflict,
-            format!("--{flag} works only {}", refused.to_lowercase()),
+            format!("--{flag} works only {}", heading.to_lowercase()),
         ));
     }
     if let Err(error) = Lease::new(parsed.heartbeat_interval_secs, parsed.lease_duration_secs) {
@@ -295,7 +338,7 @@ async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
     let backend = match args.pool_discovery.mcs() {
-        None => registrations_backend(&args)?,
+        None => registrations_backend(&args).await?,
         Some(mcs) => mcs_backend(&args, mcs).await?,
     };
     let listener = TcpListener::bind(args.listen)
@@ -320,28 +363,67 @@ fn lease(args: &Args) -> Result<Lease> {
         .context("check --heartbeat-interval-secs and --lease-duration-secs")
 }
 
-/// Where registrations go, as `--registration-storage` says.
-fn registration_storage(args: &Args, lease: Lease) -> Arc<MemoryPoolStore> {
+/// Where registrations go: one store takes them and lists them.
+struct RegistrationStore {
+    pools: Arc<PoolDirectory>,
+    registrar: Arc<dyn PoolRegistrar>,
+}
+
+/// The store `--registration-storage` names.
+async fn registration_storage(args: &Args, lease: Lease) -> Result<RegistrationStore> {
     match args.registration_storage {
-        RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
+        RegistrationStorage::Memory => {
+            let store = Arc::new(MemoryPoolStore::new(lease));
+            Ok(RegistrationStore {
+                pools: store.clone(),
+                registrar: store,
+            })
+        }
+        RegistrationStorage::DynamoDb => dynamodb_storage(args, lease).await,
     }
 }
 
+#[cfg(feature = "dynamodb")]
+async fn dynamodb_storage(args: &Args, lease: Lease) -> Result<RegistrationStore> {
+    let Some(name) = &args.dynamodb_table else {
+        bail!("--registration-storage dynamodb needs --dynamodb-table");
+    };
+    let table = TableLocation {
+        name: name.clone(),
+        region: args.dynamodb_region.clone(),
+        endpoint_url: args.dynamodb_endpoint_url.clone(),
+    };
+    let store = Arc::new(
+        DynamoDbPoolStore::connect(&table, lease)
+            .await
+            .context("connect to DynamoDB")?,
+    );
+    Ok(RegistrationStore {
+        pools: store.clone(),
+        registrar: store,
+    })
+}
+
+#[cfg(not(feature = "dynamodb"))]
+async fn dynamodb_storage(_args: &Args, _lease: Lease) -> Result<RegistrationStore> {
+    bail!(
+        "this build has no DynamoDB support: build it with `--features dynamodb`, as the image is"
+    )
+}
+
 /// Pools from registrations; router replicas from `--router`.
-fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
-    let registrations = registration_storage(args, lease(args)?);
+async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
+    let registrations = registration_storage(args, lease(args)?).await?;
     if args.routers.is_empty() {
         tracing::warn!(
             "no --router given, so GET /routers lists no Global Router replica for PoolRelays to \
              connect to"
         );
     }
-    let pools: Arc<PoolDirectory> = registrations.clone();
-    let registrar: Arc<dyn PoolRegistrar> = registrations;
     Ok(PoolDiscoveryBackend {
-        pools,
+        pools: registrations.pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
-        registrar: Some(registrar),
+        registrar: Some(registrations.registrar),
     })
 }
 
@@ -362,7 +444,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         );
     };
     let lease = lease(args)?;
-    let registrations = registration_storage(args, lease);
+    let registrations = registration_storage(args, lease).await?;
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
@@ -373,17 +455,16 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         frontend_service(args),
     )
     .context("check --frontend-service-suffix and --pool-service-suffix")?;
-    let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease);
+    let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.pools, lease);
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
         port_name: port_name.clone(),
     };
-    let registrar: Arc<dyn PoolRegistrar> = registrations;
     Ok(PoolDiscoveryBackend {
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-        registrar: Some(registrar),
+        registrar: Some(registrations.registrar),
     })
 }
 
@@ -467,9 +548,10 @@ mod tests {
     }
 
     #[test]
-    fn every_flag_says_which_pool_discovery_it_works_with() {
-        // The flags that work with every --pool-discovery value. Any other
-        // flag needs one of the two headings, which `parse_args` enforces.
+    fn every_flag_says_where_it_works() {
+        // The flags that work with every --pool-discovery value and every
+        // storage. Any other flag needs the heading of the value it works
+        // with, which `parse_args` enforces.
         const EVERY_VALUE: &[&str] = &[
             "listen",
             "tls_cert_path",
@@ -482,11 +564,14 @@ mod tests {
         ];
         for arg in Args::command().get_arguments() {
             let id = arg.get_id().as_str();
-            let headed = matches!(arg.get_help_heading(), Some(WITH_REGISTRATIONS | WITH_MCS));
+            let headed = matches!(
+                arg.get_help_heading(),
+                Some(WITH_REGISTRATIONS | WITH_MCS | WITH_DYNAMODB)
+            );
             assert_ne!(
                 EVERY_VALUE.contains(&id),
                 headed,
-                "--{id}: list it in EVERY_VALUE or give it a --pool-discovery heading"
+                "--{id}: list it in EVERY_VALUE or give it a heading"
             );
         }
     }
@@ -640,6 +725,49 @@ mod tests {
             );
             assert_eq!(error.exit_code(), 2, "{args:?}");
         }
+    }
+
+    #[test]
+    fn dynamodb_flags_need_dynamodb_storage() {
+        let error = parse_args(["gds", "--registration-storage", "dynamodb"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        assert!(error.to_string().contains("--dynamodb-table"), "{error}");
+        let dynamodb = [
+            "--registration-storage=dynamodb",
+            "--dynamodb-table=registrations",
+            "--dynamodb-region=us-west-2",
+            "--dynamodb-endpoint-url=http://localhost:8000",
+        ];
+        let args = parse_args(["gds"].into_iter().chain(dynamodb)).unwrap();
+        assert_eq!(args.registration_storage, RegistrationStorage::DynamoDb);
+        assert_eq!(args.dynamodb_table.as_deref(), Some("registrations"));
+        // Every --pool-discovery value takes it.
+        assert!(parse_args(karmada(&dynamodb)).is_ok());
+        for flag in &dynamodb[1..] {
+            let error = parse_args(["gds", flag]).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{flag}: {error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("works only with --registration-storage dynamodb"),
+                "{error}"
+            );
+        }
+        let error = parse_args([
+            "gds",
+            "--registration-storage=dynamodb",
+            "--dynamodb-table=",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+        let error = parse_args([
+            "gds",
+            "--registration-storage=dynamodb",
+            "--dynamodb-table=t",
+            "--dynamodb-endpoint-url=localhost:8000",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
     }
 
     #[test]

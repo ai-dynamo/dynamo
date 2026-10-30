@@ -10,9 +10,10 @@
 //! - `POST /routers`: `RegisterRouter` from the design, not available yet.
 //!   It answers `501` with the reason.
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
-//!   while the list may be missing pools: for one lease after the service
-//!   starts, while PoolRelays may not have registered yet; and with MCS, also
-//!   while the MCS watch keeps failing. A caller that keeps its own list
+//!   while the list may be missing pools: with memory storage, for one lease
+//!   after the service starts, while PoolRelays may not have registered yet;
+//!   with DynamoDB storage, while the table cannot be read; and with MCS,
+//!   also while the MCS watch keeps failing. A caller that keeps its own list
 //!   replaces it with a complete list, but merges a partial one: it adds new
 //!   pools and updates changed ones, keeps known pools that are missing, and
 //!   waits for a complete list to remove any. A caller that knows no pools

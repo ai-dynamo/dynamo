@@ -514,6 +514,11 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
       run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
+    - name: Run Global Discovery Service DynamoDB feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # No workspace member requests the dynamodb feature, so it needs an explicit run here.
+      run: cargo test --locked -p dynamo-global-discovery-service --features dynamodb
     - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -607,6 +612,10 @@ jobs:
         # service, and the build without the optional policy catalog.
         cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
         cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
+    - name: Lint the Global Discovery Service DynamoDB feature
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps -p dynamo-global-discovery-service --features dynamodb --all-targets -- -D warnings
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
