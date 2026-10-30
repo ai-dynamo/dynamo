@@ -11,13 +11,32 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-import deepseek_recipe
 import pytest
-import sglang.srt.parser
-import tokenizers
 
 
 class RequireRecipeCases:
+    def __init__(self, adapter: Path, revision: str):
+        self.adapter = adapter
+        self.revision = revision
+
+    def pytest_configure(self, config):
+        # Initialize pytest's plugin rewriting before SGLang imports anyio.
+        parser = importlib.import_module("sglang.srt.parser")
+        parser.__path__ = [str(self.adapter.parent), *parser.__path__]
+        bridge = importlib.import_module("dynamo.frontend.sglang_deepseek")
+        if (
+            bridge.recipe_renderer is None
+            or Path(bridge.recipe_renderer.__file__) != self.adapter
+        ):
+            raise RuntimeError("The pinned recipe adapter was not loaded")
+        recipe = importlib.import_module("deepseek_recipe")
+        tokenizers = importlib.import_module("tokenizers")
+        print(
+            f"Recipe adapter {self.revision}; "
+            f"deepseek-recipe {recipe.__version__}; tokenizers {tokenizers.__version__}",
+            flush=True,
+        )
+
     def pytest_sessionfinish(self, session):
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if session.testscollected == 0 or reporter.stats.get("skipped"):
@@ -45,22 +64,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="sglang-recipe-") as adapter_dir:
         adapter = Path(adapter_dir) / "deepseek_recipe_renderer.py"
         adapter.write_bytes(source)
-        # Overlay only this stdlib-only module; retain the image's backend stack.
-        sglang.srt.parser.__path__ = [adapter_dir, *sglang.srt.parser.__path__]
-        bridge = importlib.import_module("dynamo.frontend.sglang_deepseek")
-        if (
-            bridge.recipe_renderer is None
-            or Path(bridge.recipe_renderer.__file__) != adapter
-        ):
-            raise RuntimeError("The pinned recipe adapter was not loaded")
-        print(
-            f"Recipe adapter {args.revision}; deepseek-recipe {deepseek_recipe.__version__}; "
-            f"tokenizers {tokenizers.__version__}",
-            flush=True,
-        )
         return pytest.main(
             ["-q", "--durations=5", f"--confcutdir={tests.parent}", str(tests)],
-            plugins=[RequireRecipeCases()],
+            plugins=[RequireRecipeCases(adapter, args.revision)],
         )
 
 
