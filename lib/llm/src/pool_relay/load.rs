@@ -453,6 +453,16 @@ impl PoolDeployment {
             }),
         }
     }
+
+    /// [`Self::from_runtime_configs`] after the checks a pool's load state
+    /// applies to the same configs, so a config the pool view rejects does
+    /// not become a capacity here.
+    pub(super) fn validated(
+        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> anyhow::Result<Self> {
+        load_ranks_from_configs(runtime_configs)?;
+        Ok(Self::from_runtime_configs(runtime_configs))
+    }
 }
 
 #[cfg(test)]

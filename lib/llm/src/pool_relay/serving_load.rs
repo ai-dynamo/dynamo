@@ -64,7 +64,7 @@ pub(super) const SOURCE_RETENTION: Duration = Duration::from_secs(10 * 60);
 const SILENT_STREAM_WARNING: Duration = Duration::from_secs(30);
 
 /// One complete serving-load view: every catalog pool and every model a catalog
-/// pool registers or a fresh frontend serves.
+/// pool registers, a fresh frontend serves, or the topology gives a capacity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ServingLoadSnapshot {
     pub(super) pools: Vec<PoolServingLoad>,

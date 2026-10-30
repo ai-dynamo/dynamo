@@ -894,45 +894,6 @@ mod tests {
         assert_eq!(models[0].deployment, None);
     }
 
-    /// Capacity comes from the topology, so a model whose workers have not
-    /// materialized a pool (no KV events yet) still reports how many
-    /// requests they run at once.
-    #[test]
-    fn topology_capacity_attaches_to_a_model_without_a_catalog_pool() {
-        let mut reports = FrontendReports::default();
-        record(
-            &mut reports,
-            PUBLISHER,
-            frame(1, 1, vec![model_load("a", 2, 5)]),
-        );
-        let capacities = HashMap::from([(
-            (NS.to_string(), "a".to_string()),
-            PoolDeployment {
-                live_workers: 2,
-                max_concurrency: Some(16),
-            },
-        )]);
-
-        let models = reports.model_loads(
-            &catalog(Vec::new()),
-            &capacities,
-            RELAY_NS,
-            &listed(&[PUBLISHER]),
-            Instant::now(),
-        );
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].serving_pools, []);
-        assert_eq!(
-            models[0].deployment,
-            Some(PoolDeployment {
-                live_workers: 2,
-                max_concurrency: Some(16),
-            })
-        );
-    }
-
-    /// Capacity alone is worth publishing: a model with no catalog pool and no
-    /// fresh frontend frame still appears with its topology capacity.
     #[test]
     fn topology_capacity_publishes_a_model_without_pools_or_frontends() {
         let reports = FrontendReports::default();
@@ -967,8 +928,6 @@ mod tests {
         );
     }
 
-    /// A frontend without an exact namespace counts under the namespace whose
-    /// topology serves the model, even before that namespace has a pool.
     #[test]
     fn relay_namespace_frontends_count_under_the_models_topology_namespace() {
         let mut reports = FrontendReports::default();

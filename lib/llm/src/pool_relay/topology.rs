@@ -372,16 +372,17 @@ fn derive_topology(
         .collect()
 }
 
-/// Sums each endpoint's [`PoolDeployment`] into its (namespace, base model)
-/// groups, the groups of [`derive_topology`]. `max_concurrency` is `None` as
-/// soon as one member worker does not declare its limit, as within a pool.
+/// `max_concurrency` is `None` as soon as one member worker does not declare
+/// its limit, and a model is absent as soon as one member's configs fail the
+/// pool view's validation: unknown rather than wrong.
 fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), PoolDeployment> {
     let mut capacities = HashMap::<(String, String), PoolDeployment>::new();
+    let mut invalid = HashSet::new();
     for endpoint_membership in membership.endpoints.values() {
         if endpoint_membership.has_serving_topology_conflict() {
             continue;
         }
-        let deployment = PoolDeployment::from_runtime_configs(&endpoint_membership.runtime_configs);
+        let deployment = PoolDeployment::validated(&endpoint_membership.runtime_configs);
         let base_models = endpoint_membership
             .registrations
             .iter()
@@ -392,6 +393,18 @@ fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), 
             .collect::<BTreeSet<_>>();
         for base_model in base_models {
             let key = (endpoint_membership.namespace.clone(), base_model);
+            let deployment = match &deployment {
+                Ok(deployment) => *deployment,
+                Err(error) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_membership.endpoint,
+                        %error,
+                        "a member's runtime config is invalid; its model's capacity is unknown"
+                    );
+                    invalid.insert(key);
+                    continue;
+                }
+            };
             match capacities.entry(key) {
                 Entry::Occupied(mut entry) => {
                     let total = entry.get_mut();
@@ -408,6 +421,7 @@ fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), 
             }
         }
     }
+    capacities.retain(|key, _| !invalid.contains(key));
     capacities
 }
 
@@ -1673,7 +1687,7 @@ mod tests {
     /// link still count, grouped by (namespace, base model), and one worker
     /// without a declared limit makes the group's limit unknown.
     #[test]
-    fn model_capacities_sum_members_with_or_without_pools() {
+    fn model_capacities_follow_membership_not_the_catalog() {
         let limited = |max_num_seqs: Option<u64>, ranks: u32| ModelRuntimeConfig {
             max_num_seqs,
             data_parallel_size: ranks,
@@ -1723,5 +1737,44 @@ mod tests {
             })
         );
         assert_eq!(capacities.len(), 2);
+    }
+
+    /// A config the pool view rejects (here a zero data-parallel size) makes
+    /// its model's capacity unknown instead of a wrong number.
+    #[test]
+    fn model_capacities_omit_a_model_with_an_invalid_member_config() {
+        let config = |max_num_seqs: u64, ranks: u32| ModelRuntimeConfig {
+            max_num_seqs: Some(max_num_seqs),
+            data_parallel_size: ranks,
+            ..ModelRuntimeConfig::default()
+        };
+        let mut decode = endpoint(
+            "ns.decode.generate",
+            "llama",
+            1,
+            Some(WorkerType::Decode),
+            vec![],
+        );
+        decode.runtime_configs = HashMap::from([(1, config(8, 2)), (2, config(4, 0))]);
+        let mut other = endpoint(
+            "other.agg.generate",
+            "llama",
+            3,
+            Some(WorkerType::Aggregated),
+            vec![],
+        );
+        other.runtime_configs = HashMap::from([(3, config(16, 1))]);
+        let view = view(vec![decode, other]);
+        let publisher = TopologyPublisher::new(view, &catalog(&DcMembershipView::default(), 1));
+
+        let capacities = publisher.model_capacities();
+        assert_eq!(
+            capacities.get(&("other".to_string(), "llama".to_string())),
+            Some(&PoolDeployment {
+                live_workers: 1,
+                max_concurrency: Some(16),
+            })
+        );
+        assert_eq!(capacities.len(), 1);
     }
 }
