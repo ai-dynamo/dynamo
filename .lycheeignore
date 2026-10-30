@@ -109,3 +109,8 @@
 
 # Preserve historical attribution while this contributor profile is unavailable.
 ^https://github\.com/Spycsh$
+
+# The Qwen3-ASR DGD manifests and the renamed realtime launcher are introduced by
+# the same PR as the docs that link to them, so the blob/main URLs return 404 until
+# merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/(deploy/agg_asr(_realtime)?\.yaml|launch/agg_asr_realtime\.sh)$
