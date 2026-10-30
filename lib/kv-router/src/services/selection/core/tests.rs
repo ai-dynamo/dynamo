@@ -1195,7 +1195,7 @@ async fn injected_load_providers_restrict_selection() {
     let core = core_with_host(SelectionHost {
         load: HostLoad {
             available_workers: Some(Arc::new(move |_| provider_state.lock().clone())),
-            overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
+            overloaded_workers: Some(Arc::new(|| Some(Arc::new(HashSet::from([1]))))),
             ..HostLoad::default()
         },
         ..SelectionHost::default()
@@ -3259,6 +3259,42 @@ async fn soft_mode_follows_the_dispatch() {
 }
 
 #[tokio::test]
+async fn soft_mode_follows_custom_policy() {
+    // Bind to an eligible worker different from the custom policy's choice.
+    let (policy, _) = capturing_policy_factory();
+    let core = core_with(
+        test_config(false),
+        SelectionHost::default(),
+        Some(policy),
+        WorkerType::Aggregated,
+        Some(
+            SessionAffinityConfig::new(Duration::from_secs(10))
+                .with_mode(SessionAffinityMode::Soft),
+        ),
+    );
+    for id in [1, 2] {
+        core.upsert_worker(worker(id)).await.unwrap();
+    }
+    let preferred = core.select(select_request()).await.unwrap().worker_id;
+    let bound = if preferred == 1 { 2 } else { 1 };
+    core.dispatch_affinity_event(AffinityBindingEvent {
+        partition: default_key(),
+        session_id: "s".to_string(),
+        worker_id: bound,
+        dp_rank: Some(0),
+        sequence: 1,
+        writer_id: 99,
+    });
+    assert_eq!(bound_worker(&core, "s"), Some(bound));
+    let next = core
+        .select_and_reserve(session_reservation("next-turn", "s"))
+        .await
+        .unwrap();
+    assert_eq!(next.worker_id, preferred);
+    assert_eq!(bound_worker(&core, "s"), Some(preferred));
+}
+
+#[tokio::test]
 async fn replicated_binding_steers_a_new_session_and_frees_with_the_booking() {
     let core = core_with_session_affinity();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -3671,7 +3707,7 @@ fn hint_source_must_share_the_target_worker_type() {
 #[test]
 fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
@@ -3686,7 +3722,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(3),
+            ClusterId::new(3),
         ),
         StableDpSlotId::new([4; 16], IdentitySource::Explicit),
     );
@@ -3826,7 +3862,7 @@ fn preferred_island_falls_back_to_a_cross_island_source() {
 #[test]
 fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
@@ -3839,7 +3875,7 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )
@@ -4088,4 +4124,104 @@ async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
     })
     .await
     .expect("invalid worker patch deadline");
+}
+
+fn core_with_binding_stream(
+    writer_id: u64,
+) -> (SelectionCore, mpsc::Receiver<AffinityBindingEvent>) {
+    core_with(
+        test_config(false),
+        SelectionHost::default(),
+        None,
+        WorkerType::Aggregated,
+        Some(
+            SessionAffinityConfig::new(Duration::from_secs(10))
+                .with_mode(SessionAffinityMode::Soft),
+        ),
+    )
+    .with_session_binding_publisher(writer_id)
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_stream_publishes_bindings_and_refreshes() {
+    let (source, mut updates) = core_with_binding_stream(11);
+    let (peer, mut peer_updates) = core_with_binding_stream(22);
+    for core in [&source, &peer] {
+        core.upsert_worker(worker(1)).await.unwrap();
+    }
+    source
+        .select_and_reserve(session_reservation("turn", "s"))
+        .await
+        .unwrap();
+    let binding = updates.try_recv().expect("commit publishes synchronously");
+    assert_eq!(binding.partition, default_key());
+    assert_eq!(binding.writer_id, 11);
+    assert_eq!(binding.worker_id, 1);
+    peer.dispatch_affinity_event(binding.clone());
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    assert!(peer_updates.try_recv().is_err(), "imports must not echo");
+    assert!(peer.reservation_index.read().is_empty());
+    assert_eq!(lease_count(&peer, "s"), Some(0));
+
+    // Shared frontend semantics: only the origin has an active lease. Release
+    // restores a peer that expired during a request longer than the idle TTL.
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(bound_worker(&source, "s"), Some(1));
+    assert_eq!(bound_worker(&peer, "s"), None);
+    source.free_reservation("turn").await.unwrap();
+    let refresh = updates.try_recv().unwrap();
+    assert_eq!(refresh.version(), binding.version());
+    peer.dispatch_affinity_event(refresh);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(bound_worker(&source, "s"), Some(1));
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(bound_worker(&source, "s"), None);
+    assert_eq!(bound_worker(&peer, "s"), None);
+    assert!(peer_updates.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn peer_bindings_converge_by_version() {
+    let (source, mut source_updates) = core_with_binding_stream(11);
+    let (peer, mut peer_updates) = core_with_binding_stream(22);
+    for core in [&source, &peer] {
+        for id in [1, 2, 3] {
+            core.upsert_worker(worker(id)).await.unwrap();
+        }
+    }
+    for (core, id) in [(&source, 1), (&peer, 2)] {
+        let mut request = session_reservation("first", "s");
+        request.allowed_worker_ids = Some(HashSet::from([id]));
+        core.select_and_reserve(request).await.unwrap();
+    }
+    let mut first = source_updates.try_recv().unwrap();
+    let mut concurrent = peer_updates.try_recv().unwrap();
+    let sequence = first.sequence.max(concurrent.sequence);
+    first.sequence = sequence;
+    concurrent.sequence = sequence;
+    for (core, events) in [
+        (&source, [&first, &concurrent]),
+        (&peer, [&concurrent, &first]),
+    ] {
+        for event in events {
+            core.dispatch_affinity_event(event.clone());
+        }
+        assert_eq!(
+            bound_worker(core, "s"),
+            Some(2),
+            "host writer id breaks sequence ties"
+        );
+    }
+    let mut request = session_reservation("rebind", "s");
+    request.allowed_worker_ids = Some(HashSet::from([3]));
+    source.select_and_reserve(request).await.unwrap();
+    let newer = source_updates.try_recv().unwrap();
+    assert!(newer.version() > concurrent.version());
+    peer.dispatch_affinity_event(newer);
+    peer.free_reservation("first").await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
+    // A stale version cannot displace the newer binding.
+    peer.dispatch_affinity_event(first);
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
 }

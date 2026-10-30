@@ -81,7 +81,7 @@ pub struct RuntimeConfig {
     pub request_plane: Option<String>,
     /// Response transport. Frontend and workers must use the same value.
     /// Maps to `DYN_RESPONSE_PLANE`.
-    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic"])]
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic", "velo"])]
     pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
@@ -115,8 +115,9 @@ impl RuntimeConfig {
         config.response_plane = match self.response_plane.as_deref() {
             Some("tcp") => Some(ResponsePlaneMode::Tcp),
             Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some("velo") => Some(ResponsePlaneMode::Velo),
             Some(value) => {
-                anyhow::bail!("invalid response plane '{value}'; expected 'tcp' or 'quic'")
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp', 'quic', or 'velo'")
             }
             None => None,
         };

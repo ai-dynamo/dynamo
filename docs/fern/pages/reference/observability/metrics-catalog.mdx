@@ -27,6 +27,7 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 | `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
 | `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
+| `dynamo_global_frontend_*` | Global Frontend (`global-frontend`), which forwards each request to a pool frontend | `/metrics` on `--port` (default 8000) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
@@ -546,6 +547,34 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 </ParamField>
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
+
+## Global Frontend metrics
+
+Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the pool's region. No label comes from the request body.
+
+<ParamField path="dynamo_global_frontend_requests_total" type="counter">
+  **Experimental.** Requests forwarded to each pool. Labeled by `pool`, `region`, `local` and `status`. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. A Dynamo pool frontend sends its headers once a worker has the request, so a request the client gives up on while a worker queues it counts under its status, not as `cancelled`. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_rejected_requests_total" type="counter">
+  **Experimental.** Requests the Global Frontend answered without forwarding them. Labeled by `error_type`, with the frontend's values: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no pool serves the model) or `unavailable` (no pool can take the request). A body over `DYN_HTTP_BODY_LIMIT_MB` gets 413 before it is read and is not counted.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_time_to_first_byte_seconds" type="histogram">
+  **Experimental.** Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this is the pool's first event, usually the first token, so it approximates the time to first token as the client sees it, including the round trip to a pool in another region. If the pool frontend sends SSE keep-alives before the first token, the first keep-alive counts as the first byte: at the `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` interval when set, or after 15 seconds for a request whose output a reasoning parser may hold back. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_time_to_first_token_seconds` defaults.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_request_duration_seconds" type="histogram">
+  **Experimental.** Time from the Global Frontend receiving a request to the end of its pool's successful (2xx) response, or to the client leaving. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_request_duration_seconds` defaults.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_response_errors_total" type="counter">
+  **Experimental.** Successful responses whose body broke off before it ended, for example because the pool frontend restarted mid-stream. The client's response ends early. Labeled by `pool` and `region`.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_inflight_requests" type="gauge">
+  **Experimental.** Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Labeled by `pool` and `region`; read at scrape time, so a pool removed from the configuration loses its series.
+</ParamField>
 
 ## Related
 

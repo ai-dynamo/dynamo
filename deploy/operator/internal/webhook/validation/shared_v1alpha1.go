@@ -158,8 +158,11 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionV1Alpha1(
 	if v.toleratesMissingRuntimeVersionOverride(spec.ComponentType) || spec.RuntimeVersionOverride != "" {
 		return nil
 	}
+
+	// Resolve the component-wide runtime mode once for all roles.
+	sidecar := hasRoleSidecarV1Alpha1(spec)
 	for i := range spec.Roles {
-		image := rolePodTemplateMainImageV1Alpha1(&spec.Roles[i])
+		image := rolePodTemplateRuntimeImageV1Alpha1(&spec.Roles[i], sidecar)
 		if image != "" && runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			return field.ErrorList{field.Required(
 				fldPath.Child("runtimeVersionOverride"),
@@ -179,13 +182,18 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(
 		return nil
 	}
 
+	// Resolve old role images using the old component-wide runtime mode.
+	oldSidecar := hasRoleSidecarV1Alpha1(oldSpec)
 	oldImages := make(map[string]string, len(oldSpec.Roles))
 	for i := range oldSpec.Roles {
-		oldImages[oldSpec.Roles[i].Name] = rolePodTemplateMainImageV1Alpha1(&oldSpec.Roles[i])
+		oldImages[oldSpec.Roles[i].Name] = rolePodTemplateRuntimeImageV1Alpha1(&oldSpec.Roles[i], oldSidecar)
 	}
+
+	// Compare new role images using the new component-wide runtime mode.
+	newSidecar := hasRoleSidecarV1Alpha1(newSpec)
 	for i := range newSpec.Roles {
 		role := &newSpec.Roles[i]
-		newImage := rolePodTemplateMainImageV1Alpha1(role)
+		newImage := rolePodTemplateRuntimeImageV1Alpha1(role, newSidecar)
 		if newImage != "" && runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
 			(newImage != oldImages[role.Name] || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
 			return field.ErrorList{field.Required(
@@ -197,8 +205,16 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(
 	return nil
 }
 
-func rolePodTemplateMainImageV1Alpha1(role *nvidiacomv1alpha1.ComponentRoleSpec) string {
+func rolePodTemplateRuntimeImageV1Alpha1(role *nvidiacomv1alpha1.ComponentRoleSpec, sidecarMode bool) string {
 	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	if sidecarMode {
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == "runtime" {
+				return container.Image
+			}
+		}
 		return ""
 	}
 	index := mainContainerIndex(role.PodTemplate.Spec.Containers)

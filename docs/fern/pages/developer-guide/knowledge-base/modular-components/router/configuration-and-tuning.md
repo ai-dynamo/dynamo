@@ -63,7 +63,7 @@ its configuration even if the endpoint is unchanged.
 > over serving none. Different local winners are expected; discovery does not
 > withdraw service or run a shared election to force agreement.
 >
-> Frontend readiness reflects committed membership. The KV DC Relay
+> Frontend readiness reflects committed membership. The Pool Relay
 > evaluates discovery independently and may remain conservative while a Frontend
 > serves its incumbent. The shared readiness evaluator produces the same answer
 > only for equivalent input units.
@@ -266,9 +266,16 @@ Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
 lane, along with its busy thresholds, queue limits, quantum, deficit, and
 counters. Arbitration compares the shared head with the currently dispatchable
 exact-worker lane heads. Absolute and fractional busy thresholds use OR
-semantics. A class queues only when at least one threshold is configured and
-every eligible worker is busy for that class, but a new arrival cannot bypass
-an existing backlog in the same class.
+semantics. The absolute `prefill_busy_threshold` is deprecated and will be
+removed in v1.7; use `prefill_busy_threshold_frac`.
+`decode_busy_threshold_frac` also marks a worker busy when the KV
+blocks its active requests hold exceed that fraction of its `total_kv_blocks`,
+so a worker filled by long-running decodes stops taking new work even after
+their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
+not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
+when at least one threshold is configured and every eligible worker is busy
+for that class, but a new arrival cannot bypass an existing backlog in the
+same class.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
@@ -278,6 +285,10 @@ Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
 rejected with HTTP 529 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
+A class with any queue limit set to `0` never queues: it admits a request
+while an eligible worker is below the class's busy thresholds. If every
+eligible worker is busy, it rejects the request with HTTP 529. Use this for
+a class that should fail fast instead of waiting when its workers are full.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
 dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
