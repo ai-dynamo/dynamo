@@ -6,7 +6,6 @@
 //! failed refresh keeps the last list and marks it stale, so a discovery
 //! outage does not drop what a caller already knows.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::future::Future;
@@ -249,11 +248,6 @@ async fn refresh_pools(
             return;
         }
     };
-    // If the service lists a key twice, the last listing wins.
-    let listed = listed
-        .into_iter()
-        .map(|pool| (pool.key.clone(), pool))
-        .collect::<HashMap<_, _>>();
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
@@ -261,25 +255,28 @@ async fn refresh_pools(
         // A partial list can miss a pool that still exists, so only a
         // complete one shows that a missing pool is gone.
         if complete {
+            let listed_keys = listed.iter().map(|pool| &pool.key).collect::<HashSet<_>>();
             known.retain(|key, _| {
-                let kept = listed.contains_key(key);
+                let kept = listed_keys.contains(key);
                 if !kept {
                     removed.push(key.to_string());
                 }
                 kept
             });
         }
-        for (key, pool) in listed {
-            match known.entry(key) {
-                Entry::Vacant(entry) => {
-                    added.push(entry.key().to_string());
-                    entry.insert(pool);
-                }
-                Entry::Occupied(mut entry) => {
-                    if *entry.get() != pool {
-                        updated.push(entry.key().to_string());
-                        entry.insert(pool);
+        // Clones a key only for a new pool. If the service lists a key twice,
+        // the last listing wins.
+        for pool in listed {
+            match known.get_mut(&pool.key) {
+                Some(known_pool) => {
+                    if *known_pool != pool {
+                        updated.push(pool.key.to_string());
+                        *known_pool = pool;
                     }
+                }
+                None => {
+                    added.push(pool.key.to_string());
+                    known.insert(pool.key.clone(), pool);
                 }
             }
         }
