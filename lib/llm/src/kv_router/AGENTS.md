@@ -26,6 +26,8 @@ and the booking lifecycle these rules protect.
   - `routing_host/builtin.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
     load-based) and Direct mode. Like a KV route, a built-in route is planned (`RoutePlan`),
     then dispatched.
+  - `routing_host/README.md`: how to drive the KV and built-in planes, and what they share.
+    Read it before adding a `RoutingHost` entry point or routing mode.
   - `routing_host/request_guard.rs`: tracks a dispatched request's progress and releases its
     booking.
   - `routing_host/cancellation.rs`: what a client disconnect cancels, and the cleanup budget.

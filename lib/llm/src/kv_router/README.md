@@ -5,7 +5,9 @@ This module is the router's host layer. It embeds the selection core from `lib/k
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
 [`components/src/dynamo/router/AGENTS.md`](../../../../components/src/dynamo/router/AGENTS.md).
-The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.md).
+The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.md). How a
+caller drives a `RoutingHost` on the KV and built-in planes is in
+[`routing_host/README.md`](routing_host/README.md).
 
 ## Layer map
 
