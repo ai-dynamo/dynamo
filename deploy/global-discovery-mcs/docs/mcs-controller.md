@@ -178,12 +178,23 @@ controller with server-side apply, field manager `mcs-controller`:
 
 | Object | Name | Content |
 | :---- | :---- | :---- |
-| ServiceImport | `<name>` | `spec.type` (ClusterSetIP or Headless), merged ports, session affinity and config, IP families, `spec.ips` = the derived Service's ClusterIPs (at most two, none for Headless); exported labels and annotations; labels `dynamo.nvidia.com/mcs-managed-by`, `dynamo.nvidia.com/mcs-clusterset`; annotation `multicluster.kubernetes.io/derived-service`; `status.clusters` = the participating clusters; conditions `Ready` and `Conflict` (the import-level conflict) |
-| Derived Service | `derived-<hash>` (`api.DerivedServiceName`) | No selector; type ClusterIP; `clusterIP: None` for Headless; merged ports; session affinity; IP families (SingleStack for one, PreferDualStack for two); labels managed-by, clusterset and `multicluster.kubernetes.io/service-name`; owner reference to the ServiceImport |
+| ServiceImport | `<name>` | `spec.type` (ClusterSetIP or Headless), merged ports, session affinity and config, IP families, internal traffic policy, traffic distribution, `spec.ips` = the derived Service's ClusterIPs (at most two, none for Headless); exported labels and annotations; labels `dynamo.nvidia.com/mcs-managed-by`, `dynamo.nvidia.com/mcs-clusterset`; annotation `multicluster.kubernetes.io/derived-service`; `status.clusters` = the participating clusters; `status.endpointSliceObjects` = `Present` or `Absent`; conditions `Ready` and `Conflict` (the import-level conflict) |
+| Derived Service | `derived-<hash>` (`api.DerivedServiceName`) | No selector; type ClusterIP; `clusterIP: None` for Headless; merged ports; session affinity; internal traffic policy; traffic distribution; IP families (SingleStack for one, PreferDualStack for two); labels managed-by, clusterset and `multicluster.kubernetes.io/service-name`; owner reference to the ServiceImport |
 | EndpointSlices | `<derived>-<cluster>-<i>` | One set per source cluster, the local one included, at most `--endpoints-per-slice` endpoints each, grouped by address type and port set; ports filtered to the port names of the merged import; the `ready`, `serving` and `terminating` conditions as exported; node names kept for local endpoints only; `targetRef` from the exported target attributes (below); labels `kubernetes.io/service-name=<derived>`, `multicluster.kubernetes.io/service-name=<name>`, `multicluster.kubernetes.io/source-cluster=<cluster>`, `topology.kubernetes.io/region=<region>` when the source cluster registered a region, `endpointslice.kubernetes.io/managed-by=mcs-controller.dynamo.nvidia.com`, managed-by and clusterset; owner reference to the ServiceImport |
 
 Details:
 
+- The selected export's internal traffic policy and traffic distribution are
+  copied into both the ServiceImport and derived Service. `Local` retains
+  Kubernetes node-local routing semantics; remote endpoints have no local
+  node name and are not node-local destinations. An unspecified policy from
+  an older registry remains omitted; the derived Service then defaults to
+  `Cluster`. An empty distribution remains omitted, and server-side apply
+  removes any previously owned distribution value.
+- After applying desired slices and deleting stale ones, the controller
+  publishes `status.endpointSliceObjects: Present` when the applied slice
+  set is nonempty, and `Absent` when it is empty. This describes slice
+  objects, independently of whether their endpoints are ready.
 - An imported endpoint whose export carries the attribute `targetRef.name`
   gets `targetRef` with that name, the kind from `targetRef.kind` (Pod when
   absent) and the namespace from `targetRef.namespace` when present. The

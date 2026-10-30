@@ -244,7 +244,8 @@ func (i *Importer) apply(ctx context.Context, imp *mcsv1.ServiceImport) (err err
 		}
 	}
 
-	if err := i.applySlices(ctx, imp, uid); err != nil {
+	slicesPresent, err := i.applySlices(ctx, imp, uid)
+	if err != nil {
 		return err
 	}
 
@@ -254,12 +255,19 @@ func (i *Importer) apply(ctx context.Context, imp *mcsv1.ServiceImport) (err err
 		existing = mcsv1beta1.ServiceImport{}
 	}
 	st := BuildServiceImportStatus(imp, existing.Status.Conditions, si.GetGeneration())
-	if found && equality.Semantic.DeepEqual(st.Clusters, existing.Status.Clusters) && equalConditions(st.Conditions, existing.Status.Conditions) {
+	st.EndpointSliceObjects = mcsv1beta1.EndpointSliceObjectsAbsent
+	if slicesPresent {
+		st.EndpointSliceObjects = mcsv1beta1.EndpointSliceObjectsPresent
+	}
+	if found && st.EndpointSliceObjects == existing.Status.EndpointSliceObjects &&
+		equality.Semantic.DeepEqual(st.Clusters, existing.Status.Clusters) && equalConditions(st.Conditions, existing.Status.Conditions) {
 		return nil
 	}
 	// The status is written whole with a merge patch: the controller owns
 	// it, and the merge does not depend on the cached copy being current.
-	patch, err := json.Marshal(map[string]any{"status": map[string]any{"clusters": st.Clusters, "conditions": st.Conditions}})
+	patch, err := json.Marshal(map[string]any{"status": map[string]any{
+		"clusters": st.Clusters, "conditions": st.Conditions, "endpointSliceObjects": st.EndpointSliceObjects,
+	}})
 	if err != nil {
 		return err
 	}
@@ -272,13 +280,13 @@ func (i *Importer) apply(ctx context.Context, imp *mcsv1.ServiceImport) (err err
 }
 
 // applySlices applies the EndpointSlices of every source cluster and deletes
-// managed slices of the import that are no longer wanted.
-func (i *Importer) applySlices(ctx context.Context, imp *mcsv1.ServiceImport, owner types.UID) error {
+// managed slices no longer wanted, reporting whether the desired set is nonempty.
+func (i *Importer) applySlices(ctx context.Context, imp *mcsv1.ServiceImport, owner types.UID) (bool, error) {
 	id := i.opts.Identity
 	want := map[string]bool{}
 	for _, s := range BuildEndpointSlices(imp, id.ClusterSet, id.Cluster, owner, i.opts.EndpointsPerSlice) {
 		if err := i.opts.Client.Apply(ctx, s, ctrlclient.FieldOwner(api.FieldManager), ctrlclient.ForceOwnership); err != nil {
-			return fmt.Errorf("apply EndpointSlice %s: %w", *s.Name, err)
+			return false, fmt.Errorf("apply EndpointSlice %s: %w", *s.Name, err)
 		}
 		want[*s.Name] = true
 	}
@@ -287,7 +295,7 @@ func (i *Importer) applySlices(ctx context.Context, imp *mcsv1.ServiceImport, ow
 		api.LabelEndpointSliceManagedBy: api.EndpointSliceManagedBy,
 		api.LabelMCSServiceName:         imp.GetName(),
 	}); err != nil {
-		return err
+		return false, err
 	}
 	for idx := range list.Items {
 		s := &list.Items[idx]
@@ -295,11 +303,11 @@ func (i *Importer) applySlices(ctx context.Context, imp *mcsv1.ServiceImport, ow
 			continue
 		}
 		if err := i.opts.Client.Delete(ctx, s); ctrlclient.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("delete stale EndpointSlice %s: %w", s.Name, err)
+			return false, fmt.Errorf("delete stale EndpointSlice %s: %w", s.Name, err)
 		}
 		i.opts.Metrics.GCDeletions.WithLabelValues(metrics.GCEndpointSlice).Inc()
 	}
-	return nil
+	return len(want) > 0, nil
 }
 
 // remove deletes the managed ServiceImport, derived Service and EndpointSlices
