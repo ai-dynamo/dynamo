@@ -121,6 +121,8 @@ pub struct KvTransferTarget {
 pub struct KvTransferScope {
     /// The shortest local prefix of any target; shorter sources are skipped.
     min_local_prefix_blocks: usize,
+    /// No target can use a continuation starting beyond this depth.
+    max_local_prefix_blocks: usize,
     /// Whether some target takes a source from any island: it has no
     /// transfer domain, or `preferred` enforcement allows a fallback.
     any_island: bool,
@@ -142,6 +144,7 @@ impl KvTransferScope {
     pub fn all() -> Self {
         Self {
             min_local_prefix_blocks: 0,
+            max_local_prefix_blocks: usize::MAX,
             any_island: true,
             islands: IslandScope::Any,
         }
@@ -151,11 +154,13 @@ impl KvTransferScope {
     pub fn of(targets: impl IntoIterator<Item = (KvTransferTarget, usize)>) -> Self {
         let mut scope = Self {
             min_local_prefix_blocks: usize::MAX,
+            max_local_prefix_blocks: 0,
             any_island: false,
             islands: IslandScope::Unused,
         };
         for (target, local_prefix_blocks) in targets {
             scope.min_local_prefix_blocks = scope.min_local_prefix_blocks.min(local_prefix_blocks);
+            scope.max_local_prefix_blocks = scope.max_local_prefix_blocks.max(local_prefix_blocks);
             scope.any_island |= target.transfer_domain.is_none() || target.preferred;
             if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
                 let one = IslandScope::One(domain, island);
@@ -256,18 +261,17 @@ struct TopSources {
 
 impl TopSources {
     fn offer(&mut self, source: RankedSource) {
-        let top = self;
-        if source.outranks(&top.best) {
-            if !source.shares_attachment(&top.best) {
-                top.runner_up = Some(top.best);
+        if source.outranks(&self.best) {
+            if !source.shares_attachment(&self.best) {
+                self.runner_up = Some(self.best);
             }
-            top.best = source;
-        } else if !source.shares_attachment(&top.best)
-            && top
+            self.best = source;
+        } else if !source.shares_attachment(&self.best)
+            && self
                 .runner_up
                 .is_none_or(|runner_up| source.outranks(&runner_up))
         {
-            top.runner_up = Some(source);
+            self.runner_up = Some(source);
         }
     }
 
@@ -315,15 +319,16 @@ impl SourceBucket {
                     *bucket = Self::Continuations(vec![(0, *top), (start, next)]);
                 }
             }
-            Self::Continuations(frontiers) => {
-                let (last_start, top) = *frontiers.last().unwrap();
-                debug_assert!(start >= last_start);
-                let mut next = top;
-                next.offer(source);
-                if start == last_start {
-                    frontiers.last_mut().unwrap().1 = next;
-                } else if next != top {
-                    frontiers.push((start, next));
+            Self::Continuations(by_start) => {
+                if let Some((last_start, top)) = by_start.last_mut() {
+                    debug_assert!(start >= *last_start);
+                    let mut next = *top;
+                    next.offer(source);
+                    if start == *last_start {
+                        *top = next;
+                    } else if next != *top {
+                        by_start.push((start, next));
+                    }
                 }
             }
         }
@@ -336,9 +341,9 @@ impl SourceBucket {
     ) -> Option<KvTransferSourceChoice> {
         match self {
             Self::Root(top) => top.best_for(worker),
-            Self::Continuations(frontiers) => {
-                let idx = frontiers.partition_point(|(start, _)| *start <= local_prefix);
-                frontiers
+            Self::Continuations(by_start) => {
+                let idx = by_start.partition_point(|(start, _)| *start <= local_prefix);
+                by_start
                     .get(idx.checked_sub(1)?)
                     .and_then(|(_, top)| top.best_for(worker))
             }
@@ -365,6 +370,7 @@ impl KvTransferSourceSummary {
         scope: KvTransferScope,
     ) -> Self {
         let min_local_prefix_blocks = scope.min_local_prefix_blocks;
+        let max_local_prefix_blocks = scope.max_local_prefix_blocks;
         let needs_islands = scope.islands != IslandScope::Unused;
         let mut summary = Self {
             by_type: FxHashMap::default(),
@@ -373,7 +379,10 @@ impl KvTransferSourceSummary {
         };
         let snapshot = candidates.routing_snapshot.as_deref();
         let usable = |start, end| {
-            end > min_local_prefix_blocks && end <= candidates.block_hashes.len() && start < end
+            start <= max_local_prefix_blocks
+                && end > min_local_prefix_blocks
+                && end <= candidates.block_hashes.len()
+                && start < end
         };
         let roots = candidates
             .owner_prefix_blocks

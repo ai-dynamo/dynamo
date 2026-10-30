@@ -216,7 +216,7 @@ pub struct LowerTierQueryOptions {
 
 fn merge_kv_transfer_tier_candidates(
     device_candidates: Option<&KvTransferCandidates>,
-    tier_matches: &LowerTierMatchDetails,
+    tier_matches: &mut LowerTierMatchDetails,
     routing_snapshot: Arc<ResidencyRoutingSnapshot>,
 ) -> Option<KvTransferCandidates> {
     let mut block_hashes = device_candidates
@@ -228,7 +228,7 @@ fn merge_kv_transfer_tier_candidates(
         owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
     }
 
-    let Some(extensions) = tier_matches.kv_transfer_extensions.as_ref() else {
+    let Some(extensions) = tier_matches.kv_transfer_extensions.as_mut() else {
         return device_candidates.cloned();
     };
 
@@ -264,7 +264,9 @@ fn merge_kv_transfer_tier_candidates(
         .into_iter()
         .filter(|(_, blocks)| *blocks > 0)
         .collect::<Vec<_>>();
-    if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
+    let mut source_intervals = std::mem::take(&mut extensions.source_intervals);
+    source_intervals.retain(|interval| interval.end <= block_hashes.len());
+    if block_hashes.is_empty() || (owner_prefix_blocks.is_empty() && source_intervals.is_empty()) {
         return None;
     }
     owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
@@ -272,7 +274,7 @@ fn merge_kv_transfer_tier_candidates(
     Some(KvTransferCandidates {
         block_hashes,
         owner_prefix_blocks,
-        source_intervals: Vec::new(),
+        source_intervals,
         routing_snapshot: Some(routing_snapshot),
     })
 }
@@ -353,35 +355,9 @@ pub fn query_lower_tiers_with_options_and_snapshot(
         if retain_kv_transfer_chain {
             tier_matches.kv_transfer_candidates = merge_kv_transfer_tier_candidates(
                 device_matches.kv_transfer_candidates.as_ref(),
-                &tier_matches,
+                &mut tier_matches,
                 snapshot.clone(),
             );
-            // A detached suffix can only extend a positive device+host prefix.
-            // Cold destinations still use the root-prefix candidates above.
-            let mut frontiers: Vec<_> = tier_matches
-                .next_continuations
-                .values()
-                .map(|continuation| continuation.start_pos)
-                .filter(|&depth| depth > 0 && depth < sequence.len())
-                .collect();
-            frontiers.sort_unstable();
-            frontiers.dedup();
-            if !frontiers.is_empty() {
-                let candidates = tier_matches.kv_transfer_candidates.get_or_insert_with(|| {
-                    KvTransferCandidates {
-                        routing_snapshot: Some(snapshot.clone()),
-                        ..Default::default()
-                    }
-                });
-                indexer
-                    .backend()
-                    .extend_fetch_continuations(sequence, candidates, &snapshot, &frontiers);
-                if candidates.owner_prefix_blocks.is_empty()
-                    && candidates.source_intervals.is_empty()
-                {
-                    tier_matches.kv_transfer_candidates = None;
-                }
-            }
         }
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
         tracing::debug!(
@@ -779,13 +755,158 @@ mod tests {
             let expected = if (2..4).contains(&depth) {
                 vec![KvTransferSourceInterval {
                     source: suffix.into(),
-                    start: 2,
+                    start: depth,
                     end: 4,
                 }]
             } else {
                 Vec::new()
             };
             assert_eq!(candidates.source_intervals, expected, "depth={depth}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_continuation_coverage_matches_owner_inventory() {
+        use crate::protocols::{KvCacheRemoveData, ResidencyOwner, RouterHintSourceMetadata};
+
+        let mut rng = fastrand::Rng::with_seed(42);
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(8, 0)];
+        let owners = [cache_owner_id(4), cache_owner_id(5), cache_owner_id(6)];
+        let local: Vec<u64> = (11..19).collect();
+        let hashes: Vec<u64> = (101..109).collect();
+        for _ in 0..64 {
+            let indexers = LowerTierIndexers::new(2, 4);
+            let host = indexers.get_or_create(StorageTier::HostPinned);
+            // Two exact owners alias one local worker. Local continuation sees
+            // their union, but each fetch source must cover its own whole suffix.
+            let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+                ResidencyProjection::new([(owners[0], workers[0]), (owners[1], workers[0])])
+                    .unwrap(),
+                owners.iter().map(|&owner| {
+                    (
+                        owner,
+                        RouterHintSourceMetadata {
+                            source_control_endpoint: "tcp://source:9000".to_string(),
+                            worker_type: "prefill".to_string(),
+                            topology_domains: HashMap::new(),
+                        },
+                        None,
+                    )
+                }),
+            ));
+            let inventory: Vec<Vec<bool>> = owners
+                .iter()
+                .map(|_| (0..8).map(|_| rng.bool()).collect())
+                .collect();
+            for (&owner, present) in owners.iter().zip(&inventory) {
+                let store = store_event(9, 0, 1, None, &local, &hashes);
+                host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                    9,
+                    store.event,
+                    StorageTier::HostPinned,
+                    owner,
+                ))
+                .await
+                .unwrap();
+                host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                    9,
+                    KvCacheEvent {
+                        event_id: 2,
+                        dp_rank: 0,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: hashes
+                                .iter()
+                                .zip(present)
+                                .filter_map(|(&hash, &keep)| {
+                                    (!keep).then_some(ExternalSequenceBlockHash(hash))
+                                })
+                                .collect(),
+                        }),
+                    },
+                    StorageTier::HostPinned,
+                    owner,
+                ))
+                .await
+                .unwrap();
+            }
+            let mut device = MatchDetails::default();
+            let depths = [rng.usize(0..=8), rng.usize(0..=8)];
+            for (&worker, &depth) in workers.iter().zip(&depths) {
+                if depth > 0 {
+                    device.overlap_scores.scores.insert(worker, depth as u32);
+                    device
+                        .last_matched_hashes
+                        .insert(worker, ExternalSequenceBlockHash(hashes[depth - 1]));
+                }
+            }
+            device.retain_kv_transfer_candidates(
+                hashes[..*depths.iter().max().unwrap()]
+                    .iter()
+                    .copied()
+                    .map(ExternalSequenceBlockHash)
+                    .collect(),
+            );
+            let result = query_lower_tiers_with_options_and_snapshot(
+                &indexers,
+                &local_hashes(&local),
+                &device,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+                snapshot,
+            );
+            let host_matches = &result[&StorageTier::HostPinned];
+            let local_depths = [
+                (depths[0]..8)
+                    .find(|&p| !inventory[0][p] && !inventory[1][p])
+                    .unwrap_or(8),
+                depths[1],
+            ];
+            for (&worker, &depth) in workers.iter().zip(&local_depths) {
+                assert_eq!(
+                    host_matches
+                        .next_continuations
+                        .get(&worker)
+                        .map_or(0, |c| c.start_pos),
+                    depth
+                );
+            }
+            let candidates = host_matches.kv_transfer_candidates.as_ref();
+            if let Some(candidates) = candidates {
+                assert_eq!(
+                    candidates.block_hashes,
+                    hashes[..candidates.block_hashes.len()]
+                        .iter()
+                        .copied()
+                        .map(ExternalSequenceBlockHash)
+                        .collect::<Vec<_>>()
+                );
+            }
+            for (&owner, present) in owners.iter().zip(&inventory) {
+                let source = KvTransferCandidateSource::CacheOwner(
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                );
+                for depth in local_depths {
+                    let end = (depth..8).find(|&p| !present[p]).unwrap_or(8);
+                    let expected = (end > depth).then_some(end);
+                    let actual = candidates.and_then(|c| {
+                        c.owner_prefix_blocks
+                            .iter()
+                            .filter(|&&(s, end)| s == source && end > depth)
+                            .map(|&(_, end)| end)
+                            .chain(
+                                c.source_intervals
+                                    .iter()
+                                    .filter(|i| {
+                                        i.source == source && i.start <= depth && depth < i.end
+                                    })
+                                    .map(|i| i.end),
+                            )
+                            .max()
+                    });
+                    assert_eq!(actual, expected, "depth={depth}, inventory={inventory:?}");
+                }
+            }
         }
     }
 
