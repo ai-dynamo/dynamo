@@ -252,8 +252,20 @@ curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/resume
 ```
 
 The routing-convergence window uses `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`
-(default: 5 seconds). Previously admitted responses keep running. After admission
-closes, a late request receives a typed worker-draining rejection. A supporting
+(default: 5 seconds). After successful unregistration, the worker continues
+accepting new requests during this interval while frontends process discovery
+withdrawal. Increasing the interval delays admission closure; it does not wait
+for engine requests or KV transfers to complete. The same setting also controls
+the existing SIGTERM routing-convergence grace.
+
+```text
+unregister succeeds → continue accepting during grace → close business admission
+previously admitted work continues independently ─────────────────────────────→
+```
+
+Expiry establishes local admission closure, not acknowledgement from every
+frontend or permission to delete the Pod. After admission closes, a late request
+receives a typed worker-draining rejection. A supporting
 frontend may reselect up to three times independently of its ordinary migration
 budget, before response data and subject to explicit routing constraints.
 Internal worker health probes remain callable during manual withdrawal.
