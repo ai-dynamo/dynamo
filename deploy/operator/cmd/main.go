@@ -298,7 +298,7 @@ func main() {
 
 	// Initialize observability metrics
 	setupLog.Info("Initializing observability metrics")
-	observability.InitMetrics()
+	observability.InitMetrics(operatorVersion)
 
 	// Set up webhook certificate management.
 	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
