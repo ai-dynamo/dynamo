@@ -81,6 +81,8 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
+# Disaggregated configs run two engines on one GPU with a 2048-token context.
+DISAGGREGATED_CANCELLATION_MAX_TOKENS = 1024
 
 
 def _aggregated_payloads(metrics: EngineMetrics):
@@ -108,6 +110,12 @@ def _disaggregated_payloads(
             prefill_metrics=prefill_metrics,
             decode_metrics=decode_metrics,
             transfer_metrics=transfer_metrics,
+        ),
+        # Cancel mid-decode: decode stops early and prefill ends idle.
+        *http_cancellation_payloads(
+            decode_metrics,
+            max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS,
+            idle_metrics=(prefill_metrics,),
         ),
     ]
 
@@ -300,7 +308,13 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[disaggregated_token_count_payload(logprobs=True)],
+        request_payloads=[
+            disaggregated_token_count_payload(logprobs=True),
+            # Public disconnect/recovery only: no native scheduler observations.
+            *http_cancellation_payloads(
+                None, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
+            ),
+        ],
     ),
     "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",

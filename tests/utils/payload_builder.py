@@ -969,7 +969,10 @@ def chat_logprobs_and_structured_output_payloads(
 
 
 def http_cancellation_payloads(
-    metrics: EngineMetrics | None, *, max_tokens: int
+    metrics: EngineMetrics | None,
+    *,
+    max_tokens: int,
+    idle_metrics: tuple[EngineMetrics, ...] = (),
 ) -> list[BasePayload]:
     body = {
         "messages": [{"role": "user", "content": "Count from one to a thousand."}],
@@ -985,6 +988,7 @@ def http_cancellation_payloads(
             expected_response=[],
             expected_log=[],
             metrics=metrics,
+            idle_metrics=idle_metrics,
         ),
         StreamingChatPayload(
             body={**body, "max_tokens": 4, "stream_options": {"include_usage": True}},

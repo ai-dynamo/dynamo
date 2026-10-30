@@ -171,6 +171,9 @@ class HttpCancellationPayload(BasePayload):
     """
 
     metrics: EngineMetrics | None = field(kw_only=True)
+    # Other engines in the deployment, such as a disaggregated prefill engine;
+    # each must also go idle after the cancellation.
+    idle_metrics: tuple[EngineMetrics, ...] = field(default=(), kw_only=True)
     endpoint: str = "/v1/chat/completions"
     http_stream: bool = True
     timeout: int = 30
@@ -178,8 +181,9 @@ class HttpCancellationPayload(BasePayload):
     _completion_progress: float = field(default=0, init=False, repr=False)
 
     def bind_environment(self, env: dict[str, str]) -> None:
-        if self.metrics is not None:
-            self.metrics.bind_environment(env)
+        for metrics in (self.metrics, *self.idle_metrics):
+            if metrics is not None:
+                metrics.bind_environment(env)
 
     def _sampling_params(self) -> dict:
         return self.body
@@ -241,6 +245,8 @@ class HttpCancellationPayload(BasePayload):
             self.metrics.assert_cancelled(
                 before=self._before, completion_progress=self._completion_progress
             )
+        for metrics in self.idle_metrics:
+            metrics.wait_for_scheduler()
         return content
 
 
