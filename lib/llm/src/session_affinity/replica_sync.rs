@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dynamo_runtime::{
@@ -25,7 +26,8 @@ use crate::direct_zmq_fan_in::{
     ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
 };
 use dynamo_kv_router::services::selection::affinity::{
-    AffinityReplicaSink, AffinityTarget, AffinityVersion, SessionAffinity, WeakSessionAffinity,
+    AffinityReplicaSink, AffinityTarget, AffinityVersion, ReplicaApplyOutcome, SessionAffinity,
+    WeakSessionAffinity,
 };
 
 pub(super) const SESSION_AFFINITY_SUBJECT: &str = "session_affinity_events";
@@ -136,6 +138,13 @@ impl ReplicaUpdateApplier {
             .iter()
             .any(|instance| instance.id() == update.worker_id)
         {
+            if table.has_newer_binding(&update.session_id, update.version()) {
+                tracing::trace!(
+                    worker_id = update.worker_id,
+                    "dropping superseded session affinity update"
+                );
+                return true;
+            }
             tracing::trace!(
                 worker_id = update.worker_id,
                 "holding session affinity update until its worker is discovered"
@@ -150,7 +159,7 @@ impl ReplicaUpdateApplier {
         {
             held.sessions.remove(&update.session_id);
         }
-        apply_update(&table, update);
+        apply_update(&table, update, Duration::ZERO);
         true
     }
 
@@ -171,28 +180,47 @@ impl ReplicaUpdateApplier {
             .map(Instance::id)
             .collect();
         let (now, ttl) = (Instant::now(), table.ttl());
-        for (_, (update, received)) in held.sessions.extract_if(|_, (update, received)| {
-            now.saturating_duration_since(*received) >= ttl
-                || discovered.contains(&update.worker_id)
-        }) {
-            if now.saturating_duration_since(received) < ttl {
-                apply_update(&table, update);
+        let ready: Vec<_> = held
+            .sessions
+            .extract_if(|_, (update, received)| {
+                now.saturating_duration_since(*received) >= ttl
+                    || discovered.contains(&update.worker_id)
+            })
+            .map(|(_, held)| held)
+            .filter(|(_, received)| now.saturating_duration_since(*received) < ttl)
+            .collect();
+        for (update, received) in ready {
+            let held_for = now.saturating_duration_since(received);
+            // A local request is binding the session; keep the peer binding in
+            // case it is cancelled, and retry on the next discovery change.
+            if apply_update(&table, update.clone(), held_for)
+                == ReplicaApplyOutcome::IgnoredInitializing
+            {
+                held.sessions
+                    .insert(update.session_id.clone(), (update, received));
             }
         }
         true
     }
 }
 
-fn apply_update(table: &SessionAffinity, update: SessionAffinityUpdate) {
+/// Apply `update`, which waited `held_for` for discovery; it keeps only the
+/// lifetime it had left.
+fn apply_update(
+    table: &SessionAffinity,
+    update: SessionAffinityUpdate,
+    held_for: Duration,
+) -> ReplicaApplyOutcome {
     let target = AffinityTarget::new(update.worker_id, update.dp_rank);
     let version = update.version();
-    let outcome = table.apply_replica_update(update.session_id, target, version);
+    let outcome = table.apply_held_replica_update(update.session_id, target, version, held_for);
     tracing::trace!(
         worker_id = target.worker_id,
         dp_rank = ?target.dp_rank,
         ?outcome,
         "processed best-effort session affinity update"
     );
+    outcome
 }
 
 pub(super) struct ReplicaSyncRuntime {
@@ -537,6 +565,63 @@ mod tests {
         let table = coordinator.table_for_test().upgrade().unwrap();
         assert_eq!(table.query_target("s", None).unwrap(), None);
         assert!(applier.held.lock().sessions.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_update_keeps_version_order_ttl_and_initializing_sessions() {
+        let coordinator = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
+        let (tx, discovered_instances) = watch::channel(vec![instance(2)]);
+        let applier = ReplicaUpdateApplier {
+            local_publisher_id: 7,
+            discovered_instances,
+            table: coordinator.table_for_test(),
+            held: Arc::default(),
+        };
+        let update = |session_id: &str, worker_id, sequence| SessionAffinityUpdate {
+            session_id: session_id.to_string(),
+            worker_id,
+            dp_rank: Some(0),
+            sequence,
+            writer_id: 9,
+        };
+        let table = coordinator.table_for_test().upgrade().unwrap();
+        let bound = |session_id| {
+            table
+                .query_target(session_id, None)
+                .unwrap()
+                .map(|target| target.worker_id)
+        };
+
+        // An older update for an undiscovered worker loses to the live binding
+        // now, so it cannot return once that binding expires.
+        assert!(applier.apply(8, update("newer", 2, 5)));
+        assert!(applier.apply(8, update("newer", 1, 4)));
+        assert!(applier.held.lock().sessions.is_empty());
+
+        assert!(applier.apply(8, update("held", 1, 6)));
+        assert!(applier.apply(8, update("initializing", 1, 7)));
+        let initializing = table.try_acquire("initializing", None).unwrap();
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tx.send_modify(|instances| instances.push(instance(1)));
+        assert!(applier.apply_held());
+        assert_eq!(bound("held"), Some(1));
+        assert_eq!(applier.held.lock().sessions.len(), 1);
+
+        // The peer binding survives a local initialization that is cancelled.
+        drop(initializing);
+        assert!(applier.apply_held());
+        assert_eq!(bound("initializing"), Some(1));
+        assert!(applier.held.lock().sessions.is_empty());
+
+        // Applied bindings keep only the TTL left after waiting.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(bound("held"), None);
+        assert_eq!(bound("initializing"), None);
+        assert_eq!(bound("newer"), None);
     }
 
     fn instance(instance_id: u64) -> Instance {

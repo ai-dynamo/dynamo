@@ -569,6 +569,14 @@ impl SelectionCore {
         };
         table.observe_replica_sequence(event.sequence);
         if !self.worker_in_partition(event.worker_id, &event.partition) {
+            if table.has_newer_binding(&event.session_id, event.version()) {
+                tracing::trace!(
+                    key = %event.partition,
+                    worker_id = event.worker_id,
+                    "Dropping session affinity replica update: superseded binding"
+                );
+                return;
+            }
             tracing::trace!(
                 key = %event.partition,
                 worker_id = event.worker_id,

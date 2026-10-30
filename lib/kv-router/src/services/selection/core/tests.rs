@@ -4169,6 +4169,63 @@ async fn held_binding_expires_after_session_ttl() {
     assert!(peer.held_bindings.lock().is_empty());
 }
 
+fn peer_binding(session_id: &str, worker_id: WorkerId, sequence: u64) -> AffinityBindingEvent {
+    AffinityBindingEvent {
+        partition: default_key(),
+        session_id: session_id.to_string(),
+        worker_id,
+        dp_rank: Some(0),
+        sequence,
+        writer_id: 11,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_binding_keeps_its_remaining_ttl() {
+    let (peer, _peer_updates) = core_with_binding_stream(22);
+    peer.upsert_worker(worker(2)).await.unwrap();
+    peer.dispatch_affinity_event(peer_binding("s", 1, 1));
+    tokio::time::advance(Duration::from_secs(6)).await;
+    peer.upsert_worker(worker(1)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert_eq!(bound_worker(&peer, "s"), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_binding_is_not_held_behind_a_newer_one() {
+    let (peer, _peer_updates) = core_with_binding_stream(22);
+    peer.upsert_worker(worker(2)).await.unwrap();
+    peer.dispatch_affinity_event(peer_binding("s", 2, 5));
+    assert_eq!(bound_worker(&peer, "s"), Some(2));
+    peer.dispatch_affinity_event(peer_binding("s", 1, 4));
+    assert!(peer.held_bindings.lock().is_empty());
+    tokio::time::advance(Duration::from_secs(10)).await;
+    peer.upsert_worker(worker(1)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), None);
+}
+
+#[tokio::test]
+async fn held_binding_survives_a_cancelled_local_initialization() {
+    let (peer, _peer_updates) = core_with_binding_stream(22);
+    peer.upsert_worker(worker(2)).await.unwrap();
+    peer.dispatch_affinity_event(peer_binding("s", 1, 1));
+    let table = peer
+        .entry(&default_key())
+        .unwrap()
+        .affinity
+        .get()
+        .unwrap()
+        .clone();
+    let initializing = table.try_acquire("s", None).unwrap();
+    peer.upsert_worker(worker(1)).await.unwrap();
+    assert_eq!(peer.held_bindings.lock().len(), 1);
+    drop(initializing);
+    peer.upsert_worker(worker(1)).await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    assert!(peer.held_bindings.lock().is_empty());
+}
+
 #[test]
 fn held_bindings_drop_the_oldest_past_the_limit() {
     let start = tokio::time::Instant::now();
@@ -4190,7 +4247,7 @@ fn held_bindings_drop_the_oldest_past_the_limit() {
     assert_eq!(held.len(), limit);
     let ready = held.take_placeable(&default_key(), Duration::from_secs(3600), start, |_| true);
     assert_eq!(ready.len(), limit);
-    assert!(ready.iter().all(|event| event.session_id != "s0"));
+    assert!(ready.iter().all(|(event, _)| event.session_id != "s0"));
     assert!(held.is_empty());
 }
 

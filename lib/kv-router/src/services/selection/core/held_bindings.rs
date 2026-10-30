@@ -8,6 +8,8 @@
 
 use tokio::time::Instant;
 
+use crate::services::selection::affinity::ReplicaApplyOutcome;
+
 use super::*;
 
 /// Total held bindings across partitions, the same bound as one binding channel.
@@ -86,16 +88,16 @@ impl HeldBindings {
         }
     }
 
-    /// Remove and return the partition's bindings whose worker is now placeable.
-    /// Bindings held for `ttl` or longer are dropped: the owner's copy would
-    /// already have expired.
+    /// Remove and return the partition's bindings whose worker is now placeable,
+    /// with their arrival time. Bindings held for `ttl` or longer are dropped:
+    /// the owner's copy would already have expired.
     pub(super) fn take_placeable(
         &mut self,
         partition: &RoutingPartitionId,
         ttl: Duration,
         now: Instant,
         placeable: impl Fn(WorkerId) -> bool,
-    ) -> Vec<AffinityBindingEvent> {
+    ) -> Vec<(AffinityBindingEvent, Instant)> {
         let Some(sessions) = self.partitions.get_mut(partition) else {
             return Vec::new();
         };
@@ -105,7 +107,7 @@ impl HeldBindings {
             now.saturating_duration_since(held.received) >= ttl || placeable(held.event.worker_id)
         }) {
             if now.saturating_duration_since(held.received) < ttl {
-                ready.push(held.event);
+                ready.push((held.event, held.received));
             }
         }
         self.len -= before - sessions.len();
@@ -169,12 +171,23 @@ impl SelectionCore {
         let Some(table) = entry.affinity.get() else {
             return;
         };
-        let ready = held.take_placeable(partition, table.ttl(), Instant::now(), |worker_id| {
+        let now = Instant::now();
+        let ready = held.take_placeable(partition, table.ttl(), now, |worker_id| {
             self.worker_in_partition(worker_id, partition)
         });
-        for event in ready {
+        for (event, received) in ready {
             let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
-            let outcome = table.apply_replica_update(event.session_id, target, version);
+            let outcome = table.apply_held_replica_update(
+                event.session_id.clone(),
+                target,
+                version,
+                now.saturating_duration_since(received),
+            );
+            // A local request is binding the session; keep the peer binding in
+            // case it is cancelled, and retry on the next drain.
+            if outcome == ReplicaApplyOutcome::IgnoredInitializing {
+                held.hold(event, received);
+            }
             tracing::trace!(
                 key = %partition,
                 worker_id,

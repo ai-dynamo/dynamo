@@ -615,7 +615,40 @@ impl SessionAffinity {
         target: AffinityTarget,
         version: AffinityVersion,
     ) -> ReplicaApplyOutcome {
-        self.inner.apply_replica_update(session_id, target, version)
+        self.inner
+            .apply_replica_update(session_id, target, version, self.inner.ttl)
+    }
+
+    /// Apply a replica update that waited `held_for` before it could be placed.
+    /// The binding keeps only the lifetime it had left, so holding it cannot
+    /// extend it past the owner's copy.
+    pub fn apply_held_replica_update(
+        &self,
+        session_id: String,
+        target: AffinityTarget,
+        version: AffinityVersion,
+        held_for: Duration,
+    ) -> ReplicaApplyOutcome {
+        let lifetime = self.inner.ttl.saturating_sub(held_for);
+        self.inner
+            .apply_replica_update(session_id, target, version, lifetime)
+    }
+
+    /// Whether `session_id` has a live binding newer than `version`. A replica
+    /// update that loses to it should not be held for later.
+    pub fn has_newer_binding(&self, session_id: &str, version: AffinityVersion) -> bool {
+        let now = self.inner.now();
+        self.inner.entries.get(session_id).is_some_and(|entry| {
+            matches!(
+                &*entry,
+                AffinityEntry::Bound {
+                    version: existing,
+                    active_leases,
+                    idle_deadline,
+                    ..
+                } if *existing > version && (*active_leases > 0 || *idle_deadline > now)
+            )
+        })
     }
 
     fn validate_session_id(&self, session_id: &str) -> Result<(), AffinityError> {
@@ -734,11 +767,13 @@ impl Inner {
             .fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
+    /// `lifetime` is the idle lifetime the binding gets, at most the table TTL.
     fn apply_replica_update(
         &self,
         session_id: String,
         target: AffinityTarget,
         version: AffinityVersion,
+        lifetime: Duration,
     ) -> ReplicaApplyOutcome {
         if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
@@ -757,7 +792,7 @@ impl Inner {
                     revision,
                     version,
                     active_leases: 0,
-                    idle_deadline: now + self.ttl,
+                    idle_deadline: now + lifetime,
                 });
                 ReplicaApplyOutcome::Inserted
             }
@@ -774,7 +809,7 @@ impl Inner {
                         revision,
                         version,
                         active_leases: 0,
-                        idle_deadline: now + self.ttl,
+                        idle_deadline: now + lifetime,
                     };
                     ReplicaApplyOutcome::ReplacedExpired
                 }
@@ -785,7 +820,7 @@ impl Inner {
                     ..
                 } if *existing == target && version >= *existing_version => {
                     *existing_version = version;
-                    *idle_deadline = now + self.ttl;
+                    *idle_deadline = (*idle_deadline).max(now + lifetime);
                     ReplicaApplyOutcome::Refreshed
                 }
                 AffinityEntry::Bound {
@@ -796,7 +831,7 @@ impl Inner {
                 } if version > *existing_version => {
                     *existing = target;
                     *existing_version = version;
-                    *idle_deadline = now + self.ttl;
+                    *idle_deadline = now + lifetime;
                     ReplicaApplyOutcome::ReplacedNewer
                 }
                 AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
