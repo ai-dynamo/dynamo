@@ -32,7 +32,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 |-------|------|---------|-------------|-------------|
 | `greed_sampling` | `bool` | `None` | Preprocessor | Forces greedy sampling regardless of other sampling parameters. |
 | `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
-| `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field (streaming requests only; each frame carries the value in an SSE comment and no `data:` line, so the client's SSE parser must tolerate data-less events). Supported names include `request_id` (the frontend's request id, sent first) and `x-bypass-remote-prefill` (sent as `: true` when the KV router's conditional disaggregation prefilled the request on the decode worker instead of a prefill worker; never sent unless requested; absence of the frame means the request went through remote prefill, or the path does not support the annotation). |
+| `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
