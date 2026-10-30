@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Forward router KV hints and advertise KVCR HiCache sources to Dynamo."""
+"""Forward router KV hints and advertise SGLang KVCR sources to Dynamo."""
 
 from __future__ import annotations
 
