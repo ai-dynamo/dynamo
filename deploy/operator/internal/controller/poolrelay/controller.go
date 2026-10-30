@@ -23,6 +23,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -450,7 +451,7 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
+func serviceName(dgdName string) string { return dgdName + multicluster.PoolRelayServiceSuffix }
 
 func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := serviceName(relay.Name)

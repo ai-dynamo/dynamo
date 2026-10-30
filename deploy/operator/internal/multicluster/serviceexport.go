@@ -33,7 +33,8 @@ var ServiceExportGVK = schema.GroupVersionKind{
 
 const (
 	// PoolRelayServiceSuffix names a pool's PoolRelay Service, <DGD name>-pool-relay,
-	// as the Global Discovery Service expects by default.
+	// as the Global Discovery Service expects by default. The operator creates this
+	// Service for a DynamoPoolRelay named after the DGD.
 	PoolRelayServiceSuffix = "-pool-relay"
 	// FrontendServiceSuffix names a pool's frontend Service, <DGD name>-frontend, as
 	// the Global Discovery Service expects by default. The operator creates this
