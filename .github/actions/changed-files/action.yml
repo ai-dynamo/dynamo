@@ -94,6 +94,9 @@ outputs:
   merge_base_sha:
     description: 'True PR merge-base SHA for push-to-pull-request/N events; empty otherwise. Used as the stable OSRB diff baseline starting point.'
     value: ${{ steps.merge-base.outputs.base_sha }}
+  all_files_json:
+    description: 'Path to the complete changed-file JSON list written by tj-actions/changed-files'
+    value: ${{ steps.output-dir.outputs.path }}/all_all_modified_files.json
 
 runs:
   using: "composite"

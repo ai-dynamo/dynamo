@@ -1627,3 +1627,103 @@ classify:
     coowner: ops
   - pattern: requirements.txt
     coowner: ops
+test_selection:
+  frameworks:
+    vllm:
+    - components/src/dynamo/vllm/**
+    - lib/sidecar/vllm/**
+    sglang:
+    - components/src/dynamo/sglang/**
+    - lib/sidecar/sglang/**
+    trtllm:
+    - components/src/dynamo/trtllm/**
+    - lib/sidecar/trtllm/**
+  features:
+    frontend:
+      markers: [frontend]
+      paths:
+      - components/src/dynamo/frontend/**
+      - lib/llm/src/http.rs
+      - lib/llm/src/http/**
+      - lib/llm/src/protocols.rs
+      - lib/llm/src/protocols/**
+      - lib/llm/src/preprocessor.rs
+      - lib/llm/src/preprocessor/**
+      - tests/frontend/**
+    multimodal:
+      markers: [multimodal]
+      paths:
+      - components/src/dynamo/*/multimodal_utils/**
+      - components/src/dynamo/common/backend/multimodal.py
+      - components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py
+      - components/src/dynamo/common/multimodal/**
+      - components/src/dynamo/sglang/init_multimodal.py
+      - components/src/dynamo/sglang/request_handlers/multimodal/**
+      - components/src/dynamo/trtllm/multimodal/**
+      - components/src/dynamo/trtllm/multimodal_processor.py
+      - components/src/dynamo/vllm/multimodal_handlers/**
+      - lib/llm/src/http.rs
+      - lib/llm/src/http/**
+      - lib/llm/src/protocols.rs
+      - lib/llm/src/protocols/**
+      - lib/llm/src/preprocessor.rs
+      - lib/llm/src/preprocessor/**
+      - tests/**/multimodal/**
+      - tests/serve/multimodal_profiles/**
+      - tests/utils/multimodal.py
+    router:
+      markers: [router]
+      areas: [router]
+      paths:
+      - lib/llm/src/kv_dc_relay.rs
+      - lib/llm/src/kv_dc_relay/**
+      - lib/llm/src/kv_router/**
+      - tests/router/**
+    kvbm:
+      markers: [kvbm]
+      paths:
+      - lib/kvbm*/**
+      - lib/bindings/kvbm/**
+      - lib/llm/src/block_manager.rs
+      - lib/llm/src/block_manager/**
+      - tests/kvbm_integration/**
+    lmcache:
+      markers: [lmcache]
+      paths:
+      - tests/lmcache/**
+      - examples/backends/vllm/deploy/v1beta1/*lmcache*
+      - examples/backends/vllm/launch/*lmcache*
+  smoke_only:
+  - docs/**
+  - '**/*.md'
+  - '**/*.mdx'
+  - lib/bench/**
+  - lib/data-gen/**
+  - lib/gpu_memory_service/**
+  - lib/llm/tests/**
+  - lib/llm/examples/**
+  - lib/llm/benches/**
+  - lib/llm/docs/**
+  - deploy/operator/**
+  - deploy/helm/**
+  - .github/**
+  # CI files that change the contents of the GPU test image; full suite
+  image_build:
+  - .github/workflows/shared-build-image.yml
+  - .github/actions/docker-build/**
+  - .github/actions/docker-remote-build/**
+  - .github/scripts/apply_dev_version.py
+  shared_full:
+  - lib/**
+  - components/src/dynamo/common/**
+  - container/**
+  - .dockerignore
+  - Cargo.toml
+  - Cargo.lock
+  - pyproject.toml
+  - '**/requirements*.txt'
+  - conftest.py
+  - tests/conftest.py
+  - tests/serve/conftest.py
+  - tests/utils/**
+  - tests/serve/common.py

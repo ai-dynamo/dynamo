@@ -125,6 +125,7 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
                 3.7
@@ -246,6 +247,7 @@ sglang_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
@@ -339,6 +341,7 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
                 13.0

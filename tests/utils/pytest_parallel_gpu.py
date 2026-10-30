@@ -232,7 +232,9 @@ def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
         "-q",
         *collect_args,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["DYNAMO_GPU_PARALLEL_WORKER"] = "1"
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     test_ids = []
     for line in result.stdout.strip().split("\n"):
         line = line.strip()
@@ -681,6 +683,7 @@ def run_parallel(
     def _launch_test(test: _TestEntry, env_base: dict) -> _RunningTest:
         """Build env, spawn subprocess, start output streamer thread."""
         env = env_base.copy()
+        env["DYNAMO_GPU_PARALLEL_WORKER"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = str(test.assigned_gpu)
         if test.requested_sglang_kv_tokens is not None:
             env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(

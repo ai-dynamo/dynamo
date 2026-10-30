@@ -49,6 +49,7 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       run_deploy_tests: ${{ steps.deploy-test-configuration.outputs.enabled }}
       run_multigpu_tests: ${{ steps.multigpu-test-configuration.outputs.enabled }}
+      test_selection: ${{ steps.test-selection.outputs.test_selection }}
     steps:
       - name: Validate deploy test configuration
         id: deploy-test-configuration
@@ -118,6 +119,16 @@ jobs:
         uses: $/.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Compute GPU test selection
+        id: test-selection
+        env:
+          CHANGED_FILES_FILE: ${{ steps.changes.outputs.all_files_json }}
+          DYNAMO_CI_TEST_SELECTION_MODE: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
+        run: |
+          python3 .github/codeowners/select_tests.py \
+            --changed-files-file "$CHANGED_FILES_FILE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --github-output "$GITHUB_OUTPUT"
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -852,6 +863,8 @@ jobs:
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -875,6 +888,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   sglang-test:
@@ -900,6 +915,8 @@ jobs:
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -923,6 +940,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and sglang and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   trtllm-test:
@@ -948,6 +967,8 @@ jobs:
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -971,6 +992,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   triton-test:
