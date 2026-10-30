@@ -113,7 +113,7 @@ impl Selector {
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
-            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
+            policy_registry.with_default_factory(dynamo_router_policies::default_factory()),
         )
         .indexer_threads(cfg.selector_threads);
         if let Some(peer_replication) = peer_replication {

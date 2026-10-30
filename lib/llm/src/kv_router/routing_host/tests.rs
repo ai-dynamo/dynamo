@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::builder::hosted_picker;
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
@@ -106,13 +107,11 @@ fn selector_state_remains_owned_by_the_scheduler_actor() {
 #[test]
 fn builtin_policies_declare_capabilities() {
     for mode in [RouterMode::RoundRobin, RouterMode::Random] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        assert_eq!(hosted_picker(mode).unwrap().inputs(), WorkerInputs::NONE);
     }
     for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
         assert_eq!(
-            selector.required_worker_inputs(),
+            hosted_picker(mode).unwrap().inputs(),
             WorkerInputs::ACTIVE_REQUESTS
         );
     }
@@ -150,7 +149,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
@@ -159,7 +158,12 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(
+            &host.inner,
+            picker,
+            &HostedSelectionRequest::new(0, 0),
+            Some(1),
+        )
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -274,15 +278,25 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(
+            &host.inner,
+            picker,
+            &HostedSelectionRequest::new(0, 0),
+            Some(1),
+        )
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, selector, None)
+        .select_and_reserve(
+            &host.inner,
+            picker,
+            &HostedSelectionRequest::new(0, 0),
+            None,
+        )
         .unwrap();
 
     assert_eq!(first.worker_id, 1);

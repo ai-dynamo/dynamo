@@ -9,6 +9,7 @@
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+pub mod router_modes;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
@@ -16,9 +17,13 @@ pub use default::{
     startup_policy_parameters,
 };
 
-/// Registry containing the required default only, without an optional policy catalog.
+/// Registry every host links: the required default plus the routing modes
+/// ([`router_modes`]), without an optional policy catalog.
 pub fn default_registry() -> RouterPluginRegistry {
-    RouterPluginRegistry::default().with_default_factory(default_factory())
+    let mut registry = RouterPluginRegistry::default().with_default_factory(default_factory());
+    router_modes::register(&mut registry)
+        .expect("routing-mode type names are unique in an empty registry");
+    registry
 }
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};

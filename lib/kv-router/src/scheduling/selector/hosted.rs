@@ -24,6 +24,7 @@ pub struct HostedSelectionRequest {
     request: SchedulingRequest,
     block_size: u32,
     router_temperature_override: Option<f64>,
+    preview: bool,
 }
 
 impl HostedSelectionRequest {
@@ -36,6 +37,7 @@ impl HostedSelectionRequest {
             request: SchedulingRequest::hosted(isl_tokens),
             block_size,
             router_temperature_override: None,
+            preview: false,
         }
     }
 
@@ -61,6 +63,14 @@ impl HostedSelectionRequest {
         self
     }
 
+    /// Whether this selection only previews a worker, as a peek does; see
+    /// [`WorkerSelectionContext::is_preview`].
+    #[inline]
+    pub fn with_preview(mut self, preview: bool) -> Self {
+        self.preview = preview;
+        self
+    }
+
     fn context(&self) -> WorkerSelectionContext<'_> {
         WorkerSelectionContext {
             request: &self.request,
@@ -75,6 +85,7 @@ impl HostedSelectionRequest {
             // The host applies pins and session affinity before selecting.
             pinned_worker: None,
             router_temperature_override: self.router_temperature_override,
+            preview: self.preview,
         }
     }
 }
@@ -95,6 +106,7 @@ impl fmt::Debug for HostedSelectionRequest {
                 "router_temperature_override",
                 &self.router_temperature_override,
             )
+            .field("preview", &self.preview)
             .finish()
     }
 }

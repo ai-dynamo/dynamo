@@ -3360,7 +3360,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
+                dynamo_router_policies::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();

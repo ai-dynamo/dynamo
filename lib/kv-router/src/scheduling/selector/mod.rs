@@ -126,10 +126,6 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'a>,
         block_size: u32,
     },
-    Hosted {
-        worker_ids: &'a [WorkerId],
-        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
-    },
 }
 
 pub type ConfiguredSelectionInputs<'a, C> = (
@@ -138,8 +134,6 @@ pub type ConfiguredSelectionInputs<'a, C> = (
     RoutingEligibility<'a>,
     u32,
 );
-
-pub type HostedSelectionInputs<'a> = (&'a [WorkerId], Option<&'a dyn Fn(WorkerId) -> u64>);
 
 impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     pub fn configured(
@@ -156,42 +150,14 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
         }
     }
 
-    pub fn hosted(
-        worker_ids: &'a [WorkerId],
-        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
-    ) -> Self {
-        Self::Hosted {
-            worker_ids,
-            occupancy,
-        }
-    }
-
     pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
-        match self {
-            Self::Configured {
-                workers,
-                request,
-                eligibility,
-                block_size,
-            } => Ok((workers, request, eligibility, block_size)),
-            Self::Hosted { .. } => Err(WorkerSelectionPolicyError::failed(
-                "selector requires configured worker inputs",
-            )
-            .into()),
-        }
-    }
-
-    pub fn into_hosted(self) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
-        match self {
-            Self::Hosted {
-                worker_ids,
-                occupancy,
-            } => Ok((worker_ids, occupancy)),
-            Self::Configured { .. } => Err(WorkerSelectionPolicyError::failed(
-                "selector requires hosted worker inputs",
-            )
-            .into()),
-        }
+        let Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+        } = self;
+        Ok((workers, request, eligibility, block_size))
     }
 }
 
@@ -221,6 +187,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
+                preview: false,
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
             kv_transfer_sources: OnceCell::new(),

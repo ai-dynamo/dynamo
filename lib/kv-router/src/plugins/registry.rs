@@ -311,6 +311,27 @@ impl RouterPluginRegistry {
         })
     }
 
+    /// Build the factory for one registered policy type with default parameters, as a routing
+    /// mode names it (for example `round-robin`) without a policy file.
+    pub fn resolve_type(
+        &self,
+        policy_type: &str,
+    ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
+        let provider = self.providers.get(policy_type).ok_or_else(|| {
+            WorkerSelectionPolicyRegistryError::UnknownType {
+                name: policy_type.to_owned(),
+                available: self.available_policy_types(),
+            }
+        })?;
+        provider(&WorkerSelectionPolicyParameters::new(
+            serde_yaml::Value::Mapping(Default::default()),
+        ))
+        .map_err(|source| WorkerSelectionPolicyRegistryError::Provider {
+            policy_type: policy_type.to_owned(),
+            source,
+        })
+    }
+
     fn available_policy_types(&self) -> String {
         let mut available = self.providers.keys().cloned().collect::<Vec<_>>();
         available.sort_unstable();

@@ -41,6 +41,7 @@ nvtx = ["dep:nvtx"]
 velo = { workspace = true }
 # repo
 dynamo-truthy = { workspace = true }
+dynamo-routing-algorithms = { workspace = true }
 
 # Use workspace dependencies where available
 anyhow = { workspace = true }

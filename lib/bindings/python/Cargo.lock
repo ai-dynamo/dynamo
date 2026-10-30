@@ -2104,21 +2104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.7.0"
-dependencies = [
- "async-trait",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2213,7 +2198,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-custom-policy-builtin",
  "dynamo-decisions",
  "dynamo-kv-router",
  "dynamo-memory",
@@ -2223,6 +2207,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2324,8 +2309,8 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
+ "dynamo-router-policies",
  "dynamo-tokens",
  "futures",
  "ndarray 0.16.1",
@@ -2420,11 +2405,11 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-backend-common",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
  "dynamo-sidecar-common",
@@ -2488,6 +2473,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "dynamo-kv-router",
+ "dynamo-routing-algorithms",
+ "fastrand",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-routing-algorithms"
+version = "1.7.0"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "dynamo-runtime"
 version = "1.7.0"
 dependencies = [
@@ -2507,6 +2515,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-routing-algorithms",
  "dynamo-truthy",
  "educe",
  "either",
