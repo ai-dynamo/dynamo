@@ -81,7 +81,11 @@ def fixture():
     return engine, config, source, info
 
 
-def test_descriptors_use_only_reported_sources():
+@pytest.mark.parametrize("wide_pad_values", [False, True])
+def test_descriptors_use_only_reported_sources(monkeypatch, wide_pad_values):
+    monkeypatch.setattr(
+        state_agent, "sglang_has_wide_mm_pad_values", lambda: wide_pad_values
+    )
     engine, config, source, _ = fixture()
     (result,) = state_agent_descriptors(engine, config)
     assert result["cache_owner_id"] == source["cache_owner_id"]
@@ -91,6 +95,7 @@ def test_descriptors_use_only_reported_sources():
     assert result["raw_zmq_endpoint"] == "tcp://worker:24020"
     assert result["ingress_protocol"] == "sglang_hicache_v1"
     assert result["kv_state_endpoint"] == "ns/backend/generate"
+    assert result["engine_owned_mm_identity"] is wide_pad_values
     source["capabilities"] = ["router_hint"]
     assert state_agent_descriptors(engine, config) == []
 
@@ -117,7 +122,13 @@ def linker_fixture():
 
 
 @pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
-def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(mode):
+@pytest.mark.parametrize("wide_pad_values", [False, True])
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(
+    monkeypatch, mode, wide_pad_values
+):
+    monkeypatch.setattr(
+        state_agent, "sglang_has_wide_mm_pad_values", lambda: wide_pad_values
+    )
     engine, config, source, _ = linker_fixture()
     config.serving_mode = mode
     (descriptor,) = state_agent_descriptors(engine, config)
@@ -127,6 +138,7 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(mode):
         [source["cache_owner_id"]]
     )
     assert descriptor["kv_block_size"] == 64
+    assert descriptor["engine_owned_mm_identity"] is wide_pad_values
     assert descriptor["router_hint_source"] == {
         "source_control_endpoint": "tcp://worker:24100",
         "worker_type": {

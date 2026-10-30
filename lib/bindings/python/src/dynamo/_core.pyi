@@ -1243,6 +1243,7 @@ class KvEventPublisher:
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
+        engine_owned_mm_identity: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1266,6 +1267,10 @@ class KvEventPublisher:
             image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
             video_token_id: Optional model video-placeholder token for exact MM routing.
+            engine_owned_mm_identity: The source uses SGLang's wide multimodal pad
+                format (after sgl-project/sglang#43043), including for caller hashes,
+                so every event token at or above 1,000,000 is excluded from the index.
+                Otherwise only values that do not fit in 32 bits are.
         """
 
     def publish_stored(

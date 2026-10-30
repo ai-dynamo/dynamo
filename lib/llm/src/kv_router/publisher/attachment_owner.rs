@@ -56,6 +56,7 @@ pub struct KvStateAttachmentDescriptor {
     pub raw_topic: String,
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
+    pub engine_owned_mm_identity: bool,
     pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
@@ -150,6 +151,7 @@ fn materialize_intents(
                 raw_topic: descriptor.raw_topic,
                 image_token_id: descriptor.image_token_id,
                 video_token_id: descriptor.video_token_id,
+                engine_owned_mm_identity: descriptor.engine_owned_mm_identity,
                 router_hint_source: descriptor.router_hint_source,
             },
         );
@@ -637,6 +639,7 @@ mod tests {
                     raw_topic: String::new(),
                     image_token_id: Some(99),
                     video_token_id: Some(100),
+                    engine_owned_mm_identity: rank == 7,
                     router_hint_source: None,
                 }
             })
@@ -662,6 +665,16 @@ mod tests {
         assert_eq!(selected.raw_topic, "");
         assert_eq!(selected.image_token_id, Some(99));
         assert_eq!(selected.video_token_id, Some(100));
+        assert!(selected.engine_owned_mm_identity);
+        assert!(!intents[&4].engine_owned_mm_identity);
+
+        let mut legacy = serde_json::to_value(selected).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("engine_owned_mm_identity");
+        let legacy: KvStateAttachmentIntent = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.engine_owned_mm_identity);
     }
 
     #[tokio::test]

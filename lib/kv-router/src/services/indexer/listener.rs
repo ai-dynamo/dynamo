@@ -163,6 +163,7 @@ impl ListenerLoop {
         worker_id: WorkerId,
         dp_rank: u32,
         block_size: u32,
+        engine_owned_mm_identity: bool,
         indexer: Indexer,
         cancel: CancellationToken,
         live_socket: ZmqSocket,
@@ -177,7 +178,8 @@ impl ListenerLoop {
             live_socket,
             replay_endpoint,
             watermark,
-            normalizer: ZmqEventNormalizer::new(block_size),
+            normalizer: ZmqEventNormalizer::new(block_size)
+                .with_engine_owned_mm_identity(engine_owned_mm_identity),
             messages_processed: 0,
         }
     }
@@ -487,6 +489,7 @@ async fn run_listener(
     let endpoint = record.endpoint().to_string();
     let replay_endpoint = record.replay_endpoint().map(str::to_string);
     let block_size = record.block_size();
+    let engine_owned_mm_identity = record.engine_owned_mm_identity();
     let indexer = record.indexer();
     let watermark = record.watermark();
 
@@ -525,6 +528,7 @@ async fn run_listener(
         worker_id,
         dp_rank,
         block_size,
+        engine_owned_mm_identity,
         indexer,
         cancel,
         socket,
@@ -595,6 +599,7 @@ mod tests {
             1,
             0,
             4,
+            false,
             indexer.clone(),
             cancel.clone(),
             live_socket,

@@ -34,7 +34,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
-from dynamo.sglang._compat import override_server_args
+from dynamo.sglang._compat import override_server_args, sglang_has_wide_mm_pad_values
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import (
@@ -416,6 +416,11 @@ class DynamoSglangPublisher:
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
             connect_ip = kv_event_connect_ip(base_ep)
+            # Event tokens carry SGLang's own multimodal pad values on builds
+            # with sgl-project/sglang#43043; the normalizer maps labeled spans
+            # and excludes the rest.
+            # Accepted caller hashes also produce wide values on non-Kimi models.
+            engine_owned_mm_identity = sglang_has_wide_mm_pad_values()
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -452,6 +457,7 @@ class DynamoSglangPublisher:
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                     dp_rank=dp_rank,
                     kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
+                    engine_owned_mm_identity=engine_owned_mm_identity,
                 )
                 self.kv_publishers.append(publisher)
 

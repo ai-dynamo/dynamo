@@ -30,6 +30,7 @@ from dynamo.sglang._compat import (
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
     supports_external_mm_hashes,
+    supports_mm_routing_labels,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -485,6 +486,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
             self._video_loader = VideoLoader(enable_frontend_decoding=True)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
+        self._mm_routing_labels_supported: bool = supports_mm_routing_labels(
+            self.engine
+        )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -899,11 +903,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            # Prefer routing labels when supported; otherwise send caller hashes
+            # only when the processor accepts them.
             mm_hashes_kwargs: Dict[str, Any] = {}
-            if self._mm_hashes_supported:
+            if self._mm_routing_labels_supported or self._mm_hashes_supported:
                 forwarded = extract_mm_hashes(request)
                 if forwarded is not None:
-                    mm_hashes_kwargs["mm_hashes"] = forwarded
+                    key = (
+                        "mm_routing_labels"
+                        if self._mm_routing_labels_supported
+                        else "mm_hashes"
+                    )
+                    mm_hashes_kwargs[key] = forwarded
 
             agg = await self.engine.async_generate(
                 **input_param,

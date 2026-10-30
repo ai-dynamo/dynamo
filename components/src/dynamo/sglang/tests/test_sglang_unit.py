@@ -11,7 +11,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -35,8 +35,11 @@ from dynamo.sglang._compat import (
     publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_has_wide_mm_pad_values,
+    sglang_uses_engine_owned_mm_identity,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
+    supports_mm_routing_labels,
 )
 from dynamo.sglang.args import (
     CUDA_COREDUMP_WAIT_ENV,
@@ -1089,8 +1092,18 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.asyncio
-async def test_external_mm_hashes_rebuild_padding_after_hash_override():
-    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatch):
+    # Deferred so marker-only collection does not require SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    # The repair applies to SGLang builds that still derive pad values from
+    # caller hashes.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: False,
+    )
+    item = MultimodalDataItem(modality=Modality.IMAGE, pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
@@ -1120,6 +1133,72 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatch):
+    # sgl-project/sglang#43043 builds derive wide pad values from their own
+    # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: True,
+    )
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(MmHashEngine())
+
+
+def test_routing_labels_follow_the_async_generate_signature():
+    class LabelEngine:
+        async def async_generate(self, mm_hashes=None, mm_routing_labels=None):
+            return None
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert supports_mm_routing_labels(LabelEngine())
+    assert not supports_mm_routing_labels(MmHashEngine())
+
+
+@pytest.mark.parametrize("wide_schema", [False, True])
+def test_mm_identity_and_pad_format_capabilities(monkeypatch, wide_schema):
+    fields = ("hash", "pad_value", "modality")
+    if wide_schema:
+        fields += ("pad_values",)
+    mod = ModuleType("sglang.srt.managers.schedule_batch")
+    mod.MultimodalDataItem = type(
+        "MultimodalDataItem", (), {"__struct_fields__": fields}
+    )
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", mod)
+
+    class KimiProcessor:
+        uses_wide_image_identity = True
+
+    class CustomProcessor(KimiProcessor):
+        pass
+
+    class MmHashEngine:
+        def __init__(self, processor):
+            self.tokenizer_manager = SimpleNamespace(mm_processor=processor)
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    # The inherited capability survives external processor overrides.
+    custom = CustomProcessor()
+    assert sglang_uses_engine_owned_mm_identity(custom) is wide_schema
+    assert supports_external_mm_hashes(MmHashEngine(custom)) is not wide_schema
+    assert sglang_uses_engine_owned_mm_identity() is wide_schema
+
+    # Qwen accepts caller hashes, but its event tokens still use the wide format.
+    qwen = SimpleNamespace()
+    assert not sglang_uses_engine_owned_mm_identity(qwen)
+    assert supports_external_mm_hashes(MmHashEngine(qwen))
+    assert sglang_has_wide_mm_pad_values() is wide_schema
 
 
 @pytest.mark.parametrize(

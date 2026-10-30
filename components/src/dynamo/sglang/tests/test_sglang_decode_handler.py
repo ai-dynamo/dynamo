@@ -2392,6 +2392,7 @@ async def test_generate_limits_prompt_and_completion_logprobs_independently(
     handler = _new_decode_handler(serving_mode=mode)
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._engine_supports_priority = False
     handler._routed_experts_kwargs = {}
     handler.enable_trace = False
@@ -3025,6 +3026,7 @@ async def test_supported_sampling_reaches_engine(mode, n):
     handler.serving_mode = mode
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._engine_supports_priority = False
     handler._routed_experts_kwargs = {}
     handler.enable_trace = False
@@ -3071,6 +3073,7 @@ async def test_parallel_sampling_omits_kv_cache_hit(n):
     handler = _new_decode_handler()
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._engine_supports_priority = False
     handler._routed_experts_kwargs = {}
     handler.enable_trace = False
@@ -3132,6 +3135,7 @@ async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
     handler.serving_mode = DisaggregationMode.DECODE
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._engine_supports_priority = False
     handler._routed_experts_kwargs = {}
     handler.enable_trace = False

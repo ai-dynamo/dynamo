@@ -127,6 +127,7 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--port` | `8090` | HTTP server listen port |
 | `--threads` | `4` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
 | `--workers` | (none) | Initial workers as `instance_id[:dp_rank]=zmq_address,...` pairs (dp_rank defaults to 0) |
+| `--engine-owned-mm-identity` | `false` | Enable [multimodal event normalization](#multimodal-event-sources) for every initial `--workers` entry. Later HTTP registrations use their own field. |
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--routing-group` | `default` | Routing group for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
@@ -239,12 +240,31 @@ curl -X POST http://localhost:8090/register \
 | `routing_group` | no | `"default"` | Worker routing group |
 | `dp_rank` | no | `0` | Data parallel rank |
 | `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
+| `engine_owned_mm_identity` | no | `false` | Boolean: enable [multimodal event normalization](#multimodal-event-sources) for this source. |
 | `additional_salt` | no | — | Per-tenant salt (Mooncake RFC #1403 `additionalsalt`, alias accepted). Currently parsed for forward compatibility — engines apply their own salting today. |
 
 For transition compatibility, indexer HTTP inputs also accept a string `tenant_id`, and the
 CLI accepts the hidden `--tenant-id` flag. These values are ignored. `routing_group` always
 controls worker eligibility; when it is omitted, the endpoint's normal default or all-groups
 behavior applies. Responses never include `tenant_id`.
+
+#### Multimodal Event Sources
+
+For direct SGLang sources using the [wide-token event format](../backends/sglang/multimodal.md#newer-sglang-image-identities), set `engine_owned_mm_identity` to `true` in each source's registration. The indexer translates usable routing labels and excludes unmapped media blocks and their descendants from predicted cache hits. Leave it `false` for legacy sources whose media tokens already match Dynamo's routing tokens.
+
+```bash
+curl -X POST http://localhost:8090/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance_id": 3,
+    "endpoint": "tcp://127.0.0.1:5559",
+    "model_name": "Qwen/Qwen3-VL-2B-Instruct",
+    "block_size": 16,
+    "engine_owned_mm_identity": true
+  }'
+```
+
+The flag depends on the SGLang build, not the model. For initial `--workers`, the indexer's `--engine-owned-mm-identity` flag applies to every listed source. Use separate HTTP registrations for sources with different event formats. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
 
 ### `POST /unregister` — Deregister an instance
 
