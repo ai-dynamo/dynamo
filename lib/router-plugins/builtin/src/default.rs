@@ -8,6 +8,7 @@ mod picker;
 mod scorer;
 mod selector;
 
+pub use parameters::KVCR_POLICY_TYPE;
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
 pub use selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
@@ -19,11 +20,29 @@ use dynamo_kv_router::{KvRouterConfig, WorkerType};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+/// The cost functions this module builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Preset {
+    /// Dynamo's default cost, with no KV fetch credit.
+    Default,
+    /// The default cost plus credit for blocks a worker would fetch from a KV transfer source,
+    /// with each candidate committed to that fetch.
+    Kvcr,
+}
+
 /// Construct the builtin default from configured policy parameters.
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
-    runtime_policy(config, parameters, worker_label, None)
+    runtime_policy(config, parameters, Preset::Default, worker_label, None)
+}
+
+/// Construct the `kvcr` preset from configured policy parameters: the default cost plus credit for
+/// blocks a worker would fetch, weighted by `shared_cache_multiplier`, with every candidate
+/// committed to the fetch its cost assumes.
+pub fn kvcr_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
+    let parameters = PolicyParameters::from(&config);
+    runtime_policy(config, parameters, Preset::Kvcr, worker_label, None)
 }
 
 /// Resolved runtime parameters a default policy starts with for `role`.
@@ -45,11 +64,18 @@ pub fn startup_policy_parameters(
 fn runtime_policy(
     config: KvRouterConfig,
     parameters: PolicyParameters,
+    preset: Preset,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
 ) -> WorkerSelectionPolicy {
     let initial = parameters.snapshot();
-    let policy = policy_with_rng(config.clone(), parameters, worker_label, rng.clone());
+    let policy = policy_with_rng(
+        config.clone(),
+        parameters,
+        preset,
+        worker_label,
+        rng.clone(),
+    );
     policy.with_runtime_config(
         initial,
         Arc::new(move |values| {
@@ -57,6 +83,7 @@ fn runtime_policy(
             Ok(policy_with_rng(
                 config.clone(),
                 parameters,
+                preset,
                 worker_label,
                 rng.clone(),
             ))
@@ -67,19 +94,36 @@ fn runtime_policy(
 fn policy_with_rng(
     config: KvRouterConfig,
     parameters: PolicyParameters,
+    preset: Preset,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::build(&parameters, worker_label);
-    let picker = picker::DefaultPicker::new(parameters.router_temperature, rng);
-    WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
-        .with_exclusive_affinity(true)
+    let picker = Box::new(picker::DefaultPicker::new(
+        parameters.router_temperature,
+        rng,
+    ));
+    let policy = match preset {
+        Preset::Default => WorkerSelectionPolicy::new(
+            config,
+            worker_label,
+            vec![scorer::build(&parameters, worker_label)],
+            picker,
+        ),
+        Preset::Kvcr => WorkerSelectionPolicy::new(config, worker_label, Vec::new(), picker)
+            .with_kv_fetch_scorer(scorer::build_kv_fetch(&parameters, worker_label)),
+    };
+    policy.with_exclusive_affinity(true)
 }
 
 /// Factory installed by routing hosts, including hosts without a custom catalog.
 pub fn default_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _partition| {
-        policy_for_role(config.clone(), role, PolicyParameters::from(config))
+        policy_for_role(
+            config.clone(),
+            role,
+            PolicyParameters::from(config),
+            Preset::Default,
+        )
     })
 }
 
@@ -87,9 +131,16 @@ fn policy_for_role(
     config: KvRouterConfig,
     role: WorkerType,
     parameters: PolicyParameters,
+    preset: Preset,
 ) -> WorkerSelectionPolicy {
     let parameters = role_parameters(&config, role, parameters);
-    runtime_policy(config, parameters, role.default_selector_label(), None)
+    runtime_policy(
+        config,
+        parameters,
+        preset,
+        role.default_selector_label(),
+        None,
+    )
 }
 
 fn role_parameters(

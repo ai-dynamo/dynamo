@@ -24,9 +24,9 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
-    WorkerCandidates, WorkerFilter, WorkerInfo, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerScorer, WorkerSelectionContext,
+    CacheSnapshot, CandidateData, KvFetchScorer, KvFetchSource, ScoredWorkerCandidate,
+    WorkerCacheData, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInfo, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
@@ -34,6 +34,9 @@ use crate::plugins::worker_selection::{
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+// Only tests and benches build the small reference variant, and each policy holds one state, so
+// boxing the composed state would add an indirection to every selection for no gain.
+#[cfg_attr(any(test, feature = "bench"), allow(clippy::large_enum_variant))]
 pub(super) enum WorkerSelectionPolicyState {
     #[cfg(any(test, feature = "bench"))]
     Reference(Box<KvRouterConfig>, DefaultWorkerPicker),
@@ -50,6 +53,8 @@ pub(super) enum WorkerSelectionPolicyStateRef<'a> {
 pub(super) struct ComposedPolicyState {
     pub(super) filters: Vec<(WorkerInputs, Box<dyn WorkerFilter>)>,
     pub(super) scorers: Vec<(WorkerInputs, Box<dyn WorkerScorer>)>,
+    /// Runs after `scorers` and commits each candidate row to the fetch its cost assumes.
+    pub(super) fetch_scorer: Option<(WorkerInputs, Box<dyn KvFetchScorer>)>,
     pub(super) picker: Box<dyn WorkerPicker>,
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
@@ -59,6 +64,12 @@ pub(super) struct ComposedPolicyState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
+    /// The fetch source the host offers each unscored row, index-aligned with them; empty when
+    /// the request has no transfer data.
+    fetch_offers: Vec<Option<KvFetchSource>>,
+    /// Each candidate row's committed fetch, index-aligned with `candidates`; empty without a
+    /// fetch scorer.
+    pub(super) fetches: Vec<Option<KvFetchSource>>,
     /// Each unscored row's fetch target and local prefix while its source waits for every row.
     transfer_targets: Vec<Option<(KvTransferTarget, usize)>>,
     /// Row buffers selection is done with, for callers to prepare into next.
@@ -107,7 +118,8 @@ impl WorkerSelectionPolicy {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
-        // Fetch inputs are filled once every row is built, so only scorers receive them.
+        // Only a KvFetchScorer receives fetch inputs, so a policy that credits a fetch also
+        // commits to one. They are filled once every row is built.
         let picker_inputs = picker
             .required_worker_inputs()
             .without(WorkerInputs::KV_TRANSFER);
@@ -125,7 +137,14 @@ impl WorkerSelectionPolicy {
             .collect();
         let scorers: Vec<_> = scorers
             .into_iter()
-            .map(|scorer| (scorer.required_worker_inputs(), scorer))
+            .map(|scorer| {
+                (
+                    scorer
+                        .required_worker_inputs()
+                        .without(WorkerInputs::KV_TRANSFER),
+                    scorer,
+                )
+            })
             .collect();
         let filter_inputs = filters
             .iter()
@@ -142,6 +161,7 @@ impl WorkerSelectionPolicy {
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
+                fetch_scorer: None,
                 picker,
                 filter_inputs,
                 scorer_picker_inputs,
@@ -151,10 +171,34 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                fetch_offers: Vec::new(),
+                fetches: Vec::new(),
                 transfer_targets: Vec::new(),
                 row_buffers: Arc::new(ArrayQueue::new(ROW_BUFFERS)),
             })),
         }
+    }
+
+    /// Add the policy's [`KvFetchScorer`], replacing an earlier one. It runs after the scorers,
+    /// and only the picked candidate's committed fetch leaves selection. Call this before
+    /// [`Self::with_runtime_config`], which records the inputs the policy requires.
+    pub fn with_kv_fetch_scorer(mut self, scorer: Box<dyn KvFetchScorer>) -> Self {
+        match &mut self.state {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => {}
+            WorkerSelectionPolicyState::Composed(state) => {
+                let state = state.get_mut();
+                let inputs = scorer.required_worker_inputs() | WorkerInputs::KV_TRANSFER;
+                state.scorer_picker_inputs = state
+                    .scorers
+                    .iter()
+                    .fold(state.picker_inputs | inputs, |all, (required, _)| {
+                        all | *required
+                    });
+                state.fetch_scorer = Some((inputs, scorer));
+            }
+        }
+        self
     }
 
     /// Ask the host to constrain selection to an eligible affinity target.
@@ -269,6 +313,10 @@ fn push_picker_candidate(
 }
 
 impl ComposedPolicyState {
+    fn has_scorers(&self) -> bool {
+        !self.scorers.is_empty() || self.fetch_scorer.is_some()
+    }
+
     // Keep row construction and storage together to avoid passing a full row through a call.
     #[inline(always)]
     fn push_candidate(&mut self, candidate: CandidateData) {
@@ -282,7 +330,7 @@ impl ComposedPolicyState {
             &mut self.cache_inputs,
             &mut self.load_inputs,
         );
-        if !self.scorers.is_empty() {
+        if self.has_scorers() {
             // Picker-only policies do not need a second copy of the worker inputs.
             self.unscored_candidates.push(candidate);
         }
@@ -296,11 +344,15 @@ impl ComposedPolicyState {
     ) -> Result<(), KvSchedulerError> {
         let Self {
             scorers,
+            fetch_scorer,
             unscored_candidates,
             score_contributions,
             candidates,
+            fetch_offers,
+            fetches,
             ..
         } = self;
+        fetches.clear();
         if unscored_candidates.is_empty() {
             return Ok(());
         }
@@ -329,6 +381,38 @@ impl ComposedPolicyState {
                 scored.cost = cost;
             }
         }
+        if let Some((inputs, scorer)) = fetch_scorer {
+            // Report the fetch scorer as the last scorer.
+            let scorer_index = scorers.len();
+            score_contributions.fill(f64::NAN);
+            debug_assert!(fetch_offers.is_empty() || fetch_offers.len() == candidates.len());
+            fetches.extend_from_slice(fetch_offers);
+            fetches.resize(candidates.len(), None);
+            scorer.score(
+                context,
+                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot, &info),
+                score_contributions,
+                fetches,
+            )?;
+            for (row, ((contribution, scored), fetch)) in score_contributions
+                .iter()
+                .zip(candidates.iter_mut())
+                .zip(fetches.iter())
+                .enumerate()
+            {
+                let cost = scored.cost + contribution;
+                if !contribution.is_finite() || !cost.is_finite() {
+                    return Err(
+                        WorkerSelectionPolicyError::NonFiniteCost { scorer_index, row }.into(),
+                    );
+                }
+                // A scorer keeps or clears the host's offer; it cannot move or keep another.
+                if fetch.is_some() && *fetch != fetch_offers.get(row).copied().flatten() {
+                    return Err(WorkerSelectionPolicyError::InvalidKvFetch { row }.into());
+                }
+                scored.cost = cost;
+            }
+        }
         Ok(())
     }
 }
@@ -350,6 +434,7 @@ pub struct PreparedCandidates {
     rows: Vec<CandidateData>,
     max_raw_cached_tokens: Option<usize>,
     kv_transfer_sources: Option<KvTransferSourceSummary>,
+    fetch_offers: Vec<Option<KvFetchSource>>,
     row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
 }
 
@@ -399,14 +484,21 @@ impl CandidatePreparer {
         if rows.is_empty() {
             return None;
         }
+        let mut fetch_offers = Vec::new();
         if defer_transfer {
-            input.fill_kv_transfer_sources(workers, &mut rows, &transfer_targets);
+            input.fill_kv_transfer_sources(
+                workers,
+                &mut rows,
+                &transfer_targets,
+                &mut fetch_offers,
+            );
         }
         Some(PreparedCandidates {
             inputs: self.inputs,
             rows,
             max_raw_cached_tokens: input.max_raw_cached_tokens(),
             kv_transfer_sources: input.into_kv_transfer_sources(),
+            fetch_offers,
             row_buffers: Arc::clone(&self.row_buffers),
         })
     }
@@ -433,12 +525,14 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     );
     let ComposedPolicyState {
         scorers,
+        fetch_scorer,
         scorer_picker_inputs,
         picker_inputs,
         unscored_candidates,
         candidates,
         cache_inputs,
         load_inputs,
+        fetch_offers,
         ..
     } = state;
     candidates.clear();
@@ -447,6 +541,7 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     // Adopt the prepared rows as the scorer rows rather than copying them; the
     // outgoing buffer goes back to the pool when `prepared` drops.
     std::mem::swap(unscored_candidates, &mut prepared.rows);
+    std::mem::swap(fetch_offers, &mut prepared.fetch_offers);
     let fill_load = scorer_picker_inputs.contains(WorkerInputs::LOAD);
     for row in unscored_candidates.iter_mut() {
         if fill_load {
@@ -463,7 +558,7 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
             load_inputs,
         );
     }
-    if scorers.is_empty() {
+    if scorers.is_empty() && fetch_scorer.is_none() {
         // Picker-only policies keep no scorer rows.
         unscored_candidates.clear();
     }
@@ -491,11 +586,12 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     eligibility: RoutingEligibility<'_>,
 ) -> Result<bool, KvSchedulerError> {
     state.unscored_candidates.clear();
+    state.fetch_offers.clear();
     state.candidates.clear();
     state.cache_inputs.clear();
     state.load_inputs.clear();
     state.transfer_targets.clear();
-    // Only scorers declare KV_TRANSFER; their inputs are filled once every row is built.
+    // Only a fetch scorer reads KV_TRANSFER; its inputs are filled once every row is built.
     let defer_transfer = request.kv_transfer_candidates.is_some()
         && state
             .scorer_picker_inputs
@@ -530,6 +626,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 workers,
                 &mut state.unscored_candidates,
                 &state.transfer_targets,
+                &mut state.fetch_offers,
             );
         }
         state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
@@ -600,6 +697,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             workers,
             &mut state.unscored_candidates,
             &state.transfer_targets,
+            &mut state.fetch_offers,
         );
     }
     state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
@@ -952,13 +1050,13 @@ mod tests {
         assert_eq!(selected.worker, worker1);
     }
 
-    #[test]
-    fn components_read_fetchable_prefixes_only_when_declared() {
+    /// Hint-capable workers for fetch tests: worker 0 holds three blocks a cold worker can fetch.
+    mod fetch_fixture {
+        use super::*;
         use crate::kv_hints::KvTransferCandidates;
         use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
-        use std::sync::{Arc, Mutex};
 
-        struct HintWorker;
+        pub(super) struct HintWorker;
 
         impl WorkerConfigLike for HintWorker {
             fn data_parallel_start_rank(&self) -> u32 {
@@ -988,16 +1086,44 @@ mod tests {
             }
         }
 
-        type Seen = Arc<Mutex<Vec<(u64, Option<Option<u32>>)>>>;
-
-        struct TransferScorer {
-            inputs: WorkerInputs,
-            seen: Seen,
+        pub(super) fn workers() -> HashMap<u64, HintWorker> {
+            HashMap::from([(0, HintWorker), (1, HintWorker)])
         }
+
+        pub(super) fn request(with_candidates: bool) -> SchedulingRequest {
+            let warm = WorkerWithDpRank::from_worker_id(0);
+            let mut request = base_request(64);
+            request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
+            request.kv_transfer_candidates = with_candidates.then(|| KvTransferCandidates {
+                block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+                owner_prefix_blocks: vec![(warm.into(), 3)],
+                routing_snapshot: None,
+            });
+            request
+        }
+    }
+
+    #[test]
+    fn only_a_fetch_scorer_reads_fetchable_prefixes() {
+        use std::sync::{Arc, Mutex};
+
+        type Seen = Arc<Mutex<Vec<(u64, Option<Option<u32>>)>>>;
+        type Offers = Arc<Mutex<Vec<(u64, Option<(u64, usize, usize)>)>>>;
+
+        fn record(seen: &Seen, candidate: WorkerCandidate<'_>) {
+            let transfer = candidate
+                .kv_transfer()
+                .map(|transfer| transfer.source_prefix_blocks());
+            seen.lock()
+                .unwrap()
+                .push((candidate.worker().worker_id, transfer));
+        }
+
+        struct TransferScorer(Seen);
 
         impl WorkerScorer for TransferScorer {
             fn required_worker_inputs(&self) -> WorkerInputs {
-                self.inputs
+                WorkerInputs::KV_TRANSFER
             }
 
             fn score(
@@ -1007,13 +1133,40 @@ mod tests {
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
-                    let transfer = candidate
-                        .kv_transfer()
-                        .map(|transfer| transfer.source_prefix_blocks());
-                    self.seen
-                        .lock()
-                        .unwrap()
-                        .push((candidate.worker().worker_id, transfer));
+                    record(&self.0, candidate);
+                    *cost = 0.0;
+                }
+                Ok(())
+            }
+        }
+
+        struct TransferFetchScorer(Seen, Offers);
+
+        impl KvFetchScorer for TransferFetchScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+                fetches: &mut [Option<KvFetchSource>],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for ((candidate, cost), fetch) in candidates.iter().zip(costs).zip(fetches) {
+                    record(&self.0, candidate);
+                    self.1.lock().unwrap().push((
+                        candidate.worker().worker_id,
+                        fetch.map(|fetch| {
+                            let crate::kv_hints::KvTransferCandidateSource::Worker(source) =
+                                fetch.source()
+                            else {
+                                unreachable!("the fixture's source is a worker")
+                            };
+                            (
+                                source.worker_id,
+                                fetch.prefix_blocks(),
+                                fetch.additional_blocks(),
+                            )
+                        }),
+                    ));
                     *cost = 0.0;
                 }
                 Ok(())
@@ -1032,35 +1185,27 @@ mod tests {
                 _context: &WorkerSelectionContext<'_>,
                 candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
-                // Only scorers receive fetch inputs.
                 assert_eq!(candidate.kv_transfer(), None);
                 Ok(true)
             }
         }
 
-        let warm = WorkerWithDpRank::from_worker_id(0);
-        let workers = HashMap::from([(0, HintWorker), (1, HintWorker)]);
-        let select = |candidates: Option<KvTransferCandidates>| {
-            let (declared, undeclared) = (Seen::default(), Seen::default());
-            let mut request = base_request(64);
-            request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
-            request.kv_transfer_candidates = candidates;
+        let workers = fetch_fixture::workers();
+        let select = |with_candidates: bool| {
+            let (fetch_scorer, plain_scorer, offers) =
+                (Seen::default(), Seen::default(), Offers::default());
+            let request = fetch_fixture::request(with_candidates);
             let policy = WorkerSelectionPolicy::new_with_filters(
                 KvRouterConfig::default(),
                 "test",
                 vec![Box::new(TransferFilter)],
-                vec![
-                    Box::new(TransferScorer {
-                        inputs: WorkerInputs::KV_TRANSFER,
-                        seen: declared.clone(),
-                    }),
-                    Box::new(TransferScorer {
-                        inputs: WorkerInputs::CACHE,
-                        seen: undeclared.clone(),
-                    }),
-                ],
+                vec![Box::new(TransferScorer(plain_scorer.clone()))],
                 Box::new(FirstPicker),
-            );
+            )
+            .with_kv_fetch_scorer(Box::new(TransferFetchScorer(
+                fetch_scorer.clone(),
+                offers.clone(),
+            )));
             policy
                 .select_worker(WorkerSelectionInput::configured(
                     &workers,
@@ -1069,25 +1214,126 @@ mod tests {
                     16,
                 ))
                 .unwrap();
-            let sorted = |seen: Seen| {
+            fn sorted<T: Clone + Ord>(seen: &Arc<Mutex<Vec<T>>>) -> Vec<T> {
                 let mut seen = seen.lock().unwrap().clone();
                 seen.sort_unstable();
                 seen
-            };
-            (sorted(declared), sorted(undeclared))
+            }
+            (
+                sorted(&fetch_scorer),
+                sorted(&plain_scorer),
+                sorted(&offers),
+            )
         };
 
-        let (declared, undeclared) = select(Some(KvTransferCandidates {
-            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
-            owner_prefix_blocks: vec![(warm.into(), 3)],
-            routing_snapshot: None,
-        }));
+        let (fetch_scorer, plain_scorer, offers) = select(true);
         // The warm worker holds the whole fetchable prefix; the cold one can fetch it.
-        assert_eq!(declared, vec![(0, Some(None)), (1, Some(Some(3)))]);
-        assert_eq!(undeclared, vec![(0, None), (1, None)]);
-        // Without transfer candidates the host has nothing to report.
-        let (declared, _) = select(None);
-        assert_eq!(declared, vec![(0, None), (1, None)]);
+        assert_eq!(fetch_scorer, vec![(0, Some(None)), (1, Some(Some(3)))]);
+        assert_eq!(offers, vec![(0, None), (1, Some((0, 3, 3)))]);
+        // A plain scorer that declares KV_TRANSFER does not receive it.
+        assert_eq!(plain_scorer, vec![(0, None), (1, None)]);
+        // Without transfer candidates the host has nothing to report or offer.
+        let (fetch_scorer, _, offers) = select(false);
+        assert_eq!(fetch_scorer, vec![(0, None), (1, None)]);
+        assert_eq!(offers, vec![(0, None), (1, None)]);
+    }
+
+    #[test]
+    fn a_fetch_scorer_commits_only_the_host_offer_for_its_row() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mode {
+            Keep,
+            Clear,
+            Move,
+            NonFinite,
+        }
+
+        /// Costs the cold worker more, so picking it shows the pick, not the cost, decides.
+        struct ModeScorer(Mode);
+
+        impl KvFetchScorer for ModeScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+                fetches: &mut [Option<KvFetchSource>],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs.iter_mut()) {
+                    *cost = candidate.worker().worker_id as f64;
+                }
+                match self.0 {
+                    Mode::Keep => {}
+                    Mode::Clear => fetches.fill(None),
+                    Mode::Move => {
+                        let offer = fetches.iter().copied().flatten().next();
+                        fetches.fill(offer);
+                    }
+                    Mode::NonFinite => costs[0] = f64::NAN,
+                }
+                Ok(())
+            }
+        }
+
+        struct PickWorker(u64);
+
+        impl WorkerPicker for PickWorker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .position(|candidate| candidate.worker.worker_id == self.0)
+                    .unwrap())
+            }
+        }
+
+        let workers = fetch_fixture::workers();
+        let request = fetch_fixture::request(true);
+        let select = |mode: Mode| {
+            WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                Vec::new(),
+                Box::new(PickWorker(1)),
+            )
+            .with_kv_fetch_scorer(Box::new(ModeScorer(mode)))
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+        };
+
+        // The picked row's commitment leaves selection even though it is not the cheapest row.
+        let selected = select(Mode::Keep).unwrap();
+        assert_eq!(selected.worker.worker_id, 1);
+        let source = selected.kv_transfer_source.expect("committed fetch");
+        assert_eq!(source.source, WorkerWithDpRank::from_worker_id(0).into());
+        assert_eq!(source.prefix_blocks, 3);
+        // Clearing the slot is final: the router does not substitute a source.
+        assert_eq!(select(Mode::Clear).unwrap().kv_transfer_source, None);
+        // A source offered for another row fails selection.
+        assert!(matches!(
+            select(Mode::Move),
+            Err(KvSchedulerError::WorkerSelectionPolicy(
+                WorkerSelectionPolicyError::InvalidKvFetch { .. }
+            ))
+        ));
+        // The fetch scorer's costs are validated like any scorer's.
+        assert!(matches!(
+            select(Mode::NonFinite),
+            Err(KvSchedulerError::WorkerSelectionPolicy(
+                WorkerSelectionPolicyError::NonFiniteCost {
+                    scorer_index: 0,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -1222,12 +1468,9 @@ mod tests {
 
         struct EveryInputScorer;
 
-        impl WorkerScorer for EveryInputScorer {
+        impl KvFetchScorer for EveryInputScorer {
             fn required_worker_inputs(&self) -> WorkerInputs {
-                WorkerInputs::CACHE
-                    | WorkerInputs::LOAD
-                    | WorkerInputs::PREFERRED_TAINT
-                    | WorkerInputs::KV_TRANSFER
+                WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
             }
 
             fn score(
@@ -1235,6 +1478,7 @@ mod tests {
                 _context: &WorkerSelectionContext<'_>,
                 candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
+                _fetches: &mut [Option<KvFetchSource>],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
                     let load = candidate.load().unwrap();
@@ -1266,9 +1510,10 @@ mod tests {
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
-            vec![Box::new(EveryInputScorer)],
+            Vec::new(),
             Box::new(FirstPicker),
-        );
+        )
+        .with_kv_fetch_scorer(Box::new(EveryInputScorer));
         let preparer = WorkerSelector::<Worker>::candidate_preparer(&policy).unwrap();
         // The trace keeps every candidate's cost, so it compares every row.
         let trace = Some(SelectionTraceSpec { top_k: 0 });

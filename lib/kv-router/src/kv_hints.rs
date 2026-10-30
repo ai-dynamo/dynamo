@@ -14,8 +14,8 @@ use crate::protocols::{
 };
 
 pub use sources::{
-    CacheOwnerKvTransferKeys, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
-    KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
+    CacheOwnerKvTransferKeys, KvFetchSource, KvTransferScope, KvTransferSourceChoice,
+    KvTransferSourceSummary, KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
