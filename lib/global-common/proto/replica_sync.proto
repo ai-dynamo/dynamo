@@ -1,0 +1,138 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.globalrouter.replica.v1;
+
+// Replica sync between Global Router replicas (DEP #17639).
+//
+// Each Global Frontend embeds the router core and books requests on pools
+// as the core's workers. This stream carries the core's booking events and
+// session-affinity bindings from one replica to the others, so every replica
+// sees every replica's requests in flight and session pins.
+//
+// v1 is a compatibility major, not a schema revision. Additive fields keep
+// contract_marker=1. Preserve field numbers, types and meanings; reserve
+// deleted field numbers and names. Incompatible semantics require a new
+// package.
+//
+// Two values are deliberately absent. `token_sequence` is not carried: a
+// pool has no KV blocks the core could match, so a replica never needs the
+// prompt's block hashes. Output-block growth is not an event: it is frequent
+// and would cost disproportionate bandwidth, as in the core's own mesh.
+
+// One replica publishes; peers subscribe and receive a snapshot of the
+// publisher's state followed by its events as they happen.
+service ReplicaSync
+{
+  rpc SubscribeReplicaEvents(SubscribeRequest) returns (stream ReplicaFrame);
+}
+
+// A peer opening the stream.
+message SubscribeRequest
+{
+  // The subscribing replica's process id, the `router_id` and `writer_id` it
+  // stamps on its own events. The publisher may use it to avoid echoing the
+  // subscriber's events back.
+  uint64 subscriber_id = 1;
+  // The routing group whose partitions the subscriber wants; empty means
+  // every group the publisher serves.
+  string routing_group = 2;
+  // Must equal the publisher's CONTRACT_MARKER; the server rejects a
+  // mismatch with FAILED_PRECONDITION.
+  uint32 contract_marker = 3;
+}
+
+// One message on the stream: the opening snapshot, then event batches.
+message ReplicaFrame
+{
+  oneof frame
+  {
+    Snapshot snapshot = 1;
+    ReplicaEventBatch events = 2;
+  }
+}
+
+// The publisher's state when the subscriber joined: every live session
+// binding and an AddRequest for every booking still open. Events after it
+// apply on top.
+message Snapshot
+{
+  repeated AffinityBinding bindings = 1;
+  repeated ActiveSequenceEvent open_bookings = 2;
+}
+
+// Events since the previous frame, in the publisher's order. Bounded by the
+// core's MAX_REPLICA_BATCH_EVENTS and MAX_REPLICA_BATCH_DURATION.
+message ReplicaEventBatch
+{
+  repeated ActiveSequenceEvent events = 1;
+  repeated AffinityBinding bindings = 2;
+}
+
+// One booking lifecycle event: the core's ActiveSequenceEvent plus the
+// partition it belongs to.
+message ActiveSequenceEvent
+{
+  // With routing_group, the core partition the event belongs to. Host-mode
+  // replica channels are per partition, so the receiver needs it to route
+  // the event to the right tracker.
+  string model_name = 1;
+  string routing_group = 2;
+  // The booked request, unique within the publishing replica.
+  string request_id = 3;
+  // The worker booked: for the Global Router, the pool's worker id.
+  uint64 worker_id = 4;
+  // The worker's data-parallel rank; pools have one, 0.
+  uint32 dp_rank = 5;
+  // The publishing replica's process id. A receiver drops events carrying
+  // its own id, so a publisher's events never apply twice.
+  uint64 router_id = 6;
+  // The LoRA adapter the request targets, if any.
+  optional string lora_name = 7;
+  oneof data
+  {
+    AddRequest add = 10;
+    Empty mark_prefill_completed = 11;
+    Empty free = 12;
+  }
+}
+
+// A new booking. The core's `token_sequence` is not carried (see the file
+// comment); the receiver books the request without block hashes.
+message AddRequest
+{
+  // The requester's expected output length, if it gave one.
+  optional uint32 expected_output_tokens = 1;
+  // Whether the booking counts toward the worker's prefill load until
+  // mark_prefill_completed.
+  bool track_prefill_tokens = 2;
+  // The core's PrefillLoadHint, split into its two fields: both absent means
+  // no hint. initial_effective_prefill_tokens is required when the hint is
+  // present; expected_prefill_duration_ms is optional within it.
+  optional uint64 initial_effective_prefill_tokens = 3;
+  optional uint64 expected_prefill_duration_ms = 4;
+}
+
+// One replicated session binding: the pool a session is pinned to.
+message AffinityBinding
+{
+  // With routing_group, the core partition the binding belongs to.
+  string model_name = 1;
+  string routing_group = 2;
+  // The session pinned.
+  string session_id = 3;
+  // The worker the session is pinned to, and its rank if the pin is
+  // rank-specific.
+  uint64 worker_id = 4;
+  optional uint32 dp_rank = 5;
+  // Version of the binding: a receiver keeps the higher sequence, and on a
+  // tie the higher writer_id.
+  uint64 sequence = 6;
+  // The publishing replica's process id, which versions the binding and
+  // lets a receiver drop its own echoes.
+  uint64 writer_id = 7;
+}
+
+message Empty {}
