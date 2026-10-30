@@ -5,15 +5,32 @@
 
 See [docs/backends/sglang/](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md) for documentation.
 
-## KVCR-owned HiCache inventory
+## KVCR-owned inventory
 
 KVCR inventory publication is opt-in for the in-process `python -m dynamo.sglang`
-HiCacheStorage path. It requires a matching SGLang backend that reports the
-`kvcr_inventory` capability and engine-lifetime cache-owner metadata.
+HiCacheStorage and direct linker paths. It requires a matching SGLang backend that
+reports the `kvcr_inventory` capability and engine-lifetime cache-owner metadata.
 
-Keep KV events enabled and configure the KVCR backend with
+For HiCacheStorage, configure the KVCR backend with
 `"publish_inventory": true`, remote hints enabled, and an explicit reachable
-`control_advertise_host`. Use a ZMQ KV-event publisher with `"format": "dynamo"`.
+`control_advertise_host`.
+
+For the experimental direct linker, use TP1 and configure the worker with:
+
+```bash
+--tp-size 1 \
+--enable-unified-cache-external-linker \
+--unified-cache-external-linker-backend kvcr \
+--hicache-storage-backend-extra-config '{"publish_inventory": true, "kvcr_service_socket_path": null, "advertise_host": "192.0.2.10"}'
+```
+
+Replace `192.0.2.10` with a non-loopback address reachable by peers. Set distinct
+control and NIXL ports for colocated workers. Do not use HiCacheStorage options
+such as `control_advertise_host` in the linker configuration. See the
+[experimental linker quick start](https://github.com/ai-dynamo/kvcr/pull/129) for
+a complete example.
+
+For either path, enable KV events with a ZMQ publisher and `"format": "dynamo"`.
 Start a state-agent host in the workers' namespace before starting the workers:
 
 ```bash
@@ -30,10 +47,10 @@ Upgrade the Dynamo frontend, worker, and state-agent host together when enabling
 this mode. Existing deployments without the capability keep the legacy path;
 vLLM attachment descriptors without an ingress protocol keep their existing
 default. The new attachment requires a single-host LLM engine, PP=1, and one
-tokenizer worker; incomplete source metadata is rejected at startup.
+tokenizer worker; the direct linker additionally requires TP1 and DP1. Incomplete
+source metadata is rejected at startup.
 
 This is a live process-local inventory, not durable recovery: detaching the
 engine clears its KVCR owner, and a detected raw-event sequence gap withdraws
 readiness until the worker is restarted. Router hints remain advisory; storage
-lookup and completed delivery still determine usable pages. This integration
-does not enable direct-device linker mode.
+lookup and completed delivery still determine usable pages.
