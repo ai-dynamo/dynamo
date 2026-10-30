@@ -117,6 +117,31 @@ operator does not infer a backend from a native engine command. The leader decla
 the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
 and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
 
+> [!IMPORTANT]
+> The operator injects discovery environment variables
+> (`DYN_DISCOVERY_BACKEND`, `DYN_NAMESPACE`, and the downward-API pod identity)
+> into the `runtime` init container from Dynamo 1.6 onward. On a 1.5.x
+> operator, declare them manually on the `runtime` init container.
+
+```yaml
+env:
+- name: POD_NAME
+  valueFrom: {fieldRef: {fieldPath: metadata.name}}
+- name: POD_NAMESPACE
+  valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+- name: POD_UID
+  valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+- name: DYN_DISCOVERY_BACKEND
+  value: kubernetes
+- name: DYN_NAMESPACE
+  valueFrom: {fieldRef: {fieldPath: "metadata.labels['nvidia.com/dynamo-namespace']"}}
+- name: DYN_COMPONENT
+  valueFrom: {fieldRef: {fieldPath: "metadata.labels['nvidia.com/dynamo-component-type']"}}
+# Serves /live and /health on 9090.
+- name: DYN_SYSTEM_PORT
+  value: "9090"
+```
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP
