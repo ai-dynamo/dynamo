@@ -229,6 +229,7 @@ impl LowerTierRun<ConcurrentRadixTreeCompressed> {
             indexers,
             options: LowerTierQueryOptions {
                 retain_kv_transfer_chain: kvcr,
+                ..Default::default()
             },
             device_details: |crtc, sequence, retain| {
                 crtc.find_match_details_impl_with_options(sequence, false, retain)

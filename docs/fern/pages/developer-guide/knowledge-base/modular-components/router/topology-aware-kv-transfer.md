@@ -163,6 +163,10 @@ Worker selection and the fetch source are one decision. For every candidate, the
 
 KVCR caches are hint sources through their cache owners. A vLLM worker publishes its topology with each cache owner it creates, because KVCR runs in the worker's pod. An owner without published topology, for example one created by an older worker, takes the island of the worker it is attached to. An unattached owner without published topology is in no island.
 
+**Experimental.** Continuation fetch hints are disabled by default. To let one source extend a target worker's existing device/host-pinned prefix, set `router_fetch_continuation: true` under `router` in `--router-policy-config`, or use `--router-fetch-continuation` / `DYN_ROUTER_FETCH_CONTINUATION=true`. An explicit YAML value overrides the CLI and environment settings.
+
+The source must hold a contiguous continuation from the target's prefix and satisfy the same topology rules as prefix fetch hints; the router does not combine multiple sources. This requires hint-capable workers and a local event-driven indexer without predict-on-route. The setting also applies when queued requests refresh their cache lookup. Existing prefix fetch hints remain enabled when continuation fetch hints are disabled.
+
 A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
 
 For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: kubernetes.io/hostname` on the `KvTransferPolicy` so nodes need no extra labels.

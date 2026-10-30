@@ -70,6 +70,22 @@ def test_to_json_round_trip_is_idempotent() -> None:
     assert KvRouterConfig.from_json(text).to_json() == text
 
 
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_fetch_continuation_binding_preserves_opt_in_on_the_wire(
+    enabled: bool | None,
+) -> None:
+    config = (
+        KvRouterConfig()
+        if enabled is None
+        else KvRouterConfig(router_fetch_continuation=enabled)
+    )
+    expected = enabled is True
+    data = json.loads(config.to_json())
+    assert data.get("router_fetch_continuation", False) is expected
+    assert ("router_fetch_continuation" in data) is expected
+    assert KvRouterConfig.from_json(config.to_json()).to_json() == config.to_json()
+
+
 def test_policy_parameters_resolve_every_worker_type() -> None:
     config = _non_default_config()
     for worker_type in ("aggregated", "prefill"):

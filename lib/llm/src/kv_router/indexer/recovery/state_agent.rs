@@ -2865,6 +2865,7 @@ mod tests {
                 &MatchDetails::default(),
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain: true,
+                    ..Default::default()
                 },
             )
         };

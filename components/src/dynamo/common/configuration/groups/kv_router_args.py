@@ -52,6 +52,7 @@ _ROUTER_SETTINGS = (
     "use_remote_indexer",
     "serve_indexer",
     "enable_session_prefix_index",
+    "router_fetch_continuation",
     "shared_cache_type",
     "router_predicted_ttl_secs",
 )
@@ -203,6 +204,7 @@ class KvRouterConfigBase(ConfigBase):
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     enable_session_prefix_index: bool = False
+    router_fetch_continuation: bool = False
     shared_cache_multiplier: Optional[float] = None
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
@@ -715,6 +717,18 @@ class KvRouterArgGroup(ArgGroup):
                 "index for routing decisions yet."
             ),
             dest="enable_session_prefix_index",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-fetch-continuation",
+            env_var="DYN_ROUTER_FETCH_CONTINUATION",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Allow one source to extend a worker's "
+                "existing device/host-pinned prefix with a continuation fetch hint. Requires "
+                "hint-capable workers and a local event-driven indexer without "
+                "predict-on-route. Existing prefix fetch hints remain enabled when false."
+            ),
         )
         add_argument(
             g,
