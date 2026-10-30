@@ -1244,6 +1244,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
                             }),
+                            // The same report vLLM, SGLang and TensorRT-LLM workers attach, which the
+                            // frontend turns into the worker-reported reuse (F4) of the cache funnel.
+                            engine_data: signal.cached_tokens.map(|cached| {
+                                serde_json::json!({
+                                    "kv_cache_hit": {
+                                        "prompt_tokens": prompt_tokens_count,
+                                        "reused_tokens": cached,
+                                    }
+                                })
+                            }),
                             ..Default::default()
                         };
 
@@ -1674,6 +1684,13 @@ mod tests {
                 }),
                 completion_tokens_details: None,
             })
+        );
+        // The worker cache-hit report the frontend turns into F4 of the cache reuse funnel.
+        assert_eq!(
+            token.engine_data,
+            Some(serde_json::json!({
+                "kv_cache_hit": {"prompt_tokens": 3, "reused_tokens": 0}
+            }))
         );
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
