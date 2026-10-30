@@ -251,10 +251,15 @@ impl ReplicaHub {
             let age = now.saturating_duration_since(booking.opened_at);
             if !booking.admitted {
                 // Its add may still be queued for the partition; the expiry
-                // interval starts at admission. One the core never takes (it
-                // dropped the event) is forgotten after two intervals.
-                return age < self.booking_expiry * 2
-                    || self.backlog.contains_key(&booking.partition);
+                // interval starts at admission. After two intervals without
+                // admission the hub sends its free anyway: the free travels
+                // behind the add, so the core frees a booking it takes late
+                // and ignores a free for an add it dropped.
+                if age < self.booking_expiry * 2 {
+                    return true;
+                }
+                stale.push((booking.partition.clone(), booking.free(request_id.clone())));
+                return false;
             }
             if age < self.booking_expiry {
                 return true;
@@ -264,9 +269,7 @@ impl ReplicaHub {
                 booking.opened_at = now;
                 return true;
             }
-            if booking.admitted {
-                stale.push((booking.partition.clone(), booking.free(request_id.clone())));
-            }
+            stale.push((booking.partition.clone(), booking.free(request_id.clone())));
             false
         });
         if !stale.is_empty() {
@@ -781,11 +784,14 @@ mod tests {
         assert!(channels.inbound_rx.try_recv().is_err());
         assert_eq!(hub.stats().bookings_released, 1);
 
-        // Two intervals: the busy one made no further progress and is
-        // freed; the never-admitted one is forgotten.
         hub.sweep_at(start + hub.booking_expiry * 2);
         assert_eq!(hub.stats().bookings_tracked, 0);
-        assert_eq!(channels.inbound_rx.recv().await.unwrap().request_id, "busy");
+        let mut freed = vec![
+            channels.inbound_rx.recv().await.unwrap().request_id,
+            channels.inbound_rx.recv().await.unwrap().request_id,
+        ];
+        freed.sort();
+        assert_eq!(freed, ["busy", "dropped"]);
 
         hub.open.insert("done".to_owned(), booking(true));
         hub.booking_completed("done");
