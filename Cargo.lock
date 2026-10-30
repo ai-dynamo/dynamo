@@ -2801,6 +2801,7 @@ dependencies = [
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "flate2",
  "futures",
  "ndarray 0.16.1",
  "ndarray-interp",
