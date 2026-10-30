@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use dynamo_global_common::RouterReplica;
 use tokio::sync::watch;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -60,17 +60,15 @@ impl RouterCache {
         interval: Duration,
         cancel: CancellationToken,
     ) -> Self {
-        assert!(!interval.is_zero(), "the refresh interval must be non-zero");
+        let mut ticks = ticks(interval);
         let (routers, routers_rx) = watch::channel(HashSet::new());
         let (freshness, freshness_rx) = watch::channel(Freshness::Unread);
         let task = tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(interval);
-            ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
             cancel
                 .run_until_cancelled(async {
                     loop {
                         ticks.tick().await;
-                        refresh(&source, &routers, &freshness).await;
+                        refresh_routers(&source, &routers, &freshness).await;
                     }
                 })
                 .await;
@@ -109,9 +107,7 @@ impl RouterSource for GlobalDiscoveryClient {
     }
 }
 
-/// Logs each new failure reason and the recovery once, so an outage does not
-/// log every interval.
-async fn refresh(
+async fn refresh_routers(
     source: &impl RouterSource,
     routers: &watch::Sender<HashSet<RouterReplica>>,
     freshness: &watch::Sender<Freshness>,
@@ -120,14 +116,7 @@ async fn refresh(
         Ok(listed) => listed.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             let reason = error_chain(&error);
-            let new_reason = freshness.send_if_modified(|current| {
-                if matches!(current, Freshness::Stale(last) if *last == reason) {
-                    return false;
-                }
-                *current = Freshness::Stale(reason.clone());
-                true
-            });
-            if new_reason {
+            if mark_stale(freshness, &reason) {
                 let known = routers.borrow().len();
                 tracing::warn!(error = %reason, known, "cannot list Global Routers; keeping the known ones");
             }
@@ -147,6 +136,40 @@ async fn refresh(
         *current = listed;
         true
     });
+    if mark_current(freshness) {
+        tracing::info!("listing Global Routers again");
+    }
+    if !added.is_empty() || !removed.is_empty() {
+        tracing::info!(?added, ?removed, "Global Router set changed");
+    }
+}
+
+/// Ticks immediately, then every `interval`. A refresh that overruns delays
+/// the next tick instead of causing a burst. Built before the task is
+/// spawned, so a zero interval panics in the caller.
+fn ticks(interval: Duration) -> Interval {
+    assert!(!interval.is_zero(), "the refresh interval must be non-zero");
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticks
+}
+
+/// Records a failed refresh. Returns whether `reason` differs from the last
+/// one, so a caller logs each new reason once instead of every interval.
+fn mark_stale(freshness: &watch::Sender<Freshness>, reason: &str) -> bool {
+    freshness.send_if_modified(|current| {
+        if matches!(current, Freshness::Stale(last) if last == reason) {
+            return false;
+        }
+        *current = Freshness::Stale(reason.to_owned());
+        true
+    })
+}
+
+/// Records a successful refresh. Returns whether it ends an outage, so a
+/// caller logs the recovery once. Call it after publishing the list, so a
+/// reader never sees `Current` next to the previous list.
+fn mark_current(freshness: &watch::Sender<Freshness>) -> bool {
     let mut recovered = false;
     freshness.send_if_modified(|current| {
         if *current == Freshness::Current {
@@ -156,12 +179,7 @@ async fn refresh(
         *current = Freshness::Current;
         true
     });
-    if recovered {
-        tracing::info!("listing Global Routers again");
-    }
-    if !added.is_empty() || !removed.is_empty() {
-        tracing::info!(?added, ?removed, "Global Router set changed");
-    }
+    recovered
 }
 
 /// Each router as `<id>=<url>`, sorted, so a URL change under the same ID
