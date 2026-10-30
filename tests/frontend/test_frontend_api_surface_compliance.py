@@ -960,9 +960,10 @@ def _run_codex_exec_smoke(
 
     We prompt codex to list `cwd`; `cwd` contains `marker_filename` and nothing
     else the model could pattern-match from prior knowledge. If codex answers
-    without invoking its shell tool, the marker won't appear in stdout and the
-    assertion fails — which proves we're testing the full Responses API
-    tool-calling chain, not just text generation.
+    without invoking its shell tool, no command output in the `--json` event
+    stream contains the marker and the assertion fails — which proves we're
+    testing the full Responses API tool-calling chain, not just text
+    generation. See `_codex_listing_failure` for the exact checks.
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
@@ -988,6 +989,9 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
+        # JSONL events expose the command output, so the marker check below
+        # does not depend on the 2B model copying a random filename exactly.
+        "--json",
         CODEX_LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
@@ -1018,12 +1022,88 @@ def _run_codex_exec_smoke(
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
 
-    if marker_filename not in result.stdout:
+    failure = _codex_listing_failure(result.stdout, marker_filename)
+    if failure:
         pytest.fail(
-            "codex exec did not report the marker file — expected stdout to "
-            f"contain {marker_filename!r} (implies the shell tool was invoked "
-            f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
+            f"codex exec did not report the marker file — {failure} "
+            f"(cwd {cwd}). Got:\n{result.stdout}"
         )
+
+
+def _codex_listing_failure(stdout: str, marker_filename: str) -> str | None:
+    """Return why a `codex exec --json` run did not prove the listing, or None.
+
+    The exact marker must appear in the output of a successful command, which
+    only a real `exec_command` call routed through `/v1/responses` produces.
+    The final answer must then name a `marker_` file, which the model can only
+    know if Dynamo passed the tool output back in the follow-up request. The
+    answer may miscopy the random hex suffix: a sampled 2B model sometimes
+    drops or repeats a digit, and that is not a Dynamo API-surface failure.
+    """
+    command_outputs: list[str] = []
+    final_message = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item") or {}
+        if item.get("type") == "command_execution" and item.get("exit_code") == 0:
+            command_outputs.append(item.get("aggregated_output") or "")
+        elif item.get("type") == "agent_message":
+            final_message = item.get("text") or ""
+
+    if not any(marker_filename in output for output in command_outputs):
+        return (
+            f"no successful shell command output contained {marker_filename!r}, "
+            "so the shell tool did not run `ls` through /v1/responses"
+        )
+    if final_message is None or "marker_" not in final_message:
+        return (
+            "the final answer did not name the `marker_` file, so the tool "
+            f"output did not reach the model; final answer: {final_message!r}"
+        )
+    return None
+
+
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_codex_listing_failure_requires_command_output_and_answer() -> None:
+    marker = "marker_631ba9e666d8.txt"
+
+    def events(*items: dict) -> str:
+        lines = [{"type": "thread.started", "thread_id": "t"}]
+        lines += [{"type": "item.completed", "item": item} for item in items]
+        return "\n".join(json.dumps(line) for line in lines) + "\n"
+
+    listing = {
+        "type": "command_execution",
+        "command": "/bin/bash -lc ls",
+        "aggregated_output": f"{marker}\n",
+        "exit_code": 0,
+        "status": "completed",
+    }
+    # Observed locally: `ls` ran, but the answer dropped one hex digit.
+    miscopied = {
+        "type": "agent_message",
+        "text": "The only file present is `marker_631ba9e66d8.txt`.",
+    }
+    assert _codex_listing_failure(events(listing, miscopied), marker) is None
+
+    # The model never called the tool and guessed an answer.
+    assert _codex_listing_failure(events(miscopied), marker)
+    # Codex refused the call, so no command ran successfully.
+    refused = {**listing, "exit_code": 1, "aggregated_output": "rejected"}
+    assert _codex_listing_failure(events(refused, miscopied), marker)
+    # The tool ran, but the answer shows no sign of its output.
+    unrelated = {"type": "agent_message", "text": "The directory is empty."}
+    assert _codex_listing_failure(events(listing, unrelated), marker)
+    assert _codex_listing_failure(events(listing), marker)
 
 
 def _run_codex_subagent_smoke(
