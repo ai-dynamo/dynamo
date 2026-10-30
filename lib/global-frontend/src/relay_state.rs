@@ -80,29 +80,27 @@ impl RelayPoolState {
         let kv_sequence = kv_load.as_ref().map(|load| load.window_sequence);
         // Catalog cutover may precede the next load window. Keep that
         // interval unknown rather than applying an old layout's load.
+        let producer_matches = |producer: &Option<_>| {
+            producer
+                .as_ref()
+                .and_then(|producer| ProducerKey::try_from(producer).ok())
+                .is_some_and(|producer| producer_keys.contains(&producer))
+        };
         if serving_load.as_ref().is_some_and(|load| {
             load.pools.len() != producers.len()
-                || load.pools.iter().any(|pool| {
-                    pool.producer.is_none()
-                        || pool
-                            .producer
-                            .as_ref()
-                            .and_then(|producer| ProducerKey::try_from(producer).ok())
-                            .is_none_or(|producer| !producer_keys.contains(&producer))
-                })
+                || load
+                    .pools
+                    .iter()
+                    .any(|pool| !producer_matches(&pool.producer))
         }) {
             serving_load = None;
         }
         if kv_load.as_ref().is_some_and(|load| {
             load.pools.len() != producers.len()
-                || load.pools.iter().any(|pool| {
-                    pool.producer.is_none()
-                        || pool
-                            .producer
-                            .as_ref()
-                            .and_then(|producer| ProducerKey::try_from(producer).ok())
-                            .is_none_or(|producer| !producer_keys.contains(&producer))
-                })
+                || load
+                    .pools
+                    .iter()
+                    .any(|pool| !producer_matches(&pool.producer))
         }) {
             kv_load = None;
         }

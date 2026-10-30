@@ -3,7 +3,6 @@
 
 //! Relay-initiated pool presence updates for the Global Router.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use tonic::{Request, Response, Status, Streaming};
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Routing coordinates and replica identity claimed in the first frame.
-pub struct RelayHello {
+struct RelayHello {
     pub pool_key: PoolKey,
     pub logical_service: String,
     pub replica_id: String,
@@ -63,25 +62,8 @@ impl TryFrom<Hello> for RelayHello {
     }
 }
 
-/// Optional deployment admission policy for Relay connections.
-#[tonic::async_trait]
-pub trait RelayAdmission: Send + Sync + 'static {
-    async fn admit(&self, hello: &RelayHello, peer: SocketAddr) -> Result<(), Status>;
-}
-
-/// Admission for a trusted network. Identity fields name state; they do not authenticate a workload.
-pub struct TrustedNetworkAdmission;
-
-#[tonic::async_trait]
-impl RelayAdmission for TrustedNetworkAdmission {
-    async fn admit(&self, _hello: &RelayHello, _peer: SocketAddr) -> Result<(), Status> {
-        Ok(())
-    }
-}
-
 struct ReceiverService {
     catalog: Arc<RelayGatedPoolCatalog>,
-    admission: Arc<dyn RelayAdmission>,
     shutdown: CancellationToken,
 }
 
@@ -91,9 +73,6 @@ impl PoolViewReceiver for ReceiverService {
         &self,
         request: Request<Streaming<PoolViewFrame>>,
     ) -> Result<Response<PublishResult>, Status> {
-        let peer = request
-            .remote_addr()
-            .ok_or_else(|| Status::unauthenticated("missing peer address"))?;
         let mut frames = request.into_inner();
         let first = tokio::select! {
             _ = self.shutdown.cancelled() => return Err(Status::unavailable("receiver shutting down")),
@@ -106,10 +85,6 @@ impl PoolViewReceiver for ReceiverService {
             }) => RelayHello::try_from(hello)?,
             _ => return Err(Status::invalid_argument("first frame must be Hello")),
         };
-        tokio::select! {
-            _ = self.shutdown.cancelled() => return Err(Status::unavailable("receiver shutting down")),
-            admitted = self.admission.admit(&hello, peer) => admitted?,
-        }
         let pool = V1PoolIdDeriver.derive(&hello.pool_key);
         let source = RelaySourceKey {
             pool: pool.clone(),
@@ -183,10 +158,7 @@ fn apply_frame(
             if !snapshot.pool_present && state.is_some() {
                 return Err(Status::invalid_argument("withdrawn pool has state"));
             }
-            let pools = snapshot
-                .pool_present
-                .then_some((pool.clone(), state))
-                .into_iter();
+            let pools = state.into_iter().map(|state| (pool.clone(), state));
             stream
                 .replace_state_snapshot(snapshot.revision, pools)
                 .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -200,7 +172,7 @@ fn apply_frame(
                 .map(Arc::new)
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
             stream
-                .upsert_state(update.revision, pool.clone(), Some(state))
+                .upsert_state(update.revision, pool.clone(), state)
                 .map_err(|error| Status::failed_precondition(error.to_string()))?;
             *revision = Some(update.revision);
         }
@@ -215,17 +187,14 @@ fn apply_frame(
     Ok(())
 }
 
-/// Serve Relay streams on a dedicated listener. The caller owns admission
-/// policy and starts this alongside the HTTP frontend.
+/// Serve trusted-network Relay streams alongside the HTTP frontend.
 pub async fn serve_relay_views(
     listener: TcpListener,
     catalog: Arc<RelayGatedPoolCatalog>,
-    admission: Arc<dyn RelayAdmission>,
     shutdown: CancellationToken,
 ) -> Result<(), tonic::transport::Error> {
     let service = PoolViewReceiverServer::new(ReceiverService {
         catalog,
-        admission,
         shutdown: shutdown.clone(),
     })
     .max_decoding_message_size(MAX_FRAME_BYTES)

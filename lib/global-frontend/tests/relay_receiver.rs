@@ -9,8 +9,7 @@ use dynamo_llm::pool_relay::wan::grpc::protocol as relay;
 use prost::Message;
 mod common;
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, TrustedNetworkAdmission, app, serve,
-    serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, serve, serve_relay_views,
 };
 use dynamo_global_router::{InFlightTracker, Pool, RoundRobinSelector};
 use grpc::pool_view_frame::Event;
@@ -130,12 +129,7 @@ async fn two_routers_forward_only_while_a_relay_is_live_and_reconnect_recovers()
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let shutdown = cancel.clone();
-            let receiver = tokio::spawn(serve_relay_views(
-                listener,
-                catalog,
-                Arc::new(TrustedNetworkAdmission),
-                shutdown,
-            ));
+            let receiver = tokio::spawn(serve_relay_views(listener, catalog, shutdown));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!(
                 "http://{}/v1/chat/completions",
@@ -241,7 +235,6 @@ async fn present_snapshots_and_upserts_require_state() {
         let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(serve_relay_views(
             listener,
             catalog,
-            Arc::new(TrustedNetworkAdmission),
             cancel.clone(),
         )));
         for upsert in [false, true] {
