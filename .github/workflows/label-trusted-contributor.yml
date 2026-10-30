@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Label declared trusted contributors
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  label:
+    if: github.repository == 'ai-dynamo/dynamo' && vars.TRUSTED_CONTRIBUTOR_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # Metadata only. Never check out or execute the PR's source here.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ai-dynamo/dynamo
+          ref: main
+          persist-credentials: false
+      - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+        working-directory: .github/scripts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/contributor-ci/label.cjs

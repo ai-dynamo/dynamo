@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Trusted contributor workload
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: trusted-contributor-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  route:
+    if: github.repository == 'ai-dynamo/dynamo' && vars.TRUSTED_CONTRIBUTOR_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      candidate: ${{ steps.route.outputs.candidate }}
+      builds: ${{ steps.route.outputs.builds }}
+      tests: ${{ steps.route.outputs.tests }}
+      has_builds: ${{ steps.route.outputs.has_builds }}
+      has_tests: ${{ steps.route.outputs.has_tests }}
+      source: ${{ steps.route.outputs.source }}
+      head: ${{ steps.route.outputs.head }}
+    steps:
+      # Evaluate policy and generate the matrix using trusted code, before any
+      # PR code executes. The infrastructure hook independently admits each job.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ai-dynamo/dynamo
+          ref: main
+          persist-credentials: false
+      - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+        working-directory: .github/scripts
+      - name: Route the current PR
+        id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/contributor-ci/route.cjs
+
+  build:
+    name: build ${{ matrix.key }}
+    needs: route
+    if: needs.route.outputs.candidate == 'true' && needs.route.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.route.outputs.builds) }}
+    runs-on: [trusted_contributors, cpu, amd64, builder]
+    timeout-minutes: 120
+    container:
+      image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dynamo-ci/aws/dynamo/actions-runner/builder:0.2.0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ai-dynamo/dynamo
+          ref: ${{ needs.route.outputs.source }}
+          persist-credentials: false
+          lfs: true
+      - name: Build through contributor-only BuildKit and ECR
+        env:
+          BUILD_FRAMEWORK: ${{ matrix.framework }}
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_ARCH: ${{ matrix.arch }}
+          BUILD_CUDA: ${{ matrix.cuda }}
+          BUILD_IMAGE: ${{ matrix.image }}
+          BUILD_CACHE: ${{ matrix.cache }}
+        run: bash .github/scripts/contributor-ci/build.sh
+
+  test:
+    name: test ${{ matrix.key }}
+    needs: [route, build]
+    if: needs.route.outputs.candidate == 'true' && needs.route.outputs.has_tests == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.route.outputs.tests) }}
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 90
+    container:
+      image: ${{ matrix.image }}
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        DD_TRACE_ENABLED: 'false'
+        DD_CIVISIBILITY_ENABLED: 'false'
+        DYN_ARTIFACT_MINIO_ENDPOINT: http://localhost:9000
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: minioadmin
+        DYN_ARTIFACT_MINIO_SECRET_KEY: minioadmin
+        PYTEST_ADDOPTS: >-
+          ${{ matrix.framework == 'triton' && '--ignore=tests/fault_tolerance/test_canary_rank_pause.py --ignore=tests/serve/test_vllm.py --ignore=tests/serve/test_sglang.py --ignore=tests/serve/test_trtllm.py' || '' }}
+    services:
+      minio:
+        image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ai-dynamo/dynamo
+          ref: ${{ needs.route.outputs.source }}
+          persist-credentials: false
+      - name: Hydrate approved PR models
+        uses: ./.github/actions/hydrate-test-models
+        with:
+          bucket: dynamo-ci-210086341041-us-west-2-pr-models
+      - name: Run the selected tests
+        if: matrix.check == 'pytest'
+        env:
+          PYTEST_MARKS: ${{ matrix.markers }}
+          CONTAINER_WORKSPACE: /workspace
+          TEST_SUITE_NAME: ${{ matrix.suite }}
+          TEST_TYPE: trusted_${{ matrix.tier }}
+          PLATFORM_ARCH: ${{ matrix.arch }}
+          DYNAMO_TEST_FRAMEWORK: ${{ matrix.framework }}
+          PARALLEL_MODE: 'none'
+          GPU_TESTS: ${{ startsWith(matrix.tier, 'gpu-') && 'true' || 'false' }}
+          VERIFY_GPU: 'true'
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: bash .github/scripts/pytest-local.sh
+      - name: Check the frontend image
+        if: matrix.check == 'frontend'
+        working-directory: /workspace
+        run: |
+          set -euo pipefail
+          ldd /epp | tee /tmp/epp-links.txt
+          if grep -q 'not found' /tmp/epp-links.txt; then exit 1; fi
+          python tests/frontend/router_ais_image_smoke.py
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: contributor-tests-${{ matrix.key }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  result:
+    name: Contributor workload result
+    runs-on: ubuntu-latest
+    needs: [route, build, test]
+    if: always() && vars.TRUSTED_CONTRIBUTOR_CI_ENABLED == 'true'
+    steps:
+      - name: Require the planned workload to finish
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e '
+            .route.result == "success" and
+            (if .route.outputs.candidate != "true" then true
+             else ((.route.outputs.has_builds != "true" or .build.result == "success") and
+                   (.route.outputs.has_tests != "true" or .test.result == "success")) end)
+          ' <<< "$RESULTS"
+          echo 'Deployment, ACR, NGC publication and Triton Artifactory QA are excluded from this lane.' >> "$GITHUB_STEP_SUMMARY"

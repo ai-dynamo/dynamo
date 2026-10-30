@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Test contributor routing
+on:
+  pull_request:
+    paths:
+      - .github/scripts/contributor-ci/**
+      - .github/workflows/*contributor*.yml
+      - .github/filters.yaml
+      - .github/workflows/trigger-ci-approval-flow.yml
+      - .github/workflows/pr_full_ci_reminder.yaml
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+        working-directory: .github/scripts
+      - run: node --test .github/scripts/contributor-ci/test-*.cjs

@@ -66,6 +66,7 @@ jobs:
                 '🚀'
             })
       - name: Add contribution labels to PR
+        if: vars.TRUSTED_CONTRIBUTOR_CI_ENABLED != 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           IS_TRUSTED: ${{ steps.contributor_check.outputs.is_trusted }}

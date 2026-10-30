@@ -15,3 +15,7 @@ self-hosted-runner:
   labels:
     - prod-builder-v3
     - model-cache-publisher
+    - trusted_contributors
+    - cpu
+    - amd64
+    - builder
