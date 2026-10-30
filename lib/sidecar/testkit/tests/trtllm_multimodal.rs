@@ -537,3 +537,101 @@ async fn media_window_override_is_rejected_before_dispatch() {
     engine.cleanup().await.unwrap();
     fixture.shutdown().await;
 }
+
+#[test]
+fn remote_url_policy_is_enforced_before_engine_dispatch() {
+    // Isolate startup environment changes from the other parallel tests.
+    const CHILD: &str = "DYNAMO_TEST_REMOTE_MEDIA_POLICY";
+    if std::env::var_os(CHILD).is_none() {
+        for value in [Some("0"), Some("true"), None] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            match value {
+                Some(value) => {
+                    command.env("DYN_MM_ALLOW_REMOTE_URLS", value);
+                }
+                None => {
+                    command.env_remove("DYN_MM_ALLOW_REMOTE_URLS");
+                }
+            }
+            let output = command
+                .args([
+                    "--exact",
+                    "remote_url_policy_is_enforced_before_engine_dispatch",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_MM_ALLOW_INTERNAL", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "policy {value:?}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "the child must execute the policy test"
+            );
+        }
+        return;
+    }
+
+    let allow_remote = std::env::var("DYN_MM_ALLOW_REMOTE_URLS")
+        .map(|value| dynamo_runtime::config::parse_bool(&value).unwrap())
+        .unwrap_or(true);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(check_remote_url_policy(allow_remote));
+}
+
+async fn check_remote_url_policy(allow_remote: bool) {
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    advertise_images(&fixture);
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    for image in [
+        MultimodalData::RawUrl("http://example.com/image.png".into()),
+        MultimodalData::RawUrl("HTTPS://example.com/image.png".into()),
+        MultimodalData::Url("https://example.com/image.png".parse().unwrap()),
+        MultimodalData::RawUrl("data:image/png;base64,aW1hZ2U=".into()),
+    ] {
+        let inline = matches!(&image, MultimodalData::RawUrl(url) if url.starts_with("data:"));
+        let mut req = image_request();
+        req.multi_modal_data = Some(HashMap::from([("image_url".into(), vec![image])]));
+        req.multi_modal_uuids = None;
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        if allow_remote || inline {
+            fixture.respond(ctx.id(), vec![finished()]);
+            let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+            assert_eq!(
+                outputs.last().unwrap().as_ref().unwrap().finish_reason,
+                Some(FinishReason::Stop)
+            );
+            assert_eq!(handle.native_request().unwrap().media.len(), 1);
+        } else {
+            let error = engine
+                .generate(req, GenerateContext::new(ctx, None))
+                .await
+                .err()
+                .expect("remote URL must fail");
+            assert_eq!(
+                error.error_type(),
+                dynamo_backend_common::ErrorType::Backend(
+                    dynamo_backend_common::BackendError::InvalidArgument,
+                )
+            );
+            assert!(
+                error.to_string().contains("DYN_MM_ALLOW_REMOTE_URLS=0"),
+                "{error}"
+            );
+            assert!(handle.native_request().is_none());
+        }
+    }
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
+}

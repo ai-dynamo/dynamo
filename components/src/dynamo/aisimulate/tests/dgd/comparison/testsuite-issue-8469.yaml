@@ -50,11 +50,6 @@ tests:
           status: broken
           reason: The direct renderer does not support the TRT-LLM DEP topology selected by Sweeper.
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical DeepSeek V3.2 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: deepseek-v32-fp4-trtllm-disagg
     hardware: gb200-sxm-32gpu
@@ -63,11 +58,6 @@ tests:
         sweeper:
           status: broken
           reason: Sweeper finds no runner-compatible disaggregated configuration within the 32-GPU budget.
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical DeepSeek V3.2 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: glm-5-nvfp4-sglang-disagg
     hardware: gb200-sxm-20gpu
@@ -98,11 +88,6 @@ tests:
           status: broken
           reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Kimi K2.5 KVBM recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/8476]
 
   - case: kimi-k2-5-nvfp4-trtllm-agg-specdec
     hardware: b200-sxm-32gpu
@@ -124,48 +109,18 @@ tests:
 
   - case: llama-3-3-70b-fp8-vllm-agg-gaie
     hardware: h200-sxm-4gpu
-    exceptions:
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Llama 3.3 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-agg
     hardware: h200-sxm-4gpu
-    exceptions:
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Llama 3.3 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-gaie
     hardware: h200-sxm-8gpu
-    exceptions:
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Llama 3.3 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-multi-node
     hardware: h200-sxm-16gpu
-    exceptions:
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Llama 3.3 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: llama-3-3-70b-fp8-vllm-disagg-single-node
     hardware: h200-sxm-8gpu
-    exceptions:
-      deploy:
-        recipe:
-          status: skipped
-          reason: The historical Llama 3.3 recipe was removed from the repository.
-          links: [https://github.com/ai-dynamo/dynamo/pull/13663]
 
   - case: nemotron-3-super-fp8-sglang-agg
     hardware: h200-sxm-4gpu

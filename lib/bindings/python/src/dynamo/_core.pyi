@@ -2448,6 +2448,7 @@ def run_mocker_trace_replay(
     agentic_warmup: bool = False,
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
+    conversation_affinity: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
