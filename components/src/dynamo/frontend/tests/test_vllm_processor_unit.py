@@ -1238,6 +1238,14 @@ class _FakePostProcessor:
         }
 
 
+class _FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
+
+
 @pytest.fixture
 def real_vllm_processor_module():
     """Defer real vLLM imports until execution so marker collection stays light."""
@@ -1536,9 +1544,11 @@ async def test_generator_forwards_chat_logprobs_count(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("context_id", ["ctx-123", None])
 async def test_include_reasoning_false_keeps_response_parser_active(
     vllm_processor_module,
     monkeypatch,
+    context_id,
 ):
     class RequestForSampling(SimpleNamespace):
         model_fields = frozenset()
@@ -1608,6 +1618,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
     )
 
     def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        captured["input_request_id"] = request_id
         return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
 
     input_processor = SimpleNamespace(
@@ -1645,6 +1656,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         mm_routing_info,
         context,
     ):
+        captured["stream_request_id"] = request_id
         captured["dynamo_preproc"] = dynamo_preproc
         captured["post_processor"] = post_processors[0]
         yield {"captured": True}
@@ -1661,11 +1673,17 @@ async def test_include_reasoning_false_keeps_response_parser_active(
             {
                 "model": "test",
                 "messages": [{"role": "user", "content": "Hello"}],
-            }
+            },
+            context=_FakeContext(context_id) if context_id is not None else None,
         )
     ]
 
     assert results == [{"captured": True}]
+    assert captured["input_request_id"] == captured["stream_request_id"]
+    if context_id is not None:
+        assert captured["stream_request_id"] == context_id
+    else:
+        assert len(captured["stream_request_id"]) == 16
     assert captured["dynamo_preproc"]["reasoning_ended"] is True
     post_processor = captured["post_processor"]
     assert post_processor.reasoning_is_done is False
@@ -1887,6 +1905,7 @@ async def _run_generate(
     processor,
     preproc,
     *,
+    request_id="request-id",
     mm_routing_info=None,
     context=None,
     request=None,
@@ -1903,7 +1922,7 @@ async def _run_generate(
     return [
         item
         async for item in processor._generate_and_stream(
-            "request-id",
+            request_id,
             request if request is not None else {"model": MODEL},
             preproc,
             preproc["token_ids"],
@@ -2736,7 +2755,7 @@ class TestRoutedEnginePath:
 
         assert envelope["_dynamo_annotated"] is True
         assert envelope["data"] == {
-            "id": "request-id",
+            "id": "chatcmpl-request-id",
             "choices": [
                 {
                     "index": 0,
@@ -2757,6 +2776,32 @@ class TestRoutedEnginePath:
 
         assert "event" not in envelope
         assert "comment" not in envelope
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_id", ["ctx-123", None])
+    async def test_routed_stream_keeps_caller_request_id(
+        self, vllm_processor_module, context_id
+    ):
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": "stop"},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request_id="resolved-request",
+            context=_FakeContext(context_id),
+        )
+
+        assert [chunk["data"]["id"] for chunk in chunks] == [
+            "chatcmpl-resolved-request",
+            "chatcmpl-resolved-request",
+        ]
+        assert routed_engine.kwargs[0]["context"].id() == context_id
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
