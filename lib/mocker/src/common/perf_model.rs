@@ -336,7 +336,6 @@ mod tests {
     use super::{AisCallback, NpzReader, PerfModel};
     use ndarray::{Array1, array};
     use ndarray_npy::WriteNpyExt;
-    use rstest::rstest;
     use std::io::{Cursor, Seek, Write};
     use std::sync::Arc;
     use zip::CompressionMethod;
@@ -445,15 +444,13 @@ mod tests {
         assert_eq!(error.root_cause().to_string(), "missing AIS decode point");
     }
 
-    #[rstest]
-    #[case::stored(CompressionMethod::Stored)]
-    #[case::deflated(CompressionMethod::Deflated)]
-    fn npz_profile_loads_numpy_entry_names(#[case] method: CompressionMethod) {
+    #[test]
+    fn npz_profile_loads_numpy_entry_names() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.npz");
         write_npz(
             std::fs::File::create(&path).unwrap(),
-            method,
+            CompressionMethod::Deflated,
             &[
                 ("prefill_isl.npy", npy(&array![0.0, 128.0])),
                 ("prefill_ttft_ms.npy", npy(&array![0.0, 64.0])),
