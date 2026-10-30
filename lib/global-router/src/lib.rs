@@ -26,7 +26,8 @@ mod signals;
 pub use affinity::AffinitySelector;
 pub use core::replica_sync;
 pub use core::{
-    AffinityConfig, CorePolicy, CoreSelector, MAX_SESSION_ID_BYTES, ReplicaSync, Reservation,
+    AffinityConfig, CorePolicy, CoreSelector, GrpcReplicaSync, MAX_SESSION_ID_BYTES, ReplicaSync,
+    ReplicaSyncStats, ReplicaTransport, Reservation,
 };
 pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;

@@ -16,11 +16,11 @@
 //! each request carries its session id, the core holds the session's
 //! binding across the pick and binds it to the pool picked, and the
 //! [`policies::HeadroomPicker`] sees the binding as the request's affinity
-//! target. With [`ReplicaSync`] the core's bookings and session bindings
-//! replicate to the other Global Frontends over the core's own mesh, so
-//! every replica sees every replica's requests in flight and pins.
-//! [`replica_sync`] holds the gRPC contract those events will travel over
-//! between replicas, and its conversions to the core's event types.
+//! target. With a [`ReplicaTransport`] the core's bookings and session
+//! bindings replicate to the other Global Frontends, so every replica sees
+//! every replica's requests in flight and pins: over the core's own mesh
+//! ([`ReplicaSync`]) or over the gRPC stream [`replica_sync`] serves on the
+//! API port ([`GrpcReplicaSync`]).
 
 mod catalog;
 mod directory;
@@ -50,6 +50,7 @@ use dynamo_kv_router::services::selection::{
 use dynamo_kv_router::{WorkerId, WorkerType};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::selector::{Cursors, RequestLifecycle, RequestSelector, Selection, reachable, target};
 use crate::signals::PoolSignals;
@@ -62,6 +63,7 @@ pub use directory::{PoolDirectory, PoolEntry};
 /// an unavailable pool.
 pub use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES as MAX_SESSION_ID_BYTES;
 pub use policies::{HeadroomPicker, LeastRequestsPicker, RoundRobinPicker};
+pub use replica_sync::{GrpcReplicaSync, ReplicaHub, ReplicaSyncStats};
 
 /// How the core picks among a model's pools.
 #[derive(Clone, Debug)]
@@ -101,6 +103,27 @@ pub struct ReplicaSync {
     pub peers: Vec<String>,
 }
 
+/// How bookings and session bindings reach the other Global Frontends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplicaTransport {
+    /// The core's own ZMQ mesh, on a port of its own.
+    Mesh(ReplicaSync),
+    /// The gRPC `ReplicaSync` stream, served on the API port
+    /// ([`CoreSelector::replica_sync_routes`]).
+    Grpc(GrpcReplicaSync),
+}
+
+struct GrpcTransport {
+    hub: Arc<ReplicaHub>,
+    cancel: CancellationToken,
+}
+
+impl Drop for GrpcTransport {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 /// Selects a pool through the router core, then rotates over the pool's
 /// frontends.
 pub struct CoreSelector {
@@ -116,6 +139,7 @@ pub struct CoreSelector {
     sessions: bool,
     /// Under affinity, when each session's pin was last booked.
     pins: Option<PinRefresh>,
+    grpc: Option<GrpcTransport>,
 }
 
 /// When each session's pin was last booked, so only the requests that set,
@@ -159,10 +183,23 @@ impl PinRefresh {
 }
 
 impl CoreSelector {
-    /// Builds a core with `policy`, replicating with peers when
-    /// `replica_sync` is given. Nothing is selectable until [`Self::follow`]
-    /// has applied the first pool snapshot.
+    /// Builds a core with `policy`, replicating with peers over the core's
+    /// mesh when `replica_sync` is given. Nothing is selectable until
+    /// [`Self::follow`] has applied the first pool snapshot.
     pub async fn new(policy: CorePolicy, replica_sync: Option<ReplicaSync>) -> Result<Self> {
+        Self::with_transport(policy, replica_sync.map(ReplicaTransport::Mesh)).await
+    }
+
+    /// Builds a core with `policy`, replicating with peers over `transport`
+    /// when one is given. Nothing is selectable until [`Self::follow`] has
+    /// applied the first pool snapshot, and gRPC peers are followed only
+    /// from then on, so their events find the partitions they name. The
+    /// gRPC transport's tasks run on the current runtime and stop at
+    /// [`Self::stop_replication`] or when the selector drops.
+    pub async fn with_transport(
+        policy: CorePolicy,
+        transport: Option<ReplicaTransport>,
+    ) -> Result<Self> {
         let directory = Arc::new(PoolDirectory::new());
         let registry = policies::registry(&policy, directory.clone())
             .context("register the pool selection policies")?;
@@ -176,6 +213,7 @@ impl CoreSelector {
                     },
                     ..SelectionHost::default()
                 });
+        let affinity = matches!(policy, CorePolicy::Affinity(_));
         if let CorePolicy::Affinity(affinity) = &policy {
             // Soft: the binding follows the pool picked, as the current pin
             // moves with the request.
@@ -183,13 +221,53 @@ impl CoreSelector {
                 .session_affinity(affinity.idle)
                 .session_affinity_mode(SessionAffinityMode::Soft);
         }
-        if let Some(sync) = replica_sync {
-            builder = builder.replica_sync(sync.port, sync.peers);
+        let mut grpc = None;
+        match transport {
+            Some(ReplicaTransport::Mesh(sync)) => {
+                builder = builder.replica_sync(sync.port, sync.peers);
+            }
+            Some(ReplicaTransport::Grpc(sync)) => {
+                let cancel = CancellationToken::new();
+                let hub = ReplicaHub::new(cancel.clone());
+                for peer in sync.peers {
+                    replica_sync::peer_url(peer.as_str())?;
+                    hub.add_peer(peer);
+                }
+                // Local bookings keep living as long as their reservations.
+                // A peer's booking whose free is lost stays until the next
+                // step reconciles mirrored bookings (#17670).
+                builder = builder.host(SelectionHost {
+                    replication: HostReplication {
+                        channels: Some(hub.factory()),
+                        request_leases: Some(Arc::new(ReservationLeases)),
+                        ..HostReplication::default()
+                    },
+                    ..SelectionHost::default()
+                });
+                if affinity {
+                    builder = builder.session_binding_replication(hub.process_id());
+                }
+                grpc = Some(GrpcTransport { hub, cancel });
+            }
+            None => {}
         }
-        let service = builder.build().await.context("build the router core")?;
+        let service = Arc::new(builder.build().await.context("build the router core")?);
+        if let Some(GrpcTransport { hub, .. }) = &grpc {
+            if affinity {
+                let updates = service
+                    .session_binding_updates()
+                    .context("take the core's session binding updates")?;
+                tokio::spawn(hub.clone().publish_bindings(updates));
+            }
+            tracing::info!(
+                process_id = hub.process_id(),
+                peers = ?hub.peers().iter().map(Url::as_str).collect::<Vec<_>>(),
+                "replicating over the gRPC ReplicaSync stream"
+            );
+        }
         let books = policies::reads_bookings(&policy, &directory);
         Ok(Self {
-            service: Arc::new(service),
+            service,
             directory,
             frontends: Cursors::default(),
             books,
@@ -198,7 +276,22 @@ impl CoreSelector {
                 CorePolicy::Affinity(affinity) => Some(PinRefresh::new(affinity.idle)),
                 _ => None,
             },
+            grpc,
         })
+    }
+
+    /// The gRPC `ReplicaSync` routes to merge into the API router, when
+    /// this replica replicates over gRPC.
+    pub fn replica_sync_routes(&self) -> Option<axum::Router> {
+        self.grpc
+            .as_ref()
+            .map(|grpc| replica_sync::server::routes(grpc.hub.clone()))
+    }
+
+    /// What the gRPC transport has dropped and seen, when this replica
+    /// replicates over gRPC.
+    pub fn replica_sync_stats(&self) -> Option<ReplicaSyncStats> {
+        self.grpc.as_ref().map(|grpc| grpc.hub.stats())
     }
 
     /// Keeps the core's workers matching `pools`, the frontend's catalog
@@ -206,6 +299,10 @@ impl CoreSelector {
     /// future as a task; the receiver resolves once the core has taken the
     /// first snapshot, so the caller can wait for the configured pools to be
     /// selectable before serving. It fails if the task ends first.
+    ///
+    /// With the gRPC transport the future also follows the peers, starting
+    /// once that first snapshot is in: an event that arrived before the
+    /// core had the partition it names would be dropped for good.
     pub fn follow<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
@@ -218,14 +315,59 @@ impl CoreSelector {
         S: AsRef<[Pool]> + Send + Sync + 'static,
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
-        let (source, ready) = PoolCatalogSource::with_ready(pools);
+        let (source, first_taken) = PoolCatalogSource::with_ready(pools);
         let source = source.with_directory(self.directory.clone());
-        (ready, reconciler.run(source, cancel))
+        let (ready, is_ready) = oneshot::channel();
+        let dialer = self
+            .grpc
+            .as_ref()
+            .map(|grpc| (grpc.hub.clone(), grpc.cancel.clone()));
+        let service = self.service.clone();
+        let stop = cancel.clone();
+        // Ends the peers when the catalog closes, as the reconciler does.
+        let catalog_closed = CancellationToken::new();
+        let closed = catalog_closed.clone();
+        let follower = async move {
+            let peers = async move {
+                if first_taken.await.is_err() {
+                    return;
+                }
+                let _ = ready.send(());
+                if let Some((hub, transport)) = dialer {
+                    tokio::select! {
+                        _ = stop.cancelled() => {}
+                        _ = closed.cancelled() => {}
+                        _ = replica_sync::dialer::run_peers(hub, service, transport) => {}
+                    }
+                }
+            };
+            let reconcile = async {
+                reconciler.run(source, cancel).await;
+                catalog_closed.cancel();
+            };
+            tokio::join!(reconcile, peers);
+        };
+        (is_ready, follower)
     }
 
-    /// Subscribes to another replica's events, `endpoint` as
-    /// `tcp://host:port`. `Ok(false)` if it was already a peer.
+    /// Ends the gRPC transport now: open `ReplicaSync` streams close and
+    /// peers are no longer followed. The Global Frontend calls it when
+    /// shutdown begins, so the long-lived streams do not hold the graceful
+    /// drain open until its grace runs out. Dropping the selector does the
+    /// same.
+    pub fn stop_replication(&self) {
+        if let Some(grpc) = &self.grpc {
+            grpc.cancel.cancel();
+        }
+    }
+
+    /// Subscribes to another replica's events, `endpoint` as the transport
+    /// names peers: `tcp://host:port` over the mesh, `http://host:port` over
+    /// gRPC. `Ok(false)` if it was already a peer.
     pub async fn register_peer(&self, endpoint: String) -> Result<bool> {
+        if let Some(grpc) = &self.grpc {
+            return Ok(grpc.hub.add_peer(replica_sync::peer_url(&endpoint)?));
+        }
         self.service
             .register_replica_peer(endpoint.clone())
             .await
@@ -494,6 +636,8 @@ fn spawn(task: impl Future<Output = ()> + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
+    use axum::serve::ListenerExt;
+
     use crate::affinity::tests::{OHIO, fleet, set_occupancy};
     use crate::selector::tests::pool;
     use crate::{InFlightTracker, LeastInFlightSelector, PoolSelector, RoundRobinSelector};
@@ -510,14 +654,16 @@ mod tests {
         synced_selector(policy, pools, None).await
     }
 
-    /// [`selector`], replicating over `replica_sync`.
+    /// [`selector`], replicating over `transport`.
     async fn synced_selector(
         policy: CorePolicy,
         pools: &[Pool],
-        replica_sync: Option<ReplicaSync>,
+        transport: Option<ReplicaTransport>,
     ) -> (CoreSelector, Catalog) {
         let (catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
-        let selector = CoreSelector::new(policy, replica_sync).await.unwrap();
+        let selector = CoreSelector::with_transport(policy, transport)
+            .await
+            .unwrap();
         let (ready, follower) = selector.follow(subscription, CancellationToken::new());
         tokio::spawn(follower);
         ready.await.expect("the core took the first snapshot");
@@ -639,19 +785,19 @@ mod tests {
         let (a, catalog_a) = synced_selector(
             policy(),
             pools,
-            Some(ReplicaSync {
+            Some(ReplicaTransport::Mesh(ReplicaSync {
                 port: port_a,
                 peers: Vec::new(),
-            }),
+            })),
         )
         .await;
         let (b, catalog_b) = synced_selector(
             policy(),
             pools,
-            Some(ReplicaSync {
+            Some(ReplicaTransport::Mesh(ReplicaSync {
                 port: port_b,
                 peers: vec![format!("tcp://127.0.0.1:{port_a}")],
-            }),
+            })),
         )
         .await;
         assert!(
@@ -990,50 +1136,112 @@ mod tests {
         assert_eq!(host_for(&core, &pools, Some("s")).await, "oregon-a");
     }
 
-    #[tokio::test]
-    async fn replicas_see_each_other_s_bookings() {
-        let blue = pool("blue", "qwen", &["http://blue:8000"]);
-        let green = pool("green", "qwen", &["http://green:8000"]);
-        let pools = [blue.clone(), green.clone()];
-        let (a, b, _catalog_a, _catalog_b) = replicas(|| CorePolicy::LeastRequests, &pools).await;
+    /// A replica's `ReplicaSync` routes served on a port of their own, as
+    /// the Global Frontend serves them on its API port. Dropping it stops
+    /// accepting; open streams end when the replica drops.
+    struct Served {
+        port: u16,
+        task: tokio::task::JoinHandle<()>,
+    }
 
-        // Two requests booked through A show up at B, which then avoids blue.
-        let _busy = [a.reserve_on(&blue).await, a.reserve_on(&blue).await];
-        booked_settles(&b, &blue, 2).await;
+    impl Served {
+        async fn new(selector: &CoreSelector, port: u16) -> Self {
+            let routes = selector.replica_sync_routes().expect("gRPC routes");
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            // As the Global Frontend's `serve` does: the frames are small
+            // writes, which Nagle's algorithm would hold for the delayed ACK.
+            let listener = listener.tap_io(|tcp| tcp.set_nodelay(true).unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, routes).await.unwrap();
+            });
+            Self { port, task }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    impl Drop for Served {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn connected(selector: &CoreSelector, peers: u64) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while selector.replica_sync_stats().unwrap().connected_peers != peers {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the replica did not reach {peers} open streams"));
+    }
+
+    /// Two cores on the same pools, each serving the gRPC stream and
+    /// subscribed to the other's, once both streams are open.
+    async fn grpc_replicas(
+        policy: impl Fn() -> CorePolicy,
+        pools: &[Pool],
+    ) -> (CoreSelector, CoreSelector, Catalog, Catalog, Served, Served) {
+        let grpc = || Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, catalog_a) = synced_selector(policy(), pools, grpc()).await;
+        let (b, catalog_b) = synced_selector(policy(), pools, grpc()).await;
+        let served_a = Served::new(&a, 0).await;
+        let served_b = Served::new(&b, 0).await;
+        assert!(a.register_peer(served_b.url()).await.unwrap());
+        assert!(!a.register_peer(served_b.url()).await.unwrap());
+        assert!(b.register_peer(served_a.url()).await.unwrap());
+        connected(&a, 1).await;
+        connected(&b, 1).await;
+        (a, b, catalog_a, catalog_b, served_a, served_b)
+    }
+
+    async fn assert_replicas_see_each_other_s_bookings(
+        a: &CoreSelector,
+        b: &CoreSelector,
+        blue: &Pool,
+        green: &Pool,
+    ) {
+        let _busy = [a.reserve_on(blue).await, a.reserve_on(blue).await];
+        booked_settles(b, blue, 2).await;
         for _ in 0..4 {
             assert_eq!(
-                picks(&b, "qwen", &[&blue, &green]).await,
+                picks(b, "qwen", &[blue, green]).await,
                 Some(green.id.clone())
             );
         }
-        // And B's own requests reach A.
         let _on_green = [
-            b.reserve_on(&green).await,
-            b.reserve_on(&green).await,
-            b.reserve_on(&green).await,
+            b.reserve_on(green).await,
+            b.reserve_on(green).await,
+            b.reserve_on(green).await,
         ];
-        booked_settles(&a, &green, 3).await;
+        booked_settles(a, green, 3).await;
         assert_eq!(
-            picks(&a, "qwen", &[&blue, &green]).await,
+            picks(a, "qwen", &[blue, green]).await,
             Some(blue.id.clone())
         );
     }
 
-    #[tokio::test]
-    async fn replicas_agree_on_a_session_s_pool() {
-        let (pools, signals) = fleet();
-        let (a, b, _catalog_a, _catalog_b) = replicas(|| affinity(&signals), &pools).await;
-
+    async fn assert_replicas_agree_on_a_session_s_pool(
+        a: &CoreSelector,
+        b: &CoreSelector,
+        pools: &[Pool],
+        signals: &Arc<PoolSignals>,
+    ) {
         // A pins the session to ohio-a while it is the emptiest local pool.
-        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(host_for(&a, &pools, Some("s")).await, "ohio-a");
+        set_occupancy(pools, signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(host_for(a, pools, Some("s")).await, "ohio-a");
         // Now ohio-b is emptier, but not by twice the room. Without the
         // replicated pin B would start the session on ohio-b.
-        set_occupancy(&pools, &signals, [0.5, 0.3, 0.5, 0.5]);
-        assert_eq!(host_for(&b, &pools, Some("fresh")).await, "ohio-b");
+        set_occupancy(pools, signals, [0.5, 0.3, 0.5, 0.5]);
+        assert_eq!(host_for(b, pools, Some("fresh")).await, "ohio-b");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if host_for(&b, &pools, Some("s")).await == "ohio-a" {
+                if host_for(b, pools, Some("s")).await == "ohio-a" {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1042,12 +1250,12 @@ mod tests {
         .await
         .expect("B learned A's pin");
         // The pin moving on B is seen by A: ohio-b fills, Tokyo empties.
-        set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.1]);
-        assert_eq!(host_for(&b, &pools, Some("s")).await, "tokyo-a");
-        set_occupancy(&pools, &signals, [0.5, 0.5, 0.5, 0.5]);
+        set_occupancy(pools, signals, [0.9, 0.9, 0.9, 0.1]);
+        assert_eq!(host_for(b, pools, Some("s")).await, "tokyo-a");
+        set_occupancy(pools, signals, [0.5, 0.5, 0.5, 0.5]);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if host_for(&a, &pools, Some("s")).await == "tokyo-a" {
+                if host_for(a, pools, Some("s")).await == "tokyo-a" {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1055,5 +1263,223 @@ mod tests {
         })
         .await
         .expect("A learned B's move");
+    }
+
+    #[tokio::test]
+    async fn replicas_see_each_other_s_bookings() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b) = replicas(|| CorePolicy::LeastRequests, &pools).await;
+        assert_replicas_see_each_other_s_bookings(&a, &b, &blue, &green).await;
+    }
+
+    #[tokio::test]
+    async fn replicas_agree_on_a_session_s_pool() {
+        let (pools, signals) = fleet();
+        let (a, b, _catalog_a, _catalog_b) = replicas(|| affinity(&signals), &pools).await;
+        assert_replicas_agree_on_a_session_s_pool(&a, &b, &pools, &signals).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_replicas_see_each_other_s_bookings() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        assert_replicas_see_each_other_s_bookings(&a, &b, &blue, &green).await;
+        let stats = a.replica_sync_stats().unwrap();
+        assert_eq!(
+            (
+                stats.events_dropped,
+                stats.events_unroutable,
+                stats.subscribers_lagged
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_replicas_agree_on_a_session_s_pool() {
+        let (pools, signals) = fleet();
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| affinity(&signals), &pools).await;
+        assert_replicas_agree_on_a_session_s_pool(&a, &b, &pools, &signals).await;
+        assert_eq!(a.replica_sync_stats().unwrap().bindings_rejected, 0);
+    }
+
+    async fn subscribe(
+        served: &Served,
+        marker: u32,
+    ) -> Result<tonic::Streaming<replica_sync::proto::ReplicaFrame>, tonic::Status> {
+        let channel = tonic::transport::Endpoint::from_shared(served.url())
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = replica_sync::proto::replica_sync_client::ReplicaSyncClient::new(channel);
+        client
+            .subscribe_replica_events(replica_sync::proto::SubscribeRequest {
+                subscriber_id: 1,
+                routing_group: ROUTING_GROUP.to_owned(),
+                contract_marker: marker,
+            })
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    #[tokio::test]
+    async fn grpc_rejects_a_contract_mismatch() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, _catalog) = synced_selector(CorePolicy::LeastRequests, &[blue], grpc).await;
+        let served = Served::new(&a, 0).await;
+
+        let status = subscribe(&served, 0).await.expect_err("rejected");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            subscribe(&served, replica_sync::CONTRACT_MARKER)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_sends_a_snapshot_first_then_events() {
+        use replica_sync::proto::replica_frame::Frame;
+
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, _catalog) =
+            synced_selector(CorePolicy::LeastRequests, std::slice::from_ref(&blue), grpc).await;
+        let served = Served::new(&a, 0).await;
+
+        let mut frames = subscribe(&served, replica_sync::CONTRACT_MARKER)
+            .await
+            .unwrap();
+        let first = frames.message().await.unwrap().unwrap();
+        assert!(matches!(first.frame, Some(Frame::Snapshot(_))), "{first:?}");
+
+        let held = a.reserve_on(&blue).await;
+        let second = tokio::time::timeout(Duration::from_secs(5), frames.message())
+            .await
+            .expect("an event frame")
+            .unwrap()
+            .unwrap();
+        let Some(Frame::Events(batch)) = second.frame else {
+            panic!("expected events, got {second:?}");
+        };
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(
+            batch.events[0].request_id,
+            held.selection_id.clone().unwrap()
+        );
+        assert_eq!(batch.events[0].worker_id, worker_id(&blue.id));
+        assert_eq!(batch.events[0].routing_group, ROUTING_GROUP);
+    }
+
+    #[tokio::test]
+    async fn grpc_peer_reconnects_after_the_server_restarts() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, catalog_b, _served_a, served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        let port_b = served_b.port;
+
+        // B goes away: its listener closes and its open streams end.
+        drop(served_b);
+        drop(b);
+        drop(catalog_b);
+        connected(&a, 0).await;
+
+        // A new B on the same port: A's dialer finds it within its retry.
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (b, _catalog_b) = synced_selector(CorePolicy::LeastRequests, &pools, grpc).await;
+        let served_b = Served::new(&b, port_b).await;
+        assert!(b.register_peer(_served_a.url()).await.unwrap());
+        connected(&a, 1).await;
+        connected(&b, 1).await;
+        assert_replicas_see_each_other_s_bookings(&a, &b, &blue, &green).await;
+        drop(served_b);
+    }
+
+    #[tokio::test]
+    async fn grpc_peers_are_followed_only_once_the_first_snapshot_is_in() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let pools = [blue.clone()];
+        let grpc = || Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (b, _catalog_b) = synced_selector(CorePolicy::LeastRequests, &pools, grpc()).await;
+        let served_b = Served::new(&b, 0).await;
+
+        // A knows B before it follows any catalog: nothing is dialed yet.
+        let a = CoreSelector::with_transport(
+            CorePolicy::LeastRequests,
+            Some(ReplicaTransport::Grpc(GrpcReplicaSync {
+                peers: vec![replica_sync::peer_url(&served_b.url()).unwrap()],
+            })),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(a.replica_sync_stats().unwrap().connected_peers, 0);
+
+        // Following the catalog takes the first snapshot, then dials.
+        let (_catalog_a, subscription) = watch::channel(Arc::new(pools.to_vec()));
+        let (ready, follower) = a.follow(subscription, CancellationToken::new());
+        tokio::spawn(follower);
+        ready.await.unwrap();
+        connected(&a, 1).await;
+        drop(served_b);
+    }
+
+    #[tokio::test]
+    async fn grpc_a_peer_removed_and_added_back_at_once_is_followed_again() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+
+        // The old subscription is still winding down when the peer is
+        // back; the dialer must start a new one once it has ended.
+        let hub = &a.grpc.as_ref().unwrap().hub;
+        let peer_b = replica_sync::peer_url(&served_b.url()).unwrap();
+        assert!(hub.remove_peer(&peer_b));
+        assert!(hub.add_peer(peer_b));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let _held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_stop_replication_ends_the_open_streams() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+
+        b.stop_replication();
+        connected(&a, 0).await;
+        connected(&b, 0).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_refuses_tls_peers_and_other_schemes() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, _catalog) = synced_selector(CorePolicy::LeastRequests, &[blue], grpc).await;
+        for peer in ["https://peer:8000", "tcp://peer:5600", "peer:8000"] {
+            assert!(a.register_peer(peer.to_owned()).await.is_err(), "{peer}");
+        }
+        assert!(
+            a.register_peer("http://peer:8000".to_owned())
+                .await
+                .unwrap()
+        );
+        assert_eq!(a.replica_sync_stats().unwrap().connected_peers, 0);
     }
 }
