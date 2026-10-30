@@ -233,11 +233,13 @@ impl CoreSelector {
                     replica_sync::peer_url(peer.as_str())?;
                     hub.add_peer(peer);
                 }
-                // With peers' bookings mirrored here, the core's age expiry
-                // stays on as the backstop for a free that never arrives.
+                // Local bookings keep living as long as their reservations.
+                // A peer's booking whose free is lost stays until the next
+                // step reconciles mirrored bookings (#17670).
                 builder = builder.host(SelectionHost {
                     replication: HostReplication {
                         channels: Some(hub.factory()),
+                        request_leases: Some(Arc::new(ReservationLeases)),
                         ..HostReplication::default()
                     },
                     ..SelectionHost::default()
@@ -1310,7 +1312,6 @@ mod tests {
         assert_eq!(a.replica_sync_stats().unwrap().bindings_rejected, 0);
     }
 
-    /// A client of `served` with `marker`, and the result of subscribing.
     async fn subscribe(
         served: &Served,
         marker: u32,
