@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2 in cluster b: a Service that only b exports, with one pod. The lease
+# expiry test stops the controller of b and watches this export leave the
+# imports of a and the hub.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bonly
+  labels:
+    app: bonly
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bonly
+  template:
+    metadata:
+      labels:
+        app: bonly
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: httpd
+          image: __BUSYBOX_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - mkdir -p /www && echo "$HOSTNAME" > /www/index.html && exec httpd -f -p 8080 -h /www
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /index.html
+              port: http
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bonly
+  labels:
+    app: bonly
+    dynamo.nvidia.com/mcs-export: "true"
+spec:
+  selector:
+    app: bonly
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
