@@ -45,9 +45,10 @@ use dynamo_parsers_v2::{
     UnifiedParserStartingState, UnifiedToolOutputMode, create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCall, FunctionCallStream,
+    FunctionType,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -1480,6 +1481,8 @@ struct QwenXmlStreamState {
     pending_opener: String,
     /// Must follow recovered opener text on mismatch and precede completed call events.
     deferred_reasoning: Vec<String>,
+    /// Logprobs of chunks generated after deferred reasoning, held until it is released.
+    deferred_logprobs: Option<ChatChoiceLogprobs>,
     /// Entries in event/output lists, not XML character offsets: these preserve
     /// deferred reasoning's original response metadata through projection.
     deferred_reasoning_event_indices: HashSet<usize>,
@@ -2367,7 +2370,8 @@ impl ChoiceState {
     /// `role` / `refusal` ride on the first choice owned by the current source
     /// response; queued reasoning keeps its earlier source envelope. The terminating
     /// `finish_reason` stays after every emitted delta. The source chunk's `logprobs`
-    /// move once to its last choice: they score generated tokens, not parsed text.
+    /// move once to its last choice, waiting for any queued reasoning to go first:
+    /// they score generated tokens, not parsed text.
     pub(crate) fn choices_for(
         &mut self,
         original: &ChatChoiceStream,
@@ -2521,12 +2525,29 @@ impl ChoiceState {
         }
 
         // Queued reasoning arrived before this chunk, so this chunk's logprobs must
-        // not ride ahead of it on an earlier choice.
-        if let Some(logprobs) = original.logprobs.take() {
+        // not ride ahead of it: hold them while it is queued, then follow it.
+        let mut logprobs = original.logprobs.take();
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+            if let Some(mut held) = qwen.deferred_logprobs.take() {
+                if let Some(source) = logprobs.take() {
+                    if let Some(content) = source.content {
+                        held.content.get_or_insert_default().extend(content);
+                    }
+                    if let Some(refusal) = source.refusal {
+                        held.refusal.get_or_insert_default().extend(refusal);
+                    }
+                }
+                logprobs = Some(held);
+            }
+            if !qwen.deferred_reasoning.is_empty() {
+                qwen.deferred_logprobs = logprobs.take();
+            }
+        }
+        if let Some(logprobs) = logprobs {
             let last_is_queued = choices
                 .len()
                 .checked_sub(1)
-                .is_some_and(|last| self.qwen_reasoning_choice_positions.contains(&last));
+                .is_some_and(|last| self.is_deferred_qwen_xml_reasoning_choice(last));
             if choices.is_empty() || last_is_queued {
                 choices.push(empty_choice(index));
             }
