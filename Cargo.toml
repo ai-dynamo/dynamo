@@ -60,7 +60,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610280000000086" }
+aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
@@ -73,10 +73,12 @@ dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
+dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
 dynamo-protocols = { version = "=8.4.0" }
+dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }
 
 # Published on crates.io. To see all available versions:
@@ -151,6 +153,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
+zmq = { version = "0.10" }
 tokio = { version = "=1.54.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
