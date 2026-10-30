@@ -692,12 +692,17 @@ class DGDRRunOutputAdapter:
             return cached
         self._render_attempts[item.id] = self._render_attempts.get(item.id, 0) + 1
         try:
+            # Invalid per-candidate image choices must not fail the whole search.
+            try:
+                options = self._config.generation_options(
+                    str(item.parameters.get("backend", "")), item.parameters
+                )
+            except ValueError as exc:
+                raise CandidateMaterializationError(str(exc)) from exc
             manifest = render_dgd(
                 _RenderInput(config=item.parameters, used_gpus=item.used_gpus),
                 self._workload,
-                self._config.generation_options(
-                    str(item.parameters.get("backend", "")), item.parameters
-                ),
+                options,
                 dgd_name=_dgd_name(self._config.name, item.id),
                 renderer=self._config.generator,
             )
