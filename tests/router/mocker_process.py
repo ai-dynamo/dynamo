@@ -10,7 +10,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal, Optional
 
 import aiohttp
 
@@ -529,7 +529,7 @@ class DisaggMockerProcess:
         enable_bootstrap: bool = False,
         event_plane: Optional[str] = None,
         raw_kv_events: bool = False,
-        env_overrides: Optional[Dict[str, str]] = None,
+        env_overrides: Mapping[str, str | None] | None = None,
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -594,7 +594,7 @@ class DisaggMockerProcess:
             env["DYN_EVENT_PLANE"] = event_plane
         if event_plane == "zmq" and request_plane != "nats":
             env.pop("NATS_SERVER", None)
-        env.update(env_overrides or {})
+        _apply_extra_env(env, env_overrides)
 
         self._process = ManagedProcess(
             command=command,
