@@ -595,17 +595,13 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
-/// Stop IDs the engine trims by default but returns once
-/// `include_stop_in_output` is set for visible stops.
+/// Hidden stop IDs to remove when the engine confirms they ended generation.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
     let visible = request
         .stop_conditions
         .stop_token_ids_visible
         .as_deref()
         .unwrap_or_default();
-    if visible.is_empty() {
-        return BTreeSet::new();
-    }
     stop_token_ids(request)
         .into_iter()
         .filter(|id| !visible.contains(id))
@@ -790,10 +786,8 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Every stop ID when visible stops are set, empty otherwise. The engine
-    /// stops on these, so one at the end of a delta is held for the terminal.
-    /// OpenEngine sends the matched stop before the `finished` event carrying
-    /// usage, and the frontend decoder drops everything after a visible stop.
+    /// Hold a trailing stop until terminal usage arrives. The frontend decoder
+    /// can terminate on hidden or visible stops before reading that usage.
     held_stop_ids: BTreeSet<u32>,
     /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,
@@ -834,11 +828,7 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
-            held_stop_ids: if has_visible_stop_tokens(request) {
-                stop_token_ids(request).into_iter().collect()
-            } else {
-                BTreeSet::new()
-            },
+            held_stop_ids: stop_token_ids(request).into_iter().collect(),
             hidden_stop_ids: retained_hidden_stop_ids(request),
             pending_stop: None,
             phase: if mode.is_prefill() {
