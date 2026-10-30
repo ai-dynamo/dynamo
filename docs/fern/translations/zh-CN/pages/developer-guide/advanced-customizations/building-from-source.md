@@ -74,12 +74,19 @@ uv pip install pip 'maturin[patchelf]'
 
 ## 5. 构建 Rust 绑定
 
-使用与[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 相同的 features 进行构建：
+任选以下一种构建方式：
 
 ```bash
 cd lib/bindings/python
+
+# Minimal build
+maturin develop --uv
+
+# Build with the same features as the release wheels
 maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
+
+最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISimulate 性能模型以及 S3 请求追踪。
 
 如需在 Nsight Systems profile 中添加标注，请在 feature 列表中加上 `nvtx`。
 
@@ -148,7 +155,7 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang
 
 **`dynamo.indexer is not available in this build`**
 
-使用第 5 步中的 `--features` 列表重新构建绑定。
+使用第 5 步中发布版 wheel 的 `--features` 列表重新构建绑定。
 
 **虚拟环境未激活**
 

@@ -74,12 +74,19 @@ uv pip install pip 'maturin[patchelf]'
 
 ## 5. Build the Rust Bindings
 
-Build with the same features as the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile):
+Run one of these builds:
 
 ```bash
 cd lib/bindings/python
+
+# Minimal build
+maturin develop --uv
+
+# Build with the same features as the release wheels
 maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
+
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
 
 To annotate Nsight Systems profiles, add `nvtx` to the feature list.
 
@@ -148,7 +155,7 @@ Install protoc 30.2 as shown in step 1, then check that `protoc --version` print
 
 **`dynamo.indexer is not available in this build`**
 
-Rebuild the bindings with the `--features` list from step 5.
+Rebuild the bindings with the release-wheel `--features` list from step 5.
 
 **Virtual environment not activated**
 
