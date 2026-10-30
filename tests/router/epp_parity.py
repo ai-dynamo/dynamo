@@ -2689,7 +2689,11 @@ class EppFrontendRoutingParityStack:
     def dump_provider_events(self) -> str:
         if self.provider_router is None:
             raise RuntimeError("routing parity stack has not started")
-        return self.run_until_complete(self.provider_router.dump_events())
+
+        async def _dump():
+            return await self.provider_router.dump_events()
+
+        return self.run_until_complete(_dump())
 
     def __exit__(self, exc_type, exc, tb) -> None:
         close_error = None
