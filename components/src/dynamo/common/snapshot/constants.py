@@ -50,6 +50,9 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Served model name a restored worker registers under: one snapshot can
+    # back many deployments, each naming its model.
+    "DYN_SERVED_MODEL_NAME",
     # Target identity and failover policy consumed after engine construction.
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",

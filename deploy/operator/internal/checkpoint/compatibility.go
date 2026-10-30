@@ -59,6 +59,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"DYN_PARENT_DGD_K8S_NAME":               {},
 	"DYN_PARENT_DGD_K8S_NAMESPACE":          {},
 	"DYN_REQUEST_PLANE":                     {},
+	"DYN_SERVED_MODEL_NAME":                 {},
 	"DYN_SYSTEM_HEALTH_PATH":                {},
 	"DYN_SYSTEM_HOST":                       {},
 	"DYN_SYSTEM_LIVE_PATH":                  {},
