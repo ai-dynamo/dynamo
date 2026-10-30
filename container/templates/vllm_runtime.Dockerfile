@@ -122,9 +122,6 @@ RUN apt-get update && \
 # The NIM base assigns UID 1000 to `nim`. Remove the account but keep its
 # /opt/nim home, which holds the NIM venv.
 RUN userdel nim
-# Use vLLM's default video loader, as the default image does; the NIM base
-# selects PyNvVideoCodec.
-ENV VLLM_VIDEO_LOADER_BACKEND=opencv
 {% endif %}
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
