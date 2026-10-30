@@ -21,6 +21,12 @@
 //!   contract and its clients share.
 
 mod discovery;
+/// Relay-to-router receiving transport. Identity fields name routing state;
+/// deployment policy decides whether the network needs authentication.
+#[cfg(feature = "grpc")]
+pub mod grpc {
+    tonic::include_proto!("dynamo.globalview.v1");
+}
 mod pool;
 mod replicas;
 mod watch;

@@ -10,7 +10,14 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+grpc = ["dep:bytes", "dep:prost", "dep:tonic", "dep:tonic-build"]
+
 [dependencies]
+bytes = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
 blake3 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -18,3 +25,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true, optional = true }

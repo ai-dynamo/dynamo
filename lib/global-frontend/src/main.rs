@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, discover_pools, follow_relays,
+    measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -47,20 +48,27 @@ struct Args {
     host: String,
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// Accept Relay-initiated presence streams on this port and route only
+    /// to pools with a live Relay view. Uses a trusted network, without mTLS.
+    #[arg(long)]
+    relay_view_port: Option<u16>,
+    /// Read candidate pools from Global Discovery and require live Relay views.
+    /// Router discovery must use a probe independent of pool availability (such as /live).
+    #[arg(long, conflicts_with = "pools", requires = "relay_view_port")]
+    global_discovery_url: Option<Url>,
     /// A pool as `<cluster>/<namespace>/<DGD name>=<model>@<frontend URL>`,
     /// where the cluster is the ID the pool's PoolRelay runs with. Separate
     /// several frontend URLs with commas, and repeat the flag for each pool.
     /// The cluster also names the pool's region.
-    #[arg(long = "pool", value_parser = parse_pool, required = true)]
+    #[arg(long = "pool", value_parser = parse_pool, required_unless_present = "global_discovery_url")]
     pools: Vec<Pool>,
     /// How long to wait for a pool frontend to accept a connection.
     #[arg(long, default_value_t = 5)]
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
-    /// The region this process runs in, named as `--pool` names clusters.
-    /// `affinity` tries pools in it first, and metrics tell requests kept in
-    /// it from the rest.
+    /// The region this process runs in. Affinity prefers it, and metrics
+    /// distinguish local requests from requests sent to other regions.
     #[arg(long, required_if_eq("router_policy", "affinity"))]
     region: Option<String>,
     /// A pool's PoolRelay, which streams the pool's load, as
@@ -155,11 +163,11 @@ async fn main() -> Result<()> {
         bail!("--pool {} is given twice", repeated.id);
     }
     attach_relays(&mut args.pools, &args.pool_relays)?;
+    if args.relay_view_port.is_some() && !args.pool_relays.is_empty() {
+        bail!("--pool-relay cannot be combined with Relay-initiated receiving");
+    }
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
-    }
-    if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
-        tracing::warn!("--pool-relay is used only by --router-policy affinity");
     }
 
     let shutdown = CancellationToken::new();
@@ -171,32 +179,71 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
 
-    // The pools never change; the sender must live as long as the process,
-    // since the Relay followers stop once it drops.
+    // Keep the explicit catalog sender alive for the static-pool mode.
     let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
+    let pools = if let Some(url) = args.global_discovery_url {
+        let client = dynamo_global_discovery_client::GlobalDiscoveryClient::new(
+            url,
+            Duration::from_secs(5),
+        )?;
+        discover_pools(client, Duration::from_secs(5), shutdown.child_token())
+    } else {
+        pools
+    };
+    let in_flight = Arc::new(InFlightTracker::new());
+    let signals = Arc::new(PoolSignals::new(in_flight.clone()));
+    let relay_catalog = if args.relay_view_port.is_some() {
+        Some(Arc::new(RelayGatedPoolCatalog::with_signals(
+            pools.clone(),
+            shutdown.child_token(),
+            Some(signals.clone()),
+        )))
+    } else if !args.pool_relays.is_empty() {
+        Some(Arc::new(RelayGatedPoolCatalog::for_subscriptions(
+            pools.clone(),
+            shutdown.child_token(),
+            signals.clone(),
+        )))
+    } else {
+        None
+    };
+    let receiving = if let Some(port) = args.relay_view_port {
+        let listener = tokio::net::TcpListener::bind((args.host.as_str(), port))
+            .await
+            .context("listen for Relay views")?;
+        Some((
+            listener,
+            Arc::clone(relay_catalog.as_ref().context("missing Relay catalog")?),
+        ))
+    } else {
+        if let Some(catalog) = &relay_catalog {
+            tokio::spawn(follow_relays(
+                pools.clone(),
+                Arc::clone(catalog),
+                shutdown.child_token(),
+            ));
+        }
+        None
+    };
+    let pools = relay_catalog
+        .as_ref()
+        .map_or(pools, |catalog| catalog.subscribe());
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
         .context("build the pool HTTP client")?;
-    let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
         RouterPolicy::Affinity => {
             let region = args.region.clone().context("--region is required")?;
-            if args.pool_relays.is_empty() {
+            if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
                 tracing::warn!(
                     "no --pool-relay is given, so affinity knows no pool's load \
                      and keeps each session on its nearest pool"
                 );
             }
-            let signals = Arc::new(PoolSignals::new(in_flight.clone()));
-            tokio::spawn(follow_relays(
-                pools.clone(),
-                signals.clone(),
-                shutdown.child_token(),
-            ));
             tokio::spawn(measure_round_trips(
                 pools.clone(),
                 signals.clone(),
@@ -220,9 +267,24 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("listen on {address}"))?;
     tracing::info!(%address, "Global Frontend listening");
-    serve(listener, app, shutdown)
-        .await
-        .context("serve the Global Frontend")
+    if let Some((relay_listener, catalog)) = receiving {
+        let http = async {
+            let result = serve(listener, app, shutdown.clone()).await;
+            shutdown.cancel();
+            result.context("serve the Global Frontend")
+        };
+        let relay = async {
+            let result = serve_relay_views(relay_listener, catalog, shutdown.clone()).await;
+            shutdown.cancel();
+            result.context("serve Relay views")
+        };
+        tokio::try_join!(http, relay)?;
+        Ok(())
+    } else {
+        serve(listener, app, shutdown)
+            .await
+            .context("serve the Global Frontend")
+    }
 }
 
 /// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
@@ -304,5 +366,30 @@ mod tests {
     #[test]
     fn requires_a_pool() {
         assert!(Args::try_parse_from(["global-frontend"]).is_err());
+        let discovery = [
+            "global-frontend",
+            "--global-discovery-url",
+            "http://discovery:8080",
+        ];
+        assert!(Args::try_parse_from(discovery).is_err());
+        assert!(
+            Args::try_parse_from([&discovery[..], &["--relay-view-port", "50051"]].concat())
+                .is_ok()
+        );
+        assert!(
+            Args::try_parse_from(
+                [
+                    &discovery[..],
+                    &[
+                        "--relay-view-port",
+                        "50051",
+                        "--pool",
+                        "east/dynamo/blue=qwen@http://pool:8000"
+                    ],
+                ]
+                .concat()
+            )
+            .is_err()
+        );
     }
 }
