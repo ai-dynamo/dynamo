@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_legacy() {
+    fn selection_defaults_to_current() {
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.selection, SelectionPath::Current);

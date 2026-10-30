@@ -115,7 +115,7 @@ impl CoreSelector {
                     ..SelectionHost::default()
                 });
         if let CorePolicy::Affinity(affinity) = &policy {
-            // Soft: the binding follows the pool picked, as the legacy pin
+            // Soft: the binding follows the pool picked, as the current pin
             // moves with the request.
             builder = builder
                 .session_affinity(affinity.idle)
