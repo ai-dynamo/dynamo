@@ -233,15 +233,19 @@ impl State {
         }
     }
 
+    /// Whether programs are tracked by data group.
+    fn grouping(&self) -> bool {
+        self.config.priority.is_some()
+            || self.config.target_age.is_some()
+            || self.config.kv_admission
+    }
+
     /// The group and weight version a request's headers name.
     pub(crate) fn read_group(
         &self,
         headers: &BTreeMap<String, Vec<String>>,
     ) -> (GroupTag, Option<u64>) {
-        if self.config.priority.is_none()
-            && self.config.target_age.is_none()
-            && !self.config.kv_admission
-        {
+        if !self.grouping() {
             return (GroupTag::default(), None);
         }
         let version = header(headers, VERSION_HEADER).and_then(|v| v.parse().ok());
@@ -275,6 +279,14 @@ impl State {
         if let Some(version) = version {
             self.version = self.version.max(version);
         }
+        // A program without a group header is a group of one.
+        let tag = match tag.group {
+            None if self.grouping() => GroupTag {
+                group: Some(session_id.clone()),
+                ..tag
+            },
+            _ => tag,
+        };
         if self.requests.contains_key(&request_id) {
             return Err(ContactRouterError::DuplicateRequestId(request_id));
         }
@@ -2336,6 +2348,68 @@ mod tests {
             .filter(|(id, notify)| state.wait_status(id, notify) != WaitStatus::Waiting)
             .count();
         assert_eq!(released, 8, "a cancelled group frees its slots");
+    }
+
+    #[test]
+    fn programs_without_a_group_header_count_against_the_limit() {
+        let now = Instant::now();
+        let mut state = state(ContactRouterConfig {
+            target_age: Some(5.0),
+            initial_programs: 1,
+            ..Default::default()
+        });
+        let capacities = capacities(&[(0, 100_000_000)]);
+        let notifies: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let (tag, version) = state.read_group(&BTreeMap::new());
+                let registration = RequestRegistration::new(
+                    id.into(),
+                    id.into(),
+                    100,
+                    RequestProgress::new(100).0,
+                    false,
+                )
+                .with_group(tag, version);
+                (id, state.register(registration, &capacities, now).unwrap())
+            })
+            .collect();
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+        let released = notifies
+            .iter()
+            .filter(|(id, notify)| state.wait_status(id, notify) != WaitStatus::Waiting)
+            .count();
+        assert_eq!(released, 1);
+    }
+
+    #[test]
+    fn a_finished_group_moves_the_age_and_kv_limits() {
+        let tag = GroupTag {
+            group: Some("g".into()),
+            size: 1,
+            env_s: 0.0,
+        };
+        for (delay, limit) in [(0, 16.5), (10, 16.0)] {
+            let mut state = state(ContactRouterConfig {
+                target_age: Some(5.0),
+                kv_admission: true,
+                initial_programs: 16,
+                age_delay_versions: delay,
+                buffer_per_program: 0,
+                ..Default::default()
+            });
+            state.kv_capacity = 1_000_000;
+            state.version = 10;
+            state.groups.start(&tag, 10, "a");
+            let mut program = Program::new(10_000);
+            program.tag = tag.clone();
+            program.wv = Some(10);
+            state.insert_program("a".into(), program);
+
+            state.finish_program("a");
+            assert_eq!(state.program_limit, limit);
+            assert_eq!(state.kv_limit(), 95.0);
+        }
     }
 
     #[test]

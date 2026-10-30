@@ -107,6 +107,22 @@ impl ContactRouterConfig {
                 "acting_decay_tau_seconds must be finite and positive",
             ));
         }
+        if self.initial_programs == 0 {
+            return Err(ConfigError::Invalid("initial_programs must be positive"));
+        }
+        if self
+            .target_age
+            .is_some_and(|age| !age.is_finite() || age <= 0.0)
+        {
+            return Err(ConfigError::Invalid(
+                "target_age must be finite and positive",
+            ));
+        }
+        if !self.age_gain.is_finite() || self.age_gain < 0.0 {
+            return Err(ConfigError::Invalid(
+                "age_gain must be finite and not negative",
+            ));
+        }
         if self.max_tracked_requests == 0 {
             return Err(ConfigError::Invalid(
                 "max_tracked_requests must be positive",
@@ -166,5 +182,21 @@ mod tests {
             .validate()
             .is_err()
         );
+        for invalid in [
+            ContactRouterConfig {
+                initial_programs: 0,
+                ..Default::default()
+            },
+            ContactRouterConfig {
+                target_age: Some(0.0),
+                ..Default::default()
+            },
+            ContactRouterConfig {
+                age_gain: -0.1,
+                ..Default::default()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }
