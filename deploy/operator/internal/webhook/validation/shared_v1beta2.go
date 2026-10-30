@@ -18,14 +18,18 @@
 package validation
 
 import (
+	"errors"
+
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateNativeSearchInput validates the typed search fields. spec and fldPath must not be nil.
-// Schema and CEL own the remaining typed child rules; upstream input validation runs after lowering.
-func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
+// validateNativeSearchInput validates typed fields and the merged AISimulate input.
+// spec and fldPath must not be nil. checkInputSchema=false skips only lowering and schema validation.
+func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path, checkInputSchema bool) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if spec.Hardware != nil {
 		allErrs = append(allErrs, v.validateHardwareSpecV1beta2(spec.Hardware, fldPath.Child("hardware"))...)
@@ -33,7 +37,29 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 	if spec.AISimulate != nil {
 		allErrs = append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
 	}
+	if !checkInputSchema {
+		return allErrs
+	}
+
+	// Validate the final merge independently of typed rules; overrides remain authoritative.
+	input, err := aisimulate.Lower(spec)
+	if err != nil {
+		return append(allErrs, field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error()))
+	}
+	if err := aisimulate.ValidateInput(input); err != nil {
+		var schemaErr *jsonschema.ValidationError
+		if !errors.As(err, &schemaErr) {
+			return append(allErrs, field.InternalError(fldPath, err))
+		}
+		allErrs = append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
+	}
 	return allErrs
+}
+
+// validateNativeSearchInputUpdate preserves metadata/status updates across upstream schema changes.
+// newSpec, oldSpec, and fldPath must not be nil. Typed guards still run for unchanged specs.
+func (v *sharedValidation) validateNativeSearchInputUpdate(newSpec, oldSpec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
+	return v.validateNativeSearchInput(newSpec, fldPath, !apiequality.Semantic.DeepEqual(newSpec, oldSpec))
 }
 
 // validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.

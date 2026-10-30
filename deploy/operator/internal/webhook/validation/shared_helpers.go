@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -31,6 +32,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -419,4 +422,60 @@ func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 		}
 	}
 	return false
+}
+
+// inputSchemaErrors reports native JSON pointers at the shared spec owner. Lowering
+// combines typed fields and overrides, so a native path need not name an override.
+// Do not include input values in errors: arbitrary override strings may contain secrets.
+func inputSchemaErrors(err *jsonschema.ValidationError, fldPath *field.Path) field.ErrorList {
+	switch err.ErrorKind.(type) {
+	case *kind.Schema, *kind.Group, *kind.Reference:
+		allErrs := make(field.ErrorList, 0, len(err.Causes))
+		for _, cause := range err.Causes {
+			allErrs = append(allErrs, inputSchemaErrors(cause, fldPath)...)
+		}
+		slices.SortFunc(allErrs, func(a, b *field.Error) int { return cmp.Compare(a.Detail, b.Detail) })
+		return allErrs
+	}
+
+	// Keep unions as one error, but retain the paths needed to repair nested input.
+	path := inputJSONPointer(err.InstanceLocation)
+	keyword := strings.Join(err.ErrorKind.KeywordPath(), "/")
+	detail := fmt.Sprintf("generated AISimulate input at %s violates JSON Schema keyword %s", path, keyword)
+	switch constraint := err.ErrorKind.(type) {
+	case *kind.Required:
+		names := slices.Sorted(slices.Values(constraint.Missing))
+		detail += ": missing " + strings.Join(names, ", ")
+	case *kind.AdditionalProperties:
+		names := slices.Sorted(slices.Values(constraint.Properties))
+		detail += ": unknown " + strings.Join(names, ", ")
+	case *kind.AnyOf, *kind.OneOf:
+		locations := map[string]bool{}
+		pending := append([]*jsonschema.ValidationError(nil), err.Causes...)
+		for len(pending) > 0 {
+			cause := pending[0]
+			pending = append(pending[1:], cause.Causes...)
+			if len(cause.InstanceLocation) > len(err.InstanceLocation) {
+				locations[inputJSONPointer(cause.InstanceLocation)] = true
+			}
+		}
+		paths := make([]string, 0, len(locations))
+		for location := range locations {
+			paths = append(paths, location)
+		}
+		slices.Sort(paths)
+		if len(paths) > 0 {
+			detail += "; alternatives reject " + strings.Join(paths, ", ")
+		}
+	}
+	return field.ErrorList{field.Invalid(fldPath, "<redacted>", detail)}
+}
+
+func inputJSONPointer(location []string) string {
+	escape := strings.NewReplacer("~", "~0", "/", "~1")
+	tokens := make([]string, len(location))
+	for i, token := range location {
+		tokens[i] = escape.Replace(token)
+	}
+	return "/" + strings.Join(tokens, "/")
 }

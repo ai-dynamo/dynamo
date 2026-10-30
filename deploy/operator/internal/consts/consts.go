@@ -279,6 +279,7 @@ const (
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentRun            = "DynamoGraphDeploymentRun"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
 
 	// Resource state constants - used in status reporting and metrics

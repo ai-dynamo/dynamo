@@ -61,8 +61,9 @@ spec:
 
 To leave the complete hardware input to AISimulate and `inputOverrides`, use the
 empty-object opt-out and supply both the upstream hardware selector and candidate
-GPU budget yourself. Admission validates the merged input against the bundled
-AISimulate input schema.
+GPU budget yourself. Request and Run admission validate the merged input against
+the bundled AISimulate input schema. Run specs remain immutable; unchanged specs
+remain metadata-updatable after a bundled schema change.
 
 ```yaml
 spec:
