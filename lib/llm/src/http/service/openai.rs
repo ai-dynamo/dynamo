@@ -1605,6 +1605,10 @@ async fn completions_batch(
     use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
 
+    // Same range names as completions_single, so a capture aggregates single and
+    // batch requests together. For a streaming request the SSE stream outlives this range.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     // Resolve alias → primary served name (see completions_single).
@@ -1626,6 +1630,7 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1634,6 +1639,7 @@ async fn completions_batch(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     let mut response_collector = inflight_guard.response_collector();
 
@@ -1675,7 +1681,9 @@ async fn completions_batch(
             .request_metrics()
             .attach_to(&mut single_request_context);
 
-        // Generate stream for this prompt
+        // Generate stream for this prompt. One range per prompt: each covers that
+        // prompt's preprocessing, routing and wire handoff.
+        let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
             if super::metrics::request_was_rejected(e.as_ref()) {
                 state
@@ -1686,6 +1694,7 @@ async fn completions_batch(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+        drop(nvtx_generate);
 
         parent_ctx.link_child(stream.context());
 
@@ -1772,6 +1781,8 @@ async fn completions_batch(
                 )
             })
             .map(move |mut response| {
+                // Frontend-side SSE conversion for one chunk of the merged stream.
+                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1820,6 +1831,8 @@ async fn completions_batch(
             );
         });
 
+        // Spans the whole fold across every prompt, so it includes worker time.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
