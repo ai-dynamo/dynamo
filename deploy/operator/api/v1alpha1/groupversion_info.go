@@ -44,6 +44,9 @@ var (
 	// DynamoGraphDeploymentRequestGVK is the v1alpha1 DynamoGraphDeploymentRequest kind.
 	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
 
+	// DynamoPoolRelayGVK is the v1alpha1 DynamoPoolRelay kind.
+	DynamoPoolRelayGVK = GroupVersion.WithKind("DynamoPoolRelay")
+
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
@@ -65,6 +68,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DynamoGraphDeploymentScalingAdapterList{},
 		&DynamoModel{},
 		&DynamoModelList{},
+		&DynamoPoolRelay{},
+		&DynamoPoolRelayList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
