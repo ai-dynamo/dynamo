@@ -608,7 +608,6 @@ requirements.txt                                                                
 /tests/router/test_router_e2e_with_vllm_xpu.py                                                          @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                                                        @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot*                                                      @ai-dynamo/dynamo-gms-codeowners
-/container/templates/sglang_xpu_framework.Dockerfile                                                    @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/tests/fixtures/relay-sources-canonical.json                                                    @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/trtllm/request_handlers/diffusion/                                               @ai-dynamo/dynamo-diffusion-codeowners
 /docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md                                              @ai-dynamo/dynamo-global-router-codeowners
@@ -840,7 +839,6 @@ requirements.txt                                                                
 /lib/bindings/python/tests/test_kv_router_config.py                                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners
 /.github/actions/teardown-dynamo-operator/action.yml                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/common/tests/test_rl_admin.py                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-rl-codeowners
-/container/templates/sglang_xpu_framework.Dockerfile                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/kvbm-consolidator/src/ingress/zmq_subscriber.rs                                                    @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/forward_pass_metrics.py                                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/multimodal_processor.py                                                   @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
