@@ -84,9 +84,10 @@ for busy rejection.
 3. Recalculates the busy set when load or runtime configuration changes.
 4. Publishes the current busy set to the router.
 
-A `POST /busy_threshold` update changes the stored threshold configuration. It does not synchronously
-recompute every worker. The next worker-load or runtime-configuration update triggers reevaluation, so
-a new threshold can take a short time to change routing decisions.
+A [`POST /busy_threshold`](../../../../reference/components/frontend-configuration.mdx#admin)
+update changes the stored threshold configuration. It does not synchronously recompute every worker.
+The next worker-load or runtime-configuration update triggers reevaluation, so a new threshold can
+take a short time to change routing decisions.
 
 ## Rejection Path
 

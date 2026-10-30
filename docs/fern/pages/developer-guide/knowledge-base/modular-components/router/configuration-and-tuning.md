@@ -587,8 +587,8 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 ## Runtime Policy Updates
 
 **Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
-thresholds on the frontend admin port (`127.0.0.1:8002` by default), which is off unless
-`DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
+thresholds. It is served on the frontend admin listener (`127.0.0.1:8002` by default), which is
+off unless `DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
 
 | Resource | Methods | Scope |
 | --- | --- | --- |
@@ -704,7 +704,10 @@ listener settings.
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,
 retain the desired settings, and reapply them to new router instances; a load-balanced request
-does not update every replica. The standalone Python router does not expose this HTTP API.
+does not update every replica. With the default loopback bind, the admin port is reachable only
+from inside the pod or through `kubectl port-forward`. An out-of-pod controller needs
+`DYN_FRONTEND_ADMIN_HOST` set to a reachable address, such as the pod IP, and a network policy
+that limits the admin port to that controller. The standalone Python router does not expose this HTTP API.
 Rust hosts can use `KvRouter::policy_control()` or `LocalScheduler::policy_control()` to access
 the same actor-serialized control handle.
 

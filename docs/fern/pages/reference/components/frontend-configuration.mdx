@@ -864,8 +864,12 @@ accepted fields, limits, errors, and rolling upgrades.
 
 ### Admin
 
-Admin routes are off by default, have no authentication, and are served on a separate listener,
-not the inference port.
+Admin routes are off by default and are served on a separate listener (`127.0.0.1:8002` by
+default), never on the inference port. They have no authentication; see
+[Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md#frontend-extensions-and-admin-api).
+When frontend TLS is configured, the admin listener uses the same certificate and client CA
+settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
+routes; `generate-frontend-openapi` does.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -886,7 +890,7 @@ not the inference port.
 
 <ParamField path="DYN_FRONTEND_ADMIN_PORT" type="integer" default="8002">
   Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
-  frontend fails to start.
+  frontend fails to start. A value that is not a valid port number falls back to `8002`.
 </ParamField>
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,

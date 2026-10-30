@@ -198,10 +198,11 @@ reachable.
   target individual
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
-- **Admin API.** The frontend's HTTP admin API (for example,
-  `GET`/`POST /busy_threshold`) is disabled by default. `DYN_ENABLE_FRONTEND_ADMIN_API=1`
-  starts it on its own listener, bound to `127.0.0.1:8002` and never served on the
-  inference port. It has no authentication. If you widen the bind with
+- **Admin API.** The frontend's HTTP admin API (`/router_policy` and `/busy_threshold`),
+  which changes routing for every client, is disabled by default.
+  `DYN_ENABLE_FRONTEND_ADMIN_API=1` starts it on its own listener, bound to `127.0.0.1:8002`
+  and never served on the inference port. It uses the frontend's TLS settings but has no
+  authentication. If you widen the bind with
   `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port to trusted operators with a network
   policy or firewall.
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by

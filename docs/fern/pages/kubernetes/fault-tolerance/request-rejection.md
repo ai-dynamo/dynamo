@@ -85,15 +85,27 @@ for the complete flag, environment-variable, and validation reference.
 Optional. Use the Frontend admin API to change thresholds for a discovered model without redeploying.
 The API is off by default. Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` in the Frontend's environment to
 serve it on a separate admin port, bound to `127.0.0.1:8002` inside each Frontend pod; the inference
-port does not serve it. Updates apply to one Frontend process, so port-forward to each Frontend pod
-you want to change.
+port does not serve it. Add it to the Frontend `main` container from the previous step:
+
+```yaml
+        - name: main
+          env:
+            - name: DYN_ENABLE_FRONTEND_ADMIN_API
+              value: "1"
+```
+
+`kubectl port-forward` connects through the pod's loopback interface, so you don't need to widen
+the bind address. Updates apply to one Frontend process. List the Frontend pods, then port-forward
+to one:
 
 ```bash
-FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} \
+kubectl get pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=<deployment-name>,nvidia.com/dynamo-component-type=frontend \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward pod/${FRONTEND_POD} 8000:8000 8002:8002 -n ${NAMESPACE}
+  -o name
+kubectl port-forward pod/<frontend-pod> 8000:8000 8002:8002 -n ${NAMESPACE}
 ```
+
+Repeat the port-forward and the `curl` commands below for each Frontend pod you want to change.
 
 Set one or more thresholds:
 
@@ -147,7 +159,7 @@ For all metric fields and labels, see
 
 If decode-block load does not produce HTTP 529 responses:
 
-1. Confirm that `GET /busy_threshold` shows a numeric `active_decode_blocks_threshold` for the model.
+1. Confirm that `GET /busy_threshold` on the admin port (`8002`) shows a numeric `active_decode_blocks_threshold` for the model.
 2. Confirm that the Frontend started with `--router-mode kv`.
 3. For long-output workloads, confirm that the Frontend started with `--router-track-output-blocks`.
 4. Check worker availability on the same Frontend before diagnosing missing load telemetry:
