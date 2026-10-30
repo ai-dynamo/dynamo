@@ -438,21 +438,34 @@ impl
         };
         require_direct_prefill_worker(&binding, &prefill_request)?;
 
-        let progress = async {
-            let plan = self
-                .select_prefill_worker(binding, &prefill_request)
-                .await?;
-            let mut dispatched = self.dispatch(prefill_request, plan).await?;
-            if let (Some(state), Some(booking)) =
-                (req.migration_state.as_ref(), dispatched.booking.take())
-            {
-                state.store_prefill_release(booking);
-            }
-            self.await_prefill(dispatched, tracker, prefill_phase_barrier)
-                .await
+        let plan = self
+            .select_prefill_worker(binding, &prefill_request)
+            .await
+            .inspect_err(log_prefill_failure)?;
+        let mut dispatched = self
+            .dispatch(prefill_request, plan)
+            .await
+            .inspect_err(log_prefill_failure)?;
+
+        // `migration_state` is set when Migration may retry this request. A
+        // retry reuses the request ID and starts again from prefill. In
+        // bootstrap mode this attempt's prefill can still be running then, and
+        // still holding its booking, so booking the retry's prefill would fail
+        // as a duplicate request ID. Park a handle that frees only this
+        // attempt's booking; Migration releases it just before it sends a
+        // committed retry (ai-dynamo/dynamo#17455). Prefill itself keeps
+        // running, because a decode worker may still be pulling its KV.
+        // Built-in modes book nothing, so they have no handle.
+        if let (Some(state), Some(booking)) =
+            (req.migration_state.as_ref(), dispatched.booking.take())
+        {
+            state.store_prefill_release(booking);
         }
-        .await
-        .inspect_err(log_prefill_failure)?;
+
+        let progress = self
+            .await_prefill(dispatched, tracker, prefill_phase_barrier)
+            .await
+            .inspect_err(log_prefill_failure)?;
 
         // A prefill request can terminate before the backend establishes a KV
         // handoff (for example, EOS on the one-token context step). Native
@@ -493,7 +506,17 @@ impl
 
         let decode_req = self.build_decode_request(req, outcome, progress.topology_constraints);
         let output = prefill_need(&decode_req.annotations);
+        // Hand off to the decode `RoutingHost`, which selects a decode worker
+        // and dispatches to it.
         let decode = next.generate(context.map(|_| decode_req));
+        // `completion` is set only on the bootstrap path, where prefill is
+        // still running in the background while decode starts. Merging its
+        // completion into the decode stream fails the response if prefill
+        // fails, before or during decode, and holds decode's final item until
+        // prefill finishes, so a late prefill failure cannot follow a success.
+        // It also emits prefill's output when the request needs it, and stops
+        // prefill if decode is rejected for capacity. Without bootstrap,
+        // prefill has already finished and decode's stream is the response.
         match progress.completion {
             Some(completion) => {
                 completion
