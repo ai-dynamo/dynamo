@@ -2152,6 +2152,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-error"
+version = "1.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-generate-format-catalog"
 version = "1.7.0"
 dependencies = [
@@ -2621,6 +2629,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-error",
  "dynamo-truthy",
  "educe",
  "either",

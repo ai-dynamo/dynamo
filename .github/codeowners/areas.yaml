@@ -283,6 +283,7 @@ areas:
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
+  - lib/error/
   - lib/llm/
   - lib/llm/benches/
   - lib/llm/bin/

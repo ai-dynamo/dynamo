@@ -57,7 +57,7 @@
 //! [`DynamoError::msg`], conversion from an unclassified [`std::error::Error`], and conversion from a generic wrapper whose typed source is internal intentionally produce `Internal/runtime.unclassified`; use them as a fallback, not for failures whose meaning is known.
 //!
 //! ```rust,no_run
-//! use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+//! use dynamo_error::{DynamoError, ErrorClass, ErrorReason};
 //!
 //! let error = DynamoError::builder()
 //!     .class(ErrorClass::InvalidRequest)
@@ -74,7 +74,7 @@
 //! Structured details are preferable when the protocol renderer needs machine-readable values:
 //!
 //! ```rust,no_run
-//! use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason, PublicDetails};
+//! use dynamo_error::{DynamoError, ErrorClass, ErrorReason, PublicDetails};
 //!
 //! let error = DynamoError::builder()
 //!     .class(ErrorClass::PayloadTooLarge)
@@ -1167,20 +1167,12 @@ mod tests {
     use super::*;
     use std::error::Error;
 
-    // Compile-time assertions that DynamoError is std::error::Error + Send + Sync + 'static.
-    // These fail at compile time if a future change breaks these guarantees.
-    const _: () = {
-        fn assert_stderror<T: std::error::Error>() {}
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-        fn assert_static<T: 'static>() {}
-        fn assert_all() {
-            assert_stderror::<DynamoError>();
-            assert_send::<DynamoError>();
-            assert_sync::<DynamoError>();
-            assert_static::<DynamoError>();
-        }
-    };
+    /// Compiles only while `DynamoError` is `std::error::Error + Send + Sync + 'static`.
+    #[test]
+    fn dynamo_error_is_error_send_sync_static() {
+        fn assert_bounds<T: std::error::Error + Send + Sync + 'static>() {}
+        assert_bounds::<DynamoError>();
+    }
 
     #[test]
     fn test_msg_constructor() {
