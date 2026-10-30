@@ -96,6 +96,8 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
+    /// The core keeps at most 65,536 sessions per model; while the table is
+    /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
 }
