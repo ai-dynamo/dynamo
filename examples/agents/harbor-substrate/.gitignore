@@ -1,0 +1,10 @@
+.local/
+.venv/
+deps/
+results/
+jobs/
+__pycache__/
+*.pyc
+.env
+.trace/
+.build/

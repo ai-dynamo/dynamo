@@ -753,6 +753,8 @@ navigation:
             path: pages/use-cases/agents/session-affinity.md
           - page: Prioritize Requests
             path: pages/use-cases/agents/priority-scheduling.mdx
+          - page: Sandboxed Coding Agents
+            path: pages/use-cases/agents/harbor-substrate.mdx
           - page: Trace an Agent Run
             slug: agent-tracing
             path: pages/use-cases/agents/agent-tracing.md
