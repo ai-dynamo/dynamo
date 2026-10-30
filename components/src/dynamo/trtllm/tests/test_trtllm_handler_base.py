@@ -1024,6 +1024,292 @@ class TestGenerateLocally:
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
+    async def test_first_chunk_carries_completion_usage_cached_tokens(self):
+        """Frontend may stop_generating before the finishing chunk (#15386)."""
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[], []], cached_tokens=2
+            )
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        first = await gen.__anext__()
+        await gen.aclose()
+
+        assert first.get("finish_reason") is None
+        usage = first.get("completion_usage")
+        assert usage is not None
+        assert usage["prompt_tokens"] == 3
+        assert usage["prompt_tokens_details"]["cached_tokens"] == 2
+
+    def _open_generation_result(self, responses):
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def mock_aiter(self_mock):
+            for res in responses:
+                yield res
+
+        generation_result.__aiter__ = mock_aiter
+        return generation_result
+
+    def _engine_output(
+        self, token_ids, index=0, finish_reason=None, kv_cache_metrics=None
+    ):
+        output = MagicMock()
+        output.token_ids = list(token_ids)
+        output.index = index
+        output.finish_reason = finish_reason
+        output.stop_reason = None
+        output.prompt_logprobs = []
+        if kv_cache_metrics is None:
+            output.request_perf_metrics = None
+        else:
+            output.request_perf_metrics = SimpleNamespace(
+                kv_cache_metrics=SimpleNamespace(**kv_cache_metrics)
+            )
+        return output
+
+    def _engine_response(
+        self, outputs, cached_tokens, finished=False, avg_decoded_tokens_per_iter=None
+    ):
+        res = MagicMock()
+        res.outputs = outputs
+        res.finished = finished
+        res.cached_tokens = cached_tokens
+        res.avg_decoded_tokens_per_iter = avg_decoded_tokens_per_iter
+        return res
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_carries_decoding_statistics_before_early_stop(self):
+        handler = self._make_handler()
+        first = self._engine_response(
+            [self._engine_output([42, 43])],
+            cached_tokens=2,
+            avg_decoded_tokens_per_iter=2.0,
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result([first])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        chunk = await gen.__anext__()
+        await gen.aclose()
+
+        assert chunk.get("finish_reason") is None
+        assert chunk["engine_data"]["avg_decoded_tokens_per_iter"] == 2.0
+
+    @pytest.mark.asyncio
+    async def test_decoding_statistics_update_and_preserve_final_engine_data(self):
+        handler = self._make_handler()
+        responses = [
+            self._engine_response(
+                [self._engine_output([42])],
+                cached_tokens=2,
+                avg_decoded_tokens_per_iter=1.0,
+            ),
+            self._engine_response(
+                [self._engine_output([42, 43, 44])],
+                cached_tokens=2,
+                avg_decoded_tokens_per_iter=1.5,
+            ),
+            self._engine_response(
+                [self._engine_output([42, 43, 44, 45], finish_reason="length")],
+                cached_tokens=2,
+                finished=True,
+                avg_decoded_tokens_per_iter=4 / 3,
+            ),
+        ]
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result(responses)
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 4},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert [c["engine_data"]["avg_decoded_tokens_per_iter"] for c in chunks] == [
+            1.0,
+            1.5,
+            4 / 3,
+        ]
+        assert chunks[-1]["engine_data"]["kv_cache_hit"] == {
+            "prompt_tokens": 3,
+            "reused_tokens": 2,
+        }
+        assert chunks[-1]["completion_usage"]["completion_tokens"] == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("avg_decoded", [None, -1.0, float("nan"), float("inf")])
+    async def test_unavailable_decoding_statistics_are_omitted(self, avg_decoded):
+        handler = self._make_handler()
+        first = self._engine_response(
+            [self._engine_output([42])],
+            cached_tokens=2,
+            avg_decoded_tokens_per_iter=avg_decoded,
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result([first])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        chunk = await gen.__anext__()
+        await gen.aclose()
+
+        assert "avg_decoded_tokens_per_iter" not in chunk.get("engine_data", {})
+
+    @pytest.mark.asyncio
+    async def test_generation_only_early_cached_tokens_use_kv_reuse_metrics(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(
+                SimpleNamespace(request_type="generation_only", disagg_request_id=None),
+                None,
+                {},
+            )
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        # 1 reused / 1 missed over 4 prompt tokens -> 2, not the transferred 4.
+        metrics = {"num_reused_blocks": 1, "num_missed_blocks": 1}
+        first = self._engine_response(
+            [self._engine_output([42], kv_cache_metrics=metrics)],
+            cached_tokens=4,
+            finished=False,
+        )
+        finished = self._engine_response(
+            [self._engine_output([42, 43], finish_reason="stop")],
+            cached_tokens=4,
+            finished=True,
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result([first, finished])
+        )
+        request = {
+            "token_ids": [1, 2, 3, 4],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        chunk = await gen.__anext__()
+        await gen.aclose()
+
+        usage = chunk.get("completion_usage")
+        assert usage is not None
+        assert usage["prompt_tokens_details"]["cached_tokens"] == 2
+        assert "_engine_reported" not in usage["prompt_tokens_details"]
+
+    @pytest.mark.asyncio
+    async def test_early_completion_tokens_count_yielded_choices_only(self):
+        """n>1 must not floor scheduler progress with choices not yet yielded."""
+        handler = self._make_handler()
+        first = self._engine_response(
+            [
+                self._engine_output([10, 11, 12], index=0),
+                self._engine_output([20, 21], index=1),
+            ],
+            cached_tokens=1,
+            finished=False,
+        )
+        finished = self._engine_response(
+            [
+                self._engine_output([10, 11, 12, 13], index=0, finish_reason="stop"),
+                self._engine_output([20, 21, 22], index=1, finish_reason="stop"),
+            ],
+            cached_tokens=1,
+            finished=True,
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result([first, finished])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        first_chunk = await gen.__anext__()
+        second_chunk = await gen.__anext__()
+        await gen.aclose()
+
+        usage = first_chunk.get("completion_usage")
+        assert usage is not None
+        assert usage["completion_tokens"] == 3
+        assert usage["total_tokens"] == 6
+        assert second_chunk.get("completion_usage") is None
+
+    @pytest.mark.asyncio
+    async def test_generation_only_attaches_when_kv_metrics_arrive_later(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(
+                SimpleNamespace(request_type="generation_only", disagg_request_id=None),
+                None,
+                {},
+            )
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        metrics = {"num_reused_blocks": 1, "num_missed_blocks": 1}
+        responses = [
+            self._engine_response(
+                [self._engine_output([42])], cached_tokens=4, finished=False
+            ),
+            self._engine_response(
+                [self._engine_output([42, 43], kv_cache_metrics=metrics)],
+                cached_tokens=4,
+                finished=False,
+            ),
+            self._engine_response(
+                [self._engine_output([42, 43, 44], finish_reason="stop")],
+                cached_tokens=4,
+                finished=True,
+            ),
+        ]
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._open_generation_result(responses)
+        )
+        request = {
+            "token_ids": [1, 2, 3, 4],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        gen = handler.generate_locally(request, self._make_context())
+        first = await gen.__anext__()
+        second = await gen.__anext__()
+        await gen.aclose()
+
+        assert first.get("completion_usage") is None
+        usage = second.get("completion_usage")
+        assert usage is not None
+        assert usage["prompt_tokens_details"]["cached_tokens"] == 2
+        assert usage["completion_tokens"] == 2
+
+    @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
         """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
         handler = self._make_handler()
