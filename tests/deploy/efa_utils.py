@@ -174,6 +174,7 @@ async def _async_fetch_pod_log(pod, params: dict) -> str:
         url=f"{pod.endpoint}/{pod.name}/log",
         namespace=pod.namespace,
         params=params,
+        timeout=30,
     ) as response:
         return response.text
 

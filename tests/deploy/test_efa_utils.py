@@ -211,7 +211,6 @@ _NO_PREVIOUS = kr8s.ServerError(
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_read_pod_logs_recovers_from_transient_tunnel_drop(monkeypatch) -> None:
-    """A log readable after a tunnel recovery is scored, not replaced by an empty log."""
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
     pod = _fake_pod(
@@ -239,7 +238,6 @@ def test_read_pod_logs_retries_stalled_read(monkeypatch) -> None:
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_read_pod_logs_raises_when_tunnel_stays_down(monkeypatch) -> None:
-    """A log that cannot be read fails the read, not the LIBFABRIC check."""
     monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", MagicMock())
     pod = _fake_pod(
         [httpx.ConnectError("All connection attempts failed")] * 4, _NO_PREVIOUS
