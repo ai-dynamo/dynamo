@@ -68,15 +68,14 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
-/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
-/// if they drift, MM routing silently degrades to text-prefix. Pinned by
-/// `pad_value_matches_sglang_protocol`.
+/// Dynamo's SGLang routing compatibility constants. The worker compatibility
+/// layer applies this scalar protocol to caller-hashed multimodal items.
 pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
 pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
 
 /// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
 /// the frontend and the kv-router so request- and event-side hashes agree.
-/// Keeps the low 30 bits only (sglang's limit).
+/// Keeps the low 30 bits for compatibility with Dynamo's u32 token protocol.
 pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }

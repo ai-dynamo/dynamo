@@ -1090,11 +1090,21 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 @pytest.mark.asyncio
 async def test_external_mm_hashes_rebuild_padding_after_hash_override():
+    mm_hash = 0x9F3A6C1D2E4B5A78
     item = SimpleNamespace(
-        pad_value=91,
+        hash=mm_hash,
+        pad_value=2_484_584_418_701_536_377,
+        pad_values=(
+            2_484_584_418_701_536_377,
+            3_430_928_763_024_846_381,
+            2_765_621_168_294_226_819,
+            3_874_204_859_667_391_249,
+        ),
         offsets=[(1, 2)],
-        padding_sequence=lambda length: [91] * length,
     )
+    item.padding_sequence = lambda length: [
+        item.pad_values[index % len(item.pad_values)] for index in range(length)
+    ]
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
@@ -1111,11 +1121,62 @@ async def test_external_mm_hashes_rebuild_padding_after_hash_override():
     engine = MmHashEngine()
     assert supports_external_mm_hashes(engine)
     patched = engine.tokenizer_manager._tokenize_one_request
-    result = await patched(SimpleNamespace(mm_hashes=["abc"]))
+    result = await patched(SimpleNamespace(mm_hashes=[f"{mm_hash:016x}"]))
 
-    assert result.mm_inputs.padded_input_ids == [1, 91, 91, 4]
+    expected_pad = 1_000_000 + (mm_hash & ((1 << 30) - 1))
+    assert item.pad_values == (expected_pad,)
+    assert item.pad_value == expected_pad
+    assert result.mm_inputs.padded_input_ids == [1, expected_pad, expected_pad, 4]
     assert supports_external_mm_hashes(engine)
     assert engine.tokenizer_manager._tokenize_one_request is patched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mm_hashes", [[], ["not-hex"], ["1", "2"]])
+async def test_external_mm_hashes_leave_unmatched_padding_unchanged(mm_hashes):
+    original_pad_values = (101, 202, 303, 404)
+    item = SimpleNamespace(
+        hash=7,
+        pad_value=original_pad_values[0],
+        pad_values=original_pad_values,
+        offsets=[(1, 2)],
+    )
+    item.padding_sequence = lambda length: [
+        item.pad_values[index % len(item.pad_values)] for index in range(length)
+    ]
+    mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=None)
+    tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
+
+    class TokenizerManager:
+        async def _tokenize_one_request(self, obj):
+            return tokenized
+
+    class MmHashEngine:
+        tokenizer_manager = TokenizerManager()
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    engine = MmHashEngine()
+    assert supports_external_mm_hashes(engine)
+    await engine.tokenizer_manager._tokenize_one_request(
+        SimpleNamespace(mm_hashes=mm_hashes)
+    )
+
+    assert item.pad_values == original_pad_values
+    assert item.pad_value == original_pad_values[0]
+
+
+def test_external_mm_hashes_are_disabled_for_wide_identity_processors():
+    class WideIdentityEngine:
+        tokenizer_manager = SimpleNamespace(
+            mm_processor=SimpleNamespace(uses_wide_image_identity=True)
+        )
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(WideIdentityEngine())
 
 
 def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():

@@ -97,7 +97,9 @@ SGLang RadixAttention includes a per-media `pad_value` token in its prefix-cache
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
 3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
-5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
+5. Dynamo's worker compatibility layer applies the router's scalar `pad_value`
+   to the caller-hashed item, keeping the router and RadixAttention cache keys
+   aligned across supported SGLang releases.
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
@@ -108,7 +110,12 @@ discovery cohort publishes the same compatible contract. Unsupported models,
 legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
-Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
+Step 4 needs an SGLang build and processor that accept `mm_hashes`. Dynamo's
+SGLang image carries the upstream support. Kimi processors use processor-owned
+wide identities and reject caller hashes, so Dynamo does not forward them.
+Kimi requests still serve, but image-aware cache routing is unsupported and KV
+event batches containing wide pad IDs may be omitted. A custom build without
+hash forwarding is supported with text-prefix routing.
 
 Launch an aggregated deployment with multimodal KV routing:
 
