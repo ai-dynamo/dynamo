@@ -67,6 +67,7 @@ async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
             super::decision_error(DecisionError::validation(dialect, "invalid questions"));
         super::attach_request_ids(&mut response, "fixture-request");
         assert_eq!(response.headers()["x-request-id"], "fixture-request");
+        assert_eq!(response.headers()["x-dynamo-systemone-version"], "1");
         assert_eq!(
             response.headers()["x-typesafe-request-id"],
             "fixture-request"
@@ -237,6 +238,80 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
     );
     drop(permit);
     assert!(super::acquire_admission(admission, 1, 2, dynamo_decisions::Dialect::Jev).is_ok());
+}
+
+#[tokio::test]
+async fn capacity_error_code_is_independent_of_configured_status() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        for status in [429, 503, 529] {
+            let parent = Context::new(()).context();
+            let response = super::dispatch_error(
+                "capacity",
+                &parent,
+                super::DispatchError {
+                    status: StatusCode::from_u16(status).unwrap(),
+                    public_message: "capacity exhausted",
+                    detail: "private detail".into(),
+                    retry_after: true,
+                    is_capacity_exhausted: true,
+                },
+                dialect,
+            );
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(response.headers()["retry-after"], "1");
+            assert!(
+                response
+                    .extensions()
+                    .get::<super::DecisionCapacityRejection>()
+                    .is_some()
+            );
+            let body = response_body(response).await;
+            let code = if dialect == dynamo_decisions::Dialect::Jev {
+                &body["code"]
+            } else {
+                &body["error"]["code"]
+            };
+            assert_eq!(code, "rate_limit_exceeded");
+            assert!(!body.to_string().contains("private detail"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unavailable_with_retry_after_does_not_claim_capacity() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        let parent = Context::new(()).context();
+        let response = super::dispatch_error(
+            "unavailable",
+            &parent,
+            super::DispatchError {
+                retry_after: true,
+                ..super::DispatchError::unavailable("private detail")
+            },
+            dialect,
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert!(
+            response
+                .extensions()
+                .get::<super::DecisionCapacityRejection>()
+                .is_none()
+        );
+        let body = response_body(response).await;
+        let code = if dialect == dynamo_decisions::Dialect::Jev {
+            &body["code"]
+        } else {
+            &body["error"]["code"]
+        };
+        assert_eq!(code, "server_error");
+    }
 }
 
 #[test]

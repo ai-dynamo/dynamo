@@ -1554,6 +1554,126 @@ mod tests {
     }
 
     #[test]
+    fn v2_qwen3_coder_tag_never_excludes_its_own_trigger() {
+        // ai-dynamo/dynamo#17663: dynamo-parsers-v2 0.8.0 built the qwen3_coder
+        // tag with the trigger `<tool_call>\n<function=` next to
+        // `excludes: ["<function="]`. XGrammar applies the excludes to the free
+        // text the trigger is matched in, so the model's own call opening was
+        // rejected and it retried inside the open thought until `max_tokens`.
+        // 0.8.7+ dispatches at `<tool_call>`; this pins that no trigger may ever
+        // contain an excluded string again.
+        const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_TRIGGER_EXCLUDE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "preprocessor::structural_tag::tests::v2_qwen3_coder_tag_never_excludes_its_own_trigger",
+            )
+            .env(CHILD, "2")
+            .env(env_llm::DYN_PARSER_VERSION, "2")
+            .output()
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        assert!(v2::enabled(), "child must run with parsers v2 selected");
+
+        let tools = [ToolDefinition {
+            name: "queue_label_print_job".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"label_count": {"type": "integer", "multipleOf": 24}},
+                "required": ["label_count"]
+            })),
+            strict: None,
+        }];
+        // `scope: always` so the auto choice installs the tag the way the
+        // affected deployments do; the default scope only tags forced choices.
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for tool_choice in [ToolChoice::Auto, ToolChoice::Required] {
+            let mut request = preprocessed_request();
+            let applied = preprocessor
+                .apply_tool_choice_structural_tag(
+                    &tool_choice,
+                    &tools,
+                    None,
+                    false,
+                    None,
+                    &mut request,
+                )
+                .unwrap();
+            assert!(applied, "{tool_choice:?} must install a structural tag");
+            let tag = request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .expect("tool-call structural tag should be installed")
+                .clone();
+
+            let triggers = json_strings_under_keys(&tag, &["triggers"]);
+            let excludes = json_strings_under_keys(&tag, &["excludes", "exclude_tokens"]);
+            assert!(
+                triggers.iter().any(|trigger| trigger == "<tool_call>"),
+                "{tool_choice:?}: expected a `<tool_call>` trigger in {tag}"
+            );
+            assert!(
+                excludes.iter().any(|exclude| exclude == "<function="),
+                "{tool_choice:?}: expected the bare `<function=` marker to stay excluded in {tag}"
+            );
+            for trigger in &triggers {
+                for exclude in &excludes {
+                    assert!(
+                        !trigger.contains(exclude.as_str()),
+                        "{tool_choice:?}: trigger {trigger:?} contains the excluded string \
+                         {exclude:?}, so the grammar can never dispatch the call: {tag}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every string found directly under one of `keys` (as a string or an array
+    /// of strings), anywhere in `value`.
+    fn json_strings_under_keys(value: &serde_json::Value, keys: &[&str]) -> Vec<String> {
+        fn walk(value: &serde_json::Value, keys: &[&str], out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if keys.contains(&key.as_str()) {
+                            match child {
+                                serde_json::Value::String(text) => out.push(text.clone()),
+                                serde_json::Value::Array(items) => out.extend(
+                                    items
+                                        .iter()
+                                        .filter_map(|item| item.as_str().map(str::to_string)),
+                                ),
+                                _ => {}
+                            }
+                        }
+                        walk(child, keys, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, keys, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(value, keys, &mut out);
+        out
+    }
+
+    #[test]
     fn kimi_k3_reasoning_gate_avoids_duplicate_prefix_per_request() {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
