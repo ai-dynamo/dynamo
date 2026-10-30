@@ -1465,6 +1465,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         logger.error(f"vLLM EngineDeadError: {e}")
         self._shutdown_worker()
 
+    async def _reset_prefix_cache(self, **kwargs: Any) -> None:
+        reset_successful = await self.engine_client.reset_prefix_cache(**kwargs)
+        if reset_successful is False:
+            raise RuntimeError("vLLM declined the prefix-cache reset")
+
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
     ) -> Optional[MultiModalEmbeddingLoader]:
@@ -2073,15 +2078,34 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ),
                 }
             try:
+                legacy_pause = False
                 try:
-                    await self.engine_client.pause_generation(
-                        mode=mode, clear_cache=clear_cache
-                    )
-                except TypeError:
-                    await self.engine_client.pause_generation()
-                    if clear_cache:
-                        await self.engine_client.reset_prefix_cache()
+                    try:
+                        await self.engine_client.pause_generation(
+                            mode=mode, clear_cache=clear_cache
+                        )
+                    except TypeError:
+                        await self.engine_client.pause_generation()
+                        legacy_pause = True
+                except EngineDeadError:
+                    raise
+                except Exception:
+                    # vLLM pauses the scheduler before clearing its caches, so
+                    # pause_generation() can raise after the engine is paused.
+                    self._paused = await self.engine_client.is_paused()
+                    raise
+
                 self._paused = True
+                if clear_cache:
+                    if legacy_pause:
+                        await self._reset_prefix_cache()
+                    else:
+                        # Current vLLM discards a declined cache-reset result inside
+                        # pause_generation(), so verify it explicitly while paused.
+                        await self._reset_prefix_cache(
+                            reset_running_requests=True,
+                            reset_connector=True,
+                        )
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )
@@ -2134,7 +2158,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # weight-update / pause / resume mutating engine cache state.
         async with self._pause_lock:
             try:
-                await self.engine_client.reset_prefix_cache()
+                await self._reset_prefix_cache()
                 logger.debug("[RL] Prefix cache flushed")
                 return {"status": "ok", "message": "Cache flushed"}
             except EngineDeadError as e:
@@ -2251,11 +2275,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 else {"weight_path": path}
             )
             try:
+                # Refuse the update unless stale entries can be removed first;
+                # otherwise new weights could be applied over an old cache.
+                await self._reset_prefix_cache()
                 await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
-                # Weights changed: any prefix/KV cache computed under the old
-                # weights is now stale and must not be reused. Invalidate it
-                # while still holding _pause_lock (generation is paused).
-                await self.engine_client.reset_prefix_cache()
                 if "weight_version" in body:
                     self._weight_version = version
                 logger.info(
@@ -2319,11 +2342,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if reset_prefix_cache:
-                    # Weights changed: stale prefix/KV cache must be invalidated
-                    # before resume so it is not reused under the new weights.
-                    await self.engine_client.reset_prefix_cache()
+                    # Refuse the update unless stale entries can be removed first;
+                    # otherwise new weights could be applied over an old cache.
+                    await self._reset_prefix_cache()
+                await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if "weight_version" in body:
                     self._weight_version = version
                 logger.info(
@@ -2995,7 +3018,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if is_hot_swap:
                         try:
                             async with self._pause_lock:
-                                await self.engine_client.reset_prefix_cache()
+                                await self._reset_prefix_cache()
                         except Exception as e:
                             # The new adapter is already active in the engine, but
                             # the prefix cache still holds entries computed under
