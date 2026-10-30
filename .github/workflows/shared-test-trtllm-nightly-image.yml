@@ -57,7 +57,11 @@ jobs:
           retention-days: 7
 
   test:
-    name: Upstream TRT-LLM image integration (1 GPU)
+    name: Upstream TRT-LLM ${{ matrix.scenario }} integration (1 GPU)
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [image, image-routing]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
@@ -91,11 +95,12 @@ jobs:
           python3 lib/sidecar/trtllm/ci/run_image_test.py
           --binary trtllm-image-tests/trtllm-image-tests
           --config trtllm-image-tests/nightly.json
+          --scenario ${{ matrix.scenario }}
       - name: Upload engine logs and test results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: trtllm-nightly-image-results-${{ github.sha }}
-          path: test-results/trtllm-nightly-image/
+          name: trtllm-nightly-${{ matrix.scenario }}-results-${{ github.sha }}
+          path: test-results/trtllm-nightly-${{ matrix.scenario }}/
           if-no-files-found: warn
           retention-days: 7

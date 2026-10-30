@@ -5,8 +5,10 @@
 """Run the Rust adapter against an unmodified upstream TRT-LLM image."""
 
 import argparse
+import base64
 import importlib.metadata
 import json
+import math
 import os
 import signal
 import socket
@@ -15,6 +17,7 @@ import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
 
 TEST = "tests::e2e::e2e_real_openengine_image"
@@ -49,13 +52,67 @@ def stop_engine(process):
             process.wait(timeout=10)
 
 
+def run_test(binary, test, env, results):
+    completed = subprocess.run(
+        [str(binary), "--exact", test, "--ignored", "--nocapture", "--color", "never"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=240,
+    )
+    log = results / (
+        "rust-events-test.log" if test.endswith("event_conversion") else "rust-test.log"
+    )
+    log.write_text(completed.stdout)
+    print(completed.stdout, flush=True)
+    completed.check_returncode()
+    if "1 passed; 0 failed; 0 ignored;" not in completed.stdout:
+        raise RuntimeError(f"{test} did not execute exactly once")
+
+
+def routing_fixture(model_path):
+    from PIL import Image, ImageOps
+    from transformers import AutoProcessor
+
+    encoded = "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAK0lEQVR4nGP8z0AsYGQgVi0T0WaSAEYNHTV01NBRQ0cNHTV01NBRQwefoQBvcAI3xbX7+QAAAABJRU5ErkJggg=="
+    image = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB")
+    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+    image_processor = processor.image_processor
+    grid = image_processor(images=[image], return_tensors="pt")["image_grid_thw"][0]
+    count = math.prod(int(value) for value in grid) // image_processor.merge_size**2
+    if count < 1:
+        raise ValueError("Expected a nonempty expanded image placeholder")
+    changed = BytesIO()
+    ImageOps.mirror(image).save(changed, format="PNG")
+    return count, "data:image/png;base64," + base64.b64encode(
+        changed.getvalue()
+    ).decode("ascii")
+
+
+def validate_image_response(caption, response, expected_ids, colors=("red", "blue")):
+    words = [
+        word.strip(".,:;!?()\"'") for word in caption.lower().replace("-", " ").split()
+    ]
+    if [word for word in words if word in ("red", "blue")][:2] != list(colors):
+        raise AssertionError(
+            f"Expected {colors} in the image description, got: {caption}"
+        )
+    if response["completion_tokens"] <= 0 or response["prompt_tokens"] <= len(
+        expected_ids
+    ):
+        raise AssertionError(f"Missing authoritative image token usage: {response}")
+
+
 def run(args, results):
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
+    routing = args.scenario == "image-routing"
     config = json.loads(args.config.read_text())
     identity = {
         **config,
+        "scenario": args.scenario,
         "installed_version": importlib.metadata.version("tensorrt_llm"),
         "installed_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
     }
@@ -134,7 +191,31 @@ def run(args, results):
     )
     result_path = results / "response.json"
     engine = None
+    context = subscriber = None
+    env_extra = {}
     try:
+        if routing:
+            import zmq
+
+            count, changed = routing_fixture(model_path)
+            env_extra = {
+                "TRTLLM_E2E_IMAGE_ROUTING": "1",
+                "TRTLLM_E2E_IMAGE_TOKEN_COUNT": str(count),
+                "TRTLLM_E2E_CHANGED_IMAGE": changed,
+            }
+            context = zmq.Context()
+            subscriber = context.socket(zmq.SUB)
+            subscriber.setsockopt(zmq.SUBSCRIBE, b"")
+            event_port = subscriber.bind_to_random_port("tcp://127.0.0.1")
+            endpoint = f"tcp://127.0.0.1:{event_port}"
+            subscriber.unbind(endpoint)
+            subscriber.connect(endpoint)
+            with options.open("a") as stream:
+                stream.write(
+                    "  enable_block_reuse: true\n  use_kv_cache_manager_v2: true\n"
+                    "  kv_events_config:\n    enable_kv_cache_events: true\n"
+                    f"    publisher: zmq\n    endpoint: {endpoint}\n"
+                )
         with (results / "engine.log").open("w") as log:
             engine = subprocess.Popen(
                 [
@@ -165,64 +246,60 @@ def run(args, results):
                 TRTLLM_E2E_MODEL=config["model"],
                 TRTLLM_E2E_RESULT=str(result_path),
             )
-            completed = subprocess.run(
-                [
-                    str(binary),
-                    "--exact",
-                    TEST,
-                    "--ignored",
-                    "--nocapture",
-                    "--color",
-                    "never",
-                ],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=240,
-            )
-            (results / "rust-test.log").write_text(completed.stdout)
-            print(completed.stdout, flush=True)
-            completed.check_returncode()
-            if "1 passed; 0 failed; 0 ignored;" not in completed.stdout:
-                raise RuntimeError(
-                    "Image integration test did not execute exactly once"
+            env.update(env_extra)
+            run_test(binary, TEST, env, results)
+            if routing:
+                payloads = []
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if subscriber.poll(500):
+                        payloads.append(list(subscriber.recv_multipart()[-1]))
+                if not payloads:
+                    raise AssertionError("No native KV events were published")
+                events_path = results / "routing-events.json"
+                events_path.write_text(json.dumps(payloads))
+                env["TRTLLM_E2E_ROUTING_EVENTS"] = str(events_path)
+                run_test(
+                    binary,
+                    "tests::e2e::e2e_real_image_routing_event_conversion",
+                    env,
+                    results,
                 )
     finally:
         stop_engine(engine)
+        if subscriber is not None:
+            subscriber.close(linger=0)
+        if context is not None:
+            context.term()
 
     response = json.loads(result_path.read_text())
-    caption = tokenizer.decode(response["token_ids"], skip_special_tokens=True)
-    response["text"] = caption
+    cases = response["cases"] if routing else [response]
+    for index, case in enumerate(cases):
+        caption = tokenizer.decode(case["token_ids"], skip_special_tokens=True)
+        case["text"] = caption
+        colors = ("blue", "red") if routing and index == 3 else ("red", "blue")
+        validate_image_response(caption, case, expected_ids, colors)
+        print(f"Image response {index}: {caption}", flush=True)
     result_path.write_text(json.dumps(response, indent=2) + "\n")
-    print(f"Image response: {caption}", flush=True)
-    words = caption.lower().replace("-", " ").split()
-    # Accept phrasing differences, but require the fixture colors left to right.
-    colors = [word.strip(".,:;!?()\"'") for word in words]
-    if [color for color in colors if color in ("red", "blue")][:2] != ["red", "blue"]:
-        raise AssertionError(
-            f"Expected red, then blue, in the image description, got: {caption}"
-        )
-    if response["completion_tokens"] <= 0 or response["prompt_tokens"] <= len(
-        expected_ids
-    ):
-        raise AssertionError(f"Missing authoritative image token usage: {response}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scenario", choices=["image", "image-routing"], default="image"
+    )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument(
         "--config", type=Path, required=True, help="Resolved nightly image manifest"
     )
-    parser.add_argument(
-        "--results", type=Path, default=Path("test-results/trtllm-nightly-image")
-    )
+    parser.add_argument("--results", type=Path)
     parser.add_argument(
         "--model-path", type=Path, help="Use an already downloaded model snapshot"
     )
     args = parser.parse_args()
-    results = args.results.resolve()
+    results = (
+        args.results or Path(f"test-results/trtllm-nightly-{args.scenario}")
+    ).resolve()
     results.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
     failure = None
@@ -234,14 +311,18 @@ def main():
     duration = str(time.monotonic() - start)
     suite = ET.Element(
         "testsuite",
-        name="trtllm-nightly-image",
+        name=f"trtllm-nightly-{args.scenario}",
         tests="1",
         failures=str(int(failure is not None)),
         skipped="0",
         time=duration,
     )
     case = ET.SubElement(
-        suite, "testcase", name=TEST, classname="trtllm.sidecar", time=duration
+        suite,
+        "testcase",
+        name=f"{TEST}[{args.scenario}]",
+        classname="trtllm.sidecar",
+        time=duration,
     )
     if failure:
         ET.SubElement(case, "failure", message=failure.splitlines()[-1]).text = failure

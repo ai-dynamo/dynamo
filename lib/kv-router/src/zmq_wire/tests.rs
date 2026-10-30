@@ -16,6 +16,152 @@ use crate::protocols::{
 use super::filter::KvCacheSpecKind;
 use super::*;
 
+#[test]
+fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let key_a = serde_json::json!({"hash": a, "uuid": "dynamo-image-v1:0123456789abcdef", "start_offset": 0});
+    let key_b = serde_json::json!({"hash": b, "uuid": "dynamo-image-v1:fedcba9876543210", "start_offset": 0});
+    let event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100, 101], "parent_block_hash": null,
+        "token_ids": [1, a, 1001, 1002, 1003, 9, b, 1001], "block_size": 4,
+        "mm_keys": [[key_a.clone()], [key_a, key_b]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    let a = crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef);
+    let b = crate::protocols::pad_value_for_mm_hash(0xfedcba9876543210);
+    let expected =
+        compute_block_hash_for_seq(&[1, a, a, a, a, 9, b, b], 4, BlockHashOptions::default());
+    let placement = convert_event(
+        raw,
+        1,
+        4,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap();
+    let KvCacheEventData::Stored(stored) = placement.event.data else {
+        panic!("stored event expected")
+    };
+    assert_eq!(
+        stored
+            .blocks
+            .iter()
+            .map(|b| b.tokens_hash)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn trtllm_invalid_image_metadata_fails_closed() {
+    let digest = "a".repeat(64);
+    let valid = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100], "token_ids": [digest, 1001], "block_size": 2,
+        "mm_keys": [[{"hash": digest, "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
+    });
+    for (pointer, replacement) in [
+        ("/trtllm_image_routing/version", serde_json::json!(2)),
+        (
+            "/trtllm_image_routing",
+            serde_json::json!({"version": 2, "future_payload": [1, 2]}),
+        ),
+        (
+            "/trtllm_image_routing/token_id_offset",
+            serde_json::json!("invalid"),
+        ),
+        ("/mm_keys", serde_json::json!([])),
+        ("/mm_keys", serde_json::json!(null)),
+        ("/mm_keys", serde_json::json!(17)),
+        ("/mm_keys", serde_json::json!([[{"hash": 17}]])),
+        ("/mm_keys/0/0/hash", serde_json::json!("b".repeat(64))),
+        ("/mm_keys/0/0/uuid", serde_json::json!("caller-identity")),
+        (
+            "/mm_keys/0/0/uuid",
+            serde_json::json!("dynamo-image-v1:invalid"),
+        ),
+        (
+            "/mm_keys/0/0/uuid",
+            serde_json::json!("dynamo-image-v1:+123456789abcdef"),
+        ),
+    ] {
+        let mut event = valid.clone();
+        *event.pointer_mut(pointer).unwrap() = replacement;
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored), "{pointer}");
+        let batch = serde_json::json!([0.0, [event,
+            {"type": "BlockRemoved", "block_hashes": [100]}
+        ], 0]);
+        let decoded = decode_event_batch(&to_vec_named(&batch).unwrap()).unwrap();
+        assert!(matches!(decoded.events[1], RawKvEvent::BlockRemoved { .. }));
+    }
+}
+
+#[test]
+fn trtllm_unmapped_image_continuations_do_not_drop_subsequent_removals() {
+    let event = serde_json::json!([0.0, [
+        {"type":"BlockStored", "block_hashes":[100], "token_ids":[1003,1004], "block_size":2,
+         "mm_keys":[[{"hash":"a".repeat(64),"start_offset":3,"uuid":null}]],
+         "trtllm_image_routing":{"version":1,"token_id_offset":1000}},
+        {"type":"BlockRemoved", "block_hashes":[100]}
+    ], 0]);
+    let batch = decode_event_batch(&to_vec_named(&event).unwrap()).unwrap();
+    assert!(matches!(batch.events[0], RawKvEvent::Ignored));
+    assert!(matches!(batch.events[1], RawKvEvent::BlockRemoved { .. }));
+}
+
+#[test]
+fn trtllm_routing_requires_sibling_keys_and_preserves_other_producers() {
+    for keys in [
+        serde_json::json!(null),
+        serde_json::json!(17),
+        serde_json::json!([]),
+    ] {
+        let mut event = serde_json::json!({
+            "type": "BlockStored", "block_hashes": [100],
+            "token_ids": [1003, 1004], "block_size": 2, "mm_keys": keys,
+        });
+        // Without the extension, mm_keys remains an unrelated producer field.
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::BlockStored { .. }));
+        event["trtllm_image_routing"] = serde_json::json!({"version": 1, "token_id_offset": 1000});
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+        event.as_object_mut().unwrap().remove("mm_keys");
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+    }
+}
+
+#[test]
+fn trtllm_mapped_integer_continuation_uses_sibling_keys() {
+    let event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [101], "parent_block_hash": 100,
+        "token_ids": [1003, 1004], "block_size": 2,
+        "mm_keys": [[{"hash": "a".repeat(64), "start_offset": 3,
+            "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000},
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    let RawKvEvent::BlockStored {
+        token_ids,
+        parent_block_hash,
+        ..
+    } = raw
+    else {
+        panic!("stored event expected");
+    };
+    assert!(parent_block_hash.is_some());
+    assert_eq!(
+        token_ids,
+        vec![crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef); 2]
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum TestEventKind {
     BlockStored,

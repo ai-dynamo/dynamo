@@ -49,7 +49,7 @@ pub(crate) fn build_generate_request_with_routing(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
-    let media = image_media(&mut request, limits)?;
+    let media = image_media(&mut request, limits, mode)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -212,6 +212,7 @@ const IMAGE_KEY: &str = "image_url";
 fn image_media(
     request: &mut PreprocessedRequest,
     limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
@@ -275,7 +276,37 @@ fn image_media(
         ));
     }
 
-    let uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
+    let mut uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
+    if matches!(mode, DisaggregationMode::Aggregated)
+        && limits.is_some_and(|limits| limits.supports_image_routing)
+        && request
+            .mm_routing_info
+            .as_ref()
+            .is_some_and(|info| !info.routing_token_ids.is_empty() && info.expanded_prompt_len > 0)
+        && uuids.iter().all(Option::is_none)
+        && let Some(hashes) = request
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("mm_hashes"))
+    {
+        let hashes = hashes.as_array().ok_or_else(|| {
+            client::invalid_argument("extra_args.mm_hashes must be an array for image routing")
+        })?;
+        if hashes.len() != images.len() {
+            return Err(client::invalid_argument(
+                "image routing hash count must match image count",
+            ));
+        }
+        for (uuid, hash) in uuids.iter_mut().zip(hashes) {
+            let hash = hash
+                .as_str()
+                .filter(|s| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    client::invalid_argument("image routing hashes must be 16 hexadecimal digits")
+                })?;
+            *uuid = Some(format!("dynamo-image-v1:{}", hash.to_ascii_lowercase()));
+        }
+    }
     images
         .into_iter()
         .zip(uuids)
@@ -300,7 +331,6 @@ fn image_media(
                 source: Some(source),
                 // MIME metadata belongs to raw_bytes, which this client does not send.
                 mime_type: String::new(),
-                // Do not substitute router-owned mm_hashes for caller cache identities.
                 uuid: uuid.unwrap_or_default(),
             })
         })
@@ -441,17 +471,13 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
-/// Stop IDs the engine trims by default but returns once
-/// `include_stop_in_output` is set for visible stops.
+/// Hidden stop IDs to remove when the engine confirms they ended generation.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
     let visible = request
         .stop_conditions
         .stop_token_ids_visible
         .as_deref()
         .unwrap_or_default();
-    if visible.is_empty() {
-        return BTreeSet::new();
-    }
     stop_token_ids(request)
         .into_iter()
         .filter(|id| !visible.contains(id))
@@ -636,10 +662,8 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Every stop ID when visible stops are set, empty otherwise. The engine
-    /// stops on these, so one at the end of a delta is held for the terminal.
-    /// OpenEngine sends the matched stop before the `finished` event carrying
-    /// usage, and the frontend decoder drops everything after a visible stop.
+    /// Hold a trailing stop until terminal usage arrives. The frontend decoder
+    /// can terminate on hidden or visible stops before reading that usage.
     held_stop_ids: BTreeSet<u32>,
     /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,
@@ -680,11 +704,7 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
-            held_stop_ids: if has_visible_stop_tokens(request) {
-                stop_token_ids(request).into_iter().collect()
-            } else {
-                BTreeSet::new()
-            },
+            held_stop_ids: stop_token_ids(request).into_iter().collect(),
             hidden_stop_ids: retained_hidden_stop_ids(request),
             pending_stop: None,
             phase: if mode.is_prefill() {

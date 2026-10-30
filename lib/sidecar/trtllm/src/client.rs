@@ -48,6 +48,7 @@ pub(crate) struct ModelLimits {
     /// Whether both portable and engine-specific capabilities advertise images.
     /// `None` is reserved for unresolved/test metadata; startup always resolves this.
     pub(crate) supports_image: Option<bool>,
+    pub(crate) supports_image_routing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +215,12 @@ impl TrtllmClient {
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supports_image: Some(supports_image),
+                supports_image_routing: supports_image && info.extra.as_ref().is_some_and(|extra| {
+                    matches!(
+                        extra.fields.get("trtllm_image_routing_version").and_then(|v| v.kind.as_ref()),
+                        Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+                    )
+                }),
             },
             served_model_name: info.served_model_name,
         })

@@ -3,6 +3,10 @@
 
 //! Ignored by default: these drive a live TensorRT-LLM OpenEngine server.
 
+use std::collections::HashMap;
+
+use dynamo_backend_common::MultimodalData;
+
 use super::*;
 
 /// Drives a real disaggregated prefill -> decode handoff against two live
@@ -385,37 +389,148 @@ async fn e2e_real_openengine_image() {
         )],
     );
 
-    let outputs = collect(&engine, request).await;
-    let generated = outputs
-        .iter()
-        .flat_map(|output| output.token_ids.iter().copied())
-        .collect::<Vec<_>>();
-    let terminal = outputs
-        .iter()
-        .find(|output| output.finish_reason.is_some())
-        .expect("terminal output");
-    let usage = terminal.completion_usage.as_ref().expect("terminal usage");
-    eprintln!(
-        "[e2e-image] generated={generated:?}; usage: prompt={}, completion={}",
-        usage.prompt_tokens, usage.completion_tokens
-    );
-
+    let routing = std::env::var_os("TRTLLM_E2E_IMAGE_ROUTING").is_some();
+    if routing {
+        let mut control = crate::proto::control_client::ControlClient::connect(endpoint.clone())
+            .await
+            .expect("connect routing capability client");
+        let info = control
+            .get_model_info(pb::GetModelInfoRequest {
+                model: request.model.clone(),
+            })
+            .await
+            .expect("read live routing capability")
+            .into_inner();
+        assert!(info.extra.as_ref().is_some_and(|extra| matches!(
+            extra.fields.get("trtllm_image_routing_version").and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+        )), "the official runtime must include TRT-LLM #21125 image routing support");
+    }
+    let mut requests = vec![(request.clone(), "0123456789abcdef")];
+    if routing {
+        requests.push((request.clone(), "0123456789abcdef"));
+        requests.push((request.clone(), "fedcba9876543210"));
+        request.multi_modal_data = Some(HashMap::from([(
+            "image_url".into(),
+            vec![MultimodalData::RawUrl(
+                std::env::var("TRTLLM_E2E_CHANGED_IMAGE")
+                    .expect("set TRTLLM_E2E_CHANGED_IMAGE for the changed-content check"),
+            )],
+        )]));
+        requests.push((request, "0123456789abcdef"));
+    }
+    let mut results = Vec::new();
+    for (mut request, hash) in requests {
+        if routing {
+            let count: usize = std::env::var("TRTLLM_E2E_IMAGE_TOKEN_COUNT")
+                .expect("set TRTLLM_E2E_IMAGE_TOKEN_COUNT")
+                .parse()
+                .expect("image token count");
+            let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(
+                u64::from_str_radix(hash, 16).unwrap(),
+            );
+            let expanded: Vec<u32> = token_ids
+                .iter()
+                .flat_map(|&id| {
+                    if id == 151655 {
+                        vec![pad; count]
+                    } else {
+                        vec![id]
+                    }
+                })
+                .collect();
+            request.mm_routing_info =
+                Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+                    expanded_prompt_len: expanded.len() as _,
+                    routing_token_ids: expanded,
+                    ..Default::default()
+                });
+            request.extra_args = Some(json!({"mm_hashes": [hash]}));
+            request.stop_conditions.max_tokens = Some(64);
+        }
+        let outputs = collect(&engine, request).await;
+        let generated = outputs
+            .iter()
+            .flat_map(|output| output.token_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let terminal = outputs
+            .iter()
+            .find(|output| output.finish_reason.is_some())
+            .expect("terminal output");
+        let usage = terminal.completion_usage.as_ref().expect("terminal usage");
+        assert!(!generated.is_empty(), "expected image-conditioned output");
+        assert!(
+            usage.prompt_tokens > token_ids.len() as u32,
+            "the engine must report the expanded image prompt"
+        );
+        assert!(
+            usage.completion_tokens > 0,
+            "expected completion token usage"
+        );
+        results.push(json!({
+            "token_ids": generated,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "cached_tokens": usage.prompt_tokens_details.as_ref().and_then(|details| details.cached_tokens),
+        }));
+    }
+    if routing {
+        let cached: Vec<u64> = results
+            .iter()
+            .map(|result| {
+                result["cached_tokens"]
+                    .as_u64()
+                    .expect("authoritative cache usage")
+            })
+            .collect();
+        assert!(
+            cached[1] > cached[0],
+            "repeated image must reuse its KV prefix"
+        );
+        assert!(
+            cached[2] < cached[1],
+            "a distinct UUID must isolate native cache identity"
+        );
+        assert!(
+            cached[3] < cached[1],
+            "changed content must not reuse the first image's KV prefix"
+        );
+    }
     if let Ok(path) = std::env::var("TRTLLM_E2E_RESULT") {
+        let output = if routing {
+            json!({"cases": results})
+        } else {
+            results.remove(0)
+        };
         std::fs::write(
             path,
-            serde_json::to_vec(&json!({
-                "token_ids": generated,
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-            }))
-            .expect("serialize image result"),
+            serde_json::to_vec(&output).expect("serialize image result"),
         )
         .expect("write image result");
     }
+}
 
-    assert!(!generated.is_empty(), "expected image-conditioned output");
+#[test]
+#[ignore = "requires captured native image-routing KV events"]
+fn e2e_real_image_routing_event_conversion() {
+    use dynamo_kv_router::zmq_wire::{RawKvEvent, decode_event_batch};
+    let path = std::env::var("TRTLLM_E2E_ROUTING_EVENTS").expect("set TRTLLM_E2E_ROUTING_EVENTS");
+    let payloads: Vec<Vec<u8>> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let pads = [0x0123456789abcdef, 0xfedcba9876543210]
+        .map(dynamo_kv_router::protocols::pad_value_for_mm_hash);
+    let mut seen = [false; 2];
+    for payload in payloads {
+        let batch = decode_event_batch(&payload).expect("decode native event batch");
+        for event in batch.events {
+            if let RawKvEvent::BlockStored { token_ids, .. } = event {
+                for (found, pad) in seen.iter_mut().zip(pads) {
+                    *found |= token_ids.contains(&pad);
+                }
+            }
+        }
+    }
     assert!(
-        usage.prompt_tokens > token_ids.len() as u32,
-        "the engine's expanded image prompt usage must replace Dynamo's unexpanded token count"
+        seen.into_iter().all(|found| found),
+        "native events for both UUID hints must reach Dynamo as canonical routing pads"
     );
 }

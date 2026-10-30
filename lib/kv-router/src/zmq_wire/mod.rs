@@ -21,6 +21,7 @@ mod extra_keys;
 mod filter;
 #[cfg(test)]
 mod tests;
+mod trtllm;
 mod types;
 
 pub use convert::{
