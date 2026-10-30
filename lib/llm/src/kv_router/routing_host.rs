@@ -817,9 +817,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request.phase();
+            let plan = self.plan_builtin_route(&request, request.phase()).await?;
             return self
-                .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
+                .dispatch_builtin_plan(request, plan, |_, _| Ok(()))
                 .await
                 .map(|(_, stream)| stream);
         }

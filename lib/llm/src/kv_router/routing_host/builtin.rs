@@ -566,19 +566,6 @@ impl RoutingHost {
         .await?;
         Ok((metadata, into_monitored_response(response_stream, guard)))
     }
-
-    pub(super) async fn select_and_dispatch_builtin<M, F>(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
-        let plan = self.plan_builtin_route(&request, phase).await?;
-        self.dispatch_builtin_plan(request, plan, prepare).await
-    }
 }
 
 /// A built-in route selected but not sent, from

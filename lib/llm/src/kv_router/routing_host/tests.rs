@@ -4326,7 +4326,7 @@ async fn stopped_request_in_phase(
 
 /// The builtin plane, which is what the failing vLLM cancellation test uses
 /// (`tests/fault_tolerance/cancellation/utils.py` sets `router_mode="round-robin"`).
-/// Covers all four dispatch arms of `select_and_dispatch_builtin`.
+/// Covers all four send arms of `dispatch_builtin_plan`.
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_path() {
@@ -4608,10 +4608,9 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
         let mut content = request();
         content.routing =
             Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
-        let error = host
-            .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
-            .await
-            .unwrap_err();
+        let Err(error) = host.plan_route(&Context::new(content), phase).await else {
+            panic!("an unknown {field} must be rejected at selection");
+        };
         assert!(match_error_chain(
             error.as_ref(),
             &[ErrorType::InvalidArgument],
