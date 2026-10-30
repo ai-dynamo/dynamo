@@ -3658,6 +3658,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             lambda model_path, trust_remote_code=False: FakeTokenizer(),
         )
 
+        monkeypatch.setattr(sglang_processor_module, "_w_deepseek_spec", None)
         _init_worker(
             MODEL,
             None,
@@ -3668,7 +3669,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             structural_tag_mode="on",
             structural_tag_scope="always",
             structural_tag_schema="strict",
+            deepseek_spec="dsv41",
         )
+        assert sglang_processor_module._w_deepseek_spec == "dsv41"
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
         assert sglang_processor_module._w_default_thinking_mode == "disabled"
         assert sglang_processor_module._w_structural_tag_mode == "on"
@@ -3778,6 +3781,32 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["role"] == "system"
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_checkpoint_spec_overrides_model_alias(self, monkeypatch):
+        captured = {}
+
+        def render(request, **kwargs):
+            captured.update(kwargs)
+            return [1, 2, 3]
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+        monkeypatch.setattr(
+            sglang_prepost_module, "_render_deepseek_v4_prompt_token_ids", render
+        )
+        result = preprocess_chat_request(
+            {
+                "model": "deepseek-v4-prod",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            deepseek_spec="dsv41",
+        )
+        assert captured["spec"] == "dsv41"
+        assert result.prompt_token_ids == [1, 2, 3]
 
     def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
         self, monkeypatch

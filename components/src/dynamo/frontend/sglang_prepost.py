@@ -910,6 +910,7 @@ def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    deepseek_spec: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -986,7 +987,9 @@ def preprocess_chat_request(
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
-    if _should_use_deepseek_v4_encoding(
+    if (
+        deepseek_spec is not None and getattr(tokenizer, "chat_template", None) is None
+    ) or _should_use_deepseek_v4_encoding(
         request,
         tokenizer=tokenizer,
         tool_call_parser_name=tool_call_parser_name,
@@ -997,19 +1000,7 @@ def preprocess_chat_request(
             messages=messages,
             tokenizer=tokenizer,
             template_tools=template_tools,
-            spec=(
-                "dsv41"
-                if any(
-                    marker in _normalize_deepseek_v4_hint(hint).replace(".", "")
-                    for hint in (
-                        request.get("model"),
-                        tool_call_parser_name,
-                        reasoning_parser_name,
-                    )
-                    for marker in ("deepseekv41", "deepseekv4p1")
-                )
-                else "dsv4"
-            ),
+            spec=deepseek_spec or "dsv4",
         )
     else:
         # Build template kwargs -- single call for rendering + tokenization
