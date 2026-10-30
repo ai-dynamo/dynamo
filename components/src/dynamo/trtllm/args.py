@@ -37,7 +37,7 @@ DEFAULT_PREFILL_COMPONENT = "prefill"
 DEFAULT_ENCODE_COMPONENT = "encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
-VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
+VALID_TRTLLM_CONNECTORS = {"none"}
 
 
 def _forward_pass_metrics_enabled(config: DynamoRuntimeConfig) -> bool:
@@ -74,12 +74,18 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
             self.publish_metrics or _forward_pass_metrics_enabled(self)
         )
 
-        # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
-        # while the runtime args accepts a list of connectors
+        # Shared runtime defaults may select connectors used by other backends.
+        # Explicit KVBM configuration must fail rather than silently disabling it.
+        if self.connector and "kvbm" in self.connector:
+            raise ValueError(
+                "TRT-LLM KVBM integration has been removed. Remove --connector kvbm "
+                "or DYN_CONNECTOR=kvbm; use --connector none."
+            )
+
         if self.connector:
             if len(self.connector) > 1:
                 raise ValueError(
-                    "TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`."
+                    "TRT-LLM supports at most one connector entry. Use `--connector none`."
                 )
             elif self.connector[0] not in VALID_TRTLLM_CONNECTORS:
                 source = (

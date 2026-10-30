@@ -244,16 +244,20 @@ async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypa
         )
 
 
-def test_config_has_connector(monkeypatch):
-    """Config.has_connector returns True only for the single configured connector."""
+def test_config_rejects_removed_kvbm_connector(monkeypatch):
+    """Removed KVBM configuration fails before a worker starts without its cache."""
     monkeypatch.delenv("DYN_CONNECTOR", raising=False)
     config_none = parse_args(["--connector", "none"])
+    assert config_none.connector == ["none"]
     assert config_none.has_connector("none") is True
     assert config_none.has_connector("kvbm") is False
 
-    config_kvbm = parse_args(["--connector", "kvbm"])
-    assert config_kvbm.has_connector("kvbm") is True
-    assert config_kvbm.has_connector("none") is False
+    with pytest.raises(ValueError, match="KVBM integration has been removed"):
+        parse_args(["--connector", "kvbm"])
+
+    monkeypatch.setenv("DYN_CONNECTOR", "kvbm")
+    with pytest.raises(ValueError, match="KVBM integration has been removed"):
+        parse_args([])
 
 
 def test_config_multiple_connectors_fails(monkeypatch):
@@ -261,9 +265,9 @@ def test_config_multiple_connectors_fails(monkeypatch):
     monkeypatch.delenv("DYN_CONNECTOR", raising=False)
     with pytest.raises(
         ValueError,
-        match="TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`.",
+        match="TRT-LLM supports at most one connector entry",
     ):
-        parse_args(["--connector", "none", "kvbm"])
+        parse_args(["--connector", "none", "none"])
 
 
 def test_enable_multimodal_maps_to_multimodal_modality():
@@ -587,6 +591,7 @@ async def test_init_llm_worker_engine_args_without_overrides(
         assert engine_args["max_batch_size"] == config.max_batch_size
         assert engine_args["return_perf_metrics"] is False
         assert engine_args["enable_iter_perf_stats"] is expected_iter_perf_stats
+        assert engine_args["kv_connector_config"] is None
 
 
 @pytest.mark.asyncio
