@@ -2091,6 +2091,7 @@ class WorkerFactory:
             config=config,
             shutdown_event=shutdown_event,
         )
+        self.setup_metrics_collection(config, generate_endpoint, logger)
         model_name = config.served_model_name or config.model
         health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
         metric_labels = [

@@ -8,7 +8,7 @@ import copy
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -5074,6 +5074,7 @@ async def test_transcription_worker_reuses_snapshot_engine(
     setup_vllm_engine.assert_not_called()
     stat_logger_factory.bind_endpoint.assert_called_once_with(endpoint)
     sync_fpm_worker_id.assert_awaited_once_with(engine_client, vllm_config, "worker-1")
+    factory.setup_metrics_collection.assert_called_once_with(config, endpoint, ANY)
     assert register_vllm_model.await_args.args[4] is engine_client
     assert register_vllm_model.await_args.args[5] is vllm_config
     endpoint.serve_endpoint.assert_awaited_once()
@@ -5130,5 +5131,6 @@ async def test_transcription_worker_publishes_metrics_and_cleans_up(
     assert setup_vllm_engine.call_args.args[1] is stat_logger_factory
     stat_logger_factory.set_num_gpu_blocks_all.assert_called_once_with(128)
     stat_logger_factory.init_publish.assert_called_once_with()
+    factory.setup_metrics_collection.assert_called_once_with(config, endpoint, ANY)
     handler.cleanup.assert_called_once()
     prometheus_temp_dir.cleanup.assert_called_once()
