@@ -701,7 +701,7 @@ mod tests {
     /// no-op at the first tick.
     #[test]
     fn registered_router_controls_match_startup_policy_parameters() {
-        use dynamo_custom_policy_builtin::startup_policy_parameters;
+        use dynamo_router_policies::startup_policy_parameters;
 
         let config = retune_router_config();
         let registry = ReplayRouterControls::new();

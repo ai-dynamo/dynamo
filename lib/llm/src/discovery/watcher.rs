@@ -2342,7 +2342,7 @@ request_classifier:
             }
         });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        let mut registry = dynamo_router_policies::default_registry();
         registry
             .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
             .unwrap();
@@ -2355,7 +2355,7 @@ request_classifier:
                         let selectors = selectors.clone();
                         Ok(Arc::new(move |config, role, partition| {
                             selectors.lock().push((role, partition.into_owned()));
-                            dynamo_custom_policy_builtin::default_policy(
+                            dynamo_router_policies::default_policy(
                                 config.clone(),
                                 role.default_selector_label(),
                             )
@@ -3303,7 +3303,7 @@ request_classifier:
     #[test]
     fn only_explicit_policies_require_typed_model_cards() {
         let unresolved = RouterPluginBuilder::default();
-        let resolved = dynamo_custom_policy_builtin::default_registry()
+        let resolved = dynamo_router_policies::default_registry()
             .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
             .unwrap();
         assert!(resolved.worker_selection().is_some());

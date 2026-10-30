@@ -3,7 +3,7 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use dynamo_custom_policy_builtin::default_policy;
+use dynamo_router_policies::default_policy;
 use dynamo_kv_router::protocols::SelectionTraceSpec;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};

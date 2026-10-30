@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_router_policies::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -174,7 +174,7 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use dynamo_custom_policy_builtin::default_factory;
+    use dynamo_router_policies::default_factory;
     use dynamo_kv_router::services::selection::{
         SelectionCacheConfig, SelectionCore, WorkerRequest,
     };

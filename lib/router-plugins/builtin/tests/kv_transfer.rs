@@ -4,7 +4,7 @@
 //! The default policy credits blocks a worker can fetch from a KV transfer source.
 
 mod support;
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_router_policies::DefaultWorkerSelector;
 use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,

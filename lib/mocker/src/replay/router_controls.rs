@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_custom_policy_builtin::DefaultWorkerSelectorControl;
+use dynamo_router_policies::DefaultWorkerSelectorControl;
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyConfig, RuntimePolicyUpdate};
 use parking_lot::Mutex;
@@ -164,7 +164,7 @@ pub fn parse_router_worker_type(name: &str) -> Result<WorkerType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+    use dynamo_router_policies::DefaultWorkerSelector;
     use dynamo_kv_router::KvRouterConfig;
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
 
