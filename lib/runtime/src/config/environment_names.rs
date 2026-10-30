@@ -852,6 +852,10 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Maximum entries per frontend session-affinity table; defaults to 65,536.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 

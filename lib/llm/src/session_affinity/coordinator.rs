@@ -11,6 +11,9 @@
 use std::{sync::Arc, time::Duration};
 
 #[cfg(test)]
+use dynamo_kv_router::services::selection::affinity::SessionAffinityConfig;
+
+#[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
 use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
 use crate::{
@@ -21,7 +24,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::services::selection::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity,
 };
 use dynamo_runtime::{
     engine::AsyncEngineContext,
@@ -59,7 +62,7 @@ pub struct AffinityCoordinator {
 impl AffinityCoordinator {
     pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
         Ok(Self::wrap(
-            SessionAffinity::with_config(SessionAffinityConfig::new(ttl).with_mode(mode))
+            SessionAffinity::with_config(super::config_from_env(ttl, mode)?)
                 .map_err(affinity_error)?,
         ))
     }

@@ -371,6 +371,9 @@ The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
 
+Set `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES` on the frontend to change the
+entry limit per session-affinity table (default: `65536`).
+
 With `DYN_LORA_ENABLED`, session affinity is supported in KV mode. It is rejected
 at startup with random or round-robin routing; the other router modes are not
 LoRA-aware and are rejected independently.
