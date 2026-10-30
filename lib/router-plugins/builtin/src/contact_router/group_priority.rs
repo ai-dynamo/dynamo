@@ -43,10 +43,18 @@ pub(crate) fn header(headers: &BTreeMap<String, Vec<String>>, name: &str) -> Opt
         .map(|value| value.trim().to_string())
 }
 
+/// A data group named by `x-dynamo-group`, or the one session of a program
+/// that names none; the two never collide.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum GroupKey {
+    Named(String),
+    Session(String),
+}
+
 /// The group a request belongs to, read from its headers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GroupTag {
-    pub(crate) group: Option<String>,
+    pub(crate) group: Option<GroupKey>,
     pub(crate) size: usize,
     pub(crate) env_s: f64,
 }
@@ -61,7 +69,7 @@ impl PriorityConfig {
 impl GroupTag {
     pub(crate) fn from_headers(headers: &BTreeMap<String, Vec<String>>) -> Self {
         Self {
-            group: header(headers, GROUP_HEADER),
+            group: header(headers, GROUP_HEADER).map(GroupKey::Named),
             size: header(headers, GROUP_SIZE_HEADER)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1),
@@ -93,7 +101,7 @@ impl Group {
 }
 
 #[derive(Default)]
-pub(crate) struct Groups(HashMap<String, Group>);
+pub(crate) struct Groups(HashMap<GroupKey, Group>);
 
 impl Groups {
     /// Program `session` of `tag` started at `version`; its group keeps the first start's version.
@@ -196,7 +204,7 @@ mod tests {
     fn a_group_keeps_its_first_version_and_counts_down() {
         let priority = PriorityConfig::new(-1.0, -10.0, 0.5);
         let tag = GroupTag {
-            group: Some("g".into()),
+            group: Some(GroupKey::Named("g".into())),
             size: 2,
             env_s: 4.0,
         };
@@ -213,7 +221,7 @@ mod tests {
     #[test]
     fn a_retried_program_takes_its_slot_back() {
         let tag = GroupTag {
-            group: Some("g".into()),
+            group: Some(GroupKey::Named("g".into())),
             size: 2,
             env_s: 0.0,
         };

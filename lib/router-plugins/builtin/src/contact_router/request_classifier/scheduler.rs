@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use super::super::ContactRouterConfig;
 use super::ContactRouterError;
 use super::capacity::WorkerCapacitySnapshot;
-use crate::contact_router::group_priority::{GroupTag, Groups, VERSION_HEADER, header};
+use crate::contact_router::group_priority::{GroupKey, GroupTag, Groups, VERSION_HEADER, header};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgramStatus {
@@ -282,8 +282,9 @@ impl State {
         // A program without a group header is a group of one.
         let tag = match tag.group {
             None if self.grouping() => GroupTag {
-                group: Some(session_id.clone()),
-                ..tag
+                group: Some(GroupKey::Session(session_id.clone())),
+                size: 1,
+                env_s: tag.env_s,
             },
             _ => tag,
         };
@@ -2362,7 +2363,9 @@ mod tests {
         let notifies: Vec<_> = ["a", "b"]
             .into_iter()
             .map(|id| {
-                let (tag, version) = state.read_group(&BTreeMap::new());
+                let headers =
+                    BTreeMap::from([("x-dynamo-group-size".to_string(), vec!["8".to_string()])]);
+                let (tag, version) = state.read_group(&headers);
                 let registration = RequestRegistration::new(
                     id.into(),
                     id.into(),
@@ -2385,7 +2388,7 @@ mod tests {
     #[test]
     fn a_finished_group_moves_the_age_and_kv_limits() {
         let tag = GroupTag {
-            group: Some("g".into()),
+            group: Some(GroupKey::Named("g".into())),
             size: 1,
             env_s: 0.0,
         };
