@@ -2271,6 +2271,9 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 		podNode string
 		// removeClaim removes the claim completely, as when its finalizers were removed by hand.
 		removeClaim bool
+		// failDuringDeletion marks the Job failed while it is being deleted, as the Job controller
+		// does once the deletion removed its pod.
+		failDuringDeletion bool
 	}{
 		{
 			name:   "the Job counts a pod the pod cache does not show",
@@ -2322,6 +2325,13 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 			pod:         &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
 			podNode:     "node-a",
 			removeClaim: true,
+		},
+		{
+			name:               "the Job is marked failed while it is being deleted",
+			status:             batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
+			pod:                &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
+			podNode:            "node-a",
+			failDuringDeletion: true,
 		},
 	}
 	for _, tt := range tests {
@@ -2384,6 +2394,23 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 				t.Fatalf("status = %+v, want the Run open until its Job is gone", f.run().Status)
 			}
 			if !tt.removeClaim {
+				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", finalizer)
+			}
+
+			if tt.failDuringDeletion {
+				t.Log("A Job marked failed during its deletion is still cancelled, not taken as its own outcome")
+				deleting := f.job()
+				deleting.Status.Conditions = []batchv1.JobCondition{
+					{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue},
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+				}
+				if err := f.client.Status().Update(t.Context(), deleting); err != nil {
+					t.Fatalf("fail the deleting Job: %v", err)
+				}
+				f.reconcile()
+				if meta.IsStatusConditionTrue(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
+					t.Fatalf("status = %+v, want the Run open until its Job is gone", f.run().Status)
+				}
 				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", finalizer)
 			}
 
@@ -2461,6 +2488,8 @@ func TestV1beta2RunControllerLetsAFinishedJobDecideAfterItsTraceClaimIsDeleted(t
 		wantReason string
 		// hideJob hides the Job from the cached List for the first pass after the deletion.
 		hideJob bool
+		// staleJob shows the Job unfinished in the cached List for the first pass after the deletion.
+		staleJob bool
 	}{
 		{name: "the Job completed", condition: batchv1.JobComplete,
 			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded, wantReason: dgdrRunReasonSucceeded},
@@ -2468,6 +2497,8 @@ func TestV1beta2RunControllerLetsAFinishedJobDecideAfterItsTraceClaimIsDeleted(t
 			wantPhase: nvidiacomv1beta2.DGDRRunPhaseFailed, wantReason: dgdrRunReasonJobFailed},
 		{name: "the Job completed but the cache does not show it yet", condition: batchv1.JobComplete,
 			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded, wantReason: dgdrRunReasonSucceeded, hideJob: true},
+		{name: "the Job completed but the cache still shows it running", condition: batchv1.JobComplete,
+			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded, wantReason: dgdrRunReasonSucceeded, staleJob: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2478,6 +2509,7 @@ func TestV1beta2RunControllerLetsAFinishedJobDecideAfterItsTraceClaimIsDeleted(t
 
 			t.Log("The Job finishes, and then the claim is deleted")
 			job := f.job()
+			unfinished := job.DeepCopy()
 			job.Status.StartTime = new(metav1.Now())
 			job.Status.Conditions = []batchv1.JobCondition{{Type: tt.condition, Status: corev1.ConditionTrue}}
 			if err := f.client.Status().Update(t.Context(), job); err != nil {
@@ -2493,6 +2525,25 @@ func TestV1beta2RunControllerLetsAFinishedJobDecideAfterItsTraceClaimIsDeleted(t
 				f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
 					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 						if _, ok := list.(*batchv1.JobList); ok {
+							return nil
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+				result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+				if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+					t.Fatalf("result/error = %+v/%v, want a retry", result, err)
+				}
+				f.reconciler.Client = cached
+			}
+
+			if tt.staleJob {
+				t.Log("A pass that sees the Job unfinished in a stale cache cannot stop the finished Job")
+				cached := f.reconciler.Client
+				f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if jobs, ok := list.(*batchv1.JobList); ok {
+							jobs.Items = []batchv1.Job{*unfinished.DeepCopy()}
 							return nil
 						}
 						return c.List(ctx, list, opts...)

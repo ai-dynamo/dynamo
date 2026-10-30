@@ -1199,8 +1199,10 @@ request's `spec`. It copies container status messages into the Run but never int
 - **Deleting the claim cancels its Runs.** When the claim has a `deletionTimestamp`, the operator
   stops the Job of every Run that reads it through foreground deletion, whether or not the Job's pod
   has started. Once the Job and its pod are gone, the Run fails with reason `TraceSourceDeleted`, and
-  the operator then removes the Run's finalizer. A Job that already completed or failed is not
-  stopped; its own outcome decides the Run. A Run whose claim is already being deleted before it
+  the operator then removes the Run's finalizer. A Job that already completed or failed before the
+  claim's deletion, and is not itself being deleted, is not stopped; its own outcome decides the Run.
+  Once the operator has started stopping a Job, the Run fails with `TraceSourceDeleted` even if the
+  Job is marked failed while its pod is removed. A Run whose claim is already being deleted before it
   creates its Job fails with `TraceSourceDeleted` without creating anything.
 - **A missing claim keeps the Run open.** When the claim does not exist, the Run stays `Pending`
   with `Completed=False` and reason `TraceSourceMissing`, and starts once you create the claim.

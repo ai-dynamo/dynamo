@@ -260,13 +260,15 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
 		}
 
 		// Deleting the claim cancels the Run whatever its pod has started, unless its Job already
-		// finished: the Job's own outcome then decides the Run. A claim that is gone after the Run
+		// finished on its own: the Job's own outcome then decides the Run. A Job that is being deleted
+		// is cancelled even when it finished, because the Job controller fails a Job whose pod the
+		// deletion removes, and a started cancellation must end as one. A claim that is gone after the Run
 		// created its Job was protected by the Run, so it was deleted, too. Before the first Job, a
 		// missing claim keeps the Run open, and only a claim no Job could ever mount fails it.
 		executed := job != nil || run.Status.JobRef != nil
 		switch {
 		case (claim != nil && claim.DeletionTimestamp != nil) || (claim == nil && executed):
-			if job == nil || !dgdrRunJobFinished(job) {
+			if job == nil || !dgdrRunJobFinishedOnItsOwn(job) {
 				return r.cancelForDeletedTraceClaim(ctx, run, jobs, source)
 			}
 		case claim == nil:
@@ -347,7 +349,10 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) stopAndCompleteRun(
 }
 
 // stopOwnedJobs stops every execution visible through either the informer cache or the API
-// server. Completion is safe only after the uncached reader also confirms absence.
+// server. Completion is safe only after the uncached reader also confirms absence. Each deletion is
+// fenced by the UID and resourceVersion of the Job as it was read, so a Job that changed since, such
+// as one that finished meanwhile, is not stopped on a stale decision: the API server reports a
+// Conflict, and the next pass decides again from the changed Job.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) stopOwnedJobs(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
@@ -369,7 +374,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) stopOwnedJobs(
 		if !jobs[i].DeletionTimestamp.IsZero() {
 			continue
 		}
-		if err := r.Delete(ctx, &jobs[i], client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
+		err := r.Delete(ctx, &jobs[i], client.PropagationPolicy(metav1.DeletePropagationForeground),
+			client.Preconditions{UID: &jobs[i].UID, ResourceVersion: &jobs[i].ResourceVersion})
+		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return false, fmt.Errorf("stop Job %q %s of Run %q: %w", jobs[i].Name, action, run.Name, err)
 		}
 	}
@@ -539,7 +546,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) protectTraceClaim(
 // cancelForDeletedTraceClaim stops the execution of run because its trace claim is being deleted or
 // is gone, and then fails run with TraceSourceDeleted. jobs are the Jobs of run the cache shows.
 // When the cache shows none, a Job the API server already holds is stopped as well, unless it
-// finished: its own outcome decides the Run once the cache shows it. The Run keeps its finalizer on
+// finished on its own: its own outcome decides the Run once the cache shows it. The Run keeps its finalizer on
 // the claim until it completes. run and source must not be nil.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelForDeletedTraceClaim(
 	ctx context.Context,
@@ -553,7 +560,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelForDeletedTraceClaim(
 			return ctrl.Result{}, err
 		}
 		for i := range live {
-			if dgdrRunJobFinished(&live[i]) {
+			if dgdrRunJobFinishedOnItsOwn(&live[i]) {
 				return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
 			}
 		}
@@ -669,6 +676,13 @@ func dgdrRunJobFinished(job *batchv1.Job) bool {
 		}
 	}
 	return false
+}
+
+// dgdrRunJobFinishedOnItsOwn reports whether job finished while nothing was deleting it. A Job
+// that is being deleted can still be marked failed, because the Job controller counts the pods the
+// deletion removes as failed, so its outcome would only echo the deletion. job must not be nil.
+func dgdrRunJobFinishedOnItsOwn(job *batchv1.Job) bool {
+	return job.DeletionTimestamp.IsZero() && dgdrRunJobFinished(job)
 }
 
 // jobPods returns the pods job controls, as the cache shows them. job must not be nil.
