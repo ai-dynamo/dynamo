@@ -38,9 +38,12 @@ import (
  *    - Insert flags after the Python command but before any shell operators (|, &, ;)
  */
 
-// shellQuoteForBashC quotes a string so it survives shell interpretation inside sh -c.
-// Simple args (flags, paths) pass through unchanged; args containing special characters
-// (JSON, env vars, spaces, quotes) are wrapped in double quotes with inner escaping.
+// shellQuoteForBashC quotes a string for the nested `bash -c '...'` command the
+// TensorRT-LLM mpirun launcher builds. Simple args (flags, paths) pass through
+// unchanged; args containing special characters (JSON, env vars, spaces, quotes)
+// are wrapped in double quotes with inner escaping, and single quotes are closed
+// and reopened so they survive the outer single-quoted wrapper. It is not
+// argv-preserving through a single sh -c layer: use shellQuotePOSIX there.
 func shellQuoteForBashC(s string) string {
 	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
 		escaped := s
@@ -123,16 +126,16 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 		// Direct python command case
 		if needsShell {
 			// Transform to shell wrapper for env var interpretation.
-			// Quote each token individually so paths with spaces or special
-			// characters survive shell interpretation.
+			// Quote each token for a single sh -c layer so every argv value,
+			// including empty strings and embedded quotes, reaches the engine intact.
 			quotedCmd := make([]string, len(container.Command))
 			for i, tok := range container.Command {
-				quotedCmd[i] = shellQuoteForBashC(tok)
+				quotedCmd[i] = shellQuotePOSIX(tok)
 			}
 			fullCommand := strings.Join(quotedCmd, " ")
 			quotedArgs := make([]string, len(container.Args))
 			for i, arg := range container.Args {
-				quotedArgs[i] = shellQuoteForBashC(arg)
+				quotedArgs[i] = shellQuotePOSIX(arg)
 			}
 			originalArgs := strings.Join(quotedArgs, " ")
 			var shellCommand string
