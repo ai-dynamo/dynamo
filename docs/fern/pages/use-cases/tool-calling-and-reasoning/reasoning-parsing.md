@@ -317,7 +317,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** Auto pairs `qwen3_coder` tools with `nemotron_v3` / `nemotron3` reasoning on Unified; reasoning-only auto stays on V1. Explicit V2 selects Unified. V1 forces think-tag reasoning with tool boundaries. This does not establish model/backend qualification.
+        **Notes:** Auto pairs `qwen3_coder` tools with `nemotron_v3` / `nemotron3` reasoning on Unified; reasoning-only auto stays on V1. Explicit V2 selects Unified. V1 forces think-tag reasoning with tool boundaries.
       </Accordion>
 
       <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron">
@@ -429,7 +429,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
   <Accordion title="Muse Glimmer">
     **Parser:** `muse_glimmer` (Dynamo alias `muse`)
 
-    **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists. Backend guidance support is separate.
+    **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists.
   </Accordion>
 
   <Accordion title="Muse Spark">

@@ -185,9 +185,9 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-Builder lookup first tries the selected Unified family, then the V1 tool-parser registry if no builder was found. This does not change parser generation: explicit V2 still rejects incompatible selector pairs. Backend compilation and request-schema support must also be checked.
+Unified routes use the compatible Unified builder; V1 routes use the V1 registry. Backend compilation and request-schema support are separate checks.
 
-- `beam` through the pinned Unified library builder; this registry entry alone does not qualify a model/backend deployment
+- `beam` through the pinned Unified library builder
 - `deepseek_v3_2`, `deepseek_v4`
 - `glm47` (V1 and V2 builders)
 - `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict

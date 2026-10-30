@@ -162,7 +162,16 @@ pub(crate) fn selected_family(
 ) -> Option<&'static str> {
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    selected_family_for_selection(tool_call_parser, reasoning_parser, selection)
+    let selected = selected_family_for_selection(tool_call_parser, reasoning_parser, selection);
+    tracing::debug!(
+        target: "dynamo_unified",
+        ?tool_call_parser,
+        ?reasoning_parser,
+        ?selection,
+        ?selected,
+        "unified parser path decision"
+    );
+    selected
 }
 
 pub(crate) fn selected_family_for_selection(
@@ -188,14 +197,6 @@ pub(crate) fn selected_family_for_selection(
             dynamo_runtime::config::ParserVersion::V1 => None,
         }
     };
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        "unified parser path decision"
-    );
     selected
 }
 
