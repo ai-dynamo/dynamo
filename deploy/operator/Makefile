@@ -372,7 +372,8 @@ clustertest: ## Run Pod- and Job-backed controller tests against the explicitly 
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "Error: DYNAMO_CLUSTERTEST_CONTEXT must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_PROFILER_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_OPERATOR_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must be set"; exit 1; }
-	go test -tags=clustertest $(CLUSTERTEST_PACKAGES) \
+	# Run packages sequentially: history tests temporarily change shared CRD conversion.
+	go test -p=1 -tags=clustertest $(CLUSTERTEST_PACKAGES) \
 		-run '^TestCluster' -count=1 -v -timeout=$(CLUSTERTEST_TIMEOUT)
 
 .PHONY: integration
