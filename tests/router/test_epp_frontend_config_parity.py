@@ -12,12 +12,17 @@ Inventory and completeness guards are fail-closed and knowingly incomplete
 for this increment. They are ordinary failures, not skip/xfail. The two
 measured gaps are strict xfails of their dedicated mismatch subclasses.
 Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
-hard failures. Other profiles stay ordinary tests.
+hard failures. Other profiles stay ordinary tests. Admission/enforce
+ignored-compatibility cases and the five conditional scalar probes are
+ordinary tests, not xfail.
 """
 
 import pytest
 
 from tests.router.epp_config_contract import (
+    ADMISSION_CONTROL_CASE_IDS,
+    CONDITIONAL_SCALAR_PROBES,
+    ENFORCE_DISAGG_CASE_IDS,
     PROFILE_NAMES,
     ConditionalJsonConfigMismatch,
     LoadAwarePresetConfigMismatch,
@@ -25,7 +30,10 @@ from tests.router.epp_config_contract import (
     assert_inventory_matches_manifest,
     assert_manifest_bindings_match_collected_tests,
     assert_required_sources_exist,
+    run_conditional_scalar_not_fe_honored,
     run_effective_config_profile,
+    run_ignored_admission_control,
+    run_ignored_enforce_disagg,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -111,3 +119,25 @@ def test_effective_config_profile(
         profile_name,
         EppFrontendParityStack,
     )
+
+
+@pytest.mark.parametrize("case_id", ADMISSION_CONTROL_CASE_IDS)
+def test_ignored_admission_control(monkeypatch, case_id):
+    """Admission-control CLI/env must warn and leave native kwargs/JSON unchanged."""
+    run_ignored_admission_control(monkeypatch, case_id)
+
+
+@pytest.mark.parametrize("case_id", ENFORCE_DISAGG_CASE_IDS)
+def test_ignored_enforce_disagg(monkeypatch, case_id):
+    """Enforce-disagg CLI/env must warn and leave native kwargs/JSON unchanged."""
+    run_ignored_enforce_disagg(monkeypatch, case_id)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "sentinel"),
+    CONDITIONAL_SCALAR_PROBES,
+    ids=[name for name, _ in CONDITIONAL_SCALAR_PROBES],
+)
+def test_conditional_scalar_not_fe_honored(monkeypatch, env_name, sentinel):
+    """Each EPP-only conditional scalar env must leave FE native JSON unchanged."""
+    run_conditional_scalar_not_fe_honored(monkeypatch, env_name, sentinel)

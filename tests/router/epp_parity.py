@@ -2022,6 +2022,78 @@ def _require_u32(name: str, value: Any) -> int:
     return value
 
 
+def _typed_request_trace_selection(parsed: Any) -> dict[str, Any]:
+    """Require the live JSONL envelope: timestamp + event.selection."""
+    if not isinstance(parsed, dict):
+        raise AssertionError(
+            f"owned FE request-trace record is not an object: {parsed!r}"
+        )
+    event = parsed.get("event")
+    if not isinstance(event, dict):
+        raise AssertionError(
+            f"owned FE request-trace missing event object: {parsed!r}"
+        )
+    if event.get("schema") != "dynamo.request.trace.v1":
+        raise AssertionError(
+            f"owned FE request-trace schema is {event.get('schema')!r}, "
+            "not dynamo.request.trace.v1"
+        )
+    if event.get("event_type") != "router_selection":
+        raise AssertionError(
+            f"owned FE request-trace event_type is {event.get('event_type')!r}, "
+            "not router_selection"
+        )
+    selection = event.get("selection")
+    if not isinstance(selection, dict):
+        raise AssertionError(
+            "owned FE router_selection event missing selection object"
+        )
+    request_id = selection.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        raise AssertionError(
+            f"owned FE selection request_id is malformed: {request_id!r}"
+        )
+    worker_type = selection.get("worker_type")
+    if not isinstance(worker_type, str) or not worker_type:
+        raise AssertionError(
+            f"owned FE selection worker_type is malformed: {worker_type!r}"
+        )
+    candidate_count = _require_u64(
+        "selection.candidate_count", selection.get("candidate_count")
+    )
+    raw_candidates = selection.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise AssertionError(
+            f"owned FE selection candidates is not a list: {raw_candidates!r}"
+        )
+    candidates = []
+    for index, triple in enumerate(raw_candidates):
+        if not isinstance(triple, list) or len(triple) != 3:
+            raise AssertionError(
+                f"owned FE selection candidates[{index}] is not a triple: "
+                f"{triple!r}"
+            )
+        worker_id = _require_u64(
+            f"selection.candidates[{index}].worker_id", triple[0]
+        )
+        dp_rank = _require_u32(
+            f"selection.candidates[{index}].dp_rank", triple[1]
+        )
+        cost = triple[2]
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            raise AssertionError(
+                f"owned FE selection candidates[{index}].cost is not a "
+                f"number: {cost!r}"
+            )
+        candidates.append((worker_id, dp_rank, float(cost)))
+    return {
+        "request_id": request_id,
+        "worker_type": worker_type,
+        "candidate_count": candidate_count,
+        "candidates": candidates,
+    }
+
+
 def collect_frontend_query_token_ids(
     frontend_url: str,
     payload: dict[str, Any],
@@ -3845,6 +3917,7 @@ class EppFrontendPriorityParityStack:
             use_remote_indexer=False, use_kv_events=True
         )
         consumer["DYN_ROUTER_POLICY_CONFIG"] = str(self.policy_path)
+        consumer["DYN_TCP_REQUEST_TIMEOUT"] = "20"
         frontend_env = loopback_process_env(
             kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
         )
@@ -4020,16 +4093,32 @@ class EppFrontendPriorityParityStack:
     def selection_records(self) -> list[dict[str, Any]]:
         if self.trace_path is None or not self.trace_path.is_file():
             return []
+        data = self.trace_path.read_bytes()
+        if not data:
+            return []
+        split_at = data.rfind(b"\n")
+        if not data.endswith(b"\n"):
+            if split_at < 0:
+                return []
+            data = data[: split_at + 1]
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError(
+                "owned FE request-trace completed bytes are not UTF-8"
+            ) from exc
         records = []
-        for line in self.trace_path.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             if not line.strip():
                 continue
-            parsed = json.loads(line)
-            if not isinstance(parsed, dict):
-                continue
-            selection = parsed.get("selection")
-            if isinstance(selection, dict):
-                records.append(selection)
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AssertionError(
+                    "owned FE request-trace completed line is not JSON: "
+                    f"{line[:300]!r}"
+                ) from exc
+            records.append(_typed_request_trace_selection(parsed))
         return records
 
     def epp_log_bytes(self) -> int:

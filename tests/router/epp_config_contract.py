@@ -12,6 +12,11 @@ Do not treat that failure as full-issue completion.
 strict xfail. Setup, warning, FE sentinel, parse, and other mismatches
 stay ordinary hard failures. Other profiles stay ordinary tests.
 
+``admission_control`` and ``enforce_disagg`` are ignored-compatibility
+parser contracts. The five conditional scalar envs are a not-FE-honored
+grouped row. ``shared_cache_multiplier`` is a supported_candidate profile
+pending runtime evidence. Remaining rows stay pending.
+
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
 (``skip_initial_worker_wait=true``,
@@ -46,6 +51,7 @@ KV_ROUTER_ARGS = (
 )
 FRONTEND_ARGS = REPO_ROOT / "components/src/dynamo/frontend/frontend_args.py"
 RUST_CONFIG = REPO_ROOT / "lib/kv-router/src/scheduling/config.rs"
+RUST_PYO3_ENTRYPOINT = REPO_ROOT / "lib/bindings/python/rust/llm/entrypoint.rs"
 RUST_TREES = (
     REPO_ROOT / "lib/kv-router/src",
     REPO_ROOT / "lib/llm/src",
@@ -70,8 +76,33 @@ PROFILE_NAMES = (
     "active_cache",
     "load_aware_preset",
     "conditional_json",
+    "shared_cache_multiplier",
 )
 IMPLEMENTED_OBSERVER = "fe_native_to_json+epp_init_event"
+IGNORED_COMPAT_OBSERVER = "fe_parser_logger+router_kwargs+native_to_json"
+NOT_FE_HONORED_OBSERVER = "fe_full_native_json_before_after"
+ADMISSION_CONTROL_CASE_IDS = (
+    "cli_token_capacity",
+    "cli_none",
+    "env_token_capacity",
+    "env_none",
+)
+ENFORCE_DISAGG_CASE_IDS = (
+    "cli_positive",
+    "cli_negative",
+    "env_true",
+    "env_false",
+)
+CONDITIONAL_SCALAR_PROBES = (
+    ("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY", "isl_or_load"),
+    ("DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD", "1024"),
+    ("DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD", "0.25"),
+    ("DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD", "0.8"),
+    ("DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD", "0.7"),
+)
+CONDITIONAL_SCALAR_ENV_NAMES = tuple(name for name, _ in CONDITIONAL_SCALAR_PROBES)
+NOT_FE_HONORED_ROW = "conditional_disagg_epp_scalar_envs"
+NOT_FE_HONORED_TEST = "test_conditional_scalar_not_fe_honored"
 _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "overlap_score_credit",
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY": "overlap_score_credit_decay",
@@ -79,6 +110,7 @@ _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT": "decode_active_request_weight",
     "DYN_ROUTER_TEMPERATURE": "router_temperature",
     "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT": "prefill_load_scale",
+    "DYN_SHARED_CACHE_MULTIPLIER": "shared_cache_multiplier",
 }
 # Replacement and remove_in copied from kv_router_args.py Deprecated(...).
 _DIRECT_DEPRECATED_ENVS = {
@@ -126,6 +158,7 @@ OPTION_EVENT_FIELDS = frozenset(
         "router_predicted_ttl_secs",
         "conditional_disagg_prefill_busy_threshold",
         "conditional_disagg_decode_busy_threshold",
+        "shared_cache_multiplier",
     }
 )
 _CONDITIONAL_JSON = (
@@ -179,6 +212,7 @@ PROFILE_ASSERTED_FIELDS = {
         "conditional_disagg_prefill_busy_threshold",
         "conditional_disagg_decode_busy_threshold",
     ),
+    "shared_cache_multiplier": ("shared_cache_multiplier",),
 }
 PROFILE_DEPRECATED_ENVS = {
     "scalar_kv": (
@@ -201,14 +235,24 @@ PROFILE_DEPRECATED_ENVS = {
     "active_cache": (),
     "load_aware_preset": ("DYN_ROUTER_LOAD_AWARE",),
     "conditional_json": (),
+    "shared_cache_multiplier": ("DYN_SHARED_CACHE_MULTIPLIER",),
 }
 
 STATUS_PENDING = "pending"
 STATUS_SUPPORTED = "supported_candidate"
 STATUS_ALIAS = "alias"
 STATUS_KNOWN_GAP = "known_gap"
+STATUS_IGNORED_COMPAT = "ignored_compatibility"
+STATUS_NOT_FE_HONORED = "not_fe_honored"
 KNOWN_STATUSES = frozenset(
-    {STATUS_PENDING, STATUS_SUPPORTED, STATUS_ALIAS, STATUS_KNOWN_GAP}
+    {
+        STATUS_PENDING,
+        STATUS_SUPPORTED,
+        STATUS_ALIAS,
+        STATUS_KNOWN_GAP,
+        STATUS_IGNORED_COMPAT,
+        STATUS_NOT_FE_HONORED,
+    }
 )
 LOGGER = logging.getLogger(__name__)
 
@@ -297,6 +341,38 @@ class SettingDecision:
     profiles: tuple[str, ...]
     affected_fields: tuple[str, ...]
     reason: str
+
+
+@dataclass(frozen=True)
+class IgnoredCompatContract:
+    """Fixed ordinary case-ID and identifier contract for one ignored row."""
+
+    test_name: str
+    case_ids: tuple[str, ...]
+    flags: tuple[str, ...]
+    env: tuple[str, ...]
+    schema_fields: tuple[str, ...]
+    affected_fields: tuple[str, ...]
+
+
+IGNORED_COMPAT_CONTRACTS = {
+    "admission_control": IgnoredCompatContract(
+        "test_ignored_admission_control",
+        ADMISSION_CONTROL_CASE_IDS,
+        ("--admission-control",),
+        ("DYN_ADMISSION_CONTROL",),
+        ("admission_control",),
+        ("admission_control",),
+    ),
+    "enforce_disagg": IgnoredCompatContract(
+        "test_ignored_enforce_disagg",
+        ENFORCE_DISAGG_CASE_IDS,
+        ("--enforce-disagg", "--no-enforce-disagg"),
+        ("DYN_ENFORCE_DISAGG",),
+        ("enforce_disagg",),
+        ("enforce_disagg",),
+    ),
+}
 
 
 # Explicit decisions for this increment only. Do not derive rows from discovery.
@@ -688,20 +764,14 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
     SettingDecision(
         "conditional_disagg_epp_scalar_envs",
         (),
-        (
-            "DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
-            "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
-            "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
-            "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
-            "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
-        ),
+        CONDITIONAL_SCALAR_ENV_NAMES,
         (),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "EPP-only scalar env names. FE accepts nested JSON keys, not these "
-        "envs. This increment does not feed them on either path.",
+        STATUS_NOT_FE_HONORED,
+        NOT_FE_HONORED_OBSERVER,
+        CONDITIONAL_SCALAR_ENV_NAMES,
+        CONDITIONAL_SCALAR_ENV_NAMES,
+        "EPP-only scalar env names. Isolated FE full-JSON probes must stay "
+        "unchanged. Not support for the Frontend conditional JSON input.",
     ),
     SettingDecision(
         "active_decode_blocks_threshold",
@@ -744,24 +814,25 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--admission-control",),
         ("DYN_ADMISSION_CONTROL",),
         ("admission_control",),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Removed FE flag/env; accepted and ignored. Not a KvRouterConfig "
-        "field. No live observer in this increment.",
+        STATUS_IGNORED_COMPAT,
+        IGNORED_COMPAT_OBSERVER,
+        ADMISSION_CONTROL_CASE_IDS,
+        ("admission_control",),
+        "Removed FE flag/env; accepted and ignored. Parser warning and "
+        "router_kwargs/native JSON stay unchanged.",
     ),
     SettingDecision(
         "enforce_disagg",
         ("--enforce-disagg", "--no-enforce-disagg"),
         ("DYN_ENFORCE_DISAGG",),
         ("enforce_disagg",),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Deprecated ignored FE topology flag. Not a KvRouterConfig field. No "
-        "live observer in this increment.",
+        STATUS_IGNORED_COMPAT,
+        IGNORED_COMPAT_OBSERVER,
+        ENFORCE_DISAGG_CASE_IDS,
+        ("enforce_disagg",),
+        "Deprecated ignored FE topology flag. Parser warning and "
+        "router_kwargs/native JSON stay unchanged. Rust conversion forces "
+        "enforce_disagg false.",
     ),
     SettingDecision(
         "enable_session_prefix_index",
@@ -909,12 +980,12 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--shared-cache-multiplier",),
         ("DYN_SHARED_CACHE_MULTIPLIER",),
         ("shared_cache_multiplier",),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Deprecated policy parameter. No profile exercises it. No live "
-        "observer in this increment.",
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("shared_cache_multiplier",),
+        ("shared_cache_multiplier",),
+        "Candidate for FE to_json and the EPP init event on "
+        "shared_cache_multiplier. Pending actual runtime evidence.",
     ),
     SettingDecision(
         "shared_cache_type",
@@ -1037,7 +1108,14 @@ class ConfigProfile:
 
 
 def required_source_paths() -> tuple[Path, ...]:
-    return (ROUTER_ARGS, KV_ROUTER_ARGS, FRONTEND_ARGS, RUST_CONFIG, *RUST_TREES)
+    return (
+        ROUTER_ARGS,
+        KV_ROUTER_ARGS,
+        FRONTEND_ARGS,
+        RUST_CONFIG,
+        RUST_PYO3_ENTRYPOINT,
+        *RUST_TREES,
+    )
 
 
 def assert_required_sources_exist() -> None:
@@ -1247,6 +1325,19 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} has unknown status {row.status!r}; "
                 f"expected one of {sorted(KNOWN_STATUSES)}"
             )
+        if (
+            row.status == STATUS_IGNORED_COMPAT
+            and row.name not in IGNORED_COMPAT_CONTRACTS
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {STATUS_IGNORED_COMPAT}; only "
+                f"{sorted(IGNORED_COMPAT_CONTRACTS)} may"
+            )
+        if row.status == STATUS_NOT_FE_HONORED and row.name != NOT_FE_HONORED_ROW:
+            raise AssertionError(
+                f"{row.name} may not use {STATUS_NOT_FE_HONORED}; only "
+                f"{NOT_FE_HONORED_ROW} may"
+            )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
         names.add(row.name)
@@ -1260,9 +1351,7 @@ def assert_decision_identifier_ownership() -> None:
         for env in row.env:
             owner = envs.get(env)
             if owner is not None:
-                raise AssertionError(
-                    f"env {env!r} owned by {owner!r} and {row.name!r}"
-                )
+                raise AssertionError(f"env {env!r} owned by {owner!r} and {row.name!r}")
             envs[env] = row.name
         for field in row.schema_fields:
             owner = schema.get(field)
@@ -1311,9 +1400,7 @@ def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
     if mark.args:
         raise AssertionError(f"{name} xfail has positional condition {mark.args!r}")
     if "condition" in mark.kwargs:
-        raise AssertionError(
-            f"{name} xfail has condition={mark.kwargs['condition']!r}"
-        )
+        raise AssertionError(f"{name} xfail has condition={mark.kwargs['condition']!r}")
     if mark.kwargs.get("strict") is not True:
         raise AssertionError(
             f"{name} xfail strict={mark.kwargs.get('strict')!r} is not True"
@@ -1327,6 +1414,115 @@ def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
         raise AssertionError(f"{name} xfail run={mark.kwargs.get('run')!r} is disabled")
 
 
+def _collect_parametrized_items(
+    items: Iterable[Any], test_name: str, case_ids: tuple[str, ...]
+) -> dict[str, Any]:
+    collected: dict[str, Any] = {}
+    matched: list[Any] = []
+    for raw in items:
+        item = _require_collected_item(raw)
+        if f"{test_name}[" not in item.nodeid:
+            continue
+        matched.append(item)
+        for case_id in case_ids:
+            token = f"{test_name}[{case_id}]"
+            if token not in item.nodeid:
+                continue
+            if case_id in collected:
+                raise AssertionError(f"{token} collected more than once")
+            collected[case_id] = item
+    missing = [case_id for case_id in case_ids if case_id not in collected]
+    if missing:
+        raise AssertionError(
+            f"{test_name} missing collected case IDs: " + ", ".join(missing)
+        )
+    if len(matched) != len(case_ids):
+        raise AssertionError(
+            f"{test_name} collected {len(matched)} items, expected "
+            f"{len(case_ids)} fixed case IDs {list(case_ids)}"
+        )
+    return collected
+
+
+def _assert_ordinary_collected_item(label: str, item: Any) -> None:
+    xfails = list(item.iter_markers(name="xfail"))
+    skips = list(item.iter_markers(name="skip")) + list(
+        item.iter_markers(name="skipif")
+    )
+    if xfails or skips:
+        raise AssertionError(
+            f"{label} must remain an ordinary test, found "
+            f"xfail={len(xfails)} skip={len(skips)}"
+        )
+
+
+def _assert_ignored_compat_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    spec = IGNORED_COMPAT_CONTRACTS.get(row.name)
+    if spec is None:
+        raise AssertionError(
+            f"{row.name} is not a fixed ignored-compatibility contract"
+        )
+    if row.observer != IGNORED_COMPAT_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {IGNORED_COMPAT_OBSERVER!r}"
+        )
+    if row.profiles != spec.case_ids:
+        raise AssertionError(
+            f"{row.name} profiles {row.profiles} != fixed case IDs "
+            f"{spec.case_ids}"
+        )
+    if row.affected_fields != spec.affected_fields:
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            f"{spec.affected_fields}"
+        )
+    if row.flags != spec.flags:
+        raise AssertionError(f"{row.name} flags {row.flags} != {spec.flags}")
+    if row.env != spec.env:
+        raise AssertionError(f"{row.name} env {row.env} != {spec.env}")
+    if row.schema_fields != spec.schema_fields:
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != {spec.schema_fields}"
+        )
+    collected = _collect_parametrized_items(items, spec.test_name, spec.case_ids)
+    for case_id, item in collected.items():
+        _assert_ordinary_collected_item(f"{spec.test_name}[{case_id}]", item)
+
+
+def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    if row.name != NOT_FE_HONORED_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {NOT_FE_HONORED_ROW} contract"
+        )
+    if row.observer != NOT_FE_HONORED_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {NOT_FE_HONORED_OBSERVER!r}"
+        )
+    if row.profiles != CONDITIONAL_SCALAR_ENV_NAMES:
+        raise AssertionError(
+            f"{row.name} profiles {row.profiles} != "
+            f"{CONDITIONAL_SCALAR_ENV_NAMES}"
+        )
+    if row.env != CONDITIONAL_SCALAR_ENV_NAMES:
+        raise AssertionError(
+            f"{row.name} env {row.env} != {CONDITIONAL_SCALAR_ENV_NAMES}"
+        )
+    if row.affected_fields != CONDITIONAL_SCALAR_ENV_NAMES:
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            f"{CONDITIONAL_SCALAR_ENV_NAMES}"
+        )
+    if row.flags != ():
+        raise AssertionError(f"{row.name} flags {row.flags} != ()")
+    if row.schema_fields != ():
+        raise AssertionError(f"{row.name} schema_fields {row.schema_fields} != ()")
+    collected = _collect_parametrized_items(
+        items, NOT_FE_HONORED_TEST, CONDITIONAL_SCALAR_ENV_NAMES
+    )
+    for case_id, item in collected.items():
+        _assert_ordinary_collected_item(f"{NOT_FE_HONORED_TEST}[{case_id}]", item)
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -1338,10 +1534,14 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     measured profiles must carry exactly one unconditional strict xfail
     whose ``raises`` is the dedicated subclass. known_gap affected fields
     must be in that profile's measured ``mismatch_fields``.
+
+    ignored_compatibility and not_fe_honored rows bind only their fixed
+    ordinary case-ID sets and verbatim identifier tuples. Those tests must
+    stay free of xfail/skip.
     """
+    item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
-    for item in items:
-        item = _require_collected_item(item)
+    for item in item_list:
         nodeid = item.nodeid
         for name in PROFILE_NAMES:
             if f"test_effective_config_profile[{name}]" not in nodeid:
@@ -1401,6 +1601,12 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
         _assert_measured_xfail_marker(name, marks[0])
     for row in SETTING_DECISIONS:
         if row.status == STATUS_PENDING:
+            continue
+        if row.status == STATUS_IGNORED_COMPAT:
+            _assert_ignored_compat_binding(row, item_list)
+            continue
+        if row.status == STATUS_NOT_FE_HONORED:
+            _assert_not_fe_honored_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -1621,7 +1827,9 @@ def assert_frontend_expected_fields(
         if name not in frontend:
             raise AssertionError(f"{profile} FE projection missing {name}")
         if not _values_equal(frontend[name], wanted):
-            raise AssertionError(f"{profile} {name}: FE {frontend[name]!r} != {wanted!r}")
+            raise AssertionError(
+                f"{profile} {name}: FE {frontend[name]!r} != {wanted!r}"
+            )
         if name not in defaults:
             continue
         recorded = defaults[name]
@@ -1890,7 +2098,649 @@ def build_profile(name: str, tmp_path: Path) -> ConfigProfile:
             expected,
             PROFILE_DEPRECATED_ENVS[name],
         )
+    if name == "shared_cache_multiplier":
+        expected = {"shared_cache_multiplier": 0.35}
+        return ConfigProfile(
+            name,
+            {"DYN_SHARED_CACHE_MULTIPLIER": "0.35"},
+            PROFILE_ASSERTED_FIELDS[name],
+            expected,
+            PROFILE_DEPRECATED_ENVS[name],
+        )
     raise AssertionError(f"unknown config profile {name!r}")
+
+
+class _RouterArgsWarningHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@dataclass(frozen=True)
+class FrontendRouterSnapshot:
+    namespace: Mapping[str, Any]
+    config_attrs: Mapping[str, Any]
+    router_mode: str
+    native_router_mode: Any
+    router_kwargs: Mapping[str, Any]
+    kv_json: Mapping[str, Any]
+    router_fields: tuple[str, ...]
+
+
+def explicit_manifest_env_names() -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in SETTING_DECISIONS:
+        for env in row.env:
+            if env in seen:
+                continue
+            seen.add(env)
+            names.append(env)
+    return tuple(names)
+
+
+def clear_known_manifest_router_envs(monkeypatch) -> None:
+    for name in explicit_manifest_env_names():
+        monkeypatch.delenv(name, raising=False)
+
+
+def _add_argument_env_vars(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "env_var":
+                continue
+            if isinstance(keyword.value, ast.Constant) and isinstance(
+                keyword.value.value, str
+            ):
+                names.add(keyword.value.value)
+    return names
+
+
+def _build_router_config_uses_explicit_kv_constructor() -> bool:
+    tree = ast.parse(ROUTER_ARGS.read_text(encoding="utf-8"), filename=str(ROUTER_ARGS))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name != "build_router_config":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if not isinstance(func, ast.Name) or func.id != "KvRouterConfig":
+                continue
+            if child.args:
+                continue
+            if len(child.keywords) != 1 or child.keywords[0].arg is not None:
+                continue
+            value = child.keywords[0].value
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "kv_router_kwargs"
+                and isinstance(value.func.value, ast.Name)
+                and value.func.value.id == "config"
+                and not value.args
+                and not value.keywords
+            ):
+                return True
+    return False
+
+
+def _unique_scoped_rust_body(
+    text: str, pattern: re.Pattern[str], label: str
+) -> str:
+    matches = list(pattern.finditer(text))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"{label} is missing, duplicate, or ambiguous: found {len(matches)}"
+        )
+    start = matches[0].end() - 1
+    if start < 0 or text[start] != "{":
+        raise AssertionError(f"{label} is not followed by a scoped body")
+    depth = 1
+    index = start + 1
+    while index < len(text) and depth:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        raise AssertionError(f"{label} has an unbalanced scoped body")
+    return text[start + 1 : index - 1]
+
+
+def assert_enforce_disagg_conversion_forces_false() -> None:
+    if not RUST_PYO3_ENTRYPOINT.is_file():
+        raise AssertionError(
+            f"missing PyO3 RouterConfig source: {RUST_PYO3_ENTRYPOINT}"
+        )
+    text = _strip_rust_comments(RUST_PYO3_ENTRYPOINT.read_text(encoding="utf-8"))
+    impl_body = _unique_scoped_rust_body(
+        text,
+        re.compile(r"impl\s+From<RouterConfig>\s+for\s+RsRouterConfig\s*\{"),
+        "impl From<RouterConfig> for RsRouterConfig",
+    )
+    from_body = _unique_scoped_rust_body(
+        impl_body,
+        re.compile(
+            r"fn\s+from\s*\(\s*rc\s*:\s*RouterConfig\s*\)\s*->\s*RsRouterConfig\s*\{"
+        ),
+        "fn from(rc: RouterConfig) -> RsRouterConfig",
+    )
+    struct_body = _unique_scoped_rust_body(
+        from_body,
+        re.compile(r"RsRouterConfig\s*\{"),
+        "returned RsRouterConfig { ... }",
+    )
+    assigns = list(re.finditer(r"enforce_disagg\s*:\s*([^,}+]+)", struct_body))
+    if len(assigns) != 1:
+        raise AssertionError(
+            "conversion enforce_disagg assignment is missing, duplicate, "
+            f"or ambiguous: found {len(assigns)}"
+        )
+    if assigns[0].group(1).strip() != "false":
+        raise AssertionError(
+            "PyO3 RouterConfig conversion no longer forces enforce_disagg: false"
+        )
+
+
+def assert_ignored_inputs_excluded_from_router_fields() -> None:
+    from dynamo.common.configuration.groups.router_args import _ROUTER_FIELDS
+
+    leaked = [
+        name
+        for name in ("admission_control", "enforce_disagg")
+        if name in _ROUTER_FIELDS
+    ]
+    if leaked:
+        raise AssertionError(
+            "_ROUTER_FIELDS now forwards ignored inputs: " + ", ".join(leaked)
+        )
+
+
+CONDITIONAL_SCALAR_RUST_READS = {
+    "DYN_ROUTER_CONDITIONAL_DISAGG_POLICY": (
+        'get_env("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY")'
+    ),
+    "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD": (
+        'parse_usize(&get_env,"DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD")'
+    ),
+    "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD": (
+        'parse_f64(&get_env,"DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD")'
+    ),
+    "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD": (
+        'parse_f64(&get_env,"DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD")'
+    ),
+    "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD": (
+        'parse_f64(&get_env,"DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD")'
+    ),
+}
+
+
+def _docstring_constants(tree: ast.AST) -> set[ast.AST]:
+    docstrings: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstrings.add(first.value)
+    return docstrings
+
+
+def _python_non_docstring_string_literals(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    skip = _docstring_constants(tree)
+    literals: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if node in skip:
+            continue
+        literals.append(node.value)
+    return literals
+
+
+def _count_token_in_python_source(path: Path, token: str) -> int:
+    return sum(
+        literal.count(token) for literal in _python_non_docstring_string_literals(path)
+    )
+
+
+def _frontend_python_source_paths() -> list[Path]:
+    frontend_pkg = FRONTEND_ARGS.parent
+    if not frontend_pkg.is_dir():
+        raise AssertionError(f"missing frontend package: {frontend_pkg}")
+    paths = sorted(frontend_pkg.rglob("*.py"))
+    for extra in (ROUTER_ARGS, KV_ROUTER_ARGS):
+        if extra not in paths:
+            paths.append(extra)
+    return paths
+
+
+def _production_rust_source_paths() -> list[Path]:
+    paths: list[Path] = []
+    for tree in RUST_TREES:
+        if not tree.exists():
+            raise AssertionError(f"missing Rust source tree: {tree}")
+        paths.extend(sorted(tree.rglob("*.rs")))
+    if not RUST_PYO3_ENTRYPOINT.is_file():
+        raise AssertionError(
+            f"missing PyO3 RouterConfig source: {RUST_PYO3_ENTRYPOINT}"
+        )
+    paths.append(RUST_PYO3_ENTRYPOINT)
+    return paths
+
+
+def _stripped_production_rust_text(path: Path) -> str:
+    return _drop_cfg_test_modules(
+        _strip_rust_comments(path.read_text(encoding="utf-8"))
+    )
+
+
+def _count_token_in_stripped_rust(path: Path, token: str) -> int:
+    return _stripped_production_rust_text(path).count(token)
+
+
+def _rust_read_spelling_re(spelling: str) -> re.Pattern[str]:
+    """Match one collapsed helper call, allowing Rust's trailing argument comma."""
+    if not spelling.endswith(")"):
+        raise AssertionError(f"read spelling {spelling!r} does not end with ')'")
+    return re.compile(re.escape(spelling[:-1]) + r",?\)")
+
+
+def _assert_conditional_scalar_source_sites() -> None:
+    if set(CONDITIONAL_SCALAR_RUST_READS) != set(CONDITIONAL_SCALAR_ENV_NAMES):
+        raise AssertionError(
+            "conditional scalar read-spelling keys "
+            f"{sorted(CONDITIONAL_SCALAR_RUST_READS)} != "
+            f"{list(CONDITIONAL_SCALAR_ENV_NAMES)}"
+        )
+    rust_sites: dict[str, list[str]] = {
+        name: [] for name in CONDITIONAL_SCALAR_ENV_NAMES
+    }
+    for path in _production_rust_source_paths():
+        for name in CONDITIONAL_SCALAR_ENV_NAMES:
+            count = _count_token_in_stripped_rust(path, name)
+            if count:
+                rust_sites[name].extend([str(path)] * count)
+    python_sites: dict[str, list[str]] = {
+        name: [] for name in CONDITIONAL_SCALAR_ENV_NAMES
+    }
+    for path in _frontend_python_source_paths():
+        for name in CONDITIONAL_SCALAR_ENV_NAMES:
+            count = _count_token_in_python_source(path, name)
+            if count:
+                python_sites[name].extend([str(path)] * count)
+    for name in CONDITIONAL_SCALAR_ENV_NAMES:
+        rust_hits = rust_sites[name]
+        python_hits = python_sites[name]
+        expected_rust = [str(RUST_CONFIG)]
+        if rust_hits != expected_rust or python_hits:
+            raise AssertionError(
+                f"{name} source sites require review: rust={rust_hits} "
+                f"expected rust={expected_rust} python={python_hits} "
+                "expected python=[]"
+            )
+    collapsed = re.sub(r"\s+", "", _stripped_production_rust_text(RUST_CONFIG))
+    missing_reads = [
+        name
+        for name, spelling in CONDITIONAL_SCALAR_RUST_READS.items()
+        if _rust_read_spelling_re(spelling).search(collapsed) is None
+    ]
+    if missing_reads:
+        raise AssertionError(
+            "production parser no longer reads "
+            + ", ".join(missing_reads)
+            + " with get_env/parse_usize/parse_f64"
+        )
+
+
+def assert_conditional_scalar_envs_are_not_fe_consumers() -> None:
+    _assert_conditional_scalar_source_sites()
+    rust_names = _rust_env_literals(RUST_CONFIG)
+    missing_rust = [
+        name for name in CONDITIONAL_SCALAR_ENV_NAMES if name not in rust_names
+    ]
+    if missing_rust:
+        raise AssertionError(
+            "Rust kv_router_config_from_lookup no longer reads "
+            + ", ".join(missing_rust)
+        )
+    fe_env_vars = (
+        _add_argument_env_vars(KV_ROUTER_ARGS)
+        | _add_argument_env_vars(ROUTER_ARGS)
+        | _add_argument_env_vars(FRONTEND_ARGS)
+    )
+    leaked = [name for name in CONDITIONAL_SCALAR_ENV_NAMES if name in fe_env_vars]
+    if leaked:
+        raise AssertionError(
+            "FE argparse now consumes conditional scalar envs: " + ", ".join(leaked)
+        )
+    required_fe = {
+        "DYN_ROUTER_CONDITIONAL_DISAGG",
+        "DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG",
+    }
+    missing_fe = sorted(required_fe - fe_env_vars)
+    if missing_fe:
+        raise AssertionError(
+            "FE no longer exposes conditional enable/JSON: " + ", ".join(missing_fe)
+        )
+    from dynamo.common.configuration.groups.kv_router_args import (
+        _CONDITIONAL_DISAGG_CONFIG_FIELDS,
+    )
+
+    expected_fields = {
+        "policy": "conditional_disagg_policy",
+        "eff_isl_threshold": "conditional_disagg_eff_isl_threshold",
+        "eff_isl_ratio_threshold": "conditional_disagg_eff_isl_ratio_threshold",
+        "prefill_busy_threshold": "conditional_disagg_prefill_busy_threshold",
+        "decode_busy_threshold": "conditional_disagg_decode_busy_threshold",
+    }
+    if dict(_CONDITIONAL_DISAGG_CONFIG_FIELDS) != expected_fields:
+        raise AssertionError(
+            "FE _CONDITIONAL_DISAGG_CONFIG_FIELDS changed: "
+            f"{dict(_CONDITIONAL_DISAGG_CONFIG_FIELDS)}"
+        )
+    if not _build_router_config_uses_explicit_kv_constructor():
+        raise AssertionError(
+            "build_router_config no longer calls "
+            "KvRouterConfig(**config.kv_router_kwargs())"
+        )
+    pyo3 = _strip_rust_comments(RUST_PYO3_ENTRYPOINT.read_text(encoding="utf-8"))
+    for banned in (
+        "kv_router_config_from_lookup",
+        "try_kv_router_config_from_dynamo_env",
+        "kv_router_config_from_dynamo_env",
+    ):
+        if banned in pyo3:
+            raise AssertionError(f"PyO3 KvRouterConfig path now calls {banned}")
+
+
+def _capture_router_args_warnings(build):
+    from dynamo.common.configuration.groups.router_args import logger as router_logger
+
+    handler = _RouterArgsWarningHandler()
+    router_logger.addHandler(handler)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            snapshot = build()
+    finally:
+        router_logger.removeHandler(handler)
+    return snapshot, handler.records
+
+
+def _frontend_router_snapshot(
+    extra_cli: tuple[str, ...] = (),
+) -> FrontendRouterSnapshot:
+    from dynamo.common.configuration.groups.router_args import (
+        _ROUTER_FIELDS,
+        build_router_config,
+    )
+    from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+    from dynamo.llm import RouterMode
+
+    parser = argparse.ArgumentParser(add_help=False)
+    FrontendArgGroup().add_arguments(parser)
+    namespace = parser.parse_args(list(WRAPPER_CLI) + list(extra_cli))
+    config = FrontendConfig.from_cli_args(namespace)
+    config.validate()
+    router = build_router_config(config)
+    if router is None or router.kv_router_config is None:
+        raise AssertionError("build_router_config did not produce KvRouterConfig")
+    if router.router_mode != RouterMode.KV:
+        raise AssertionError(f"native router_mode {router.router_mode!r} is not KV")
+    if config.router_mode != "kv":
+        raise AssertionError(f"config.router_mode {config.router_mode!r} is not kv")
+    return FrontendRouterSnapshot(
+        dict(vars(namespace)),
+        dict(vars(config)),
+        config.router_mode,
+        router.router_mode,
+        dict(config.router_kwargs()),
+        json.loads(router.kv_router_config.to_json()),
+        tuple(_ROUTER_FIELDS),
+    )
+
+
+def _frontend_full_kv_json() -> dict[str, Any]:
+    snapshot = _frontend_router_snapshot()
+    return dict(snapshot.kv_json)
+
+
+def _require_router_args_warning(
+    records: list[logging.LogRecord],
+    *,
+    logger_name: str,
+    message: str,
+) -> None:
+    matches = [
+        record
+        for record in records
+        if record.name == logger_name and record.getMessage() == message
+    ]
+    if len(records) != 1 or len(matches) != 1:
+        got = [(record.name, record.getMessage()) for record in records]
+        raise AssertionError(
+            f"expected exactly one {logger_name!r} warning {message!r}, got {got}"
+        )
+
+
+def _assert_ignored_options_absent(snapshot: FrontendRouterSnapshot) -> None:
+    if "admission_control" in snapshot.namespace:
+        raise AssertionError(
+            "admission_control was stored on the argparse namespace"
+        )
+    if "admission_control" in snapshot.config_attrs:
+        raise AssertionError("admission_control was stored on FrontendConfig")
+    leaked = [
+        name
+        for name in ("admission_control", "enforce_disagg")
+        if name in snapshot.router_kwargs
+    ]
+    if leaked:
+        raise AssertionError(
+            "ignored options entered router_kwargs(): " + ", ".join(leaked)
+        )
+    if "admission_control" in snapshot.router_fields:
+        raise AssertionError("_ROUTER_FIELDS now includes admission_control")
+    if "enforce_disagg" in snapshot.router_fields:
+        raise AssertionError("_ROUTER_FIELDS now includes enforce_disagg")
+
+
+def _assert_snapshots_match(
+    baseline: FrontendRouterSnapshot, changed: FrontendRouterSnapshot
+) -> None:
+    if baseline.router_mode != changed.router_mode:
+        raise AssertionError(
+            f"router_mode changed {baseline.router_mode!r} -> {changed.router_mode!r}"
+        )
+    if baseline.native_router_mode != changed.native_router_mode:
+        raise AssertionError(
+            "native router_mode changed "
+            f"{baseline.native_router_mode!r} -> {changed.native_router_mode!r}"
+        )
+    if dict(baseline.router_kwargs) != dict(changed.router_kwargs):
+        raise AssertionError(
+            "router_kwargs changed "
+            f"{dict(baseline.router_kwargs)} -> {dict(changed.router_kwargs)}"
+        )
+    if dict(baseline.kv_json) != dict(changed.kv_json):
+        raise AssertionError(
+            "kv_router_config.to_json changed "
+            f"{dict(baseline.kv_json)} -> {dict(changed.kv_json)}"
+        )
+    LOGGER.info(
+        "ignored-compat snapshots baseline_json=%r changed_json=%r kwargs=%r",
+        dict(baseline.kv_json),
+        dict(changed.kv_json),
+        dict(changed.router_kwargs),
+    )
+
+
+def _run_ignored_compat_case(
+    monkeypatch,
+    *,
+    extra_cli: tuple[str, ...] = (),
+    env_name: str | None = None,
+    env_value: str | None = None,
+    warning_message: str,
+) -> None:
+    from dynamo.common.configuration.groups.router_args import logger as router_logger
+
+    assert_ignored_inputs_excluded_from_router_fields()
+    assert_enforce_disagg_conversion_forces_false()
+    clear_known_manifest_router_envs(monkeypatch)
+    baseline, baseline_records = _capture_router_args_warnings(
+        _frontend_router_snapshot
+    )
+    if baseline_records:
+        got = [(record.name, record.getMessage()) for record in baseline_records]
+        raise AssertionError(f"baseline parse emitted unexpected warnings {got}")
+    _assert_ignored_options_absent(baseline)
+    if env_name is not None:
+        if env_value is None:
+            raise AssertionError(f"{env_name} probe is missing a sentinel")
+        monkeypatch.setenv(env_name, env_value)
+    changed, changed_records = _capture_router_args_warnings(
+        lambda: _frontend_router_snapshot(extra_cli)
+    )
+    _require_router_args_warning(
+        changed_records,
+        logger_name=router_logger.name,
+        message=warning_message,
+    )
+    _assert_ignored_options_absent(changed)
+    _assert_snapshots_match(baseline, changed)
+
+
+def run_ignored_admission_control(monkeypatch, case_id: str) -> None:
+    from dynamo.common.configuration.groups.router_args import (
+        _ADMISSION_CONTROL_FLAG_REMOVAL_WARNING,
+        _ADMISSION_CONTROL_REMOVAL_WARNING,
+    )
+
+    if case_id == "cli_token_capacity":
+        _run_ignored_compat_case(
+            monkeypatch,
+            extra_cli=("--admission-control", "token-capacity"),
+            warning_message=_ADMISSION_CONTROL_FLAG_REMOVAL_WARNING,
+        )
+        return
+    if case_id == "cli_none":
+        _run_ignored_compat_case(
+            monkeypatch,
+            extra_cli=("--admission-control", "none"),
+            warning_message=_ADMISSION_CONTROL_FLAG_REMOVAL_WARNING,
+        )
+        return
+    if case_id == "env_token_capacity":
+        _run_ignored_compat_case(
+            monkeypatch,
+            env_name="DYN_ADMISSION_CONTROL",
+            env_value="token-capacity",
+            warning_message=_ADMISSION_CONTROL_REMOVAL_WARNING,
+        )
+        return
+    if case_id == "env_none":
+        _run_ignored_compat_case(
+            monkeypatch,
+            env_name="DYN_ADMISSION_CONTROL",
+            env_value="none",
+            warning_message=_ADMISSION_CONTROL_REMOVAL_WARNING,
+        )
+        return
+    raise AssertionError(f"unknown admission_control case {case_id!r}")
+
+
+def run_ignored_enforce_disagg(monkeypatch, case_id: str) -> None:
+    from dynamo.common.configuration.groups.router_args import (
+        _ENFORCE_DISAGG_DEPRECATION,
+    )
+
+    if case_id == "cli_positive":
+        _run_ignored_compat_case(
+            monkeypatch,
+            extra_cli=("--enforce-disagg",),
+            warning_message=_ENFORCE_DISAGG_DEPRECATION % "--enforce-disagg",
+        )
+        return
+    if case_id == "cli_negative":
+        _run_ignored_compat_case(
+            monkeypatch,
+            extra_cli=("--no-enforce-disagg",),
+            warning_message=_ENFORCE_DISAGG_DEPRECATION % "--no-enforce-disagg",
+        )
+        return
+    if case_id == "env_true":
+        _run_ignored_compat_case(
+            monkeypatch,
+            env_name="DYN_ENFORCE_DISAGG",
+            env_value="true",
+            warning_message=_ENFORCE_DISAGG_DEPRECATION % "DYN_ENFORCE_DISAGG",
+        )
+        return
+    if case_id == "env_false":
+        _run_ignored_compat_case(
+            monkeypatch,
+            env_name="DYN_ENFORCE_DISAGG",
+            env_value="false",
+            warning_message=_ENFORCE_DISAGG_DEPRECATION % "DYN_ENFORCE_DISAGG",
+        )
+        return
+    raise AssertionError(f"unknown enforce_disagg case {case_id!r}")
+
+
+def run_conditional_scalar_not_fe_honored(
+    monkeypatch, env_name: str, sentinel: str
+) -> None:
+    assert_conditional_scalar_envs_are_not_fe_consumers()
+    if (env_name, sentinel) not in CONDITIONAL_SCALAR_PROBES:
+        raise AssertionError(f"unknown conditional scalar probe {(env_name, sentinel)}")
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG", "true")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        baseline = _frontend_full_kv_json()
+    if baseline.get("conditional_disagg_enabled") is not True:
+        raise AssertionError(
+            "FE baseline conditional enable is not True: "
+            f"{baseline.get('conditional_disagg_enabled')!r}"
+        )
+    monkeypatch.setenv(env_name, sentinel)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        changed = _frontend_full_kv_json()
+    LOGGER.info(
+        "conditional scalar %s=%s baseline=%r changed=%r",
+        env_name,
+        sentinel,
+        baseline,
+        changed,
+    )
+    if baseline != changed:
+        raise AssertionError(
+            f"{env_name}={sentinel!r} changed FE native JSON "
+            f"{baseline} -> {changed}"
+        )
 
 
 def run_effective_config_profile(
