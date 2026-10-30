@@ -233,13 +233,12 @@ impl CoreSelector {
                     replica_sync::peer_url(peer.as_str())?;
                     hub.add_peer(peer);
                 }
-                // Local bookings keep living as long as their reservations.
-                // A peer's booking whose free is lost stays until the next
-                // step reconciles mirrored bookings (#17670).
+                // The hub holds the leases for what peers mirror here: it
+                // frees them when the peer leaves or their free never comes.
                 builder = builder.host(SelectionHost {
                     replication: HostReplication {
                         channels: Some(hub.factory()),
-                        request_leases: Some(Arc::new(ReservationLeases)),
+                        request_leases: Some(hub.clone()),
                         ..HostReplication::default()
                     },
                     ..SelectionHost::default()
@@ -1486,6 +1485,30 @@ mod tests {
         b.stop_replication();
         connected(&a, 0).await;
         connected(&b, 0).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_mirrored_bookings_are_held_by_the_hub_until_freed() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        let held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+        // The core told the hub it took both.
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 2);
+
+        drop(held);
+        booked_settles(&a, &blue, 0).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while a.replica_sync_stats().unwrap().bookings_tracked != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the frees reach the hub through the core");
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_released, 0);
     }
 
     #[tokio::test]
