@@ -3349,18 +3349,28 @@ fn push_dispatch_event(
     }
 }
 
-/// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// True when a streaming chunk carries generated model output.
+/// True when the engine generated tokens for this streaming chunk, which is where
+/// the TTFT marker belongs.
+///
+/// Prefers `llm_metrics.chunk_tokens`, the count the TTFT metric uses, because a
+/// chunk can carry generated tokens while its parsed delta is empty: multi-byte
+/// token assembly and the Nemotron `force_nonempty_content` deferral both do this.
+/// Falls back to inspecting the delta when the backend does not report metrics,
+/// since a marker that silently never fires is worse than one placed by inspection.
+fn chunk_has_generated_tokens(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    match &resp.llm_metrics {
+        Some(metrics) => metrics.chunk_tokens > 0,
+        None => carries_generated_token(resp),
+    }
+}
+
+/// True when a streaming chunk's delta carries generated model output.
 ///
 /// Deliberately narrower than `!is_empty_stream_response`: that predicate exists
 /// to decide what is worth forwarding to the client, so it counts a role-only
 /// opening delta (`{"role": "assistant"}`) as non-empty. Such a delta carries no
 /// generated token, and treating it as one would place the TTFT marker before the
 /// model had produced anything.
-///
-/// Content-based rather than `llm_metrics.chunk_tokens > 0`, which the metrics
-/// path uses: `llm_metrics` is only present when the backend reports it, and a
-/// marker that silently never fires is worse than one placed by inspection.
 fn carries_generated_token(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     resp.inner.choices.iter().any(|choice| {
         let ChatCompletionStreamResponseDelta {
@@ -3384,6 +3394,7 @@ fn carries_generated_token(resp: &NvCreateChatCompletionStreamResponse) -> bool 
     })
 }
 
+/// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -3809,7 +3820,9 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
-            let mut first_chunk = true;
+            // Starts false when NVTX is off, so the first-token check below never
+            // runs; with the feature compiled out this is a constant.
+            let mut first_chunk = dynamo_runtime::nvtx::enabled();
 
             while let Some(mut response) = stream.next().await {
                 // Frontend-side SSE conversion for one chunk. The gaps *between*
@@ -3843,6 +3856,16 @@ async fn chat_completions(
                     deduplicate_stream_roles(data, &mut emitted_roles);
                 }
 
+                // Marked here, before the empty-chunk filter below: a chunk can carry
+                // generated tokens with an empty delta, and the TTFT metric counts it
+                // in that branch. Not at the top of the loop either: the stream is
+                // prefixed with annotation events (`data: None`) and opens with a
+                // role-only delta, neither of which is a generated token.
+                if first_chunk && response.data.as_ref().is_some_and(chunk_has_generated_tokens) {
+                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
+                    first_chunk = false;
+                }
+
                 // Drop empty chunks from multi-byte token assembly.
                 // Empty chunks are transport artifacts, not a streaming boundary.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
@@ -3860,16 +3883,6 @@ async fn chat_completions(
                         &mut http_queue_guard,
                     );
                     continue;
-                }
-
-                // Marked here, not at the top of the loop: the stream is prefixed
-                // with annotation events (`data: None`), can yield empty chunks
-                // that never reach the client, and opens with a role-only delta
-                // that carries no token. This is the first chunk actually carrying
-                // generated output, which is what a TTFT reading wants.
-                if first_chunk && response.data.as_ref().is_some_and(carries_generated_token) {
-                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
-                    first_chunk = false;
                 }
 
                 if tool_dispatch_enabled {
@@ -11002,7 +11015,6 @@ mod tests {
     /// land before the model produced a token.
     #[test]
     fn test_carries_generated_token() {
-        // Scaffolding, not a token.
         assert!(
             !carries_generated_token(&make_delta(
                 None,
@@ -11033,8 +11045,6 @@ mod tests {
             )),
             "empty text from multi-byte token assembly carries no token",
         );
-
-        // Real generated output, in each of its shapes.
         assert!(
             carries_generated_token(&make_delta(
                 Some("hi"),
@@ -11073,6 +11083,45 @@ mod tests {
                 None
             )),
             "a refusal is generated output",
+        );
+    }
+
+    /// Reported token counts win over the delta: a chunk whose content was
+    /// deferred still marks first token, and one the engine reports as tokenless
+    /// does not.
+    #[test]
+    fn test_chunk_has_generated_tokens() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let with_chunk_tokens = |content: Option<&str>, chunk_tokens: usize| {
+            let mut resp = make_delta(content, None, None, None, None, None, None, None);
+            resp.llm_metrics = Some(LLMMetricAnnotation {
+                chunk_tokens,
+                ..Default::default()
+            });
+            resp
+        };
+
+        assert!(
+            chunk_has_generated_tokens(&with_chunk_tokens(None, 3)),
+            "deferred content with reported tokens is the first token",
+        );
+        assert!(
+            !chunk_has_generated_tokens(&with_chunk_tokens(Some("hi"), 0)),
+            "reported zero tokens overrides visible content",
+        );
+        assert!(
+            chunk_has_generated_tokens(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "without metrics, falls back to inspecting the delta",
         );
     }
 
