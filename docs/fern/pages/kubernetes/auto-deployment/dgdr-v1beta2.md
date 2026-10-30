@@ -2,391 +2,358 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Search Deployment Configurations with DGDR v1beta2
-subtitle: Run a replay-backed deployment search, inspect its candidates, and promote a candidate to a DynamoGraphDeployment
+subtitle: Run an AISimulate-backed deployment search, inspect immutable runs and candidates, and create a DynamoGraphDeployment from a result
 ---
 
-`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses [AI Simulate's
-Sweeper](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
-to evaluate deployment configurations with Replay. A request can optimize one metric or search for
-a Pareto front. During the search, Dynamo publishes a bounded set of
-`DynamoGraphDeploymentCandidate` (DGDC) resources. Each candidate represents one evaluated point.
-Its spec contains the flat `DynamoGraphDeployment` (DGD) fields and the resolved non-deployment
-parameters that distinguish the point.
+`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses AISimulate to evaluate deployment
+configurations without creating one Kubernetes resource per optimizer trial. A mutable Request
+creates immutable `DynamoGraphDeploymentRun` resources. Each Run publishes a bounded set of
+immutable `DynamoGraphDeploymentCandidate` (DGDC) resources.
 
-Each accepted change to the DGDR spec creates an immutable `DynamoGraphDeploymentRun`. Its spec is
-a complete copy of the request that started it. The run owns the Sweeper Job, its DGDCs, progress,
-and report references. This lets one DGDR retain a history of independent searches without keeping
-completed Jobs alive.
+Each Candidate represents one evaluated point. Its spec contains the flat
+`DynamoGraphDeployment` (DGD) fields plus resolved evaluation `parameters`; its status contains
+evaluation `metrics`. Copy the DGD fields into an independent DGD when you choose a result.
 
 > [!WARNING]
-> **Experimental.** The `v1beta2` API and its unstructured search parameters can change in a future
-> release.
+> **Experimental.** Enable DGDR v1beta2 only on development clusters. The feature gate is disabled
+> by default, and incompatible schema changes can make persisted Request, Run, or Candidate objects
+> unreadable during an upgrade.
 
-Unlike the `v1beta1` profiler, Sweeper searches commonly run for hours and can return multiple
-useful configurations. DGDR reports progress after each search round and refreshes its visible
-candidates as better configurations are found.
+The current MVP supports a static workload and a scalar `Optimize` objective. Sections marked
+**Planned** preserve the intended trace, Pareto, override, browser-UI, and continuous-profiling
+design; those manifests are sketches and are not accepted by the current API.
 
-This guide describes the Kubernetes workflow and the stable DGDR fields. Use the Sweeper
-documentation as the reference for traffic, optimization goals, and the unstructured search
-parameters supported by the installed Sweeper version.
+## Enable DGDR v1beta2
+
+Enable the Request schema, Run and Candidate CRDs, admission behavior, and controllers with this
+platform chart value during installation or upgrade:
+
+```yaml
+dynamo-operator:
+  dgdrV1Beta2:
+    enabled: true
+```
+
+Use the same value when upgrading an existing installation. When it is `false`, the CRD installer
+removes the v1beta2 Request schema and conversion carriers and does not install the Run or Candidate
+CRDs.
+
+The operator selects the planner image configured by its Helm release. Requests and Runs cannot
+select a different AISimulate image or version.
 
 ## Create a Search
 
-The following request searches for a vLLM deployment for MiniMax-M2.5 on up to 32 B200 GPUs. It
-replays a Mooncake trace and optimizes goodput per GPU while enforcing Time To First Token (TTFT)
-and Inter-Token Latency (ITL) limits.
+The following Request pins the hardware topology, so admission does not need cluster discovery:
 
 ```yaml
 apiVersion: nvidia.com/v1beta2
 kind: DynamoGraphDeploymentRequest
 metadata:
-  name: minimax-planner-search
+  name: qwen-search
   namespace: inference
 spec:
-  modelRef:
-    name: MiniMaxAI/MiniMax-M2.5
-    revision: f710177d938eff80b684d42c5aa84b382612f21f
-    remoteCode: AlwaysTrust # AlwaysTrust | TrustCacheAndRevision | Never
-    cache:
-      pvc:
-        name: model-cache
-        modelPath: minimax-m2.5
-        mountPath: /opt/model-cache
-
-  backends: [vllm]
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
-
+  model:
+    name: Qwen/Qwen3-32B
   hardware:
     gpu:
-      sku: b200_sxm
-      budget: 32
+      sku: h200_sxm
+      budget: 8
+    numGpusPerNode: 8
+```
 
+Admission supplies the omitted stable defaults. The accepted Request is equivalent to this shape:
+
+```yaml
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  backends: [vllm, sglang, trtllm]
+  hardware:
+    gpu:
+      sku: h200_sxm
+      budget: 8
+    numGpusPerNode: 8
   workload:
-    trace:
-      format: mooncake
-      source:
-        pvc:
-          claimName: workload-traces
-          path: mooncake/trace.jsonl
-      replay:
-        arrivalSpeedupRatio: 1.0
-
+    static:
+      inputTokens: 1024
+      outputTokens: 128
+      load:
+        concurrency: 10
   objective:
-    mode: optimize
-    metric: goodputPerGpu
+    mode: Optimize
+    metric: ThroughputPerGPU
     sla:
       ttftMs: 2000
-      itlMs: 50
-
-  search:
-    budget:
-      maxRounds: 80
-      candidatesPerRound: 8
-      parallelEvaluations: 8
-      maxEvaluationDuration: 120s
-    parameters: # unstructured
-      search_space:
-        deployment_mode: [agg]
-        min_gpu_budget: 8
-        parallel_configs:
-          - tp: 4
-            attention_dp: 1
-            moe_tp: 4
-            moe_ep: 1
-            replicas: 2
-        agg_max_num_batched_tokens: [16384]
-        agg_max_num_seqs: [512]
-      workload:
-        shared_prefix_ratio: 0.25
-        num_prefix_groups: 4
-        turns_per_session: 1
-        inter_turn_delay_ms: 0
-      adapters:
-        dynamo.router:
-          search_space:
-            mode: [kv_router]
-            overlap_score_credit: [1.0]
-            prefill_load_scale: [4.0]
-            temperature: [0.0]
-        dynamo.planner:
-          search_space:
-            scaling_policy: [load_180_5]
-            load_sensitivity: [default]
-            fpm_sampling: [default]
-
+      itlMs: 30
   recommendation:
-    maxCandidates: 5
-
-  overrides:
-    profilingJob:
-      backoffLimit: 0
-    dgd:
-      apiVersion: nvidia.com/v1beta1
-      kind: DynamoGraphDeployment
+    maxCandidates: 1
 ```
 
-Apply the request:
+Apply the Request and wait for admission and the Request controller to accept it:
 
 ```bash
-kubectl apply -f minimax-planner-search.yaml
-kubectl get dgdr minimax-planner-search -n inference -w
+kubectl apply -f qwen-search.yaml
+kubectl get dgdr qwen-search -n inference -w
 ```
 
-`modelRef.revision` pins the model contents. For models that execute repository-provided Python
-code, set `remoteCode` explicitly:
+The Request reports the active immutable Run:
 
-| Value                   | Behavior                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------ |
-| `Never`                 | Reject models that require remote code                                                     |
-| `TrustCacheAndRevision` | Allow remote code only when both a pinned revision and the configured model cache are used |
-| `AlwaysTrust`           | Allow the backend to execute remote model code                                             |
+```yaml
+status:
+  observedGeneration: 1
+  activeRunRef:
+    name: qwen-search-1
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: RunCreated
+```
 
-Use `AlwaysTrust` only for a repository and revision that you trust.
+The exact generated name can differ when the Request name needs truncation.
 
-## Choose a Workload
+## Configure Stable Search Intent
 
-Set exactly one of `workload.static` or `workload.trace`.
+### Backends and Hardware
 
-Use a static workload when a fixed traffic shape represents the expected load:
+Set `backends` to one or more of `vllm`, `sglang`, and `trtllm`. Omit the field to search all three.
+
+Omit `hardware` to let admission discover the GPU SKU, available capacity, and GPUs per node. The
+default budget uses the selected homogeneous node shape and is capped at 32 GPUs unless the operator
+is configured with a lower cap. An explicit budget is authoritative.
+
+Use AISimulate catalog identifiers for `hardware.gpu.sku`. The bundled release currently documents
+these values:
+
+```text
+a100_pcie, a100_sxm, a30, b200_sxm, b300_sxm, b60, gb200, gb300,
+h100_pcie, h100_sxm, h200_sxm, l4, l40s, rtx_pro_6000_server
+```
+
+The field remains open. Admission accepts an unknown SKU when both `budget` and `numGpusPerNode`
+are explicit and returns a warning that the installed AISimulate catalog may reject it. Without
+those two values, admission cannot discover capacity or topology for an unknown SKU and rejects the
+Request with guidance to set them.
+
+Set an exact empty object to bypass all operator hardware discovery and typed hardware defaults:
+
+```yaml
+spec:
+  hardware: {}
+  aisimulate:
+    inputOverrides:
+      engine:
+        hardware: h200_sxm
+      optimization:
+        constraints:
+          max_candidate_gpus: 8
+```
+
+`hardware: {}` is an advanced escape hatch. Prefer the typed hardware fields so admission can
+validate and persist a complete Run snapshot. With the escape hatch, AISimulate's system-spec
+resolution supplies any node-width default; `dgdr_run.num_gpus_per_node` remains operator-owned and
+cannot be overridden.
+
+### Static Workload
+
+The current native workload is static. Set token lengths and exactly one load discriminator:
 
 ```yaml
 spec:
   workload:
     static:
-      isl: 1024
-      osl: 1024
-      concurrency: 32
-      # requestRate: 10 # alternative to concurrency
+      inputTokens: 2048
+      outputTokens: 256
+      load:
+        requestsPerSecond: 10
+        # concurrency: 32
+        # kvCapacityFraction:
+        #   value: 0.75
+        #   range:
+        #     min: 0.25
+        #     max: 1.0
 ```
 
-Use a trace workload to preserve request timestamps and sequence lengths from recorded traffic:
+Choose one load form:
 
-```yaml
-spec:
-  workload:
-    trace:
-      format: mooncake
-      source:
-        pvc:
-          claimName: workload-traces
-          path: mooncake/trace.jsonl
-      replay:
-        arrivalSpeedupRatio: 1.0
-```
+| Field | Meaning |
+|---|---|
+| `requestsPerSecond` | Fixed open-loop arrival rate in requests per second |
+| `concurrency` | Fixed closed-loop in-flight request cap |
+| `kvCapacityFraction.value` | Fixed fraction of each candidate's estimated KV capacity; `1.0` uses the full estimate |
+| `kvCapacityFraction.range` | Search a fraction between `min` and `max` |
 
-`arrivalSpeedupRatio` maps directly to the Replay traffic-rate control. A value of `1.0` preserves
-the recorded arrival rate. [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
-defines the supported workload shapes, trace fields, and open-loop versus closed-loop behavior.
+Omitting `workload` supplies the complete 1024-input-token, 128-output-token, concurrency-10
+default. A nonempty `workload.static` object receives any missing token or load defaults. Set
+`workload.static: {}` to opt out of all typed traffic defaults and provide the complete upstream
+traffic input through `aisimulate.inputOverrides`.
 
-To create a Mooncake-format trace for testing, follow [Generate a Synthetic Trace in the Sweeper
-examples](https://github.com/ai-dynamo/dynamo/blob/main/aisimulate/examples/sweeper/README.md#generate-a-synthetic-trace),
-then copy the generated JSONL file to the PVC referenced by `workload.trace.source`.
+### Scalar Objective
 
-## Choose an Objective
-
-For a scalar search, set `mode: optimize` and one metric:
+The current API admits only the case-sensitive `Optimize` mode:
 
 ```yaml
 spec:
   objective:
-    mode: optimize
-    metric: goodputPerGpu
+    mode: Optimize
+    metric: GoodputPerGPU
     sla:
       ttftMs: 2000
-      itlMs: 50
+      itlMs: 30
 ```
 
-Common Sweeper metrics include throughput, end-to-end latency, goodput, and their per-GPU variants.
-See [Sweeper Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
-for the supported targets, directions, and SLA semantics.
+Valid scalar metrics are `Throughput`, `ThroughputPerGPU`, `ThroughputPerUser`, `TTFT`,
+`E2ELatency`, `Goodput`, and `GoodputPerGPU`. `Goodput` and `GoodputPerGPU` require at least one
+Service Level Agreement (SLA) bound.
 
-For a multi-objective search, set `mode: pareto` and list the metrics:
+Set any combination of `ttftMs` and `itlMs`, or set `e2eMs`. Do not combine `e2eMs` with either
+per-token bound. Omit `objective` to receive the default `Optimize`, `ThroughputPerGPU`, and
+2000/30 ms SLA. Set `objective.sla: {}` to keep the mode and metric defaults while disabling the
+typed SLA defaults.
+
+### Candidate Limit
+
+`recommendation.maxCandidates` defaults to `1`, accepts values from 1 through 100, and limits only
+the number of DGDC resources published by the Run. It does not limit AISimulate optimizer trials.
 
 ```yaml
 spec:
-  objective:
-    mode: pareto
-    metrics:
-      - goodput
-      - goodputPerGpu
-      - e2eLatency
-    sla:
-      e2eMs: 2000
+  recommendation:
+    maxCandidates: 5
 ```
 
-Set either `sla.ttftMs` with `sla.itlMs`, or `sla.e2eMs`. Do not combine both latency
-forms.
+## Override Native AISimulate Input
 
-Sweeper computes the complete non-dominated front. DGDR publishes no more than
-`recommendation.maxCandidates` candidates from that front as Kubernetes resources.
-
-## Configure the Search
-
-`search.budget` controls how long and how broadly Sweeper evaluates configurations:
-
-| Field                   | Meaning                                                   |
-| ----------------------- | --------------------------------------------------------- |
-| `maxRounds`             | Maximum optimizer rounds per resolved deployment branch   |
-| `candidatesPerRound`    | Target successful unique candidates in one branch round   |
-| `parallelEvaluations`   | Replay worker-process fan-out                             |
-| `maxEvaluationDuration` | Timeout for one candidate evaluation                      |
-
-`search.parameters` is an unstructured object passed to the search implementation. The Kubernetes
-API preserves these values but does not validate their nested schema. Use [Sweeper
-Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
-as the parameter reference for the installed Sweeper version. For Dynamo-specific Planner and
-Router parameters, see [Dynamo Sweeper Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md).
-
-The unstructured boundary is intentional. Search adapters and experimental knobs evolve faster than
-the Kubernetes API. Stable concepts such as the workload, objective, hardware budget, and search
-budget use typed fields; implementation-specific search spaces remain under `parameters`.
-
-## Monitor Progress
-
-Large searches can take several hours. Inspect `status.progress` instead of treating the profiling
-Job as a short, opaque operation:
-
-```bash
-RUN=$(kubectl get dgdr minimax-planner-search -n inference \
-  -o jsonpath='{.status.activeRunRef.name}')
-
-kubectl get dynamographdeploymentrun "$RUN" -n inference \
-  -o jsonpath='{.status.progress}'
-```
-
-The DGDR points to the active run:
+Use `spec.aisimulate.inputOverrides` for supported AISimulate input that is not part of the stable
+typed API:
 
 ```yaml
-status:
-  activeRunRef:
-    name: minimax-planner-search-run-4
+spec:
+  aisimulate:
+    inputOverrides:
+      engine:
+        mode: aggregated
+        context_length: 32768
+      traffic:
+        stop:
+          requests: 1000
+      optimizer:
+        algorithm: random
+        max_trials: 50
+        parallelism: 4
+        candidate_timeout_seconds: 120
+      dgdr_run:
+        snapshot_interval_seconds: 30
 ```
 
-While the search is active, the run status resembles:
+The object uses the upstream AISimulate field names, including `snake_case`. The operator applies
+it as an RFC 7386 JSON Merge Patch over the typed lowering. Override values win; JSON `null` deletes
+a lowered field.
+
+The effective input is assembled in this order:
+
+```text
+operator underlay
+  + typed Request lowering
+  + spec.aisimulate.inputOverrides
+  + protected operator-owned dgdr_run values
+```
+
+Admission rejects overrides of `dgdr_run.name`, `max_candidates`, `snapshot_dir`, `runtime_image`,
+`runtime_version_override`, `derive_runtime_images`, `num_gpus_per_node`, and `namespace`. These
+values define the Run identity, trust boundary, and transport.
+
+The current webhook validates the merge-patch shape and protected fields, not the complete nested
+AISimulate schema. AISimulate validates the effective input before running the search. Use the
+[AISimulate Sweeper configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
+that matches the operator release.
+
+## Monitor the Run
+
+Resolve the active Run from the Request:
+
+```bash
+RUN=$(kubectl get dgdr qwen-search -n inference \
+  -o jsonpath='{.status.activeRunRef.name}')
+
+kubectl get dgdrrun "$RUN" -n inference -o yaml
+```
+
+The Run spec is an immutable, fully defaulted copy of the accepted Request spec. The Run controller
+lowers that snapshot exactly once, writes the effective input to an immutable Run-owned ConfigMap,
+and reports the same public input at `status.aisimulate.input`.
+
+While execution is active, an abridged status resembles:
 
 ```yaml
 status:
   phase: Running
   jobRef:
-    name: minimax-planner-search-run-4
+    name: qwen-search-1
+  aisimulate:
+    input:
+      engine:
+        model: Qwen/Qwen3-32B
+        backend:
+          choices: [vllm, sglang, trtllm]
+      optimizer:
+        max_trials: 320
+  progress:
+    branches:
+      - name: aggregated
+        rounds:
+          completed: 2
+          total: 10
+    evaluations:
+      scheduled: 12
+      running: 4
+      feasible: 6
+      infeasible: 1
+      failed: 1
+    candidates:
+      published: 1
+  candidateRefs:
+    - name: qwen-search-1-evaluated-point-0123456789ab
   conditions:
     - type: Completed
       status: "False"
-      reason: EvaluatingCandidates
-  progress:
-    branches:
-      - name: agg
-        rounds:
-          completed: 23
-          total: 80
-    evaluations:
-      scheduled: 52
-      running: 8
-      feasible: 41
-      infeasible: 1
-      failed: 2
-      unsupported: 0
-      cacheHits: 3
-    candidates:
-      paretoFront: 0
-      published: 2
-  candidateRefs:
-    - name: minimax-planner-search-g4-4b5c3f31
-    - name: minimax-planner-search-g4-9a7d681c
-  provenance:
-    sweeperVersion: 0.2.0
-    replayVersion: 1.3.0
-  startTime: "2026-07-16T13:20:00Z"
-  lastProgressTime: "2026-07-16T13:28:42Z"
+      reason: JobRunning
 ```
 
-`Completed=True` marks a terminal run. Inspect its `reason` to distinguish success, failure, and
-cancellation.
+Treat `status.aisimulate.input` as the authoritative record of what the Job received. For a native
+static workload, lowering also sets `traffic.stop.requests` to 1000. It independently defaults
+`optimizer.max_trials` to 320. An input override can replace or delete either value.
 
-DGDR refreshes the visible candidate set after completed search rounds. While `Completed=False`, a
-candidate is provisional and can be replaced when Sweeper finds a better result. DGDR publishes at
-most `recommendation.maxCandidates` resources even when Sweeper evaluates hundreds of internal
-configurations.
+`Completed=True` marks a terminal Run. `phase: Succeeded` with reason `SearchSucceeded` reports a
+successful search. A failed Job or publisher protocol error sets `phase: Failed` with a diagnostic
+reason and message.
 
-## Open the Search UI
-
-The Dynamo Search UI runs as a cluster service, independently of individual Sweeper Jobs. Port
-forward the service to inspect active and completed runs in a local browser:
-
-```bash
-kubectl port-forward service/dynamo-search-ui \
-  -n dynamo-system 8080:8080
-```
-
-Open the local address:
-
-```text
-http://localhost:8080
-```
-
-Select the `inference` namespace, `minimax-planner-search`, and its active run. The first UI version
-shows:
-
-- completed rounds and evaluations;
-- feasible, infeasible, failed, and cached evaluations;
-- evaluated configurations across the resolved search-space dimensions;
-- the current scalar leaders or Pareto front;
-- published DGDCs and their ranks; and
-- an optional Sweeper log panel.
-
-![Mock Dynamo Search UI showing run progress, a parallel-coordinates search-space plot, the Pareto front, ranked candidates, and the Sweeper log](../../../assets/img/dgdr-search-ui-mock.svg)
-
-The UI does not run in the Sweeper Job. A Job-local server would stop when the search process exits,
-and a long-running sidecar would prevent the Job from completing. The cluster UI reads run status
-and DGDCs from Kubernetes and loads detailed evaluation points from the run's report artifacts.
-
-For an active run, the optional log panel streams the Sweeper Pod log. After the Pod is deleted, the
-log remains available only when log retention is enabled for the run. Progress, candidates, and the
-search report remain available independently of the Job.
+The Job has two containers. The planner image runs `aisimulate recommend` and writes atomic
+`dgdr_run` snapshots to a shared `emptyDir`. The publisher in the operator image reads those
+snapshots, updates Run progress, and reconciles Candidates. Only the publisher receives projected
+Kubernetes credentials.
 
 ## Inspect Candidates
 
-DGDC resources carry the owning run UID, DGDR generation, and input hash as labels. List the
-candidates for the active run:
+Use the Run's ordered `candidateRefs`; list order is the scalar ranking, best first:
 
 ```bash
-RUN=$(kubectl get dgdr minimax-planner-search -n inference \
-  -o jsonpath='{.status.activeRunRef.name}')
-RUN_UID=$(kubectl get dynamographdeploymentrun "$RUN" -n inference \
-  -o jsonpath='{.metadata.uid}')
-
-kubectl get dgdc -n inference -l "nvidia.com/dgdr-run-uid=${RUN_UID}"
-```
-
-Inspect the selected candidate:
-
-```bash
-CANDIDATE=$(kubectl get dynamographdeploymentrun "$RUN" -n inference \
+CANDIDATE=$(kubectl get dgdrrun "$RUN" -n inference \
   -o jsonpath='{.status.candidateRefs[0].name}')
 
 kubectl get dgdc "$CANDIDATE" -n inference -o yaml
 ```
 
-A candidate spec contains the DGD fields flatly plus immutable, unstructured `parameters`. The
-parameters identify resolved evaluation inputs that are not part of the deployable DGD. The status
-reports simulation results rather than deployment health:
+An abridged Candidate resembles:
 
 ```yaml
 apiVersion: nvidia.com/v1beta2
 kind: DynamoGraphDeploymentCandidate
 metadata:
-  name: minimax-planner-search-g4-4b5c3f31
-  ownerReferences:
-    - apiVersion: nvidia.com/v1beta2
-      kind: DynamoGraphDeploymentRun
-      name: minimax-planner-search-run-4
+  name: qwen-search-1-evaluated-point-0123456789ab
   labels:
-    nvidia.com/dgdr-run-uid: ddc22b7a-6557-4a3e-a1d7-a32da8849694
-    nvidia.com/dgdr-generation: "4"
-    nvidia.com/dgdr-input-hash: 7d3a9c18e24f9468b307c21f03c4a662
-    nvidia.com/dgdc-point-hash: 4b5c3f31ef237481
-    nvidia.com/dgd-spec-hash: 8f2a0ab82d09d50d
-spec: # flat DGD fields plus DGDC-only parameters
+    nvidia.com/dgdr-run-uid: 59aeff3d-5d41-4981-85a2-822edeb7976f
+    nvidia.com/dgdr-candidate-id: evaluated-point-0123456789ab
+spec:
   backendFramework: vllm
   components:
     - name: Frontend
@@ -396,161 +363,119 @@ spec: # flat DGD fields plus DGDC-only parameters
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
-              env:
-                - name: DYN_ROUTER_MODE
-                  value: kv
-                - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
-                  value: "1.0"
-                - name: DYN_ROUTER_PREFILL_LOAD_SCALE
-                  value: "4.0"
-                - name: DYN_ROUTER_TEMPERATURE
-                  value: "0.0"
-    - name: Planner
-      type: planner
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-runtime:latest
+    - name: VllmWorker
+      type: worker
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
-              command: [python3, -m, dynamo.planner]
-              args:
-                - --config
-                - '{"environment":"kubernetes","backend":"vllm","optimization_target":"sla","enable_throughput_scaling":false,"enable_load_scaling":true,"load_adjustment_interval_seconds":180,"load_scaling_down_sensitivity":80,"load_min_observations":5}'
-    - name: VllmWorker
-      type: worker
-      replicas: 2
-      podTemplate:
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-              command: [python3, -m, dynamo.vllm]
-              args:
-                - --model
-                - MiniMaxAI/MiniMax-M2.5
-                - --tensor-parallel-size
-                - "4"
-                - --trust-remote-code
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
               resources:
                 limits:
-                  nvidia.com/gpu: "4"
-  parameters: # unstructured, resolved values rather than search ranges
-    workload:
-      kv_load_ratio: 0.5
-status: # candidate-specific, not DGD deployment status
-  rank: 1
-  conditions:
-    - type: Evaluated
-      status: "True"
-      reason: CandidateMaterialized
-  experimental: # unstructured
+                  nvidia.com/gpu: "8"
+  parameters:
+    backend: vllm
+status:
+  metrics:
     score: 87.7
-    used_gpus: 8
-    backend_version: "0.11.0"
-    metrics:
-      output_throughput_tok_s: 1200.0
-      mean_ttft_ms: 1840.0
-      mean_tpot_ms: 42.0
-      goodput_output_throughput_tok_s: 727.9
-      gpu_hours: 0.83
-      duration_ms: 360000.0
+    usedGpus: 8
 ```
 
-The `experimental` status object is unstructured. Treat its metrics and diagnostics as specific to
-the Sweeper version that produced the candidate.
-
-The `nvidia.com/dgdc-point-hash` label covers the materialized DGD fields and `parameters`. The
-`nvidia.com/dgd-spec-hash` label covers only the deployable DGD fields. Multiple evaluated points
-can therefore share a DGD-spec hash when Sweeper evaluates the same deployment under different
-resolved workload parameters.
+The inline DGD fields and `parameters` are immutable. `parameters` contains resolved evaluation
+input that distinguishes this evaluated point from another point with the same deployable DGD.
+Candidate status contains evaluation metrics, not deployment-health conditions.
 
 ## Create a DGD from a Candidate
 
-Create a DGD after the owning DGDRRun reports `Completed=True`.
-
-The Search UI shows the selected DGDC as syntax-highlighted YAML. Enter a name, review the
-materialized spec, and select **Create DGD**. The UI copies the flat DGD fields, omits the
-DGDC-only `parameters`, and creates an independent DGD. It does not modify or delete an existing
-deployment.
-
-The deployment action does not modify an Ingress, LoadBalancer, or HTTPRoute and does not shift
-traffic between two DGDs. After creating a new DGD, wait until it is ready and update external
-routing separately.
-
-![Mock dialog showing syntax-highlighted DGDC YAML, a new DGD name and namespace, unchanged traffic routing, and a Create DGD button](../../../assets/img/dgdr-candidate-create-dgd-ui-mock.svg)
+Create an independent DGD after the owning Run reports `Completed=True`. Copy the flat DGD fields
+and omit the Candidate-only `parameters`:
 
 ```bash
-kubectl get dgdc minimax-planner-search-g4-4b5c3f31 -n inference -o json \
+kubectl get dgdc "$CANDIDATE" -n inference -o json \
   | jq '{
       apiVersion: "nvidia.com/v1beta1",
       kind: "DynamoGraphDeployment",
-      metadata: {name: "minimax-production-g4", namespace: "inference"},
+      metadata: {name: "qwen-production", namespace: "inference"},
       spec: (.spec | del(.parameters))
     }' \
   | kubectl create -f -
 ```
 
-The new DGD starts its own deployment lifecycle. DGDC `status.conditions` only confirms that Replay
-evaluated the configuration; it does not indicate that the configuration has been deployed.
+The DGD has no owner reference to the Request or Run. Deleting the search history does not delete a
+DGD created from a Candidate.
 
 ## Start a New Search
 
-Changing a search input creates a new immutable run for the new DGDR generation. The run contains a
-complete copy of the accepted DGDR spec, so later edits to the request do not change an active or
-completed run. Use `status.activeRunRef` to find the run currently being evaluated. Run and
-candidate labels identify the generation and input hash that produced each result.
+Change any native Request spec field to create a new generation. If the previous Run is active, the
+Request controller marks it for supersession. The Run controller deletes only the execution Job,
+waits for it to disappear, marks the immutable Run terminal with reason `Superseded`, and lets the
+newest Request generation start. Rapid successive edits can coalesce intermediate generations.
 
-Changes that affect the model, hardware, workload, objective, search budget, or unstructured
-parameters require new evaluations. Metadata-only changes do not change the search input.
+The Request retains the five newest terminal Runs in `status.recentRunRefs`; older owned Runs and
+their Candidates are garbage-collected. Metadata-only Request changes do not create a Run.
 
-For recurring trace-based searches, write every completed trace to a new location and update the
-trace source. An object-storage URI identifies a trace directly:
+The current API has no unchanged-input `spec.rerun` trigger. To execute another search, change an
+execution input, such as a seed in `inputOverrides`, and apply it as a new generation.
+
+## Work with v1beta1 Clients
+
+`v1beta1` and `v1beta2` represent different workflows. Conversion preserves the complete native
+payload instead of attempting a semantic conversion:
+
+- A native v1beta2 Request stores its fields directly under `spec`. A v1beta1 client sees that
+  payload under `spec.v1beta2`.
+- A native v1beta1 Request keeps its profiler fields directly under `spec`. A v1beta2 client sees
+  that payload under `spec.v1beta1`.
+- Native fields and the foreign-version carrier are mutually exclusive. The carrier is read-only
+  through the foreign API version.
+
+Use the native API version to modify a Request. Run and Candidate resources have no v1beta1 form.
+
+## Planned: Trace Workloads
+
+The vision includes timestamped trace replay from a PersistentVolumeClaim (PVC) or object storage.
+The following shape is a design sketch, not a currently admitted v1beta2 Request:
 
 ```yaml
 spec:
   workload:
     trace:
-      source:
-        uri: s3://dynamo-traces/qwen/2026-08-12.jsonl
-```
-
-For a trace stored on a PersistentVolumeClaim (PVC), update the path within the claim:
-
-```yaml
-spec:
-  workload:
-    trace:
+      format: mooncake
       source:
         pvc:
           claimName: workload-traces
-          path: qwen/2026-08-12.jsonl
+          path: qwen/trace.jsonl
+      replay:
+        arrivalSpeedupRatio: 1.0
 ```
 
-DGDR treats the contents at a trace location as immutable. Updating the URI or PVC path starts the
-new run; it does not require a separate trigger or content digest.
+Trace support will preserve request timestamps and sequence lengths and will provide the input to
+the [continuous-profiling vision](continuous-profiling.md).
 
-To repeat a search without changing its inputs, change `spec.rerun.reason`:
+## Planned: Pareto Objectives
+
+The Go API reserves `Pareto`, and Run progress already has a `paretoFront` counter, but admission
+currently rejects Pareto authoring. The intended API uses a list of objective metrics:
 
 ```yaml
 spec:
-  rerun:
-    reason: "Repeat after Sweeper upgrade on 2026-08-12"
+  objective:
+    mode: Pareto
+    metrics:
+      - ThroughputPerGPU
+      - ThroughputPerUser
 ```
 
-Every new value requests one run and is copied into that run's DGDR snapshot. Reapplying the same
-value does not request another run. If a trace is replaced at the same location, change
-`spec.rerun.reason` because Kubernetes cannot observe the content change.
+The planned publisher will project a deterministic bounded subset of the non-dominated front without
+assigning scalar ranks. The design does not yet promise a preference or representative-coverage
+policy.
 
-To capture traffic from an active DGD and repeat this workflow on a schedule, see [Continuous
-Profiling](continuous-profiling.md). That higher-level workflow treats the active DGD as the
-baseline and creates independent runs from successive trace windows.
+## Planned: DGD and Job Overrides
 
-## Customize Generated DGD Specs
-
-Use `spec.overrides.dgd` to merge common settings into every generated candidate. The override uses
-the `nvidia.com/v1beta1` DGD schema:
+The vision includes protected patches for generated DGD fields and selected execution-Job settings.
+These fields are not in the current v1beta2 API:
 
 ```yaml
 spec:
@@ -565,49 +490,58 @@ spec:
               spec:
                 nodeSelector:
                   workload.nvidia.com/class: inference
+    profilingJob:
+      ttlSecondsAfterFinished: 3600
 ```
 
-Use `spec.overrides.profilingJob` for Kubernetes Job settings such as tolerations, node selectors,
-and garbage-collection TTL. The MVP requires `backoffLimit: 0` because it does not resume a failed
-Sweeper process.
+The DGD override is intended to reuse the profiler's patch machinery while preventing changes that
+invalidate the evaluated topology, GPU allocation, backend arguments, or provider configuration.
 
-## Work with v1beta1 Clients
+## Planned: Browser UI
 
-`v1beta1` and `v1beta2` represent different workflows. Conversion preserves the complete source
-payload instead of selecting one candidate or discarding search state:
+The Dynamo Search UI remains the planned second phase. It will run as a long-lived cluster service,
+independently of individual AISimulate Jobs, and retain detailed UI-local history outside Kubernetes
+object status.
 
-- A native `v1beta2` request stores its fields directly under `spec`. A `v1beta1` client sees that
-  payload under `spec.v1beta2`.
-- A native `v1beta1` request keeps its profiler fields directly under `spec`. A `v1beta2` client sees
-  that payload under `spec.v1beta1`.
-- The native schema and the versioned compatibility payload are mutually exclusive.
+The UI is intended to show:
 
-Use the same API version for reads and writes when updating a request. The versioned compatibility
-payload is for lossless round trips; it does not translate a single `v1beta1` result into a
-multi-candidate `v1beta2` search.
+- Run lifecycle and effective input;
+- completed rounds and evaluation outcomes;
+- evaluated configurations across resolved search-space dimensions;
+- scalar leaders or a Pareto front;
+- published Candidates and optional AISimulate logs; and
+- a separately authorized action that creates an independent DGD from a completed Candidate.
+
+![Mock Dynamo Search UI showing run progress, a parallel-coordinates search-space plot, the Pareto front, ranked candidates, and the AISimulate log](../../../assets/img/dgdr-search-ui-mock.svg)
+
+The UI will remain read-only for Request, Run, and Candidate resources. DGD creation uses a separate
+create permission and does not update, replace, or move traffic away from an existing deployment.
+
+![Mock dialog showing syntax-highlighted DGDC YAML, a new DGD name and namespace, unchanged traffic routing, and a Create DGD button](../../../assets/img/dgdr-candidate-create-dgd-ui-mock.svg)
 
 ## Clean Up
 
-Delete the request and its owned runs and candidates:
+Delete the Request and its owned Runs and Candidates:
 
 ```bash
-kubectl delete dgdr minimax-planner-search -n inference
+kubectl delete dgdr qwen-search -n inference
 ```
 
-Promoted DGDs have an independent lifecycle and remain after the DGDR is deleted:
+Independently created DGDs remain until you delete them:
 
 ```bash
-kubectl delete dgd minimax-production-g4 -n inference
+kubectl delete dgd qwen-production -n inference
 ```
 
 ## Related Documentation
 
 - [Auto Deployment Overview](overview.mdx)
 - [Auto Deploy with DGDR v1beta1](auto-deploy-with-dgdr.md)
-- [Continuous Profiling](continuous-profiling.md)
+- [Continuous Profiling Vision](continuous-profiling.md)
 - [DynamoGraphDeployment Reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx)
-- [AI Simulate's Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
-- [Sweeper Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
-- [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
-- [Sweeper Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
-- [Dynamo Sweeper Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md)
+- [Full Kubernetes API Reference](../../reference/kubernetes-api/full-api-reference.mdx#v1beta2-dynamographdeploymentrequest)
+- [AISimulate Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
+- [AISimulate Sweeper Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
+- [AISimulate Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
+- [AISimulate Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
+- [Dynamo AISimulate Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md)
