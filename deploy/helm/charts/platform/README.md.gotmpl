@@ -60,7 +60,7 @@ Update experimental Candidate consumers to read `status.parameters` and check `V
 before using the DGD spec. The publisher's Run-scoped role now requires DGD `create`
 permission for dry-run admission. Existing DGDR v1beta1 resources are unaffected.
 
-**Existing deployments:** This change affects the opt-in `dgdrV1Beta2.enabled` API.
+**Existing deployments:** This change affects the opt-in `dynamo-operator.dgdrV1Beta2.enabled` API.
 Complete or cancel active experimental Runs before upgrading, then recreate their
 Requests to generate Candidates in the new shape. Existing Candidates are not migrated.
 

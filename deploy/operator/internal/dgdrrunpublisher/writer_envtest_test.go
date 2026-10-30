@@ -313,14 +313,16 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 	f := newWriterFixture(t)
 	const overridePrefix = `{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment",`
 	tests := []struct {
-		name      string
-		manifest  string
-		override  string
-		reason    string
-		wantSpec  string
-		wantLabel string
+		name       string
+		manifest   string
+		override   string
+		reason     string
+		wantSpec   string
+		wantLabel  string
+		absentSpec string
 	}{
 		{name: "valid DGD keeps its pre-defaulting spec", manifest: validManifest, reason: "ValidationSucceeded"},
+		{name: "optional DGD backend is not synthesized", manifest: strings.Replace(validManifest, "  backendFramework: vllm\n", "", 1), reason: "ValidationSucceeded", absentSpec: `"backendFramework"`},
 		{name: "unknown field is retained", manifest: validManifest + "  unknownField: 9007199254740993\n", reason: "ValidationFailed", wantSpec: `"unknownField":9007199254740993`},
 		{name: "wrong type is retained", manifest: "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec:\n  components: not-a-list\n", reason: "ValidationFailed", wantSpec: `"components":"not-a-list"`},
 		{name: "DGD webhook rejects an ambiguous runtime image", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), reason: "ValidationFailed", wantSpec: `"image":"registry.example/runtime:custom"`},
@@ -363,6 +365,9 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 			require.Equal(t, test.reason, meta.FindStatusCondition(got.Status.Conditions, v1beta2.DGDCConditionValid).Reason)
 			if test.wantSpec != "" {
 				require.Contains(t, string(got.Spec.Raw), test.wantSpec)
+			}
+			if test.absentSpec != "" {
+				require.NotContains(t, string(got.Spec.Raw), test.absentSpec)
 			}
 			if test.wantLabel != "" {
 				require.Equal(t, test.wantLabel, got.Labels["custom"])

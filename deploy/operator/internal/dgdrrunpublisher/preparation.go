@@ -63,8 +63,7 @@ func (w *clientWriter) PrepareCandidate(
 		if err != nil {
 			candidate.Validity.Status = metav1.ConditionFalse
 			candidate.Validity.Reason = "OverrideFailed"
-			var missing *dgdoverride.TargetNotFoundError
-			if errors.As(err, &missing) {
+			if _, ok := errors.AsType[*dgdoverride.TargetNotFoundError](err); ok {
 				candidate.Validity.Reason = "OverrideTargetNotFound"
 			}
 			candidate.Validity.Message = boundDiagnostic(err.Error())
