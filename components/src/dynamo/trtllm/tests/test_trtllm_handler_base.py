@@ -6,6 +6,7 @@ import logging
 import os
 import re as re_mod
 import threading
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -15,15 +16,13 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from tensorrt_llm.llmapi.llm_args import (
+    TorchLlmArgs,
+    update_llm_args_with_extra_options,
+)
 
 from dynamo.llm.exceptions import InvalidArgument
 
-if not torch.cuda.is_available():
-    pytest.skip(
-        "Skipping to avoid errors during collection with '-m gpu_0'. "
-        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
-        allow_module_level=True,
-    )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
@@ -42,11 +41,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
 ]
 
-# Intentionally omit profiled_vram_gib so this import-heavy module runs in the
-# sequential GPU stage instead of starting one TRT-LLM subprocess per test node.
+# The handler and engine are mocked; these tests do not execute CUDA work.
 
 
 @dataclass
@@ -435,6 +433,7 @@ class TestDeferredAbortGuard:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         config.conversation_affinity = False
         return _ConcreteHandler(config)
@@ -644,6 +643,7 @@ class TestMultimodalGuard:
 
     def _make_handler(self, multimodal_processor=None) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
         config.conversation_affinity = False
@@ -726,6 +726,7 @@ class TestPrefillPromptMetadata:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
         config.conversation_affinity = False
@@ -797,6 +798,7 @@ class TestDisaggRequestId:
 
     def _make_prefill_handler(self, machine_id: int = 42) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
         config.conversation_affinity = False
@@ -806,6 +808,7 @@ class TestDisaggRequestId:
 
     def _make_decode_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.DECODE
@@ -900,6 +903,7 @@ class TestGenerateLocally:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
@@ -1677,6 +1681,7 @@ class TestConversationAffinity:
         dp_rank_source: str = "engine",
     ) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
@@ -1969,6 +1974,7 @@ class TestEngineIdMapLogging:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.engine.engine_args = {}
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
@@ -2073,3 +2079,165 @@ def test_trtllm_handler_matches_shared():
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
+
+
+class TestMultimodalPreprocessingPool:
+    @pytest.fixture
+    def pool_handler(self):
+        handler = TestGenerateLocally()._make_handler()
+        yield handler
+        if handler._mm_preprocess_pool is not None:
+            handler._mm_preprocess_pool.shutdown(wait=True, cancel_futures=True)
+
+    @pytest.mark.asyncio
+    async def test_preprocessing_thread_preserves_request_context(self, pool_handler):
+        request_context = ContextVar("request_context", default=None)
+        request_context.set("one-request")
+        loop_thread = threading.get_ident()
+
+        def preprocess(*args):
+            return (
+                threading.get_ident(),
+                threading.current_thread().name,
+                request_context.get(),
+            )
+
+        pool_handler.engine.llm.preprocess = preprocess
+        thread, name, value = await pool_handler._preprocess_multimodal_input(
+            {}, None, None
+        )
+        assert thread != loop_thread
+        assert name.startswith("mm-preprocess")
+        assert value == "one-request"
+
+    @pytest.mark.asyncio
+    async def test_invalid_media_remains_a_request_error(self, pool_handler):
+        def preprocess(*args):
+            raise ValueError("invalid media")
+
+        pool_handler.engine.llm.preprocess = preprocess
+        pool_handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={
+                "prompt_token_ids": [1, 2, 3],
+                "multi_modal_data": {"image": [object()]},
+            }
+        )
+        pool_handler._handle_fatal_error = mock.AsyncMock()
+        pool_handler.engine.llm.generate_async = MagicMock()
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 8},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in pool_handler.generate_locally(
+                request, TestGenerateLocally()._make_context()
+            )
+        ]
+        assert chunks[-1]["finish_reason"] == {"error": "invalid media"}
+        pool_handler.engine.llm.generate_async.assert_not_called()
+        pool_handler._handle_fatal_error.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_preprocessing_consumes_exported_handles(
+        self, pool_handler
+    ):
+        entered, release, cleaned = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        params = SimpleNamespace(
+            to_tensor=MagicMock(side_effect=lambda _: cleaned.set())
+        )
+
+        def preprocess(*args):
+            entered.set()
+            assert release.wait(timeout=5)
+            return SimpleNamespace(multimodal_params=params)
+
+        pool_handler.engine.llm.preprocess = preprocess
+        task = asyncio.create_task(
+            pool_handler._preprocess_multimodal_input({}, None, None)
+        )
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(cleaned.wait, 2)
+        params.to_tensor.assert_called_once_with("multimodal_data")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_preprocessing_failure_is_consumed(self, pool_handler):
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _, context: errors.append(context))
+
+        def preprocess(*args):
+            entered.set()
+            assert release.wait(timeout=5)
+            raise ValueError("cancelled invalid media")
+
+        pool_handler.engine.llm.preprocess = preprocess
+        try:
+            task = asyncio.create_task(
+                pool_handler._preprocess_multimodal_input({}, None, None)
+            )
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            await asyncio.to_thread(pool_handler._mm_preprocess_pool.shutdown, True)
+            await asyncio.sleep(0)
+            assert not errors
+        finally:
+            release.set()
+            loop.set_exception_handler(previous)
+
+    @pytest.mark.parametrize("workers", [0, 1, 2, 8])
+    @pytest.mark.parametrize("typed", [False, True])
+    def test_workers_from_engine_args(self, workers, typed):
+        config = MagicMock()
+        config.shutdown_event = None
+        config.engine.engine_args = (
+            TorchLlmArgs(
+                model="dummy/model", num_input_processor_workers=workers
+            ).model_dump()
+            if typed
+            else {"num_input_processor_workers": workers}
+        )
+        handler = _ConcreteHandler(config)
+        if workers == 0:
+            assert handler._mm_preprocess_pool is None
+        else:
+            assert handler._mm_preprocess_pool._max_workers == workers
+            handler._mm_preprocess_pool.shutdown(wait=True)
+
+    @pytest.mark.parametrize("workers", [-1, 1.5, "invalid"])
+    def test_invalid_workers_rejected(self, workers):
+        config = MagicMock()
+        config.shutdown_event = None
+        config.engine.engine_args = {"num_input_processor_workers": workers}
+        with pytest.raises(ValueError):
+            _ConcreteHandler(config)
+
+    def test_workers_from_yaml(self, tmp_path):
+        path = tmp_path / "engine.yaml"
+        path.write_text("num_input_processor_workers: 4\n")
+        config = MagicMock()
+        config.shutdown_event = None
+        config.engine.engine_args = update_llm_args_with_extra_options({}, str(path))
+        handler = _ConcreteHandler(config)
+        assert handler._mm_preprocess_pool._max_workers == 4
+        handler._mm_preprocess_pool.shutdown(wait=True)
+
+    def test_default_ignores_removed_env_var(self, monkeypatch):
+        monkeypatch.setenv("DYN_TRTLLM_MM_PREPROCESS_WORKERS", "1")
+        handler = TestGenerateLocally()._make_handler()
+        assert handler._mm_preprocess_pool._max_workers == 8
+        handler._mm_preprocess_pool.shutdown(wait=True)
