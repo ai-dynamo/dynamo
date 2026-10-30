@@ -617,7 +617,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Model:           "test-model",
 					Backend:         "vllm",
 					Image:           "test-profiler:1.1.0",
-					Unauthenticated: ptr.To(true),
+					Unauthenticated: new(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
@@ -665,7 +665,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				&corev1.EnvVar{Name: "DGDR_NAME", Value: dgdrName},
 			))
 
-			// Clean up job
 			_ = k8sClient.Delete(ctx, job)
 		})
 

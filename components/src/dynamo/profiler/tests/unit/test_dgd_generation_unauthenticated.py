@@ -1,13 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for unauthenticated DGDR handling in generated DGD configs.
-
-When spec.unauthenticated is true the generated deployment must not
-reference hf-token-secret at all. The default (field absent or false)
-keeps the reference required.
-"""
-
 import pytest
 
 try:
@@ -62,7 +55,6 @@ def _secret_refs(config: dict, component_name: str, container_name: str) -> list
 def test_authenticated_requests_keep_required_secret_reference(
     backend: str, mode: str, unauthenticated: bool | None
 ) -> None:
-    """Absent or false leaves every hf-token-secret reference required."""
     config = load_dgd_template(backend, mode)
     dgdr = _dgdr(unauthenticated)
 
@@ -84,7 +76,6 @@ def test_authenticated_requests_keep_required_secret_reference(
 def test_unauthenticated_removes_secret_reference_from_all_containers(
     backend: str, mode: str
 ) -> None:
-    """True strips hf-token-secret from every container of every component."""
     config = load_dgd_template(backend, mode)
     dgdr = _dgdr(unauthenticated=True)
 
@@ -107,7 +98,6 @@ def test_unauthenticated_removes_secret_reference_from_all_containers(
 
 
 def test_unauthenticated_preserves_other_env_from_entries() -> None:
-    """Stripping must not drop unrelated envFrom sources on the same container."""
     config = load_dgd_template("vllm", "agg")
     frontend_container = next(
         component
@@ -129,7 +119,6 @@ def test_unauthenticated_preserves_other_env_from_entries() -> None:
 
 
 def test_unauthenticated_strips_mocker_template() -> None:
-    """The mocker base config is also generated from a template with the reference."""
     config = load_dgd_template("mocker", "disagg")
 
     apply_unauthenticated_mode(_dgdr(unauthenticated=True), config)
@@ -149,7 +138,6 @@ class _Ops:
 
 
 def test_assemble_final_config_applies_unauthenticated_mode() -> None:
-    """The assembly path also strips the reference."""
     config = load_dgd_template("vllm", "agg")
     dgdr = _dgdr(unauthenticated=True)
 
