@@ -24,12 +24,14 @@ package dynamo.globalrouter.replica.v1;
 
 // One replica publishes; peers subscribe and receive a snapshot of the
 // publisher's state followed by its events as they happen.
-service ReplicaSync {
+service ReplicaSync
+{
   rpc SubscribeReplicaEvents(SubscribeRequest) returns (stream ReplicaFrame);
 }
 
 // A peer opening the stream.
-message SubscribeRequest {
+message SubscribeRequest
+{
   // The subscribing replica's process id, the `router_id` and `writer_id` it
   // stamps on its own events. The publisher may use it to avoid echoing the
   // subscriber's events back.
@@ -43,8 +45,10 @@ message SubscribeRequest {
 }
 
 // One message on the stream: the opening snapshot, then event batches.
-message ReplicaFrame {
-  oneof frame {
+message ReplicaFrame
+{
+  oneof frame
+  {
     Snapshot snapshot = 1;
     ReplicaEventBatch events = 2;
   }
@@ -53,21 +57,24 @@ message ReplicaFrame {
 // The publisher's state when the subscriber joined: every live session
 // binding and an AddRequest for every booking still open. Events after it
 // apply on top.
-message Snapshot {
+message Snapshot
+{
   repeated AffinityBinding bindings = 1;
   repeated ActiveSequenceEvent open_bookings = 2;
 }
 
 // Events since the previous frame, in the publisher's order. Bounded by the
 // core's MAX_REPLICA_BATCH_EVENTS and MAX_REPLICA_BATCH_DURATION.
-message ReplicaEventBatch {
+message ReplicaEventBatch
+{
   repeated ActiveSequenceEvent events = 1;
   repeated AffinityBinding bindings = 2;
 }
 
 // One booking lifecycle event: the core's ActiveSequenceEvent plus the
 // partition it belongs to.
-message ActiveSequenceEvent {
+message ActiveSequenceEvent
+{
   // With routing_group, the core partition the event belongs to. Host-mode
   // replica channels are per partition, so the receiver needs it to route
   // the event to the right tracker.
@@ -84,7 +91,8 @@ message ActiveSequenceEvent {
   uint64 router_id = 6;
   // The LoRA adapter the request targets, if any.
   optional string lora_name = 7;
-  oneof data {
+  oneof data
+  {
     AddRequest add = 10;
     Empty mark_prefill_completed = 11;
     Empty free = 12;
@@ -93,7 +101,8 @@ message ActiveSequenceEvent {
 
 // A new booking. The core's `token_sequence` is not carried (see the file
 // comment); the receiver books the request without block hashes.
-message AddRequest {
+message AddRequest
+{
   // The requester's expected output length, if it gave one.
   optional uint32 expected_output_tokens = 1;
   // Whether the booking counts toward the worker's prefill load until
@@ -107,7 +116,8 @@ message AddRequest {
 }
 
 // One replicated session binding: the pool a session is pinned to.
-message AffinityBinding {
+message AffinityBinding
+{
   // With routing_group, the core partition the binding belongs to.
   string model_name = 1;
   string routing_group = 2;
