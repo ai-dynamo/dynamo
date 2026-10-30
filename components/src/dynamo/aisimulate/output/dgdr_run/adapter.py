@@ -376,6 +376,9 @@ class DGDRRunOutputAdapter:
         self._accepting = True
 
         # Writer coordination.
+        # Pareto front count from on_round (set by AISimulate; 0 before first round).
+        self._pareto_front_count: int = 0
+
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -426,7 +429,34 @@ class DGDRRunOutputAdapter:
             self._wake.set()
 
     def on_round(self, round_number: int, candidates: list[Any]) -> None:
-        del candidates  # cumulative feasible list: the adapter tracks its own set
+        if self._is_pareto and candidates:
+            # In Pareto mode AISimulate passes its current front selection through
+            # on_round. Use it directly so dominated points are not presented as
+            # front members; _retain() is CPU-bound and safe to call outside the lock.
+            front_count = len(candidates)
+            retained: dict[str, _Retained] = {}
+            for record in candidates[: self._max_candidates]:
+                if not _is_feasible(record):
+                    continue
+                try:
+                    point = self._retain(record)
+                except Exception:
+                    logger.exception(
+                        "dgdr_run: ignoring Pareto front candidate that could not be read"
+                    )
+                    point = None
+                if point is not None and point.id not in retained:
+                    retained[point.id] = point
+            with self._lock:
+                if not self._accepting:
+                    return
+                self._round_no = max(self._round_no, round_number)
+                self._pareto_front_count = front_count
+                # Replace the retained set with AISimulate's front; may evict dominated
+                # points that on_candidate already retained between rounds.
+                self._retained = retained
+                self._wake.set()
+            return
         with self._lock:
             if not self._accepting:
                 return
@@ -661,6 +691,7 @@ class DGDRRunOutputAdapter:
                 round_no = self._round_no
                 evaluated = self._evaluated
                 terminal = self._terminal
+                pareto_front_count = self._pareto_front_count
             if render:
                 candidates = tuple(self._materialize(item) for item in ordered)
             else:
@@ -679,7 +710,7 @@ class DGDRRunOutputAdapter:
                     phase=terminal.phase if terminal else RunPhase.RUNNING,
                     round_no=round_no,
                     evaluated=evaluated,
-                    pareto_front=(self._pareto_front_size or len(ordered)) if self._is_pareto else 0,
+                    pareto_front=(self._pareto_front_size or pareto_front_count or len(ordered)) if self._is_pareto else 0,
                     candidates=candidates,
                     message=terminal.message if terminal else "",
                     error=terminal.error if terminal else "",

@@ -613,6 +613,57 @@ def test_pareto_adapter_is_accepted(tmp_path: Path) -> None:
     assert adapter._is_pareto is True
 
 
+def test_pareto_on_round_reports_full_front_count_when_larger_than_max_candidates(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    # The Pareto front has 3 members but max_candidates=2. The snapshot must
+    # publish 2 candidates and report paretoFront=3 (the full AISimulate front),
+    # not 2 (the bounded publication set).
+    config = make_config(tmp_path, max_candidates=2, is_pareto=True)
+    adapter = DGDRRunOutputAdapter(config, workload=None)
+
+    front = [record(f"p{i}", float(i)) for i in range(3)]
+    for candidate in front:
+        adapter.on_candidate(candidate)
+    adapter.on_round(1, front)
+    adapter.close()
+
+    snapshot = load(tmp_path)
+    assert snapshot["progress"]["paretoFront"] == 3
+    assert len(snapshot["candidates"]) == 2
+    assert snapshot["progress"]["paretoFront"] != len(snapshot["candidates"]), (
+        "front count and published count must be distinct"
+    )
+
+
+def test_pareto_on_round_evicts_dominated_points_from_publication_set(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    # Scalar rank: A(100,10) > B(90,9) > C(80,100). With maxCandidates=2,
+    # on_candidate retains A+B and evicts C. AISimulate's Pareto front is A+C
+    # (B is dominated by A). After on_round fires, the snapshot must show A+C.
+    config = make_config(tmp_path, max_candidates=2, is_pareto=True)
+    adapter = DGDRRunOutputAdapter(config, workload=None)
+
+    candidate_a = record("a", 100.0, objectives={"obj1": 100.0, "obj2": 10.0})
+    candidate_b = record("b", 90.0, objectives={"obj1": 90.0, "obj2": 9.0})
+    candidate_c = record("c", 80.0, objectives={"obj1": 80.0, "obj2": 100.0})
+
+    adapter.on_candidate(candidate_a)
+    adapter.on_candidate(candidate_b)
+    adapter.on_candidate(candidate_c)  # evicted by scalar rank before on_round
+    # AISimulate identifies the Pareto front as A+C; B is dominated by A.
+    adapter.on_round(1, [candidate_a, candidate_c])
+    adapter.close()
+
+    snapshot = load(tmp_path)
+    published = tags(snapshot)
+    assert "a" in published
+    assert "c" in published
+    assert "b" not in published, "dominated point must not appear in the Pareto publication set"
+    assert snapshot["progress"]["paretoFront"] == 2
+
+
 @pytest.mark.parametrize(
     ("overrides", "valid"),
     [
