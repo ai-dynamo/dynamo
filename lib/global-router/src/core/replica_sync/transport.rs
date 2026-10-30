@@ -16,10 +16,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::multi_worker_sequence::active_request_expiry_duration;
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
@@ -87,6 +89,9 @@ pub struct ReplicaSyncStats {
     pub bindings_rejected: u64,
     /// Frames subscribers missed for reading too slowly.
     pub subscribers_lagged: u64,
+    /// Bookings peers have opened here and not yet freed, as tracked for
+    /// [`ReplicaHub::remove_peer`].
+    pub bookings_tracked: u64,
     /// Bookings freed on this replica's behalf of peers that left
     /// ([`ReplicaHub::remove_peer`]).
     pub bookings_released: u64,
@@ -96,6 +101,45 @@ pub struct ReplicaSyncStats {
 struct OpenBooking {
     worker: WorkerWithDpRank,
     lora_name: Option<String>,
+    opened_at: Instant,
+}
+
+/// The bookings one router id has opened here and not yet freed. A free
+/// can be lost (a stream that drops between the add and the free, a lagged
+/// subscriber), and the core expires such a booking on its own, so an entry
+/// older than the core's expiry is dropped too: freeing it would be a no-op.
+struct Ledger {
+    entries: HashMap<(RoutingPartitionId, String), OpenBooking>,
+    pruned_at: Instant,
+}
+
+impl Ledger {
+    fn new(now: Instant) -> Self {
+        Self {
+            entries: HashMap::new(),
+            pruned_at: now,
+        }
+    }
+
+    /// Drops the entries the core has expired, at most once per `expiry`.
+    fn prune(&mut self, now: Instant, expiry: Duration) {
+        if now.saturating_duration_since(self.pruned_at) < expiry {
+            return;
+        }
+        self.entries
+            .retain(|_, booking| now.saturating_duration_since(booking.opened_at) < expiry);
+        self.pruned_at = now;
+    }
+
+    fn live(
+        self,
+        now: Instant,
+        expiry: Duration,
+    ) -> impl Iterator<Item = ((RoutingPartitionId, String), OpenBooking)> {
+        self.entries
+            .into_iter()
+            .filter(move |(_, booking)| now.saturating_duration_since(booking.opened_at) < expiry)
+    }
 }
 
 #[derive(Default)]
@@ -133,7 +177,10 @@ pub struct ReplicaHub {
     /// The bookings each peer's events have opened and not yet freed, by
     /// the router id the events carry (the peer's process), so a peer that
     /// leaves can have them freed rather than left to the core's expiry.
-    open: DashMap<u64, HashMap<(RoutingPartitionId, String), OpenBooking>>,
+    open: DashMap<u64, Ledger>,
+    /// How long the core keeps a booking nobody frees; entries older than
+    /// this are gone from the core already.
+    booking_expiry: Duration,
     /// The router ids each peer's stream has carried events for.
     routers_of: DashMap<Url, HashSet<u64>>,
     cancel: CancellationToken,
@@ -159,6 +206,7 @@ impl ReplicaHub {
             peers: DashMap::new(),
             peers_changed: Notify::new(),
             open: DashMap::new(),
+            booking_expiry: active_request_expiry_duration(),
             routers_of: DashMap::new(),
             cancel,
             counters: Arc::default(),
@@ -186,6 +234,11 @@ impl ReplicaHub {
             events_unroutable: c.events_unroutable.load(Relaxed),
             bindings_rejected: c.bindings_rejected.load(Relaxed),
             subscribers_lagged: c.subscribers_lagged.load(Relaxed),
+            bookings_tracked: self
+                .open
+                .iter()
+                .map(|ledger| ledger.entries.len() as u64)
+                .sum(),
             bookings_released: c.bookings_released.load(Relaxed),
         }
     }
@@ -247,6 +300,7 @@ impl ReplicaHub {
         let Some((_, routers)) = self.routers_of.remove(peer) else {
             return;
         };
+        let now = Instant::now();
         let mut released = 0u64;
         let mut pending = Vec::new();
         for router_id in routers {
@@ -257,10 +311,10 @@ impl ReplicaHub {
             if still_carried {
                 continue;
             }
-            let Some((_, bookings)) = self.open.remove(&router_id) else {
+            let Some((_, ledger)) = self.open.remove(&router_id) else {
                 continue;
             };
-            for ((partition, request_id), booking) in bookings {
+            for ((partition, request_id), booking) in ledger.live(now, self.booking_expiry) {
                 let free = ActiveSequenceEvent {
                     request_id,
                     worker: booking.worker,
@@ -392,6 +446,7 @@ impl ReplicaHub {
                 ActiveSequenceEventData::AddRequest { .. } => Some(Some(OpenBooking {
                     worker: event.worker,
                     lora_name: event.lora_name.clone(),
+                    opened_at: Instant::now(),
                 })),
                 ActiveSequenceEventData::Free => Some(None),
                 ActiveSequenceEventData::MarkPrefillCompleted => None,
@@ -412,14 +467,17 @@ impl ReplicaHub {
             }
             match opened {
                 Some(Some(booking)) => {
-                    self.open
+                    let now = booking.opened_at;
+                    let mut ledger = self
+                        .open
                         .entry(router_id)
-                        .or_default()
-                        .insert((partition, request_id), booking);
+                        .or_insert_with(|| Ledger::new(now));
+                    ledger.prune(now, self.booking_expiry);
+                    ledger.entries.insert((partition, request_id), booking);
                 }
                 Some(None) => {
-                    if let Some(mut bookings) = self.open.get_mut(&router_id) {
-                        bookings.remove(&(partition, request_id));
+                    if let Some(mut ledger) = self.open.get_mut(&router_id) {
+                        ledger.entries.remove(&(partition, request_id));
                     }
                 }
                 None => {}
@@ -510,5 +568,54 @@ async fn publish_events(
                 bindings: Vec::new(),
             })),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn booking(opened_at: Instant) -> OpenBooking {
+        OpenBooking {
+            worker: WorkerWithDpRank::new(1, 0),
+            lora_name: None,
+            opened_at,
+        }
+    }
+
+    fn key(request: &str) -> (RoutingPartitionId, String) {
+        (
+            RoutingPartitionId::new("qwen", "global"),
+            request.to_owned(),
+        )
+    }
+
+    #[test]
+    fn a_ledger_drops_what_the_core_has_expired() {
+        let expiry = Duration::from_secs(300);
+        let start = Instant::now();
+        let mut ledger = Ledger::new(start);
+        ledger.entries.insert(key("old"), booking(start));
+        ledger
+            .entries
+            .insert(key("young"), booking(start + Duration::from_secs(200)));
+
+        // Pruning is rate limited to once per expiry.
+        ledger.prune(start + Duration::from_secs(299), expiry);
+        assert_eq!(ledger.entries.len(), 2);
+        ledger.prune(start + Duration::from_secs(301), expiry);
+        assert_eq!(ledger.entries.keys().collect::<Vec<_>>(), [&key("young")]);
+
+        // Only live entries are freed for a peer that leaves.
+        let mut ledger = Ledger::new(start);
+        ledger.entries.insert(key("old"), booking(start));
+        ledger
+            .entries
+            .insert(key("young"), booking(start + Duration::from_secs(200)));
+        let live = ledger
+            .live(start + Duration::from_secs(301), expiry)
+            .map(|(key, _)| key.1)
+            .collect::<Vec<_>>();
+        assert_eq!(live, ["young"]);
     }
 }

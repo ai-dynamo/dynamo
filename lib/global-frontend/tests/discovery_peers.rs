@@ -127,14 +127,11 @@ async fn peers_come_from_discovery_and_follow_its_listing() {
     let (fake, client) = FakeDiscovery::serve(&[("gf-a", SELF), ("gf-b", OTHER)]).await;
     let core = core_following(client, &[], &cancel).await;
 
-    // Every listed replica but this one.
     assert_peers(&core, &[OTHER]).await;
 
-    // The listing changes: one joins, one leaves.
     fake.list(&[("gf-a", SELF), ("gf-c", THIRD)]);
     assert_peers(&core, &[THIRD]).await;
 
-    // Everyone else leaves; this replica alone stays listed.
     fake.list(&[("gf-a", SELF)]);
     assert_peers(&core, &[]).await;
     cancel.cancel();
