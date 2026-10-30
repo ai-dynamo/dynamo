@@ -441,6 +441,8 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
   Experimental process checkpoint/restore through standalone Snapshot. The API retains the name `checkpoint`; configure it under `spec.components[*].experimental` in a DGD. Enable checkpoint support in the Dynamo operator and install Snapshot before using this field.
 
   Set `enabled: true` without `checkpointRef` for DGD-managed capture through a `SnapshotJob`. Set `checkpointRef` to restore an existing compatible `PodSnapshot` in the same namespace. Omit the deprecated `mode` and `identity` fields.
+
+  Restore admission accepts a worker container only if it directly runs `python -m <module>`. Enabling checkpointing makes the module responsible for calling `maybe_run_restore_standby_mode()` before importing runtime or backend code; no additional annotation is needed. Shell wrappers and non-Python launchers are rejected, including a direct `python -m` command that the operator wraps in a shell while rendering the Pod, and `DynamoGraphDeployment` admission rejects them when you create the deployment or change the entrypoint. See [Use a Custom Worker Entrypoint](../../kubernetes/model-deployment/model-loading/snapshot.mdx#use-a-custom-worker-entrypoint).
 </ParamField>
 
 <Warning>

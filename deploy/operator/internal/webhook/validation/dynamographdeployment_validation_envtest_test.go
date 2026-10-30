@@ -145,7 +145,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			worker := dgd.GetComponentByName("worker")
 			enableBetaSnapshotFailover(worker, "vllm")
 			worker.Experimental.Checkpoint.TargetContainerName = "helper"
-		}), wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`}},
+		}), wantWebhookErrs: []string{
+			`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`,
+			`spec.components[1].podTemplate.spec.containers: Required value: must contain the checkpoint target container "helper" that directly runs python -m <module>`,
+		}},
 		{name: "snapshot failover rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			worker := dgd.GetComponentByName("worker")
@@ -2041,6 +2044,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
+				useBetaRestoreEntrypoint(betaWorkerComponent(dgd), betaPythonModuleCommand("dynamo.vllm"))
 			}),
 		},
 		{
@@ -2067,10 +2071,201 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						},
 					},
 				}
+				useBetaRestoreEntrypoint(betaWorkerComponent(dgd), betaPythonModuleCommand("dynamo.vllm"))
 			}),
 			wantWebhookErrs: []string{
 				"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration",
 				"spec.components[1].experimental.checkpoint.job.gmsClientContainers: Forbidden: requires gpuMemoryService to be set",
+			},
+		},
+
+		// Checkpoint restore entrypoint: the target container must directly run python -m <module>.
+		{
+			name:       "checkpoint admits a custom python module without extra opt-in",
+			deployment: betaCheckpointRestoreDGD(true, betaPythonModuleCommand("my_worker"), 1),
+		},
+		{
+			name:            "checkpoint rejects a shell wrapper at create",
+			deployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			wantWebhookErrs: []string{betaRestoreEntrypointForbidden},
+		},
+		{
+			name:            "checkpoint rejects a missing command because the operator default is a shell",
+			deployment:      betaCheckpointRestoreDGD(true, nil, 1),
+			wantWebhookErrs: []string{betaRestoreEntrypointForbidden},
+		},
+		{
+			name:       "disabled checkpoint does not restrict the entrypoint",
+			deployment: betaCheckpointRestoreDGD(false, betaShellCommand(), 1),
+		},
+		{
+			name: "checkpoint requires the target container to exist",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: "helper"},
+				}
+				useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.vllm"))
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec.containers: Required value: must contain the checkpoint target container "helper" that directly runs python -m <module>`,
+			},
+		},
+		{
+			name:               "unchanged legacy shell entrypoint survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         betaCheckpointRestoreDGD(true, betaShellCommand(), 2),
+		},
+		{
+			name:            "enabling checkpoint on a shell entrypoint is rejected on update",
+			oldDeployment:   betaCheckpointRestoreDGD(false, betaShellCommand(), 1),
+			deployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			wantWebhookErrs: []string{betaRestoreEntrypointForbidden},
+		},
+		{
+			name:               "changing a legacy shell entrypoint to another shell is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         betaCheckpointRestoreDGD(true, []string{"bash", "-c"}, 1),
+			wantWebhookErrs:    []string{betaRestoreEntrypointForbidden},
+		},
+		{
+			name:               "repairing a legacy shell entrypoint is accepted",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         betaCheckpointRestoreDGD(true, betaPythonModuleCommand("my_worker"), 1),
+		},
+		{
+			name:               "disabling checkpoint on a legacy shell entrypoint is accepted",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         betaCheckpointRestoreDGD(false, betaShellCommand(), 1),
+		},
+		{
+			name:            "rolling a repaired entrypoint back to a shell is rejected",
+			oldDeployment:   betaCheckpointRestoreDGD(true, betaPythonModuleCommand("my_worker"), 1),
+			deployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			wantWebhookErrs: []string{betaRestoreEntrypointForbidden},
+		},
+		{
+			name:               "reordering containers keeps a legacy shell entrypoint exempt",
+			seedWithoutWebhook: true,
+			oldDeployment:      withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), false),
+			deployment:         withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), true),
+		},
+		{
+			name:               "inserting a sidecar before a legacy shell target keeps it exempt",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), true),
+		},
+		{
+			name:               "moving the checkpoint target to another container is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment:      withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), false),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: betaMetricsContainerName},
+				}
+				useBetaRestoreEntrypoint(worker, betaShellCommand())
+				appendBetaMetricsContainer(worker, false)
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.spec.containers[1].command: Forbidden: " +
+					"checkpoint restore requires the target container to directly run python -m <module>; " +
+					"shell wrappers and non-python launchers are not supported",
+			},
+		},
+
+		{
+			name:       "checkpoint admits role templates that directly run python modules",
+			deployment: betaCheckpointRoleTemplatesDGD(betaPythonModuleCommand("my_worker"), betaPythonModuleCommand("my_worker"), 1),
+		},
+		{
+			name:       "checkpoint rejects a shell wrapper in one role template at its role path",
+			deployment: betaCheckpointRoleTemplatesDGD(betaPythonModuleCommand("my_worker"), betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:       "checkpoint checks every role template",
+			deployment: betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[0].podTemplate.spec.containers[0].command"),
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name: "checkpoint requires the target container in each role template",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaCheckpointRoleTemplates(worker, betaPythonModuleCommand("my_worker"), betaPythonModuleCommand("my_worker"))
+				worker.Roles[0].PodTemplate.Spec.Containers[0].Name = "helper"
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].podTemplate.spec.containers: Required value: must contain a container named "main"`,
+				`spec.components[1].roles[0].podTemplate.spec.containers: Required value: must contain the checkpoint target container "main" that directly runs python -m <module>`,
+			},
+		},
+		{
+			name:               "unchanged legacy shell role templates survive an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			deployment:         betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 2),
+		},
+		{
+			name:               "changing one legacy role launch to another shell is rejected for that role only",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			deployment:         betaCheckpointRoleTemplatesDGD(betaShellCommand(), []string{"bash", "-c"}, 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+
+		{
+			name:       "snapshot failover admits a main container that directly runs a python module",
+			deployment: betaSnapshotFailoverRestoreDGD(betaPythonModuleCommand("dynamo.vllm"), 1),
+		},
+		{
+			name:       "snapshot failover rejects a shell wrapper because both engines clone main",
+			deployment: betaSnapshotFailoverRestoreDGD(betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:               "unchanged legacy shell snapshot failover survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaSnapshotFailoverRestoreDGD(betaShellCommand(), 1),
+			deployment:         betaSnapshotFailoverRestoreDGD(betaShellCommand(), 2),
+		},
+
+		{
+			name:       "checkpoint rejects a python launch that elastic expert parallelism on Ray rewrites into a shell",
+			deployment: betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointRewrittenAt("spec.components[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:       "checkpoint admits elastic expert parallelism that keeps the python launch",
+			deployment: betaVLLMRestoreDGD(betaElasticEPArgs("mp"), 1),
+		},
+		{
+			name:               "unchanged legacy elastic expert parallelism on Ray survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 1),
+			deployment:         betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 2),
+		},
+		{
+			name:       "checkpoint rejects a multinode TRT-LLM python launch with one error at the authored command",
+			deployment: betaMultinodeTRTLLMRestoreDGD(),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointRewrittenAt("spec.components[1].podTemplate.spec.containers[0].command"),
 			},
 		},
 
@@ -2398,6 +2593,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.vllm"))
 			}),
 		},
 		{
@@ -2409,6 +2605,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaInterPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+				useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.vllm"))
 			}),
 			wantWebhookErrs: []string{
 				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
@@ -4799,6 +4996,138 @@ func enableBetaInterPodGMS(component *nvidiacomv1beta1.DynamoComponentDeployment
 			}},
 		},
 	}
+}
+
+const betaRestoreEntrypointForbidden = "spec.components[1].podTemplate.spec.containers[0].command: Forbidden: " +
+	"checkpoint restore requires the target container to directly run python -m <module>; " +
+	"shell wrappers and non-python launchers are not supported"
+
+func betaPythonModuleCommand(module string) []string {
+	return []string{"python3", "-m", module}
+}
+
+func betaShellCommand() []string {
+	return []string{"/bin/sh", "-c"}
+}
+
+// useBetaRestoreEntrypoint gives the checkpoint target the launch restore admission requires.
+func useBetaRestoreEntrypoint(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, command []string) {
+	component.PodTemplate.Spec.Containers[0].Command = command
+}
+
+// betaCheckpointRestoreDGD builds a worker whose checkpoint target launches command.
+func betaCheckpointRestoreDGD(enabled bool, command []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: enabled},
+		}
+		useBetaRestoreEntrypoint(worker, command)
+	})
+}
+
+// betaRestoreEntrypointForbiddenAt is the restore entrypoint rejection reported at path.
+func betaRestoreEntrypointForbiddenAt(path string) string {
+	return path + ": Forbidden: checkpoint restore requires the target container to directly run python -m <module>; " +
+		"shell wrappers and non-python launchers are not supported"
+}
+
+// setBetaCheckpointRoleTemplates moves the worker to leader/worker role templates whose
+// checkpoint target launches the given commands.
+func setBetaCheckpointRoleTemplates(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	leaderCommand, workerCommand []string,
+) {
+	worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	setBetaExplicitMultinodeRoleTemplates(worker, 2)
+	worker.Roles[0].PodTemplate.Spec.Containers[0].Command = leaderCommand
+	worker.Roles[1].PodTemplate.Spec.Containers[0].Command = workerCommand
+}
+
+// betaCheckpointRoleTemplatesDGD builds a multinode worker whose role templates launch the given commands.
+func betaCheckpointRoleTemplatesDGD(leaderCommand, workerCommand []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		setBetaCheckpointRoleTemplates(worker, leaderCommand, workerCommand)
+	})
+}
+
+// betaSnapshotFailoverRestoreDGD builds a vLLM snapshot-backed intra-pod failover worker whose main launches command.
+func betaSnapshotFailoverRestoreDGD(command []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		enableBetaContainerDiscovery(dgd)
+		dgd.Spec.BackendFramework = "vllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		enableBetaSnapshotFailover(worker, "vllm")
+		useBetaRestoreEntrypoint(worker, command)
+	})
+}
+
+// betaRestoreEntrypointRewrittenAt is the rejection of an authored python launch that rendering rewrites.
+func betaRestoreEntrypointRewrittenAt(path string) string {
+	return path + ": Forbidden: checkpoint restore requires the target container to directly run python -m <module>; " +
+		"the operator rewrites this launch when it renders the Pod, and the rewritten launch does not"
+}
+
+// betaElasticEPArgs asks vLLM for elastic expert parallelism on the given data-parallel backend.
+func betaElasticEPArgs(backend string) []string {
+	return []string{"--model", "Qwen/Qwen3-0.6B", "--enable-elastic-ep", "--data-parallel-backend", backend}
+}
+
+// betaVLLMRestoreDGD builds a single-node vLLM worker whose checkpoint target directly runs python with args.
+func betaVLLMRestoreDGD(args []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Spec.BackendFramework = "vllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		}
+		useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.vllm"))
+		main := &worker.PodTemplate.Spec.Containers[0]
+		main.Args = args
+		main.Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2")}
+	})
+}
+
+// betaMultinodeTRTLLMRestoreDGD builds a two-node TRT-LLM worker whose checkpoint target directly runs python.
+func betaMultinodeTRTLLMRestoreDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Spec.BackendFramework = "trtllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		}
+		useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.trtllm"))
+		worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+		}
+	})
+}
+
+const betaMetricsContainerName = "metrics"
+
+// appendBetaMetricsContainer adds an unrelated sidecar before or after the existing containers.
+func appendBetaMetricsContainer(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, first bool) {
+	metrics := corev1.Container{Name: betaMetricsContainerName, Image: "registry.example.invalid/metrics:1.0.0"}
+	containers := component.PodTemplate.Spec.Containers
+	if first {
+		component.PodTemplate.Spec.Containers = append([]corev1.Container{metrics}, containers...)
+		return
+	}
+	component.PodTemplate.Spec.Containers = append(containers, metrics)
+}
+
+// withBetaMetricsContainer adds an unrelated sidecar to the worker and returns dgd.
+func withBetaMetricsContainer(dgd *nvidiacomv1beta1.DynamoGraphDeployment, first bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	appendBetaMetricsContainer(betaWorkerComponent(dgd), first)
+	return dgd
 }
 
 // enableBetaSnapshotFailover constructs a fresh multi-GPU capture/election

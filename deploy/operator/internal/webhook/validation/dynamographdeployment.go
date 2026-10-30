@@ -68,6 +68,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	workloadProvider        string
 	grovePathway            bool
 	grovePathwayRequirement string
+	annotations             map[string]string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
@@ -224,6 +225,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
+		annotations:             dgd.Annotations,
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
@@ -464,11 +466,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			dynamoComponentDeploymentSharedSpecValidationOptions{
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
-				providerOverridesSupported:        true,
-				workloadProvider:                  opts.workloadProvider,
-				oldComponent:                      opts.oldComponents[component.ComponentName],
-				groveUpdateStrategy:               opts.groveUpdateStrategy,
-				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
+				checkpointRestoreEntrypoint: &checkpointRestoreEntrypointOptions{
+					backendFramework: spec.BackendFramework,
+					annotations:      opts.annotations,
+					grovePathway:     opts.grovePathway,
+				},
+				providerOverridesSupported: true,
+				workloadProvider:           opts.workloadProvider,
+				oldComponent:               opts.oldComponents[component.ComponentName],
+				groveUpdateStrategy:        opts.groveUpdateStrategy,
+				groveStrategyChanged:       opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
 			},
 		)...)
 	}

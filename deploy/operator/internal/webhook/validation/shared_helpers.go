@@ -25,6 +25,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
@@ -264,6 +265,172 @@ func mainContainerIndex(containers []corev1.Container) int {
 		}
 	}
 	return -1
+}
+
+// restoreEntrypointInputs is the complete input of the checkpoint restore
+// entrypoint rule for one restore destination: the Pod template that renders it,
+// the restore target and the launch it receives.
+type restoreEntrypointInputs struct {
+	// roleName names the role that renders the destination. Before rendering it is
+	// the role whose complete PodTemplate authored the input, or empty for the
+	// component-level PodTemplate, which serves every role.
+	roleName        string
+	targetContainer string
+	// roleIndex and containerIndex locate the target in the authored lists for error
+	// paths only; the destination keeps its identity when siblings are reordered or
+	// inserted. roleIndex is -1 for the component-level PodTemplate and
+	// containerIndex is -1 when the target container is missing.
+	roleIndex      int
+	containerIndex int
+	// command and args are the launch restore admission sees: the rendered launch when
+	// the operator can derive it, otherwise the authored one.
+	command []string
+	args    []string
+	// authoredSupported reports whether the authored launch already satisfies the
+	// contract, so a rejection comes from the operator rewriting it.
+	authoredSupported bool
+}
+
+// supported reports whether the launch satisfies the restore entrypoint contract.
+func (i restoreEntrypointInputs) supported() bool {
+	return checkpoint.HasSupportedRestoreEntrypoint(&corev1.Container{Command: i.command, Args: i.args})
+}
+
+// equal compares the destination identity and launch, treating nil and empty launch slices alike.
+func (i restoreEntrypointInputs) equal(other restoreEntrypointInputs) bool {
+	return i.roleName == other.roleName &&
+		i.targetContainer == other.targetContainer &&
+		slices.Equal(i.command, other.command) &&
+		slices.Equal(i.args, other.args)
+}
+
+// restoreEntrypointInputsForTemplate resolves the target container launch of one Pod template.
+// roleIndex is -1 for the component-level template; podTemplate may be nil.
+func restoreEntrypointInputsForTemplate(
+	podTemplate *corev1.PodTemplateSpec,
+	roleName string,
+	roleIndex int,
+	targetContainer string,
+) restoreEntrypointInputs {
+	inputs := restoreEntrypointInputs{
+		roleName:        roleName,
+		targetContainer: targetContainer,
+		roleIndex:       roleIndex,
+		containerIndex:  -1,
+	}
+
+	// An authored command replaces the operator's /bin/sh -c default, so a missing one leaves the shell.
+	containers := podTemplateContainers(podTemplate)
+	for i := range containers {
+		if containers[i].Name == targetContainer {
+			inputs.containerIndex = i
+			inputs.command = containers[i].Command
+			inputs.args = containers[i].Args
+			break
+		}
+	}
+	inputs.authoredSupported = inputs.supported()
+	return inputs
+}
+
+// checkpointRestoreEntrypointOptions carries what rendering needs besides the component:
+// the graph's explicit backend, the graph annotations propagated to components, and
+// whether the graph renders through Grove or LeaderWorkerSet.
+type checkpointRestoreEntrypointOptions struct {
+	backendFramework string
+	annotations      map[string]string
+	grovePathway     bool
+}
+
+// restoreEntrypointInputsFor resolves the entrypoint of every restore destination
+// that restore admission will see for the checkpoint target container. The
+// component-level PodTemplate is one destination; in role-template mode each role
+// with a complete PodTemplate is one, mirroring how rendering selects the template.
+// The operator rewrites the launch of the main container while rendering, so its
+// destinations carry the rendered launch whenever it can be derived. It reports
+// false when the component does not enable checkpointing for a component type that
+// supports it, or when the launch is not authored by the user (native sidecars).
+// spec must not be nil.
+func restoreEntrypointInputsFor(
+	ctx context.Context,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	options checkpointRestoreEntrypointOptions,
+) ([]restoreEntrypointInputs, bool) {
+	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
+		return nil, false
+	}
+	switch spec.ComponentType {
+	case nvidiacomv1beta1.ComponentTypeWorker, nvidiacomv1beta1.ComponentTypePrefill, nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		return nil, false
+	}
+	if dynamo.GetDynamoSidecar(spec) != nil {
+		return nil, false
+	}
+
+	targetContainer := spec.Experimental.Checkpoint.TargetContainerName
+	if targetContainer == "" {
+		targetContainer = consts.MainContainerName
+	}
+
+	// A component-level PodTemplate is the complete source for every role.
+	var inputs []restoreEntrypointInputs
+	if spec.PodTemplate != nil || !dynamo.HasRolePodTemplates(spec) {
+		inputs = []restoreEntrypointInputs{restoreEntrypointInputsForTemplate(spec.PodTemplate, "", -1, targetContainer)}
+	} else {
+		// Role-template mode renders each role from its own complete PodTemplate.
+		for i := range spec.Roles {
+			if spec.Roles[i].PodTemplate != nil {
+				inputs = append(inputs, restoreEntrypointInputsForTemplate(spec.Roles[i].PodTemplate, spec.Roles[i].Name, i, targetContainer))
+			}
+		}
+	}
+
+	// Only the main container's launch is rewritten while rendering.
+	if targetContainer != consts.MainContainerName {
+		return inputs, true
+	}
+	return renderRestoreEntrypointInputs(ctx, spec, options, inputs), true
+}
+
+// renderRestoreEntrypointInputs replaces the authored launch of each main-container
+// destination with the launch the operator renders for the roles it serves. It keeps
+// the authored inputs when the launch cannot be derived, which includes a template
+// without the main container, so admission is never stricter than restore Pod
+// admission on what it cannot model.
+func renderRestoreEntrypointInputs(
+	ctx context.Context,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	options checkpointRestoreEntrypointOptions,
+	authored []restoreEntrypointInputs,
+) []restoreEntrypointInputs {
+	deploymentType := consts.MultinodeDeploymentTypeLWS
+	if options.grovePathway {
+		deploymentType = consts.MultinodeDeploymentTypeGrove
+	}
+	launches, err := dynamo.RenderMainContainerLaunches(ctx, spec, options.backendFramework, options.annotations, deploymentType)
+	if err != nil {
+		return authored
+	}
+
+	// Each rendered role becomes one destination located at the authored container that produced it.
+	rendered := make([]restoreEntrypointInputs, 0, len(launches))
+	for _, launch := range launches {
+		for _, input := range authored {
+			// The component-level template (no role name) serves every role; a role template only its own.
+			if input.roleName != "" && input.roleName != string(launch.Role) {
+				continue
+			}
+			input.roleName = string(launch.Role)
+			input.command = launch.Command
+			input.args = launch.Args
+			rendered = append(rendered, input)
+		}
+	}
+	if len(rendered) == 0 {
+		return authored
+	}
+	return rendered
 }
 
 func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {

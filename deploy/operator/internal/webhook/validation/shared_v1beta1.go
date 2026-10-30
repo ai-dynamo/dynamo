@@ -161,11 +161,14 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
-	providerOverridesSupported        bool
-	workloadProvider                  string
-	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
-	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
-	groveStrategyChanged              bool
+	// checkpointRestoreEntrypoint applies the restore entrypoint rule when non-nil; only
+	// DynamoGraphDeployment components opt in, not standalone DynamoComponentDeployments.
+	checkpointRestoreEntrypoint *checkpointRestoreEntrypointOptions
+	providerOverridesSupported  bool
+	workloadProvider            string
+	oldComponent                *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy         grovev1alpha1.UpdateStrategyType
+	groveStrategyChanged        bool
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -281,6 +284,59 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
+
+	// Reject each checkpoint restore destination that restore admission would refuse. An
+	// unchanged stored violation survives only while its role, target and launch are identical.
+	if options.checkpointRestoreEntrypoint != nil {
+		inputs, applies := restoreEntrypointInputsFor(v.ctx, spec, *options.checkpointRestoreEntrypoint)
+		var oldInputs []restoreEntrypointInputs
+		if applies && options.oldComponent != nil {
+			oldInputs, _ = restoreEntrypointInputsFor(v.ctx, options.oldComponent, *options.checkpointRestoreEntrypoint)
+		}
+
+		// Roles that share an authored container report one error at that container.
+		reported := map[string]bool{}
+		for _, destination := range inputs {
+			if destination.supported() || slices.ContainsFunc(oldInputs, destination.equal) {
+				continue
+			}
+
+			templatePath := fldPath.Child("podTemplate")
+			if destination.roleIndex >= 0 {
+				templatePath = fldPath.Child("roles").Index(destination.roleIndex).Child("podTemplate")
+			}
+			containersPath := templatePath.Child("spec", "containers")
+			if destination.containerIndex < 0 {
+				if !reported[containersPath.String()] {
+					allErrs = append(allErrs, field.Required(
+						containersPath,
+						fmt.Sprintf("must contain the checkpoint target container %q that directly runs python -m <module>", destination.targetContainer),
+					))
+					reported[containersPath.String()] = true
+				}
+				continue
+			}
+
+			commandPath := containersPath.Index(destination.containerIndex).Child("command")
+			if reported[commandPath.String()] {
+				continue
+			}
+			reported[commandPath.String()] = true
+			if destination.authoredSupported {
+				allErrs = append(allErrs, field.Forbidden(
+					commandPath,
+					"checkpoint restore requires the target container to directly run python -m <module>; "+
+						"the operator rewrites this launch when it renders the Pod, and the rewritten launch does not",
+				))
+				continue
+			}
+			allErrs = append(allErrs, field.Forbidden(
+				commandPath,
+				"checkpoint restore requires the target container to directly run python -m <module>; "+
+					"shell wrappers and non-python launchers are not supported",
+			))
+		}
+	}
 
 	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
