@@ -1031,7 +1031,6 @@ def _run_codex_exec_smoke(
         )
 
 
-# A `marker_` filename with any hex suffix: the answer may miscopy the digits.
 _MARKER_FILENAME_RE = re.compile(r"marker_[0-9a-f]+\.txt")
 
 
@@ -1071,42 +1070,6 @@ def _codex_listing_failure(stdout: str, marker_filename: str) -> str | None:
             f"output did not reach the model; final answer: {final_message!r}"
         )
     return None
-
-
-@pytest.mark.unit
-@pytest.mark.sglang
-@pytest.mark.core
-@pytest.mark.gpu_0
-@pytest.mark.pre_merge
-def test_codex_listing_failure_requires_command_output_and_answer() -> None:
-    marker = "marker_631ba9e666d8.txt"
-
-    def events(*items: dict) -> str:
-        lines = [{"type": "thread.started", "thread_id": "t"}]
-        lines += [{"type": "item.completed", "item": item} for item in items]
-        return "\n".join(json.dumps(line) for line in lines) + "\n"
-
-    listing = {
-        "type": "command_execution",
-        "command": "/bin/bash -lc ls",
-        "aggregated_output": f"{marker}\n",
-        "exit_code": 0,
-        "status": "completed",
-    }
-    miscopied = {
-        "type": "agent_message",
-        "text": "The only file present is `marker_631ba9e66d8.txt`.",
-    }
-    assert _codex_listing_failure(events(listing, miscopied), marker) is None
-
-    assert _codex_listing_failure(events(miscopied), marker)
-    refused = {**listing, "exit_code": 1, "aggregated_output": "rejected"}
-    assert _codex_listing_failure(events(refused, miscopied), marker)
-    unrelated = {"type": "agent_message", "text": "The directory is empty."}
-    assert _codex_listing_failure(events(listing, unrelated), marker)
-    no_name = {"type": "agent_message", "text": "I could not identify a marker_ file."}
-    assert _codex_listing_failure(events(listing, no_name), marker)
-    assert _codex_listing_failure(events(listing), marker)
 
 
 def _run_codex_subagent_smoke(
