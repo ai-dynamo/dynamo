@@ -95,16 +95,24 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
+    # The Mistral Large 4 vLLM image (amd64 and arm64), pinned to the index
+    # published on 2026-10-29.
+    runtime_image_tag: mistral-large-4@sha256:83a52c97e78b284d031e98135f17a448789358be31aa246237d6ad0130ef7657
+    # The base requires transformers >=5.16.1 and tokenizers >=0.23.2, and
+    # vLLM-Omni requires Transformers <5.15, so Omni stays off and the
+    # versions the base installed are kept.
+    enable_vllm_omni: "false"
+    transformers_version: "5.20.2"
+    tokenizers_version: "0.23.3"
     vllm_omni_ref: "v0.31.0rc1"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
+    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.3-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
     # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
     # rather than hiding it. Per-arch stem; the licenses stage appends
     # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
     # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    baseline_sbom: cuda@7c7413a5
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -118,6 +126,7 @@ vllm:
     runtime_image_tag: v0.30.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.30.0rc1"
+  enable_vllm_omni: "true"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
@@ -136,7 +145,9 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.22-cu130-runtime
+    # The Mistral Large 4 SGLang image (amd64 and arm64), pinned to the index
+    # published on 2026-10-29.
+    runtime_image_tag: mistral-large-4@sha256:6c9e19a08f30ef8472f3c2ae2d01de99b452cf1fed77f720cd3b6fec61625770
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.

@@ -42,6 +42,7 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
+from .models.mistral import MistralImagePlaceholders
 from .models.qwen import (
     QwenGridParams,
     build_qwen_embedding_params,
@@ -375,6 +376,8 @@ class VllmMultimodalRequestProcessor:
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
         self._k3_expansion_cached = False
+        self._mistral_placeholders: Optional[MistralImagePlaceholders] = None
+        self._mistral_placeholders_cached = False
 
         if use_unified_vision_chunk is None:
             model_config = getattr(
@@ -499,6 +502,55 @@ class VllmMultimodalRequestProcessor:
             previous = position + 1
         expanded.extend(token_ids[previous:])
         return expanded
+
+    def _is_kimi_k3(self) -> bool:
+        model_config = getattr(
+            getattr(self.engine_client, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(model_config, "hf_config", None)
+        return getattr(hf_config, "model_type", None) == "kimi_k3"
+
+    def _mistral_image_placeholders(self) -> Optional[MistralImagePlaceholders]:
+        """Return the image placeholders of a Mistral-format model.
+
+        Tokenizers without a mistral-common image encoder are cached as
+        ``None``. A missing tokenizer is not cached because it may become
+        available later during startup.
+        """
+        if self._mistral_placeholders_cached:
+            return self._mistral_placeholders
+        get_tokenizer = getattr(self.engine_client, "get_tokenizer", None)
+        if get_tokenizer is None:
+            return None
+        tokenizer = get_tokenizer()
+        if tokenizer is None:
+            return None
+        self._mistral_placeholders = MistralImagePlaceholders.from_tokenizer(tokenizer)
+        self._mistral_placeholders_cached = True
+        return self._mistral_placeholders
+
+    def _adapt_image_placeholders(
+        self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
+    ) -> list[int]:
+        """Adapt the frontend's image placeholders for this model's vLLM processor.
+
+        The frontend emits one placeholder per image. Kimi K3 renames it to the
+        token vLLM expands. vLLM never expands Mistral-format placeholders, so
+        the worker expands them. Other models take the placeholder as is.
+        """
+        if not multi_modal_data:
+            return token_ids
+        if self._is_kimi_k3():
+            return self._expand_kimi_k3_pads(token_ids, multi_modal_data)
+        mistral = self._mistral_image_placeholders()
+        if mistral is None:
+            return token_ids
+        images = multi_modal_data.get("image")
+        if images is None or isinstance(images, dict):
+            return token_ids
+        if not isinstance(images, (list, tuple)):
+            images = [images]
+        return mistral.expand(token_ids, images)
 
     @staticmethod
     def _multimodal_disabled_error() -> InvalidArgument:
@@ -898,7 +950,7 @@ class VllmMultimodalRequestProcessor:
                 )
 
         prompt_kwargs: dict[str, Any] = {
-            "prompt_token_ids": self._expand_kimi_k3_pads(
+            "prompt_token_ids": self._adapt_image_placeholders(
                 request["token_ids"],
                 multi_modal_data,
             ),

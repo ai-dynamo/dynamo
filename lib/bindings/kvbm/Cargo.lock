@@ -2299,8 +2299,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "10.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2323,8 +2322,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.7.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
 dependencies = [
  "anyhow",
  "openai-harmony",
@@ -2340,8 +2338,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "8.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2359,8 +2356,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "8.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2470,8 +2466,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "914bc0a92430a2fc39164e21a7849587de190e0fea824f56c5f8bb9f29413658"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
 dependencies = [
  "aho-corasick",
  "anyhow",

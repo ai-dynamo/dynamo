@@ -2245,6 +2245,84 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
 
 
+# --- Per-model image placeholder dispatch ------------------------------------
+
+_IMG, _IMG_BREAK, _IMG_END = 10, 12, 13
+
+
+def _mistral_processor(
+    tokenizer: object,
+) -> tuple[mod.VllmMultimodalRequestProcessor, SimpleNamespace]:
+    engine_client = SimpleNamespace(get_tokenizer=MagicMock(return_value=tokenizer))
+    processor = mod.VllmMultimodalRequestProcessor(
+        model="mistral",
+        engine_client=engine_client,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
+    return processor, engine_client
+
+
+def _mistral_tokenizer() -> SimpleNamespace:
+    """A Mistral tokenizer whose image encoder spends one token per 28 pixels."""
+    encoder = SimpleNamespace(
+        special_ids=SimpleNamespace(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END),
+        _image_to_num_tokens=lambda image: (
+            (image.size[0] - 1) // 28 + 1,
+            (image.size[1] - 1) // 28 + 1,
+        ),
+    )
+    return SimpleNamespace(instruct=SimpleNamespace(mm_encoder=encoder))
+
+
+def test_mistral_build_tokens_prompt_expands_placeholders():
+    processor, _ = _mistral_processor(_mistral_tokenizer())
+
+    prompt = processor.build_tokens_prompt(
+        {"token_ids": [1, _IMG, 2], "multi_modal_uuids": {"image_url": ["a"]}},
+        {"image": Image.new("RGB", (56, 28))},
+        None,
+    )
+
+    # A 56x28 image is a 2x1 grid.
+    assert prompt["prompt_token_ids"] == [1, _IMG, _IMG, _IMG_END, 2]
+
+
+@pytest.mark.parametrize(
+    "tokenizer",
+    [SimpleNamespace(encode=MagicMock()), None],
+    ids=["no-mm-encoder", "missing"],
+)
+def test_non_mistral_tokenizers_are_never_rewritten(tokenizer: object):
+    processor, engine_client = _mistral_processor(tokenizer)
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    # A known non-Mistral tokenizer is resolved once; a missing one is retried.
+    assert engine_client.get_tokenizer.call_count == (2 if tokenizer is None else 1)
+
+
+def test_text_only_requests_never_resolve_the_tokenizer():
+    processor, engine_client = _mistral_processor(_mistral_tokenizer())
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, None) is tokens
+    assert processor._adapt_image_placeholders(tokens, {}) is tokens
+    engine_client.get_tokenizer.assert_not_called()
+
+
+def test_k3_placeholders_skip_the_mistral_path():
+    processor, engine_client = _k3_processor()
+
+    result = processor._adapt_image_placeholders(
+        [1, _K3_PAD_ID, 2], {"image": object()}
+    )
+
+    assert result == [1, *_K3_NATIVE_IDS, 2]
+    engine_client.get_tokenizer.assert_called_once_with()
+
+
 class TestLoadQwenGridParams:
     """Tests for embedding dimensions loaded from Qwen vision configs."""
 

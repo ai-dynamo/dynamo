@@ -47,6 +47,11 @@ pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
+/// Runtime-data key indicating that the backend compiles a lark
+/// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
+/// `%json` schemas are valid. Absence means `false`.
+pub const LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY: &str = "llguidance_lark_grammar";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false

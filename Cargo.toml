@@ -232,3 +232,12 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Build the frontend crates from the frontend-crates release branch, which adds
+# Mistral support at the versions pinned with `=` above.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e6efb77404896c68bd98d4545500c9d5ff44245d" }

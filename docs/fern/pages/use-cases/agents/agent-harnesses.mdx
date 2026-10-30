@@ -35,14 +35,11 @@ bash examples/backends/sglang/launch/agg_agent.sh
     wire_api = "responses"
     ```
 
-    Dynamo's Responses adapter currently supports function tools, including functions inside namespaces, and `tool_choice` values of `none`, `auto`, `required`, or a named function. Unsupported tool or tool-choice types return HTTP 400 before inference. Unsupported tools are rejected even when `tool_choice` is `none` or `auto`.
-
-    Disable Codex's hosted web search when using Dynamo. The following command overrides the top-level `web_search` setting for this run:
+    Dynamo's Responses adapter currently supports function tools, including functions inside namespaces, and `tool_choice` values of `none`, `auto`, `required`, or a named function. Hosted web search (`web_search`, `web_search_preview` and their dated variants), which Codex sends by default, is ignored: the model is not offered it. Other unsupported tools, such as `local_shell`, `file_search` or a remote `mcp` server, return HTTP 400 before inference, even when `tool_choice` is `none` or `auto`; so does a `tool_choice` that names a hosted tool.
 
     ```bash
     # replace -m <model> with your model
-    codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo \
-      -c 'web_search="disabled"'
+    codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
     ```
 
     Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.

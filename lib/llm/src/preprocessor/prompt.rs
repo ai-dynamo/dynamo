@@ -23,7 +23,9 @@ use dynamo_renderer::{
     kimi_k3_formatter_for, may_be_fix_tool_schema,
 };
 
-use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+use crate::model_card::{
+    ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
+};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -258,6 +260,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         }
     }
 
+    fn raw_tools(&self) -> Option<Value> {
+        self.inner.tools.as_ref().map(Value::from_serialize)
+    }
+
     fn tool_choice(&self) -> Option<Value> {
         if self.inner.tool_choice.is_none() {
             None
@@ -379,6 +385,20 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    // Mistral-native checkpoints ship no template; mistral-common's encoding
+    // is reproduced natively from the tekken tokenizer's version and settings.
+    if let Some(TokenizerKind::TekkenJson(checked_file)) = &mdc.tokenizer {
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        let version = metadata
+            .version()
+            .context("tekken.json has no numeric version")?;
+        let formatter = dynamo_renderer::mistral::MistralFormatter::new(
+            version,
+            metadata.model_settings_builder(),
+        )?;
+        return Ok(PromptFormatter::OAI(std::sync::Arc::new(formatter)));
+    }
+
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
     // `model_type` carries no signal — normalize to `None` so the display-name

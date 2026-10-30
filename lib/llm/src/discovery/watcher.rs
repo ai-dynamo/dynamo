@@ -466,6 +466,7 @@ impl ModelWatcher {
         // Build the WorkerSet with all applicable engines
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
+        worker_set.set_mistral_disabled_thinking_effort(card.mistral_disabled_thinking_effort()?);
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
