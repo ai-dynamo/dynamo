@@ -65,6 +65,18 @@ Two-node aggregated deployments with a process-local KVCR tier or a resilient
 KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
 RDMA, and lifecycle requirements.
 
+### 9. **Out-of-Tree vLLM Plugin Models** (`oot_plugin/`)
+
+Aggregated deployment for models whose architecture is registered through an
+out-of-tree vLLM plugin instead of vLLM's in-tree registry (worked example:
+[XHToken Spark-X2.6](https://github.com/XHToken/Spark-X2.6), a hybrid-attention
+model with a 1M-token native context). Includes a Dockerfile that layers the
+plugin onto the stock `vllm-runtime` image with build-time gates for plugin
+registration and dependency compatibility (`--no-deps` install),
+engine-version compatibility guidance, and the current limitations for
+hybrid-attention models under KV-aware routing. See
+[`oot_plugin/README.md`](./oot_plugin/README.md).
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -163,6 +175,7 @@ Select the deployment pattern that matches your requirements:
 - Use `xpu/agg_xpu_dra.yaml` for aggregated deployment on Intel XPU clusters using Kubernetes DRA
 - Use `xpu/disagg_xpu_dra.yaml` for disaggregated deployment on Intel XPU clusters using Kubernetes DRA
 - Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
+- Use `oot_plugin/agg_oot_plugin.yaml` for models that require an out-of-tree vLLM plugin (e.g. Spark-X2.6)
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
