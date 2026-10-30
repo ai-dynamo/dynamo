@@ -41,6 +41,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -1119,6 +1120,62 @@ def build_sampling_params_openai(
     # Same setattr gap as in build_sampling_params.
     sampling_params.__post_init__()
     return sampling_params
+
+
+# The keys of a raw text-only token prompt as Dynamo builds it (vLLM TokensPrompt).
+_TOKENS_PROMPT_KEYS = frozenset(
+    {
+        "prompt_token_ids",
+        "cache_salt",
+        "multi_modal_data",
+        "multi_modal_uuids",
+        "mm_processor_kwargs",
+    }
+)
+
+
+def render_tokens_prompt(
+    engine_client: Any,
+    prompt: Any,
+    tokenization_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    """Render a text-only token prompt the way vLLM's InputProcessor renders a raw
+    prompt, so that AsyncLLM.add_request processes it inline.
+
+    add_request sends a raw prompt to the renderer thread pool, which pays off only
+    when there is text to tokenize or multimodal data to process. Any other prompt
+    is returned unchanged and keeps that path. Pass the tokenization_kwargs that
+    generate() or encode() would get.
+    """
+    if (
+        not isinstance(prompt, dict)
+        or "type" in prompt
+        or not prompt.keys() <= _TOKENS_PROMPT_KEYS
+        or not isinstance(prompt.get("prompt_token_ids"), list)
+        or prompt.get("multi_modal_data")
+        or prompt.get("multi_modal_uuids")
+        or prompt.get("mm_processor_kwargs")
+    ):
+        return prompt
+    renderer = engine_client.renderer
+    model_config = engine_client.model_config
+    if model_config.is_encoder_decoder:
+        return prompt
+
+    # The same steps as InputProcessor.process_inputs for a raw prompt.
+    parsed_prompt = parse_model_prompt(model_config, prompt)
+    tok_params = renderer.default_cmpl_tok_params.with_kwargs(
+        **(tokenization_kwargs or {})
+    )
+
+    (engine_input,) = renderer.render_cmpl(
+        [parsed_prompt],
+        tok_params,
+    )
+    # process_inputs stamps a raw prompt's arrival time when it runs; leave it to do
+    # the same for this one.
+    engine_input.pop("arrival_time", None)
+    return engine_input
 
 
 def _engine_generate_reasoning_kwargs(
@@ -3525,6 +3582,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
+            prompt = render_tokens_prompt(self.engine_client, prompt)
             gen = self._generate_with_lora_admission_lock(
                 lora_request,
                 lambda admitted_lora_request: self.engine_client.generate(
@@ -4646,6 +4704,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
+                prompt = render_tokens_prompt(self.engine_client, prompt)
                 gen = self._generate_with_lora_admission_lock(
                     lora_request,
                     lambda admitted_lora_request: self.engine_client.generate(
@@ -4971,6 +5030,7 @@ class EmbeddingWorkerHandler:
                 if isinstance(prompt, str)
                 else TokensPrompt(prompt_token_ids=prompt)
             )
+            encode_arg = render_tokens_prompt(self.engine_client, encode_arg)
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
