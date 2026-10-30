@@ -1174,6 +1174,7 @@ pub(super) fn warn_nvext_disabled(endpoint: &str, discarded: bool) {
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+/// Omitted or null `n` becomes one before validation and dispatch; explicit values are retained.
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -1181,6 +1182,7 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    request.inner.n.get_or_insert(1);
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2476,6 +2478,8 @@ async fn pooling(
     Ok(response)
 }
 
+/// Serve chat requests, resolving omitted or null `n` to one before validation and dispatch.
+/// Explicit choice counts retain their existing validation; downstream errors use the HTTP error path.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2505,6 +2509,7 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    request.inner.n.get_or_insert(1);
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
