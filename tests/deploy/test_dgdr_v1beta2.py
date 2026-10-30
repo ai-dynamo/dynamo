@@ -63,7 +63,8 @@ def _assert_owned_by(resource: dict, owner: dict) -> None:
 
 async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
     """Exercise chart RBAC, admission, both controllers, and both Job containers."""
-    assert namespace, "--namespace is required for the DGDR v1beta2 smoke test"
+    if not namespace:
+        pytest.fail("--namespace is required for the DGDR v1beta2 smoke test")
     name = f"dgdr-smoke-{uuid4().hex[:8]}"
     async with await config.new_client_from_config() as api:
         custom = client.CustomObjectsApi(api)
@@ -119,7 +120,6 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         assert request["spec"]["workload"]["static"]["load"] == {"concurrency": 10}
         assert request["spec"]["objective"]["metric"] == "ThroughputPerGPU"
 
-        # The installed operator creates the Run; the test never starts a manager or writes status.
         deadline = time.monotonic() + 600
         run = {}
         run_name = None
@@ -161,7 +161,6 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         assert run["spec"] == request["spec"]
         logger.info("Completed Run: %s", json.dumps(run))
 
-        # Completion requires both real containers and the generated publisher identity.
         job_name = run["status"]["jobRef"]["name"]
         job = await batch.read_namespaced_job(job_name, namespace, _request_timeout=30)
         _assert_owned_by(api.sanitize_for_serialization(job), run)
