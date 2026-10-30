@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -64,6 +64,7 @@ pub struct LocalScheduler<
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
+    classifier_installed: Arc<Notify>,
     worker_configs: watch::Receiver<HashMap<WorkerId, C>>,
     applied_worker_configs: Arc<Mutex<Option<HashMap<WorkerId, C>>>>,
     monitor_worker_configs: bool,
@@ -279,6 +280,8 @@ where
             }
         });
 
+        let classifier_installed = Arc::new(Notify::new());
+        let classifier_installed_periodic = Arc::clone(&classifier_installed);
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(recheck_interval);
             tracing::trace!("LocalScheduler periodic queue update task started");
@@ -292,6 +295,11 @@ where
                     _ = recheck_interval.tick() => {
                         queue_periodic_updates.update().await;
                     }
+                    _ = classifier_installed_periodic.notified() => {
+                        // Rust API classifiers are installed after the periodic task starts.
+                        let period = recheck_interval.period().min(Duration::from_millis(100));
+                        recheck_interval = tokio::time::interval(period);
+                    }
                 }
             }
         });
@@ -301,6 +309,7 @@ where
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
+            classifier_installed,
             worker_configs: workers_with_configs,
             applied_worker_configs,
             monitor_worker_configs,
@@ -478,9 +487,14 @@ where
         classifier: Box<dyn RequestClassifier>,
         shutdown: CancellationToken,
     ) -> bool {
-        self.request_classifier
+        let installed = self
+            .request_classifier
             .set(RequestClassifierRuntime::new(classifier, shutdown))
-            .is_ok()
+            .is_ok();
+        if installed {
+            self.classifier_installed.notify_one();
+        }
+        installed
     }
 
     #[doc(hidden)]
@@ -1509,6 +1523,71 @@ mod tests {
             0
         );
         cancel_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn installed_classifier_rechecks_capacity_before_the_deadline() {
+        struct DeadlineClassifier;
+        impl RequestClassifier for DeadlineClassifier {
+            fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+                request.set_due_at(request.ingress_at() + Duration::from_secs(5));
+                Box::pin(async move { Ok(request) })
+            }
+        }
+
+        let workers = HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        )]);
+        // The helper constructs the scheduler with the default 60-second recheck.
+        let (scheduler, slots, _configs, cancellation) = make_scheduler(
+            workers,
+            Some(0.0),
+            false,
+            Some(Arc::new(FixedPrefillLoadEstimator {
+                duration: Duration::from_secs(1),
+            })),
+        );
+        scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "active".into(),
+            }))
+            .await
+            .unwrap();
+        // Consume the initial periodic tick before installing the classifier.
+        tokio::task::yield_now().await;
+        assert!(
+            scheduler
+                .install_request_classifier(Box::new(DeadlineClassifier), cancellation.clone(),)
+        );
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("waiting")
+            .unwrap()
+            .unwrap();
+        let mut admission = Box::pin(scheduler.schedule_request(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: "waiting".into(),
+            },
+        )));
+        assert!(poll_once(admission.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        assert_eq!(scheduler.pending_count(), 1);
+
+        // Prefill load decays after one second without publishing a capacity update.
+        let response = tokio::time::timeout(Duration::from_secs(2), admission)
+            .await
+            .expect("available capacity must be rechecked before the classifier deadline")
+            .unwrap();
+        assert_eq!(response.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(scheduler.pending_count(), 0);
+        scheduler.free("active").await.unwrap();
+        scheduler.free("waiting").await.unwrap();
+        scheduler.admission_barrier().await.unwrap();
+        slots.assert_completely_drained(Instant::now());
+        cancellation.cancel();
     }
 
     #[tokio::test]
