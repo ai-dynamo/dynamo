@@ -398,6 +398,23 @@ async fn requests_without_a_model_are_rejected() {
 }
 
 #[tokio::test]
+async fn session_ids_longer_than_the_core_accepts_are_rejected() {
+    let pool_frontend = echo_pool_frontend().await;
+    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+
+    for (length, expected) in [(256, StatusCode::OK), (257, StatusCode::BAD_REQUEST)] {
+        let response = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "s".repeat(length))
+            .json(&chat(MODEL, "hi", false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "session id of {length} bytes");
+    }
+}
+
+#[tokio::test]
 async fn pool_errors_pass_through() {
     // The catalog says the pool serves a model its frontend does not have.
     let echo = echo_pool_frontend().await;

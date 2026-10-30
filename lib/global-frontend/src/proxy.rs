@@ -19,7 +19,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::serve::ListenerExt;
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, RequestSelector, RoutingRequest, Selection};
+use dynamo_global_router::{
+    InFlightTracker, MAX_SESSION_ID_BYTES, RequestSelector, RoutingRequest, Selection,
+};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -151,6 +153,15 @@ async fn forward(
     let session = headers
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
+    // The core's session table refuses longer ids; refusing them here keeps
+    // that a client error rather than an unavailable pool.
+    if session.is_some_and(|session| session.len() > MAX_SESSION_ID_BYTES) {
+        metrics.rejected(error_type::VALIDATION);
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{HEADER_DYNAMO_SESSION_ID} is longer than {MAX_SESSION_ID_BYTES} bytes"),
+        );
+    }
     let request = RoutingRequest::new(&model).with_session(session);
     // `lifecycle` is what the selector holds for the request. It is dropped
     // wherever this handler or the response stream is, which ends the
