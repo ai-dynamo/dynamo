@@ -52,7 +52,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional, cast
 
 import numpy as np
 import soundfile as sf
@@ -87,6 +87,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_AUDIO_SAMPLE_RATE = 24000
 
+# The encodings this handler writes, which are the values of
+# `NvImagesResponse.output_format`. `_normalize_image_output_options` returns
+# one of them, so the response model accepts what it returns.
+ImageOutputFormat = Literal["png", "jpeg", "webp"]
+
 _IMAGE_OUTPUT_FORMATS = {
     "png": ("PNG", "png", "image/png"),
     "jpeg": ("JPEG", "jpg", "image/jpeg"),
@@ -100,7 +105,7 @@ def _normalize_image_output_options(
     *,
     quality: str | None = None,
     background: str | None = None,
-) -> str:
+) -> ImageOutputFormat:
     if response_format not in (None, "url", "b64_json"):
         raise ValueError(
             f"Unsupported response_format: {response_format!r}; "
@@ -126,7 +131,7 @@ def _normalize_image_output_options(
             f"Unsupported output_format: {output_format!r}; "
             "expected 'png', 'jpeg', or 'webp'"
         )
-    return normalized
+    return cast(ImageOutputFormat, normalized)
 
 
 def _resolved_image_size(images: list) -> str | None:
@@ -791,12 +796,12 @@ class DiffusionFormatter:
             ValueError: If the response format is unsupported.
             OSError: If an image cannot be encoded or uploaded.
         """
-        output_format = _normalize_image_output_options(output_format, response_format)
+        image_format = _normalize_image_output_options(output_format, response_format)
         if is_empty_payload(images):
             return _error_chunk(request_id, self._model_name, "No images generated")
 
         data_urls = await self._prepare_images(
-            images, request_id, response_format, output_format
+            images, request_id, response_format, image_format
         )
 
         if request_type == RequestType.CHAT_COMPLETION:
@@ -837,7 +842,7 @@ class DiffusionFormatter:
             return NvImagesResponse(
                 created=int(time.time()),
                 data=image_data_list,
-                output_format=output_format,
+                output_format=image_format,
                 size=_resolved_image_size(images),
                 nvext=ImagesResponseNvExt(
                     usage=ImageAccounting(
@@ -956,6 +961,19 @@ class AudioFormatter:
             if stream_state is not None or aggregate_state is not None:
                 return None
             return self._error_response(request_id, "No audio generated")
+
+        # DELTA output drains the audio key but can retain sample-rate metadata.
+        # It is not a media result or a failure. Aggregate completion and health
+        # probes still require nonempty audio elsewhere in the response stream.
+        if (
+            isinstance(mm_output, Mapping)
+            and set(mm_output) == {"sr"}
+            and (
+                stream_state is not None
+                or (aggregate_state is not None and not aggregate_state.cumulative)
+            )
+        ):
+            return None
 
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")

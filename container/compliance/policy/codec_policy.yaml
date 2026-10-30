@@ -93,13 +93,14 @@ allow_exact_paths:
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.
 exceptions:
-  - glob: "**/nvidia/dali/.libs/*"
+  - glob: "**/nvidia/dali/.libs/libav*"
     reason: >-
       NVIDIA DALI (nvidia-dali-cuda130) vendors its own ffmpeg stack (libav* plus
       the libsw*/libpostproc companions) under .libs/ for its video reader. It is
       owned and handled by its own component team and tracked separately rather
-      than gated here. The glob covers the whole vendored dir so the libsw*
-      companions are waived too, not just libavcodec.
+      than gated here. The waiver is scoped to the ffmpeg library families, so
+      anything else DALI vendors that hits a deny glob (libx264, libx265,
+      fdk-aac) still fails the build.
 
       Resolved by a version bump, not by narrowing. Measured with
       container/compliance/enumerate_bundled_decoders.py against the shipped
@@ -119,9 +120,7 @@ exceptions:
       libraries on their own breaks `import nvidia.dali` outright. The vendored
       set is all-or-nothing with the package.
 
-      The entry stays even so. trtllm_runtime.Dockerfile pins
-      nvidia-dali-cuda130==2.2.0, which is the version the 1.3.0rc27 base image
-      already carries, so the pin now holds a version rather than moving one. The
+      The entry stays even so. DALI now comes from the base image unpinned. The
       vendored libraries do not register those decoders -- but they are still on
       disk and still match the deny globs above, which gate on presence rather
       than content. What changed is the reason for the waiver: it now covers a
@@ -130,7 +129,7 @@ exceptions:
 
       Enforcement lives at build time, not here. Two guards in
       trtllm_runtime.Dockerfile enumerate every bundled libavcodec -- one in
-      runtime_full after the pinned install, and one after the overlay COPY,
+      runtime_full, and one after the overlay COPY,
       which is the only stage where a missed whiteout can leave the base image's
       older copy sitting beside the upgraded one -- and
       tests/dependencies/test_no_software_video_codecs.py repeats the check
@@ -142,10 +141,20 @@ exceptions:
       subtracted from the generated delta, so such an entry would never match
       anything and would read as a check while doing nothing.
 
-      Re-measure when the vendored version moves. Last measured against
-      nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27, whose base carries 2.2.0:
-      440 decoders, h264, hevc, aac, aac_fixed and aac_latm absent, vp8, vp9,
-      mjpeg and av1 present.
+      Re-measure when the vendored version moves. Last measured against the
+      nvidia-dali-cuda130 2.3.0 wheel that nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1
+      carries: 440 decoders, h264, hevc, aac, aac_fixed and aac_latm absent, vp8,
+      vp9, mjpeg and av1 present.
+    owner: DALI
+  - glob: "**/nvidia/dali/.libs/libsw*"
+    reason: >-
+      Companion to the DALI libav* waiver above: libswscale/libswresample from
+      the same vendored ffmpeg build.
+    owner: DALI
+  - glob: "**/nvidia/dali/.libs/libpostproc*"
+    reason: >-
+      Companion to the DALI libav* waiver above: libpostproc from the same
+      vendored ffmpeg build.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
