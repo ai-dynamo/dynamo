@@ -9,6 +9,7 @@ This operator automates the deployment and lifecycle management of Dynamo resour
 
 - **DynamoGraphDeploymentRequest (DGDR)** - Simplified SLA-driven deployment interface
 - **DynamoGraphDeployment (DGD)** - Direct deployment configuration
+- **DynamoPoolRelay** - Relay Service and Pods for one DGD
 
 Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes best practices and supports declarative configuration through CustomResourceDefinitions (CRDs).
 
@@ -16,6 +17,7 @@ Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes be
 
 - **DynamoGraphDeploymentRequest**: High-level interface for SLA-driven configuration generation. Automatically handles profiling and generates an optimized DGD spec based on your performance requirements.
 - **DynamoGraphDeployment**: Lower-level interface for direct deployment configuration with full control over all parameters.
+- **DynamoPoolRelay**: Active Relay Pods for one DGD. See the [operator setup](../../docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md#deploy-with-the-operator) and [sample](samples/dynamo-pool-relay.yaml).
 
 
 ## Developer guide
