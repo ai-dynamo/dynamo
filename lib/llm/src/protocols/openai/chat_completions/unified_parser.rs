@@ -182,7 +182,7 @@ pub(crate) fn selected_family_for_selection(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
     // do not identify their tool grammar. Auto keeps both on the legacy path.
-    let selected = if tool_call_parser.is_none()
+    if tool_call_parser.is_none()
         && matches!(
             reasoning_parser,
             Some("qwen3" | "nemotron_v3" | "nemotron3")
@@ -196,8 +196,7 @@ pub(crate) fn selected_family_for_selection(
             | dynamo_runtime::config::ParserVersion::V2 => configured,
             dynamo_runtime::config::ParserVersion::V1 => None,
         }
-    };
-    selected
+    }
 }
 
 pub(crate) fn selected_content_decoder_family(
