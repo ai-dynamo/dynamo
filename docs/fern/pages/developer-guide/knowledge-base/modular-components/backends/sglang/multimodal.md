@@ -114,11 +114,21 @@ This legacy path needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang
 
 SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
 
-The compatibility behavior below requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
+This compatibility support is unreleased. It requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
 
 On these builds, Dynamo accepts wide values in KV events. When an event lacks usable routing labels, Dynamo indexes only complete text blocks before the first block whose hash includes image or video tokens. That block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache. This fallback applies both to URL passthrough and to `--frontend-decoding`.
 
-Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. It enables routing-label translation and exclusion of unmapped wide-format media tokens. Without it, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. It enables routing-label translation and exclusion of unmapped wide-format media tokens. Without it, values that do not fit in 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+
+To check a build before registering a direct source, run this in the SGLang engine's Python environment:
+
+```bash
+python3 -c 'from sglang.srt.managers.schedule_batch import MultimodalDataItem; print("pad_values" in MultimodalDataItem.__struct_fields__)'
+```
+
+`True` identifies a wide-token build and requires the flag above. `False` identifies a legacy build. The result depends on the SGLang build, not the selected model.
+
+The [SGLang sidecar](sidecar.md) cannot inspect the engine build and leaves the flag disabled. It excludes values that do not fit in 32 bits, but does not provide the full multimodal exclusion behavior above or routing-label translation. Media-aware routing on wide-token builds is not supported through the sidecar.
 
 ### Routing Labels
 
