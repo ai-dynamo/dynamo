@@ -3,6 +3,7 @@
 
 """Unit tests for the EFA deploy-test helpers (tests/deploy/efa_utils.py)."""
 
+import contextlib
 import re
 from unittest.mock import MagicMock
 
@@ -190,13 +191,14 @@ def _fake_pod(current_reads: list, previous_read: BaseException) -> MagicMock:
     pod.raw = {"spec": {"containers": [{"name": "main"}]}}
     reads = iter(current_reads)
 
-    def logs(*, previous: bool, **_kwargs):
-        result = previous_read if previous else next(reads)
+    @contextlib.asynccontextmanager
+    async def call_api(*_args, params: dict, **_kwargs):
+        result = previous_read if params.get("previous") else next(reads)
         if isinstance(result, BaseException):
             raise result
-        return iter(result)
+        yield MagicMock(text="\n".join(result) + "\n")
 
-    pod.logs = MagicMock(side_effect=logs)
+    pod.api.call_api = call_api
     return pod
 
 
@@ -216,6 +218,19 @@ def test_read_pod_logs_recovers_from_transient_tunnel_drop(monkeypatch) -> None:
         [httpx.ConnectError("All connection attempts failed"), _LIBFABRIC_LOG],
         _NO_PREVIOUS,
     )
+
+    assert "Backend LIBFABRIC was instantiated" in _read_pod_logs(pod)
+    sleep.assert_called_once_with(5)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_read_pod_logs_retries_stalled_read(monkeypatch) -> None:
+    """A read that times out is retried, not returned as a partial log."""
+    sleep = MagicMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
+    pod = _fake_pod([httpx.ReadTimeout("timed out"), _LIBFABRIC_LOG], _NO_PREVIOUS)
 
     assert "Backend LIBFABRIC was instantiated" in _read_pod_logs(pod)
     sleep.assert_called_once_with(5)

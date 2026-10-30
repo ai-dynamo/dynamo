@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Mapping
 
 import kr8s
+from kr8s._async_utils import as_sync_func
 
 # The request defaults, prompt and response validation are shared with
 # tests/deploy/test_dgd.py via dgd_utils, a non-test module -- so these tests
@@ -166,6 +167,24 @@ def runtime_version_override(image: str) -> str | None:
 _NO_PREVIOUS_INSTANCE = "previous terminated container"
 
 
+async def _async_fetch_pod_log(pod, params: dict) -> str:
+    async with pod.api.call_api(
+        "GET",
+        version=pod.version,
+        url=f"{pod.endpoint}/{pod.name}/log",
+        namespace=pod.namespace,
+        params=params,
+    ) as response:
+        return response.text
+
+
+# Not pod.logs(): kr8s 0.20.13 suppresses httpx.ReadTimeout around that stream
+# and returns whatever it read, so a stalled tunnel yields a partial log with no
+# error. A plain request raises the timeout. kr8s's own sync bridge runs it on
+# the event loop that owns the pod's API session.
+_fetch_pod_log = as_sync_func(_async_fetch_pod_log)
+
+
 def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     """Return this pod's logs, including the previous container instance.
 
@@ -177,27 +196,28 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
 
     A read that fails is raised, never returned as an empty log: an empty log
     scores as "LIBFABRIC never instantiated", which blames the backend for what
-    was a dropped vCluster API tunnel. Connection errors are retried while the
-    tunnel recovers; the only failure tolerated is a missing previous instance.
+    was a dropped vCluster API tunnel. Connection errors and read timeouts are
+    retried while the tunnel recovers; the only failure tolerated is a missing
+    previous instance.
     """
     chunks = []
     spec = pod.raw.get("spec", {})
     containers = [c["name"] for c in (spec.get("containers") or []) if c.get("name")]
     for container in containers or [""]:
         for previous in (True, False):
-            kwargs = {"tail_lines": tail_lines, "previous": previous}
+            params = {"tailLines": tail_lines}
+            if previous:
+                params["previous"] = "true"
             if container:
-                kwargs["container"] = container
+                params["container"] = container
             try:
-                # pod.logs() is a generator, so the request only happens while
-                # it is consumed -- join inside the retried call.
                 chunks.append(
                     retry_vcluster_api(
                         f"reading logs of {pod.name}",
-                        lambda kwargs=kwargs: "\n".join(pod.logs(**kwargs)),
+                        lambda params=params: _fetch_pod_log(pod, params),
                         _KR8S_VCLUSTER_CONNECTION_ERRORS,
                         logger,
-                    )
+                    ).rstrip("\n")
                 )
             except kr8s.ServerError as e:
                 # A container that never restarted has no previous instance.
