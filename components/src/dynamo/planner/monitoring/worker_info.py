@@ -44,6 +44,7 @@ class WorkerInfo:
     max_num_batched_tokens: Optional[int] = None
     context_length: Optional[int] = None
     speculative_nextn: Optional[int] = None
+    max_num_scheduled_tokens: Optional[int] = None
 
     @property
     def max_kv_tokens(self) -> Optional[int]:
@@ -63,6 +64,8 @@ class WorkerInfo:
             parts.append(f"max_num_seqs(max_bs)={self.max_num_seqs}")
         if self.max_num_batched_tokens is not None:
             parts.append(f"max_num_batched_tokens={self.max_num_batched_tokens}")
+        if self.max_num_scheduled_tokens is not None:
+            parts.append(f"max_num_scheduled_tokens={self.max_num_scheduled_tokens}")
         if self.context_length is not None:
             parts.append(f"context_length={self.context_length}")
         if self.speculative_nextn is not None:

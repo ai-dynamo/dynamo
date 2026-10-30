@@ -36,6 +36,20 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
     )
 
 
+def publish_vllm_scheduling_budget(runtime_config: Any, scheduler_config: Any) -> None:
+    """Publish a smaller scheduler ceiling without changing model-input capacity."""
+    # CPU/XPU images may still use vLLM versions without this optional limit.
+    scheduled = getattr(scheduler_config, "max_num_scheduled_tokens", None)
+    if scheduled is None:
+        return
+    if type(scheduled) is not int or scheduled <= 0:
+        raise ValueError("max_num_scheduled_tokens must be a positive integer")
+    if scheduled < scheduler_config.max_num_batched_tokens:
+        runtime_config.set_engine_specific(
+            "max_num_scheduled_tokens", json.dumps(scheduled)
+        )
+
+
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int
 ) -> int | None:

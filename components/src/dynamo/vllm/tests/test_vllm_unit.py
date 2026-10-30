@@ -2520,6 +2520,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
         "apply_data_parallel_runtime_config",
         "publish_kv_hint_capabilities",
         "publish_vllm_token_budget",
+        "publish_vllm_scheduling_budget",
         "apply_topology_config",
         "_register_model_source_path",
         "build_router_config",

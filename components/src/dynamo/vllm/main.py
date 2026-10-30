@@ -74,6 +74,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_scheduling_budget,
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
@@ -1002,6 +1003,9 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+    publish_vllm_scheduling_budget(
+        runtime_config, engine_client.vllm_config.scheduler_config
+    )
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint

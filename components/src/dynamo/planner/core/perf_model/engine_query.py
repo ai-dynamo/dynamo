@@ -43,6 +43,7 @@ class EnginePerfLimits:
     max_num_batched_tokens: int
     max_num_seqs: int
     max_kv_tokens: int
+    max_num_scheduled_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -54,6 +55,18 @@ class EnginePerfLimits:
                 raise ValueError(f"{name} must be positive, got {value}")
             if value > _U32_MAX:
                 raise ValueError(f"{name} exceeds u32::MAX")
+        scheduled = self.max_num_scheduled_tokens
+        if scheduled is not None and (
+            type(scheduled) is not int or not 0 < scheduled <= _U32_MAX
+        ):
+            raise ValueError("max_num_scheduled_tokens must be a positive u32")
+
+    @property
+    def scheduling_token_budget(self) -> int:
+        """Issued-token ceiling, bounded by the model's input capacity."""
+        if self.max_num_scheduled_tokens is None:
+            return self.max_num_batched_tokens
+        return min(self.max_num_batched_tokens, self.max_num_scheduled_tokens)
 
 
 class OptimizationTarget(str, Enum):
@@ -259,7 +272,7 @@ class AISCoreEnginePerfModel:
         plans = [
             _PrefillChunkPlan.build(
                 metrics.queued_requests.sum_prefill_tokens,
-                self._limits.max_num_batched_tokens,
+                self._limits.scheduling_token_budget,
             )
             for metrics in metrics_by_rank
         ]
@@ -278,7 +291,7 @@ class AISCoreEnginePerfModel:
             repeat_count = end - start
             chunk_metrics: list[ForwardPassMetrics] = []
             for snapshot, plan in zip(metrics_by_rank, plans, strict=True):
-                chunk = plan.chunk_at(start, self._limits.max_num_batched_tokens)
+                chunk = plan.chunk_at(start, self._limits.scheduling_token_budget)
                 scheduled = ScheduledRequestMetrics(
                     num_prefill_requests=_estimate_prefill_request_count(
                         snapshot.queued_requests.num_prefill_requests, chunk
@@ -431,7 +444,7 @@ class AISCoreEnginePerfModel:
     def _find_aggregated_capacity(
         self, request: EngineCapacityRequest
     ) -> Optional[EngineCapacity]:
-        if request.osl == 0 or self._limits.max_num_batched_tokens <= 1:
+        if request.osl == 0 or self._limits.scheduling_token_budget <= 1:
             return None
 
         prefill_isl = _effective_prefill_isl(request)
@@ -439,7 +452,7 @@ class AISCoreEnginePerfModel:
         context_length = _decode_context_length(request)
         hard_cap = min(
             self._decode_max_batch(context_length),
-            max(1, self._limits.max_num_batched_tokens - 1),
+            max(1, self._limits.scheduling_token_budget - 1),
         )
         if hard_cap == 0:
             return None
@@ -450,14 +463,14 @@ class AISCoreEnginePerfModel:
                 prefill_isl,
                 request.osl,
                 batch_size,
-                self._limits.max_num_batched_tokens,
+                self._limits.scheduling_token_budget,
                 accept_length,
             ):
                 continue
 
             decode_kv = _saturating_mul_u32(batch_size, context_length)
             prefill_per_iteration = min(
-                self._limits.max_num_batched_tokens,
+                self._limits.scheduling_token_budget,
                 _aggregate_prefill_per_iteration(
                     prefill_isl,
                     request.osl,
@@ -501,12 +514,22 @@ class AISCoreEnginePerfModel:
             best = _select_capacity(best, capacity, request.optimization_target)
         return best
 
+    def _synthetic_prefill_budget(self) -> int:
+        # Preserve the existing total ceiling when splitting work across ranks.
+        return min(
+            self._limits.max_num_batched_tokens,
+            _saturating_mul_u32(
+                self._limits.scheduling_token_budget, self._attention_dp_size
+            ),
+        )
+
     def _prefill_time_for_tokens(self, tokens: int) -> Optional[float]:
         return self._prefill_chunk_time(
             tokens,
             lambda chunk: self._estimate_forward_pass_seconds(
                 _synthetic_prefill_by_rank(chunk, self._attention_dp_size)
             ),
+            max_chunk=self._synthetic_prefill_budget(),
         )
 
     def _decode_time_for_batch(
@@ -549,11 +572,15 @@ class AISCoreEnginePerfModel:
         self,
         tokens: int,
         estimate_chunk: Callable[[int], Optional[float]],
+        *,
+        max_chunk: Optional[int] = None,
     ) -> Optional[float]:
-        plan = _PrefillChunkPlan.build(tokens, self._limits.max_num_batched_tokens)
+        if max_chunk is None:
+            max_chunk = self._limits.scheduling_token_budget
+        plan = _PrefillChunkPlan.build(tokens, max_chunk)
         total_s = 0.0
         if plan.full_chunks > 0:
-            duration_s = estimate_chunk(self._limits.max_num_batched_tokens)
+            duration_s = estimate_chunk(max_chunk)
             if duration_s is None:
                 return None
             total_s = _checked_duration_add(
@@ -571,20 +598,27 @@ class AISCoreEnginePerfModel:
         return total_s
 
     def _prefill_max_batch(self, isl: int) -> int:
-        if isl > self._limits.max_num_batched_tokens:
+        budget = self._synthetic_prefill_budget()
+        if isl > budget:
             return 1
         return min(
             self._limits.max_num_seqs,
-            self._limits.max_num_batched_tokens // max(1, isl),
+            budget // max(1, isl),
         )
 
     def _decode_max_batch(self, context_length: int) -> int:
         if context_length == 0:
             return 0
-        return min(
+        max_batch = min(
             self._limits.max_num_seqs,
             self._limits.max_kv_tokens // context_length,
         )
+        if self._limits.max_num_scheduled_tokens is not None:
+            max_batch = min(
+                max_batch,
+                self._limits.scheduling_token_budget * self._attention_dp_size,
+            )
+        return max_batch
 
     def _validate_metrics_by_rank(
         self, metrics_by_rank: list[ForwardPassMetrics]

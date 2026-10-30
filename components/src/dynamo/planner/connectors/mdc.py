@@ -152,6 +152,12 @@ def worker_info_from_mdc(
     # TODO(rank-aware-kv-capacity): propagate capacity provenance into WorkerInfo. Only an exact
     # or conservative scalar is safe for Planner's scale-down feasibility check; an aggregate
     # mean must remain explicitly approximate rather than masquerade as a worker minimum.
+    runtime_data = runtime_cfg.get("runtime_data")
+    scheduled_limit = (
+        runtime_data.get("max_num_scheduled_tokens")
+        if isinstance(runtime_data, dict)
+        else None
+    )
     return WorkerInfo(
         k8s_name=k8s_name,
         component_name=component_name,
@@ -163,4 +169,5 @@ def worker_info_from_mdc(
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
         context_length=context_length,
         speculative_nextn=_parse_speculative_nextn(runtime_cfg),
+        max_num_scheduled_tokens=scheduled_limit,
     )

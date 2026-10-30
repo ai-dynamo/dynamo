@@ -116,6 +116,18 @@ and conflicting worker identities are rejected.
 Configure model identity and estimator controls through `ais_perf_model.roles`.
 The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
 
+For vLLM workers, Planner uses a published `max_num_scheduled_tokens` smaller
+than `max_num_batched_tokens` as the scheduling ceiling for prefill chunks and
+capacity queries. AISimulate retains `max_num_batched_tokens` as model-input
+capacity. A 192-token prefill queued on one rank with limits 256 and 64 therefore
+needs three 64-token chunks. Synthetic pure-prefill capacity estimates pool
+these per-rank budgets while retaining the existing total chunk ceiling.
+Workers without a separate scheduling ceiling retain the batched-token limit.
+
+Keep worker limits uniform within each component. Planner discovers static
+limits from a representative worker; restart Planner after changing them.
+The scheduling ceiling does not model dynamic speculative verification widths.
+
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
 
 Configure the role models in a DynamoGraphDeploymentRequest:

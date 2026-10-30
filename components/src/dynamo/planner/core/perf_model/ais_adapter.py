@@ -206,6 +206,11 @@ class PlannerEnginePerfModel:
             return None
         if caps.max_kv_tokens is not None and caps.max_kv_tokens <= 0:
             return None
+        scheduled = caps.max_num_scheduled_tokens
+        if scheduled is not None and (
+            type(scheduled) is not int or not 0 < scheduled < (1 << 32)
+        ):
+            return None
 
         # Match the historical engine-query defaults when the planner has a
         # capability object but an individual runtime limit has not been
@@ -228,6 +233,11 @@ class PlannerEnginePerfModel:
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
+            max_num_scheduled_tokens=(
+                self._capabilities.max_num_scheduled_tokens
+                if self._capabilities is not None
+                else None
+            ),
         )
 
     def _build_options(self) -> dict[str, int]:
@@ -283,9 +293,11 @@ class PlannerEnginePerfModel:
                     model=self._config.model_name
                     or f"dynamo-planner:{self._config.namespace}",
                     system="unprofiled",
-                    backend="vllm"
-                    if self._config.backend == "mocker"
-                    else self._config.backend,
+                    backend=(
+                        "vllm"
+                        if self._config.backend == "mocker"
+                        else self._config.backend
+                    ),
                     worker_type=self._worker_type,
                     estimation_mode="fpm_regression",
                 )
@@ -339,6 +351,11 @@ class PlannerEnginePerfModel:
         return (
             self._worker_type,
             values,
+            (
+                self._capabilities.max_num_scheduled_tokens
+                if self._capabilities is not None
+                else None
+            ),
             json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
         )
 
