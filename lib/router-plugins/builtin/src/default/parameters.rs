@@ -19,6 +19,7 @@ struct Parameters {
     overlap_score_credit_decay: Option<f64>,
     prefill_load_scale: Option<f64>,
     decode_active_request_weight: Option<f64>,
+    prefix_affinity_weight: Option<f64>,
     host_cache_hit_weight: Option<f64>,
     disk_cache_hit_weight: Option<f64>,
     shared_cache_multiplier: Option<f64>,
@@ -32,6 +33,7 @@ pub(super) struct PolicyParameters {
     pub(super) overlap_score_credit_decay: f64,
     pub(super) prefill_load_scale: f64,
     pub(super) decode_active_request_weight: f64,
+    pub(super) prefix_affinity_weight: f64,
     pub(super) host_cache_hit_weight: f64,
     pub(super) disk_cache_hit_weight: f64,
     pub(super) shared_cache_multiplier: f64,
@@ -57,6 +59,7 @@ impl Parameters {
                 "decode_active_request_weight",
                 self.decode_active_request_weight,
             ),
+            ("prefix_affinity_weight", self.prefix_affinity_weight),
             ("host_cache_hit_weight", self.host_cache_hit_weight),
             ("disk_cache_hit_weight", self.disk_cache_hit_weight),
             ("shared_cache_multiplier", self.shared_cache_multiplier),
@@ -93,6 +96,9 @@ impl Parameters {
             decode_active_request_weight: self
                 .decode_active_request_weight
                 .unwrap_or(config.decode_active_request_weight),
+            prefix_affinity_weight: self
+                .prefix_affinity_weight
+                .unwrap_or(config.prefix_affinity_weight),
             host_cache_hit_weight: self
                 .host_cache_hit_weight
                 .unwrap_or(inherited_cache_weight(config.host_cache_hit_weight)),

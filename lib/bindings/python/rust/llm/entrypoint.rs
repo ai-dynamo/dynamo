@@ -189,6 +189,8 @@ impl KvRouterConfig {
             overlap_score_credit_decay,
             prefill_load_scale,
             decode_active_request_weight,
+            // Set through the default policy's `parameters` in router policy YAML.
+            prefix_affinity_weight: 0.0,
             host_cache_hit_weight,
             disk_cache_hit_weight,
             router_temperature,

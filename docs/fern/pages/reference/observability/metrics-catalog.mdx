@@ -430,11 +430,11 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill or aggregated scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Decode routers do not report it. Labeled by `worker_type`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
-  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
+  Difference in effective KV cache overlap between the highest-overlap eligible worker and the selected worker for each non-max-overlap selection on a prefill or aggregated router. Labeled by `worker_type`.
 </ParamField>
 
 ### KV-cache reuse telemetry
