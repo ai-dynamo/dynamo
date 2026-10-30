@@ -182,6 +182,20 @@ hint_policies:
     // An action-only role starts no worker-input resources.
     let requirements = factory.requirements(WorkerType::Prefill);
     assert_eq!(requirements.worker_inputs(), WorkerInputs::NONE);
+    // Fetch sources come from the KV index; a committed fetch arrives only from a routing policy
+    // that already reads it.
+    assert_eq!(
+        HintRequirements::new()
+            .with_kv_fetch_sources()
+            .worker_inputs(),
+        WorkerInputs::KV_TRANSFER
+    );
+    assert_eq!(
+        HintRequirements::new()
+            .with_committed_kv_fetch()
+            .worker_inputs(),
+        WorkerInputs::NONE
+    );
     assert!(factory.names(WorkerType::Decode).is_empty());
     assert!(factory.names(WorkerType::Encode).is_empty());
 }

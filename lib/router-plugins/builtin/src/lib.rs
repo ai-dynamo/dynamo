@@ -41,7 +41,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyFactory};
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
     use super::*;
@@ -149,6 +149,11 @@ hint_policies:
         let requirements = resolved.requirements(WorkerType::Prefill);
         assert!(requirements.delivers_committed_kv_fetch());
         assert!(requirements.reads_kv_fetch_sources());
+        assert!(
+            requirements
+                .worker_inputs()
+                .contains(WorkerInputs::KV_TRANSFER)
+        );
         assert!(resolved.names(WorkerType::Decode).is_empty());
 
         for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {

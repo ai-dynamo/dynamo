@@ -100,7 +100,8 @@ impl HintRequirements {
     }
 
     /// Read the booked worker's eligible fetch source through
-    /// [`HintActionContext::kv_fetch_source`]. The host retains the request's block chain for it.
+    /// [`HintActionContext::kv_fetch_source`]. The host starts the KV index and retains the
+    /// request's block chain for it, even when the worker-selection policy reads neither.
     pub fn with_kv_fetch_sources(mut self) -> Self {
         self.kv_fetch_sources = true;
         self
@@ -138,9 +139,14 @@ impl HintRequirements {
     }
 
     /// Worker inputs a host must provide for these requirements. Hosts union this with the
-    /// worker-selection policy's inputs before starting indexes and subscriptions.
+    /// worker-selection policy's inputs before starting indexes and subscriptions. Reading fetch
+    /// sources adds [`WorkerInputs::KV_TRANSFER`], whose sources come from the KV index.
     pub fn worker_inputs(&self) -> WorkerInputs {
-        self.inputs
+        if self.kv_fetch_sources {
+            self.inputs | WorkerInputs::KV_TRANSFER
+        } else {
+            self.inputs
+        }
     }
 }
 
