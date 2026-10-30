@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
 
+use dynamo_global_discovery_client::{
+    Freshness, GlobalDiscoveryClient, RouterCache, RouterReplica,
+};
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, SchedulerLoad, WorkerId};
@@ -37,6 +40,7 @@ use serde::Serialize;
 use tokio::sync::{RwLock, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, PoolRelayHandle, PoolRelayRecoveryTarget};
 use super::discovery::{
@@ -82,6 +86,10 @@ pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
+/// How often the Relay reads the Global Router replicas from Global Discovery.
+const GLOBAL_ROUTERS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// How long one Global Discovery request may take.
+const GLOBAL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn validate_publication_capacity(expected_unique_blocks: usize) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -152,6 +160,9 @@ pub struct PoolRelayConfig {
     pub sources: PoolRelaySources,
     pub producer: PoolRelayProducerConfig,
     pub transport: Option<PoolRelayGrpcConfig>,
+    /// Root of the Global Discovery Service to read the Global Router
+    /// replicas from. `None` reads none.
+    pub global_discovery_url: Option<Url>,
 }
 
 impl Default for PoolRelayConfig {
@@ -163,6 +174,7 @@ impl Default for PoolRelayConfig {
             }),
             producer: PoolRelayProducerConfig::default(),
             transport: None,
+            global_discovery_url: None,
         }
     }
 }
@@ -311,6 +323,11 @@ pub struct PoolRelayHealth {
     pub wan_serving: bool,
     pub wan_bound_address: Option<String>,
     pub wan_last_error: Option<String>,
+    pub global_discovery_enabled: bool,
+    /// Why the Global Router list may be out of date. The Relay keeps the
+    /// last list and its router connections, so this does not affect
+    /// `healthy` or readiness.
+    pub global_routers_stale_reason: Option<String>,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -635,6 +652,7 @@ pub struct PoolRelay {
     transport: Option<GrpcTransport>,
     /// Serving-load aggregator feeding the transport; runs only with it.
     serving_load_aggregator: Mutex<Option<JoinHandle<()>>>,
+    global_routers: Option<RouterCache>,
 }
 
 impl PoolRelay {
@@ -671,6 +689,11 @@ impl PoolRelay {
         if let Some(transport) = transport_config.as_ref() {
             transport.validate()?;
         }
+        let discovery_client = config
+            .global_discovery_url
+            .clone()
+            .map(|url| GlobalDiscoveryClient::new(url, GLOBAL_DISCOVERY_REQUEST_TIMEOUT))
+            .transpose()?;
         let publication = ActorPublicationConfig {
             threshold: config.producer.publication_threshold,
             delay: Duration::from_millis(config.producer.publication_delay_ms),
@@ -801,6 +824,14 @@ impl PoolRelay {
             topology.clone(),
             supervisor_complete.clone(),
         );
+        // Started last, so a failed start leaves no refresh task running.
+        let global_routers = discovery_client.map(|client| {
+            RouterCache::spawn(
+                client,
+                GLOBAL_ROUTERS_REFRESH_INTERVAL,
+                cancel.child_token(),
+            )
+        });
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             cluster_id,
@@ -816,7 +847,14 @@ impl PoolRelay {
             publication_source,
             transport,
             serving_load_aggregator: Mutex::new(serving_load_aggregator),
+            global_routers,
         })
+    }
+
+    /// The Global Router replicas listed by the Global Discovery Service, or
+    /// `None` without a Global Discovery URL.
+    pub fn subscribe_global_routers(&self) -> Option<watch::Receiver<HashSet<RouterReplica>>> {
+        self.global_routers.as_ref().map(RouterCache::subscribe)
     }
 
     pub fn pool_catalog(&self) -> PoolCatalogSnapshot {
@@ -975,6 +1013,14 @@ impl PoolRelay {
                 .bound_address
                 .map(|address| address.to_string()),
             wan_last_error: transport_health.last_error,
+            global_discovery_enabled: self.global_routers.is_some(),
+            global_routers_stale_reason: self.global_routers.as_ref().and_then(|routers| {
+                match routers.freshness() {
+                    Freshness::Unread => Some("no successful read yet".to_owned()),
+                    Freshness::Current => None,
+                    Freshness::Stale(reason) => Some(reason),
+                }
+            }),
         }
     }
 
@@ -3115,6 +3161,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_discovery_url_starts_the_router_poller() {
+        let component = test_component("global-routers").await;
+        let error = PoolRelay::start(
+            component.clone(),
+            "test-dc".to_string(),
+            PoolRelayConfig {
+                global_discovery_url: Some("global-discovery:8080".parse().unwrap()),
+                ..PoolRelayConfig::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a Global Discovery URL that cannot be a base must fail start");
+        assert!(format!("{error:#}").contains("global-discovery:8080 cannot be a base URL"));
+
+        // Nothing serves this URL, so the first read fails and the router list
+        // stays empty.
+        let relay = PoolRelay::start(
+            component,
+            "test-dc".to_string(),
+            PoolRelayConfig {
+                global_discovery_url: Some("http://127.0.0.1:9/".parse().unwrap()),
+                ..PoolRelayConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let health = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let health = relay.health().await;
+                if health
+                    .global_routers_stale_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("http://127.0.0.1:9/routers"))
+                {
+                    return health;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first read did not finish");
+        assert!(health.global_discovery_enabled);
+        assert!(health.healthy);
+        let mut routers = relay.subscribe_global_routers().unwrap();
+        assert!(routers.borrow().is_empty());
+
+        relay.shutdown().await.unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(1), routers.changed()).await;
+        assert!(closed.expect("the router channel did not close").is_err());
+    }
+
+    #[tokio::test]
     async fn unexpected_host_return_cancels_relay_and_records_terminal_error() {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
@@ -3147,6 +3246,7 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -3241,6 +3341,7 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
         };
 
         cancel.cancel();
@@ -3359,6 +3460,7 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
         };
 
         let health = relay.health().await;

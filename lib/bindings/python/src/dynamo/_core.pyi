@@ -2824,6 +2824,7 @@ class PoolRelay:
         tuning: Optional[Dict[str, int]] = None,
         sources_file: Optional[str] = None,
         connection_revision: Optional[str] = None,
+        global_discovery_url: Optional[str] = None,
     ) -> None:
         ...
 

@@ -2666,6 +2666,7 @@ dependencies = [
  "dynamo-bench",
  "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-discovery-client",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
