@@ -190,6 +190,9 @@ pub const METRIC_STATUS_ALLOCATION_FAILED: &str = "allocation_failed";
 pub const METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW: &str = "ownership_degree_overflow";
 pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_violation";
 pub const METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN: &str = "unsupported_residency_domain";
+/// An error kind this crate does not know: `KvCacheEventError` is non-exhaustive and lives in
+/// `dynamo-kv-events`, so a newer event crate can report kinds this indexer predates.
+pub const METRIC_STATUS_UNKNOWN: &str = "unknown";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -370,6 +373,7 @@ impl KvIndexerMetrics {
                         KvCacheEventError::UnsupportedResidencyDomain => {
                             METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN
                         }
+                        _ => METRIC_STATUS_UNKNOWN,
                     };
                     self.kv_cache_events_applied
                         .with_label_values(&[event_type, error_label])
@@ -437,6 +441,7 @@ struct ResultCounters {
     ownership_degree_overflow: IntCounter,
     indexer_invariant_violation: IntCounter,
     unsupported_residency_domain: IntCounter,
+    unknown: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -459,6 +464,7 @@ impl ResultCounters {
                 .with_label_values(&[event_type, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION]),
             unsupported_residency_domain: counters
                 .with_label_values(&[event_type, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN]),
+            unknown: counters.with_label_values(&[event_type, METRIC_STATUS_UNKNOWN]),
         }
     }
 
@@ -475,6 +481,7 @@ impl ResultCounters {
             Err(KvCacheEventError::UnsupportedResidencyDomain) => {
                 &self.unsupported_residency_domain
             }
+            Err(_) => &self.unknown,
         }
     }
 }

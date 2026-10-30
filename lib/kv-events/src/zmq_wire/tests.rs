@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
 
-use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
-    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
-    compute_block_hash_for_seq,
-};
+use crate::event::KvCacheEventData;
+use crate::placement::{PlacementEvent, PlacementOwner};
+use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::filter::KvCacheSpecKind;
 use super::*;

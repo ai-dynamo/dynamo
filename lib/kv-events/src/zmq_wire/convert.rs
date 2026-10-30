@@ -5,11 +5,15 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement, PlacementEvent,
-    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
+use crate::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use crate::placement::{Placement, PlacementEvent};
+use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::types::{BlockHashValue, Locality, RawKvEvent};
 
@@ -260,7 +264,7 @@ pub fn normalize_mm_placeholder_runs(
 
     let mut out = token_ids.to_vec();
     for ((start, end, _), group_index) in runs.into_iter().zip(run_groups) {
-        let pad = crate::protocols::pad_value_for_mm_hash(mm_objects[group_index]);
+        let pad = dynamo_kv_hashing::routing::pad_value_for_mm_hash(mm_objects[group_index]);
         out[start..end].fill(pad);
     }
     Some((out, group_count))
@@ -289,7 +293,7 @@ pub fn normalize_mm_token_runs(
                 in_run = true;
                 runs += 1;
                 let mm_hash = mm_hashes.get(object_index).copied().unwrap_or(last_mm_hash);
-                run_pad = crate::protocols::pad_value_for_mm_hash(mm_hash);
+                run_pad = dynamo_kv_hashing::routing::pad_value_for_mm_hash(mm_hash);
             }
             out.push(run_pad);
         } else {
@@ -486,7 +490,8 @@ pub fn create_stored_blocks(
 #[cfg(test)]
 mod normalize_tests {
     use super::*;
-    use crate::protocols::{BlockMmObjectInfo, pad_value_for_mm_hash};
+    use dynamo_kv_hashing::routing::pad_value_for_mm_hash;
+    use dynamo_router_protocol::mm::BlockMmObjectInfo;
 
     #[test]
     fn image_only_normalization_preserves_worker_order_and_clamping() {

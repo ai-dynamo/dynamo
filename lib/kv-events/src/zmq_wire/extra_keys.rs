@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
 
 use super::types::ExtraKeyItem;
 

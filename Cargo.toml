@@ -11,6 +11,7 @@ members = [
     "lib/data-gen",
     "lib/kv-hashing",
     "lib/mocker",
+    "lib/kv-events",
     "lib/kv-router",
     "lib/router/protocol",
     "lib/global-common",
@@ -78,6 +79,7 @@ dynamo-renderer = { version = "=8.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
+dynamo-kv-events = { path = "lib/kv-events", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }

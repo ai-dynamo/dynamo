@@ -74,13 +74,14 @@
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
+/lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                                             @ai-dynamo/dynamo-router-codeowners
+/lib/kv-events/src/zmq_wire/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/recovery/                                                                            @ai-dynamo/dynamo-router-codeowners
-/lib/kv-router/src/zmq_wire/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/sequences/                                                                           @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/router/                                                                          @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/scheduling/                                                                          @ai-dynamo/dynamo-router-codeowners
@@ -737,8 +738,8 @@ requirements.txt                                                                
 /components/src/dynamo/vllm/cache_info.py                                                               @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/deps/requirements.frontend.txt                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/lib/kv-events/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
-/lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/sidecar/testkit/tests/support/lpx.rs                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners

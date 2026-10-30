@@ -27,6 +27,7 @@ testing = ["dynamo-router-protocol/testing"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }

@@ -22,7 +22,7 @@ pub mod services;
 pub mod session_prefix_index;
 pub mod tracking_hash;
 pub mod worker_type;
-pub mod zmq_wire;
+pub use dynamo_kv_events::zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
 pub use indexer::concurrent_radix_tree_compressed;

@@ -1,0 +1,24 @@
+[package]
+name = "dynamo-kv-events"
+description = "KV cache event types, the engine ZMQ codec, and the replay cursor shared by Dynamo publishers and the router"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[dependencies]
+dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+rmp-serde = { workspace = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rstest = "0.18.2"

@@ -13,7 +13,9 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
+use crate::placement::PlacementEvent;
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::{DpRank, WorkerWithDpRank};
 
 mod convert;
 mod deserialize;

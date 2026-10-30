@@ -4,7 +4,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::protocols::BlockExtraInfo;
+use dynamo_router_protocol::mm::BlockExtraInfo;
 
 use super::filter::{KvCacheEventMetadata, KvCacheSpecKind};
 
