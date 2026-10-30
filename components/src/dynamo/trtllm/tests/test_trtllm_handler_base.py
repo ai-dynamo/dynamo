@@ -713,10 +713,11 @@ class TestMultimodalGuard:
         epd_metadata = {
             "_prefill_prompt": "describe image",
             "_prefill_prompt_token_ids": [1, 2, 3],
+            "_decode_without_media": True,
         }
 
         result = await self._prepare(handler, request, epd_metadata)
-        assert result["prompt"] == "describe image"
+        assert "prompt" not in result
         assert result["prompt_token_ids"] == [1, 2, 3]
         assert result["multi_modal_data"] is None
 
@@ -731,8 +732,17 @@ class TestPrefillPromptMetadata:
         config.conversation_affinity = False
         return _ConcreteHandler(config)
 
-    def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
-        params = DisaggregatedParams(request_type="context_only")
+    def _pack_metadata(
+        self, request, processed_input, prompt, prompt_token_ids, **overrides
+    ):
+        fields = {
+            "request_type": "context_only",
+            "multimodal_input": {"multimodal_hashes": [1]},
+            "mrope_position_ids_handle": {"method_key": 4, "data": "AA=="},
+            "mrope_position_deltas_handle": {"method_key": 4, "data": "AA=="},
+        }
+        fields.update(overrides)
+        params = DisaggregatedParams(**fields)
         output = MagicMock(disaggregated_params=params)
         result = MagicMock(prompt=prompt, prompt_token_ids=prompt_token_ids)
 
@@ -754,6 +764,49 @@ class TestPrefillPromptMetadata:
 
         assert "_epd_metadata" not in result
 
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "multimodal_input",
+            "mrope_position_ids_handle",
+            "mrope_position_deltas_handle",
+        ],
+    )
+    def test_incomplete_handoff_keeps_legacy_media(self, missing):
+        request = {"token_ids": [1, 2, 3], "multi_modal_data": {"image_url": ["image"]}}
+        result = self._pack_metadata(request, {}, None, [1, 2, 3], **{missing: None})
+        assert "_epd_metadata" not in result
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        expected = {
+            "prompt": "describe image",
+            "multi_modal_data": {"image": [object()]},
+        }
+        handler.multimodal_processor.process_openai_request = mock.AsyncMock(
+            return_value=expected
+        )
+        actual = asyncio.run(
+            handler._prepare_input_for_generation(
+                request, None, None, {"_prefill_prompt_token_ids": [1, 2, 3]}
+            )
+        )
+        assert actual is expected
+        handler.multimodal_processor.process_openai_request.assert_awaited_once_with(
+            request, None, None
+        )
+        assert request["multi_modal_data"]
+
+    @pytest.mark.parametrize("handle", [{"method_key": 1}, {"method_key": 4}])
+    def test_nonportable_handoff_keeps_legacy_media(self, handle):
+        result = self._pack_metadata(
+            {"multi_modal_data": {"image_url": ["image"]}},
+            {},
+            None,
+            [1, 2, 3],
+            mrope_position_ids_handle=handle,
+        )
+        assert "_epd_metadata" not in result
+
     def test_multimodal_prefill_preserves_prompt_metadata(self):
         result = self._pack_metadata(
             request={
@@ -768,8 +821,8 @@ class TestPrefillPromptMetadata:
         )
 
         assert result["_epd_metadata"] == {
-            "_prefill_prompt": "describe image",
             "_prefill_prompt_token_ids": [1, 2, 3],
+            "_decode_without_media": True,
         }
 
     def test_epd_prefill_preserves_encoder_metadata(self):
@@ -785,11 +838,32 @@ class TestPrefillPromptMetadata:
         )
 
         assert result["_epd_metadata"] == {
-            "_prefill_prompt": "encoder prompt",
             "_prefill_prompt_token_ids": [4, 5, 6],
+            "_decode_without_media": True,
             "_epd_processed_prompt": "engine prompt",
             "_epd_prompt_token_ids": [4, 5, 6],
         }
+
+    def test_multimodal_token_id_prefill_needs_no_prompt(self):
+        result = self._pack_metadata(
+            request={"token_ids": [1, 91, 2], "multi_modal_data": {"image_url": []}},
+            processed_input={"prompt_token_ids": [1, 91, 2]},
+            prompt=None,
+            prompt_token_ids=[1, 91, 91, 91, 2],
+        )
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt_token_ids": [1, 91, 91, 91, 2],
+            "_decode_without_media": True,
+        }
+
+    def test_multimodal_prefill_missing_expanded_ids_fails(self):
+        with pytest.raises(ValueError, match="expanded prompt token IDs"):
+            self._pack_metadata(
+                request={"multi_modal_data": {"image_url": ["image"]}},
+                processed_input={},
+                prompt=None,
+                prompt_token_ids=[],
+            )
 
 
 class TestDisaggRequestId:
