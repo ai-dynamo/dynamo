@@ -4,7 +4,6 @@
 //! The default policy credits blocks a worker can fetch from a KV transfer source.
 
 mod support;
-use dynamo_router_policies::DefaultWorkerSelector;
 use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,
@@ -12,6 +11,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::SchedulingRequest;
 use dynamo_kv_router::{KvRouterConfig, WorkerLoadProjection, WorkerSelector};
+use dynamo_router_policies::DefaultWorkerSelector;
 use std::collections::HashMap;
 
 const BLOCK_SIZE: u32 = 16;

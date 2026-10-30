@@ -1,99 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::{
-    protocols::{WorkerSelectionResult, WorkerWithDpRank},
-    scheduling::KvSchedulerError,
-    selector::{HostedSelectionInputs, WorkerInputs, WorkerSelectionInput, WorkerSelector},
-};
-use dynamo_runtime::pipeline::{BuiltinRoutePicker, RouterMode};
+use dynamo_kv_router::selector::HostedSelectionRequest;
 
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-
-/// First-party selector hosted directly by [`RoutingHost`](super::RoutingHost).
-pub(super) struct BuiltinWorkerSelector {
-    mode: RouterMode,
-    picker: BuiltinRoutePicker,
-}
-
-impl BuiltinWorkerSelector {
-    pub(super) fn new(mode: RouterMode) -> Option<Self> {
-        let picker = match mode {
-            RouterMode::RoundRobin => BuiltinRoutePicker::round_robin(),
-            RouterMode::Random => BuiltinRoutePicker::random(),
-            RouterMode::PowerOfTwoChoices => BuiltinRoutePicker::power_of_two_choices(),
-            RouterMode::LeastLoaded => BuiltinRoutePicker::least_loaded(),
-            _ => return None,
-        };
-        Some(Self { mode, picker })
-    }
-
-    pub(super) fn peek_worker(
-        &self,
-        input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
-    ) -> Result<u64, KvSchedulerError> {
-        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
-        self.picker
-            .peek_worker(worker_ids, |worker_id| {
-                occupancy.map_or(0, |occupancy| occupancy(worker_id))
-            })
-            .ok_or(KvSchedulerError::NoEndpoints)
-    }
-
-    fn hosted_inputs<'a>(
-        &self,
-        input: WorkerSelectionInput<'a, ModelRuntimeConfig>,
-    ) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
-        let (worker_ids, occupancy) = input.into_hosted()?;
-        if self
-            .required_worker_inputs()
-            .contains(WorkerInputs::ACTIVE_REQUESTS)
-            && occupancy.is_none()
-        {
-            return Err(dynamo_kv_router::WorkerSelectionPolicyError::failed(
-                "selector requires hosted ACTIVE_REQUESTS input",
-            )
-            .into());
-        }
-        Ok((worker_ids, occupancy))
-    }
-}
-
-impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        if self.mode.requires_occupancy() {
-            WorkerInputs::ACTIVE_REQUESTS
-        } else {
-            WorkerInputs::NONE
-        }
-    }
-
-    fn select_worker(
-        &self,
-        input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
-        let worker_id = self
-            .picker
-            .select_worker(worker_ids, |worker_id| {
-                occupancy.map_or(0, |occupancy| occupancy(worker_id))
-            })
-            .ok_or(KvSchedulerError::NoEndpoints)?;
-        Ok(selection(worker_id))
-    }
-}
-
-fn selection(worker_id: u64) -> WorkerSelectionResult {
-    WorkerSelectionResult {
-        worker: WorkerWithDpRank::from_worker_id(worker_id),
-        required_blocks: 0,
-        effective_overlap_blocks: 0.0,
-        cached_tokens: 0,
-        max_raw_cached_tokens: None,
-        selected_raw_cached_tokens: None,
-        potential_decode_blocks: 0,
-        kv_transfer_source: None,
-    }
+/// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
+/// [`request_blocks`](dynamo_kv_router::WorkerSelectionContext::request_blocks) reads 0.
+fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
+    HostedSelectionRequest::new(request.token_ids.len(), 0)
 }
 
 use super::*;
@@ -143,11 +56,8 @@ impl RoutingHost {
             ));
         }
         let target = lora
-            .selector
-            .select_worker(dynamo_kv_router::selector::WorkerSelectionInput::hosted(
-                &candidates,
-                None,
-            ))?
+            .picker
+            .select(&candidates, None, &hosted_request(request))?
             .worker
             .worker_id;
         tracing::debug!(
@@ -194,19 +104,18 @@ impl RoutingHost {
                     device_aware_telemetry: None,
                 })
             }
-            RoutingPolicy::Builtin(selector) => {
+            RoutingPolicy::Hosted(picker) => {
                 let preferred_worker = preferred_worker()?;
-                if selector
-                    .required_worker_inputs()
-                    .contains(WorkerInputs::ACTIVE_REQUESTS)
-                {
+                let hosted_request = hosted_request(request.content());
+                if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS) {
                     let occupancy = self
                         .hosted_occupancy
                         .as_ref()
                         .expect("ACTIVE_REQUESTS policy must have hosted occupancy state");
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
-                        selector,
+                        picker,
+                        &hosted_request,
                         target_constraint
                             .map(|target| target.worker_id)
                             .or(preferred_worker),
@@ -229,12 +138,8 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 Ok(worker_id)
                             } else {
-                                selector
-                                    .select_worker(
-                                        dynamo_kv_router::selector::WorkerSelectionInput::hosted(
-                                            ids, None,
-                                        ),
-                                    )
+                                picker
+                                    .select(ids, None, &hosted_request)
                                     .map(|selection| selection.worker.worker_id)
                             }
                         })??,
@@ -537,76 +442,90 @@ impl RoutingHost {
 mod tests {
     use std::cell::Cell;
 
+    use dynamo_kv_router::selector::HostedWorkerPicker;
+    use dynamo_runtime::pipeline::RouterMode;
+
+    use super::super::builder::hosted_picker;
     use super::*;
 
-    fn select(selector: &BuiltinWorkerSelector, worker_ids: &[u64]) -> u64 {
-        selector
-            .select_worker(WorkerSelectionInput::hosted(worker_ids, None))
+    fn request() -> HostedSelectionRequest {
+        HostedSelectionRequest::new(0, 0)
+    }
+
+    fn select(picker: &HostedWorkerPicker, worker_ids: &[u64]) -> u64 {
+        picker
+            .select(worker_ids, None, &request())
             .unwrap()
             .worker
             .worker_id
     }
 
     #[test]
-    fn round_robin_uses_hosted_selector_input() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
-        assert_eq!(select(&selector, &[10, 20]), 10);
-        assert_eq!(select(&selector, &[10, 20]), 20);
-        assert_eq!(select(&selector, &[10, 20]), 10);
+    fn round_robin_rotates_and_previews_do_not_advance() {
+        let picker = hosted_picker(RouterMode::RoundRobin).unwrap();
+        assert_eq!(picker.inputs(), WorkerInputs::NONE);
+        let peek = |picker: &HostedWorkerPicker| {
+            picker
+                .select(&[10, 20], None, &request().with_preview(true))
+                .unwrap()
+                .worker
+                .worker_id
+        };
+        assert_eq!(peek(&picker), 10);
+        assert_eq!(peek(&picker), 10);
+        assert_eq!(select(&picker, &[10, 20]), 10);
+        assert_eq!(select(&picker, &[10, 20]), 20);
+        assert_eq!(select(&picker, &[10, 20]), 10);
     }
 
     #[test]
-    fn random_uses_hosted_selector_input() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::Random).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+    fn random_picks_an_eligible_worker() {
+        let picker = hosted_picker(RouterMode::Random).unwrap();
+        assert_eq!(picker.inputs(), WorkerInputs::NONE);
         for _ in 0..32 {
-            assert!(matches!(select(&selector, &[10, 20]), 10 | 20));
+            assert!(matches!(select(&picker, &[10, 20]), 10 | 20));
         }
     }
 
     #[test]
-    fn occupancy_policies_require_lazy_occupancy_input() {
+    fn load_based_modes_require_active_requests() {
         for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-            let selector = BuiltinWorkerSelector::new(mode).unwrap();
-            assert_eq!(
-                selector.required_worker_inputs(),
-                WorkerInputs::ACTIVE_REQUESTS
-            );
-            assert!(
-                selector
-                    .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))
-                    .is_err()
-            );
+            let picker = hosted_picker(mode).unwrap();
+            assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
+            assert!(picker.select(&[10, 20], None, &request()).is_err());
         }
     }
 
     #[test]
-    fn least_loaded_reads_hosted_occupancy() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::LeastLoaded).unwrap();
-        let occupancy = |worker_id| if worker_id == 10 { 4 } else { 1 };
-        let selected = selector
-            .select_worker(WorkerSelectionInput::hosted(&[10, 20], Some(&occupancy)))
-            .unwrap();
+    fn least_loaded_reads_active_requests() {
+        let picker = hosted_picker(RouterMode::LeastLoaded).unwrap();
+        let active = |worker_id| if worker_id == 10 { 4 } else { 1 };
+        let selected = picker.select(&[10, 20], Some(&active), &request()).unwrap();
         assert_eq!(selected.worker.worker_id, 20);
     }
 
     #[test]
-    fn power_of_two_choices_reads_only_two_occupancies() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::PowerOfTwoChoices).unwrap();
+    fn power_of_two_reads_only_two_active_request_counts() {
+        let picker = hosted_picker(RouterMode::PowerOfTwoChoices).unwrap();
         let reads = Cell::new(0);
-        let occupancy = |_| {
+        let active = |_| {
             reads.set(reads.get() + 1);
             0
         };
-
-        selector
-            .select_worker(WorkerSelectionInput::hosted(
-                &[10, 20, 30, 40],
-                Some(&occupancy),
-            ))
+        picker
+            .select(&[10, 20, 30, 40], Some(&active), &request())
             .unwrap();
-
         assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn non_plugin_modes_have_no_hosted_policy() {
+        for mode in [
+            RouterMode::KV,
+            RouterMode::Direct,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            assert!(hosted_picker(mode).is_err());
+        }
     }
 }

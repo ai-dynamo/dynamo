@@ -93,8 +93,8 @@ worker_selection:
 
 #[test]
 fn programmatic_factory_is_an_explicit_custom_selection() {
-    let plugins = RouterPlugins::default()
-        .with_worker_selection(dynamo_router_policies::default_factory());
+    let plugins =
+        RouterPlugins::default().with_worker_selection(dynamo_router_policies::default_factory());
     assert!(plugins.has_custom_worker_selection());
     assert!(plugins.has_custom_plugins());
 }

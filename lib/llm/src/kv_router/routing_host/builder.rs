@@ -12,7 +12,11 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::selector::{WorkerInputs, WorkerSelector};
+use dynamo_kv_router::{
+    KvRouterConfig, RoutingPartitionRef, WorkerType,
+    selector::{HostedWorkerPicker, WorkerInputs},
+};
+use dynamo_router_policies::router_modes;
 use dynamo_runtime::{
     component::Client,
     pipeline::{
@@ -22,7 +26,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{BuiltinWorkerSelector, HostedOccupancy, LoraRouting, RoutingHost, RoutingPolicy};
+use super::{HostedOccupancy, LoraRouting, RoutingHost, RoutingPolicy};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
@@ -203,7 +207,7 @@ impl PolicyInputs {
                 let policy = match mode {
                     RouterMode::Direct => RoutingPolicy::Direct,
                     RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
-                    mode => RoutingPolicy::Builtin(builtin_selector(mode)?),
+                    mode => RoutingPolicy::Hosted(hosted_picker(mode)?),
                 };
                 let lora = match (lora, mode) {
                     (None, _) => None,
@@ -213,7 +217,7 @@ impl PolicyInputs {
                     ) => Some(LoraRouting {
                         filter,
                         load_estimator,
-                        selector: builtin_selector(mode)?,
+                        picker: hosted_picker(mode)?,
                     }),
                     (Some(_), mode) => {
                         anyhow::bail!("LoRA filtering is unsupported with {mode:?} routing")
@@ -229,9 +233,26 @@ impl PolicyInputs {
     }
 }
 
-fn builtin_selector(mode: RouterMode) -> anyhow::Result<BuiltinWorkerSelector> {
-    BuiltinWorkerSelector::new(mode)
-        .ok_or_else(|| anyhow::anyhow!("{mode:?} routing is not a first-party policy"))
+/// Resolve a routing mode to its policy by type name in the linked plugin registry, the same way
+/// a policy file names a type, and take out its picker.
+pub(super) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
+    let policy_type = match mode {
+        RouterMode::RoundRobin => router_modes::ROUND_ROBIN,
+        RouterMode::Random => router_modes::RANDOM,
+        RouterMode::PowerOfTwoChoices => router_modes::POWER_OF_TWO,
+        RouterMode::LeastLoaded => router_modes::LEAST_LOADED,
+        mode => anyhow::bail!("{mode:?} routing is not a routing-mode policy"),
+    };
+    let factory = crate::kv_router::plugins::router_plugin_registry().resolve_type(policy_type)?;
+    // Routing-mode policies read neither the role nor the partition.
+    let policy = factory(
+        &KvRouterConfig::default(),
+        WorkerType::Aggregated,
+        RoutingPartitionRef::new("", ""),
+    );
+    policy
+        .into_hosted_picker()
+        .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))
 }
 
 /// Wire a host over its transport. This is the one place that turns
@@ -273,8 +294,8 @@ fn assemble(
         } => {
             let hosted_occupancy = matches!(
                 &policy,
-                RoutingPolicy::Builtin(selector)
-                    if selector.required_worker_inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
+                RoutingPolicy::Hosted(picker)
+                    if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
             )
             .then(|| HostedOccupancy::new(&inner))
             .transpose()?;

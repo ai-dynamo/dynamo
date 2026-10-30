@@ -174,11 +174,11 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use dynamo_router_policies::default_factory;
     use dynamo_kv_router::services::selection::{
         SelectionCacheConfig, SelectionCore, WorkerRequest,
     };
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
+    use dynamo_router_policies::default_factory;
     use dynamo_runtime::protocols::EndpointId;
     use tower::ServiceExt;
 

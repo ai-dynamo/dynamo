@@ -2478,6 +2478,7 @@ version = "1.7.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
+ "dynamo-routing-algorithms",
  "fastrand",
  "parking_lot",
  "serde",
@@ -2485,6 +2486,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-routing-algorithms"
+version = "1.7.0"
+dependencies = [
+ "fastrand",
 ]
 
 [[package]]
@@ -2507,6 +2515,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-routing-algorithms",
  "dynamo-truthy",
  "educe",
  "either",

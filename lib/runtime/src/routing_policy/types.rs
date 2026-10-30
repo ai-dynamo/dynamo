@@ -29,12 +29,7 @@ pub(crate) enum RoutePolicy {
     DeviceAwareWeighted,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum RouteDevice {
-    Cpu,
-    #[default]
-    Accelerator,
-}
+pub(crate) use dynamo_routing_algorithms::Device as RouteDevice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RouteCandidate {

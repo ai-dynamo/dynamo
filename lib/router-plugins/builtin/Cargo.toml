@@ -15,6 +15,7 @@ description = "Router plugins shipped with Dynamo"
 fastrand = "2"
 parking_lot.workspace = true
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-routing-algorithms = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
