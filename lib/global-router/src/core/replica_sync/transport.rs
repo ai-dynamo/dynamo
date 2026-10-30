@@ -13,7 +13,6 @@
 //! the same way through the core's [`SessionBindingUpdates`] and
 //! [`SelectionService::apply_session_binding`].
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -105,11 +104,16 @@ pub struct ReplicaSyncStats {
 #[derive(Clone)]
 struct OpenBooking {
     partition: RoutingPartitionId,
+    /// The stream it arrived on; `None` for a frame applied directly.
+    peer: Option<Url>,
     router_id: u64,
     worker: WorkerWithDpRank,
     lora_name: Option<String>,
+    /// When it was opened, or last given a second chance by the sweep.
     opened_at: Instant,
     admitted: bool,
+    /// The core saw progress on it since `opened_at`.
+    progressed: bool,
 }
 
 impl OpenBooking {
@@ -127,9 +131,9 @@ impl OpenBooking {
 /// One following of a peer. A peer removed and added back is a new
 /// generation, so a frame the old stream still holds is not applied.
 #[derive(Clone)]
-pub(super) struct Follow {
-    pub(super) generation: u64,
-    pub(super) cancel: CancellationToken,
+pub(crate) struct Follow {
+    pub(crate) generation: u64,
+    pub(crate) cancel: CancellationToken,
 }
 
 #[derive(Default)]
@@ -172,11 +176,11 @@ pub struct ReplicaHub {
     /// departed peer left ([`Self::remove_peer`]) or what no free ever
     /// reached ([`Self::sweep_at`]).
     open: DashMap<String, OpenBooking>,
-    /// How long a mirrored booking may go without its free before the hub
-    /// frees it; the core's own expiry length, now applied here.
+    /// How long a mirrored booking may go without progress or its free
+    /// before the hub frees it; the core's own expiry length, applied here
+    /// as the embedded router applies it: a booking that progressed in the
+    /// last interval gets one more.
     booking_expiry: Duration,
-    /// The router ids each peer's stream has carried events for.
-    routers_of: DashMap<Url, HashSet<u64>>,
     cancel: CancellationToken,
     counters: Arc<Counters>,
 }
@@ -202,7 +206,6 @@ impl ReplicaHub {
             peers_changed: Notify::new(),
             open: DashMap::new(),
             booking_expiry: active_request_expiry_duration(),
-            routers_of: DashMap::new(),
             cancel,
             counters: Arc::default(),
         });
@@ -210,15 +213,21 @@ impl ReplicaHub {
         hub
     }
 
-    /// Frees, in the core, every mirrored booking admitted `booking_expiry`
-    /// ago whose free never came, and forgets one the core never admitted
-    /// (it dropped the event) after the same time. With the host holding
-    /// the leases this is the only expiry a mirrored booking has; a local
-    /// booking ends with its reservation.
+    /// Frees, in the core, every mirrored booking that went `booking_expiry`
+    /// without progress or its free, and forgets one the core never
+    /// admitted (it dropped the event) after the same time. A booking that
+    /// progressed in the interval starts another one instead. With the host
+    /// holding the leases this is the only expiry a mirrored booking has; a
+    /// local booking ends with its reservation.
     fn sweep_at(&self, now: Instant) {
         let mut stale = Vec::new();
         self.open.retain(|request_id, booking| {
             if now.saturating_duration_since(booking.opened_at) < self.booking_expiry {
+                return true;
+            }
+            if booking.progressed {
+                booking.progressed = false;
+                booking.opened_at = now;
                 return true;
             }
             if booking.admitted {
@@ -309,27 +318,12 @@ impl ReplicaHub {
         true
     }
 
-    /// Frees, in the core, every booking still open from the router ids
-    /// `peer`'s stream carried, unless another peer still carries them.
+    /// Frees, in the core, every booking still open that `peer`'s stream
+    /// carried.
     fn release_bookings_of(&self, peer: &Url) {
-        let Some((_, routers)) = self.routers_of.remove(peer) else {
-            return;
-        };
-        let gone: HashSet<u64> = routers
-            .into_iter()
-            .filter(|router_id| {
-                !self
-                    .routers_of
-                    .iter()
-                    .any(|entry| entry.value().contains(router_id))
-            })
-            .collect();
-        if gone.is_empty() {
-            return;
-        }
         let mut frees = Vec::new();
         self.open.retain(|request_id, booking| {
-            if gone.contains(&booking.router_id) {
+            if booking.peer.as_ref() == Some(peer) {
                 frees.push((booking.partition.clone(), booking.free(request_id.clone())));
                 return false;
             }
@@ -385,7 +379,7 @@ impl ReplicaHub {
     }
 
     /// Each peer with its current following.
-    pub(super) fn follows(&self) -> Vec<(Url, Follow)> {
+    pub(crate) fn follows(&self) -> Vec<(Url, Follow)> {
         self.peers
             .iter()
             .map(|peer| (peer.key().clone(), peer.value().clone()))
@@ -432,7 +426,7 @@ impl ReplicaHub {
     /// leaves. A frame from a peer no longer followed, or from an earlier
     /// following of it, is ignored: it cannot re-book what
     /// [`Self::remove_peer`] freed.
-    pub(super) fn apply_from(
+    pub(crate) fn apply_from(
         &self,
         peer: &Url,
         generation: u64,
@@ -462,6 +456,7 @@ impl ReplicaHub {
             Some(Frame::Events(batch)) => (batch.events, batch.bindings),
             None => return,
         };
+        let mut pending = Vec::new();
         for event in events {
             if event.router_id == self.process_id {
                 continue;
@@ -480,38 +475,47 @@ impl ReplicaHub {
                 continue;
             };
             let request_id = event.request_id.clone();
-            match &event.data {
-                ActiveSequenceEventData::AddRequest { .. } => {
-                    self.open.insert(
-                        request_id.clone(),
-                        OpenBooking {
-                            partition: partition.clone(),
-                            router_id: event.router_id,
-                            worker: event.worker,
-                            lora_name: event.lora_name.clone(),
-                            opened_at: Instant::now(),
-                            admitted: false,
-                        },
-                    );
+            // An add is tracked before it is sent, so the core's `admitted`
+            // finds it; a free is left to the core's `completed`, so one the
+            // partition is slow to take is still remembered.
+            let added = matches!(event.data, ActiveSequenceEventData::AddRequest { .. });
+            if added {
+                self.open.insert(
+                    request_id.clone(),
+                    OpenBooking {
+                        partition: partition.clone(),
+                        peer: peer.cloned(),
+                        router_id: event.router_id,
+                        worker: event.worker,
+                        lora_name: event.lora_name.clone(),
+                        opened_at: Instant::now(),
+                        admitted: false,
+                        progressed: false,
+                    },
+                );
+            }
+            match inbound.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(event)) => pending.push((inbound.clone(), event)),
+                Err(TrySendError::Closed(_)) => {
+                    if added {
+                        self.open.remove(&request_id);
+                    }
+                    self.counters.events_dropped.fetch_add(1, Relaxed);
+                    tracing::debug!(%partition, "a replica event was dropped: the partition is gone");
                 }
-                ActiveSequenceEventData::Free => {
-                    self.open.remove(&request_id);
+            }
+        }
+        if !pending.is_empty() {
+            // A full partition takes them as soon as it can; nothing is lost.
+            let counters = self.counters.clone();
+            tokio::spawn(async move {
+                for (inbound, event) in pending {
+                    if inbound.send(event).await.is_err() {
+                        counters.events_dropped.fetch_add(1, Relaxed);
+                    }
                 }
-                ActiveSequenceEventData::MarkPrefillCompleted => {}
-            }
-            let router_id = event.router_id;
-            if let Err(error) = inbound.try_send(event) {
-                self.open.remove(&request_id);
-                self.counters.events_dropped.fetch_add(1, Relaxed);
-                tracing::debug!(%partition, %error, "a replica event was dropped");
-                continue;
-            }
-            if let Some(peer) = peer {
-                self.routers_of
-                    .entry(peer.clone())
-                    .or_default()
-                    .insert(router_id);
-            }
+            });
         }
         for binding in bindings {
             if binding.writer_id == self.process_id {
@@ -585,7 +589,11 @@ impl ReplicaRequestLeaseObserver for ReplicaHub {
         self.booking_admitted(&booking.request_id);
     }
 
-    fn progressed(&self, _: &SchedulerBookingDescriptor) {}
+    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+        if let Some(mut open) = self.open.get_mut(&booking.request_id) {
+            open.progressed = true;
+        }
+    }
 
     fn completed(&self, booking: &SchedulerBookingDescriptor) {
         self.booking_completed(&booking.request_id);
@@ -603,6 +611,14 @@ impl ReplicaHub {
     /// The core let the mirrored booking `request_id` go.
     fn booking_completed(&self, request_id: &str) {
         self.open.remove(request_id);
+    }
+
+    /// The core saw progress on the mirrored booking `request_id`.
+    #[cfg(test)]
+    fn booking_progressed(&self, request_id: &str) {
+        if let Some(mut open) = self.open.get_mut(request_id) {
+            open.progressed = true;
+        }
     }
 }
 
@@ -655,18 +671,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_frame_from_an_earlier_following_is_ignored() {
-        let hub = ReplicaHub::new(CancellationToken::new());
-        let peer: Url = "http://peer:8000".parse().unwrap();
-        assert!(hub.add_peer(peer.clone()));
-        let first = hub.follows()[0].1.generation;
-        assert!(hub.remove_peer(&peer));
-        assert!(hub.add_peer(peer.clone()));
-        let second = hub.follows()[0].1.generation;
-        assert_ne!(first, second);
-    }
-
-    #[tokio::test]
     async fn the_sweep_frees_an_admitted_booking_whose_free_never_came() {
         let hub = ReplicaHub::new(CancellationToken::new());
         let partition = RoutingPartitionId::new("qwen", "global");
@@ -674,30 +678,41 @@ mod tests {
         let start = Instant::now();
         let booking = |admitted: bool| OpenBooking {
             partition: partition.clone(),
+            peer: None,
             router_id: 7,
             worker: WorkerWithDpRank::new(1, 0),
             lora_name: None,
             opened_at: start,
             admitted,
+            progressed: false,
         };
         hub.open.insert("taken".to_owned(), booking(false));
         hub.open.insert("dropped".to_owned(), booking(false));
+        hub.open.insert("busy".to_owned(), booking(false));
         hub.booking_admitted("taken");
-        assert_eq!(hub.stats().bookings_tracked, 2);
+        hub.booking_admitted("busy");
+        hub.booking_progressed("busy");
+        assert_eq!(hub.stats().bookings_tracked, 3);
 
         // Too young to sweep.
         hub.sweep_at(start + hub.booking_expiry / 2);
-        assert_eq!(hub.stats().bookings_tracked, 2);
+        assert_eq!(hub.stats().bookings_tracked, 3);
 
         // Old enough: the admitted one is freed in the core, the one the
-        // core never took is only forgotten.
+        // core never took is only forgotten, and the one that progressed
+        // gets another interval.
         hub.sweep_at(start + hub.booking_expiry);
-        assert_eq!(hub.stats().bookings_tracked, 0);
+        assert_eq!(hub.stats().bookings_tracked, 1);
         let free = channels.inbound_rx.recv().await.unwrap();
         assert_eq!(free.request_id, "taken");
         assert!(matches!(free.data, ActiveSequenceEventData::Free));
         assert!(channels.inbound_rx.try_recv().is_err());
         assert_eq!(hub.stats().bookings_released, 1);
+
+        // No further progress: the second interval ends it.
+        hub.sweep_at(start + hub.booking_expiry * 2);
+        assert_eq!(hub.stats().bookings_tracked, 0);
+        assert_eq!(channels.inbound_rx.recv().await.unwrap().request_id, "busy");
 
         // The core letting a booking go removes it from the ledger.
         hub.open.insert("done".to_owned(), booking(true));

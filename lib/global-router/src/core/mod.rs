@@ -1488,6 +1488,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_a_frame_from_an_earlier_following_of_a_peer_is_not_applied() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, _catalog) =
+            synced_selector(CorePolicy::LeastRequests, std::slice::from_ref(&blue), grpc).await;
+        let hub = a.grpc.as_ref().unwrap().hub.clone();
+        let peer: Url = "http://peer:8000".parse().unwrap();
+        assert!(hub.add_peer(peer.clone()));
+        let old = hub.follows()[0].1.generation;
+        assert!(hub.remove_peer(&peer));
+        assert!(hub.add_peer(peer.clone()));
+        let current = hub.follows()[0].1.generation;
+        assert_ne!(old, current);
+
+        let frame = |request: &str| replica_sync::proto::ReplicaFrame {
+            frame: Some(replica_sync::proto::replica_frame::Frame::Events(
+                replica_sync::proto::ReplicaEventBatch {
+                    events: vec![replica_sync::wire::to_wire_event(
+                        &dynamo_kv_router::identity::RoutingPartitionId::new("qwen", ROUTING_GROUP),
+                        &dynamo_kv_router::protocols::ActiveSequenceEvent {
+                            request_id: request.to_owned(),
+                            worker: dynamo_kv_router::protocols::WorkerWithDpRank::new(
+                                worker_id(&blue.id),
+                                0,
+                            ),
+                            data:
+                                dynamo_kv_router::protocols::ActiveSequenceEventData::AddRequest {
+                                    token_sequence: None,
+                                    track_prefill_tokens: false,
+                                    expected_output_tokens: None,
+                                    prefill_load_hint: None,
+                                },
+                            router_id: 99,
+                            lora_name: None,
+                        },
+                    )],
+                    bindings: Vec::new(),
+                },
+            )),
+        };
+        // The old stream's frame is dropped; the current one's is applied.
+        hub.apply_from(&peer, old, frame("stale"), &a.service);
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 0);
+        hub.apply_from(&peer, current, frame("live"), &a.service);
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 1);
+        booked_settles(&a, &blue, 1).await;
+    }
+
+    #[tokio::test]
     async fn grpc_mirrored_bookings_are_held_by_the_hub_until_freed() {
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let green = pool("green", "qwen", &["http://green:8000"]);
