@@ -624,35 +624,6 @@ a.fern-card:hover{
 .fern-docs-badge{
     border-radius: var(--rounded);
 }
-/* Enum "Allowed values" chips: match Fern's Schema renderer, which builds each
-   chip as <Badge size="sm"> with the default subtle variant. We can't invoke
-   that renderer (it needs an OpenAPI-backed <Schema>), so we restyle the MDX
-   <Badge> to the same tokens Fern uses: label in shrink-0 text-sm grayscale-a11,
-   chips as .subtle.small (grayscale-a3 fill, grayscale-a11 text, radius-1). The
-   forced background/color neutralize whatever intent the MDX <Badge> requires.
-   Scoped to .enum-values so the pill <Badge> used elsewhere is unaffected. */
-.enum-values {
-    display: inline-flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.5rem;
-}
-.enum-values .enum-label {
-    flex-shrink: 0;
-    color: var(--grayscale-a11);
-    font-size: var(--text-sm);
-}
-.enum-values .fern-docs-badge {
-    border-radius: var(--radius-1) !important;
-    height: 1.25rem;
-    padding: 0 0.375rem;
-    font-size: var(--text-xs);
-    font-weight: 500;
-    background-color: var(--grayscale-a3) !important;
-    color: var(--grayscale-a11) !important;
-    text-transform: none;
-}
-
 /* ============================================================
    Compatibility page: category chips for the Requirement table.
    Splits comma-separated OS / Arch / GPU / CUDA values into
