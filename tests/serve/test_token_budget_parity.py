@@ -167,6 +167,7 @@ def _write_trtllm_options(tmp_path: Path) -> Path:
 
 
 def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[str]:
+    """Build the native server command with the test's context and KV limits."""
     if spec.framework == "vllm":
         return [
             "vllm",
