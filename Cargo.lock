@@ -2884,11 +2884,11 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.8.10"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90#e144fae6e29a02242d3d105732a5825c54fa5b90"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=bc5386b164969d3c6aa58ff13e7bdfca61b20109#bc5386b164969d3c6aa58ff13e7bdfca61b20109"
 dependencies = [
  "anyhow",
- "dynamo-structural-tag 0.1.0 (git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90)",
+ "dynamo-structural-tag 0.1.0 (git+https://github.com/ai-dynamo/frontend-crates?rev=bc5386b164969d3c6aa58ff13e7bdfca61b20109)",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -3172,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90#e144fae6e29a02242d3d105732a5825c54fa5b90"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=bc5386b164969d3c6aa58ff13e7bdfca61b20109#bc5386b164969d3c6aa58ff13e7bdfca61b20109"
 dependencies = [
  "anyhow",
  "regex",
