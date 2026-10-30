@@ -99,11 +99,15 @@ the backend returned for it. The `token` text and `bytes` are decoded
 representations: a control token such as end-of-sequence can have empty text
 and bytes, and `return_tokens_as_token_ids` can replace the text with a
 `token_id:<id>` label. Without that option, concatenating the `bytes` in
-order shows the model output before any tool-call parser touched it, minus
-tokens that decode to nothing. That is the key piece for triage: it tells us
-what the model actually produced, separately from what the parser made of
-it. Decoded text is not a substitute for exact token IDs where the response
-provides them.
+order approximates the model output before any tool-call parser touched it.
+It omits tokens that decode to nothing, and because each token can be
+decoded on its own, it can lose spacing that the tokenizer adds only in
+context. That is the key piece for triage: it tells us what the model
+actually produced, separately from what the parser made of it. For an exact
+replay, also request the generated token IDs with
+`"nvext": {"extra_fields": ["completion_token_ids"]}` where the response
+supports them (see
+[NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md)).
 
 ## What to include when reporting an issue
 
