@@ -1951,9 +1951,11 @@ class PlannerConfig(BaseModel):
         default=None,
         description=(
             "Opt-in periodic replay-based retune of router and planner runtime "
-            "parameters. Replay-only in this release. Setting both "
-            "enable_load_scaling and enable_throughput_scaling explicitly to "
-            "false with retune set runs retune-only with fixed replicas."
+            "parameters. executor 'local' runs in planner-in-the-loop replay; "
+            "a live Kubernetes planner requires executor 'dgdr' "
+            "(experimental). Setting both enable_load_scaling and "
+            "enable_throughput_scaling explicitly to false with retune set "
+            "runs retune-only with fixed replicas."
         ),
     )
 

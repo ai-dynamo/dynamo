@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: planner RBAC — Pod lifecycle observation
+suite: planner RBAC — Pod lifecycle observation and live retune
 templates:
   - charts/dynamo-operator/templates/planner.yaml
 
@@ -113,4 +113,187 @@ tests:
             verbs:
               - get
               - patch
+        documentIndex: 1
+
+  # ── EXPERIMENTAL live retune (dgdrV1Beta2.enabled) ────────────────────────────
+
+  - it: omits live retune rules from the ClusterRole when dgdrV1Beta2 is disabled (default)
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - watch
+              - delete
+        documentIndex: 0
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 0
+
+  - it: grants DGDR v1beta2 and Lease access in the ClusterRole when dgdrV1Beta2 is enabled
+    set:
+      dynamo-operator.dgdrV1Beta2.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - watch
+              - delete
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentruns
+              - dynamographdeploymentcandidates
+            verbs:
+              - get
+              - list
+              - watch
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - pods
+            verbs:
+              - list
+        documentIndex: 0
+      # The planner reads, creates, replaces and deletes Leases; it never patches them.
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - patch
+              - delete
+        documentIndex: 0
+
+  - it: omits live retune rules from the Role when dgdrV1Beta2 is disabled in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 1
+
+  - it: grants DGDR v1beta2 and Lease access in the Role when dgdrV1Beta2 is enabled in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+      dynamo-operator.dgdrV1Beta2.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - watch
+              - delete
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentruns
+              - dynamographdeploymentcandidates
+            verbs:
+              - get
+              - list
+              - watch
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 1
+      # The planner reads, creates, replaces and deletes Leases; it never patches them.
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - patch
+              - delete
         documentIndex: 1

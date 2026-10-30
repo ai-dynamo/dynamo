@@ -339,7 +339,9 @@ RETUNE_OUTCOMES: tuple[str, ...] = get_args(RetuneOutcome)
 class RetuneDecision:
     """Audit record of one retune decision.
 
-    ``decision_id`` is ``retune-<s0>-w<k>`` and is the live reconfiguration
+    ``decision_id`` is ``retune-<s0>-w<k>`` in replay and
+    ``retune-w<window_end_ms>`` live (windows anchored at an epoch phase, so
+    the id survives planner restarts); it is the live reconfiguration
     ``request_id``. Times are planner-clock seconds: epoch seconds live,
     virtual seconds in replay. ``as_of_s`` is the censoring cutoff (the
     scheduled launch time). ``chosen`` equals ``previous`` unless the outcome
@@ -352,7 +354,10 @@ class RetuneDecision:
     ``(params.key(), score)`` pairs, best first. ``sweep_wall_s`` is the
     sweep's wall-clock time and ``decision_latency_s`` the delay the decision
     waited for after launch (at least one tick; ``decided_at_s`` is the tick
-    that observed it).
+    that observed it). ``failure_reason`` is a stable machine-readable reason
+    next to the free-text ``reason`` (for example ``replicas_changed``, or
+    the live sweep executor's), and ``details`` carries JSON-shaped
+    executor facts; both are empty in replay.
     """
 
     decision_id: str
@@ -376,6 +381,8 @@ class RetuneDecision:
     decision_latency_s: Optional[float] = None
     top: list[tuple[str, float]] = field(default_factory=list)
     reason: Optional[str] = None
+    failure_reason: Optional[str] = None
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_non_empty_string("decision_id", self.decision_id)
@@ -391,6 +398,10 @@ class RetuneDecision:
             raise ValueError("previous and chosen must be RetuneParams")
         if self.predictor_warmup is not None:
             object.__setattr__(self, "predictor_warmup", tuple(self.predictor_warmup))
+        if self.failure_reason is not None:
+            _require_non_empty_string("failure_reason", self.failure_reason)
+        # A private copy: the record must not change with the sweep result.
+        object.__setattr__(self, "details", dict(self.details))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-shaped record; ``predictor_warmup`` becomes its length."""
@@ -423,6 +434,8 @@ class RetuneDecision:
             "decision_latency_s": self.decision_latency_s,
             "top": [[key, score] for key, score in self.top],
             "reason": self.reason,
+            "failure_reason": self.failure_reason,
+            "details": json.loads(json.dumps(self.details)),
         }
 
 

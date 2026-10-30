@@ -23,6 +23,26 @@ own ``wall_s`` (capped at the timeout) times ``decision_latency_scale``,
 known once the sweep is done. In replay the old parameters therefore serve
 traffic for the modeled sweep time; live, ``measured`` with scale 1 decides
 on the first tick after the sweep finishes.
+
+A live host (``retune.live``) passes hooks that replay never sets, so replay
+behaviour is unchanged:
+
+- ``start(start_s, phase_s)`` anchors ``s0`` at an epoch phase instead of
+  the planner start, so windows and ``decision_id = retune-w<end_ms>``
+  survive restarts and leader changes.
+- ``launch_gate(k, window)`` is asked before a due window is launched or
+  recorded ``busy``: ``not_leader``/``not_ready`` leave the window due (it
+  is retried on a later tick), ``already_decided`` consumes it silently.
+- ``harvest_allowed(generation)`` is asked before a finished sweep becomes
+  a decision; a refused or abandoned (``NON_DECISION_FAILURES``) sweep
+  records nothing and rewinds the window so it can be relaunched or adopted.
+- ``drop_pending``/``rewind`` let the host abandon an in-flight sweep
+  without consuming its window; ``restore_desired`` re-installs persisted
+  router values.
+- ``predecessor``/``running_future`` carry the single sweep thread across
+  controller generations: a rebuilt controller's first launch queues behind
+  the previous generation's still-running sweep, as a relaunch queues
+  behind a dropped sweep within one controller.
 """
 
 from __future__ import annotations
@@ -33,8 +53,9 @@ import logging
 import math
 import threading
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +84,12 @@ from dynamo.planner.retune.domains import (
     grid_points,
     required_history_seconds,
 )
+from dynamo.planner.retune.live.contracts import (
+    NON_DECISION_FAILURES,
+    GateResult,
+    HarvestAllowed,
+    LaunchGate,
+)
 from dynamo.planner.retune.sweep import (
     SweepRequest,
     SweepResult,
@@ -76,6 +103,11 @@ logger = logging.getLogger(__name__)
 
 _TOP_SCORES = 5
 _EPSILON = 1e-9
+# Gate reasons that leave a due window due, to be retried on a later tick.
+_GATE_RETRY_REASONS = frozenset({"not_leader", "not_ready"})
+
+# ``sweep_fn(request, *, cancel)`` in replay; live hooks add ``abort``.
+SweepFn = Callable[..., SweepResult]
 
 
 @dataclass(frozen=True)
@@ -105,6 +137,12 @@ class _PendingSweep:
     # Both None while a ``measured`` sweep is still running.
     decision_latency_s: float | None
     ready_at_s: float | None
+    # Set by the supervisor to stop this sweep (lost leadership, rebuild).
+    abort: threading.Event | None = None
+    # When submitted behind a dropped (or predecessor generation's) sweep
+    # that was still running: ``(submitted_monotonic, [started_monotonic])``.
+    # ``launched_at_s`` then moves to the moment the sweep really started.
+    queued: tuple[float, list[float]] | None = None
 
 
 class RetuneController:
@@ -118,6 +156,16 @@ class RetuneController:
     from it. Under ``config.advisory`` a decision that would apply is
     recorded as ``advisory`` and leaves the desired state at the deployed
     point.
+
+    The keyword-only hooks are for a live host and default to replay
+    behaviour: ``sweep_fn`` replaces ``run_sweep`` (and must accept
+    ``abort=`` when ``launch_gate`` is set), ``launch_gate`` and
+    ``harvest_allowed`` are the supervisor's predicates (module docstring),
+    and ``generation`` identifies this controller among the ones a live host
+    builds over its lifetime; every sweep request carries it.
+    ``predecessor`` is the previous generation's ``running_future()``: this
+    controller's first launch waits for it, so two generations never sweep
+    at once.
     """
 
     def __init__(
@@ -127,12 +175,29 @@ class RetuneController:
         capabilities: WorkerCapabilities,
         clock: Clock,
         scale_interval_s: float,
+        *,
+        sweep_fn: SweepFn | None = None,
+        launch_gate: LaunchGate | None = None,
+        harvest_allowed: HarvestAllowed | None = None,
+        generation: int = 0,
+        predecessor: Future[SweepResult] | None = None,
     ) -> None:
         retune = config.retune
         if retune is None:
             raise ValueError("RetuneController requires config.retune")
         if not (math.isfinite(scale_interval_s) and scale_interval_s > 0):
             raise ValueError("scale_interval_s must be positive and finite")
+        if launch_gate is not None and sweep_fn is None:
+            # run_sweep takes no abort event; a gated launch passes one.
+            raise ValueError("RetuneController launch_gate requires a sweep_fn")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise ValueError("generation must be an integer")
+        if predecessor is not None and not isinstance(predecessor, Future):
+            raise ValueError("predecessor must be a concurrent.futures.Future")
+        self._sweep_fn = sweep_fn
+        self._launch_gate = launch_gate
+        self._harvest_allowed = harvest_allowed
+        self._generation = generation
         self._config = config
         self._retune = retune
         self._inputs = inputs
@@ -156,6 +221,7 @@ class RetuneController:
         )
         self._router_maps: dict[str, dict[str, dict[str, float]]] = {}
         router_domain = self._router_domain(retune)
+        self._router_domain_values = router_domain
         self._router_keys = tuple(sorted(router_domain))
         self._router_searched = bool(router_domain)
 
@@ -193,10 +259,17 @@ class RetuneController:
         self._startup_point = self.current_point()
 
         self._s0 = 0.0
+        # Live: s0 is an epoch phase and decision ids carry the window end.
+        self._phase_anchored = False
         self._started = False
         self._last_k = -1
         self._history: deque[tuple[float, dict[str, int]]] = deque()
         self._pending: _PendingSweep | None = None
+        # A dropped sweep that may still hold the single sweep thread, or
+        # the previous generation's sweep that a first launch waits for.
+        self._dropped: Future[SweepResult] | None = (
+            predecessor if predecessor is not None and not predecessor.done() else None
+        )
         self._cancel = threading.Event()
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="planner-retune"
@@ -226,10 +299,23 @@ class RetuneController:
 
     # ------------------------------------------------------------------ API
 
-    def start(self, start_s: float) -> None:
-        """Anchor the window schedule at the planner's first tick time."""
+    def start(self, start_s: float, phase_s: float | None = None) -> None:
+        """Anchor the window schedule.
 
-        self._s0 = float(start_s)
+        Replay anchors ``s0`` at the planner's first tick time ``start_s``.
+        A live host passes ``phase_s``: ``s0`` is then that epoch phase, so
+        every planner process and controller generation cuts the same
+        windows, and decision ids become ``retune-w<window_end_ms>``.
+        """
+
+        if phase_s is None:
+            self._s0 = float(start_s)
+            self._phase_anchored = False
+        else:
+            if not math.isfinite(phase_s):
+                raise ValueError("phase_s must be finite")
+            self._s0 = float(phase_s)
+            self._phase_anchored = True
         self._started = True
         self._last_k = -1
 
@@ -252,6 +338,8 @@ class RetuneController:
 
         pending = self._pending
         if pending is not None and pending.future.done():
+            if pending.queued is not None:
+                self._settle_queue_delay(pending)
             if pending.ready_at_s is None:
                 pending.decision_latency_s = self._decision_latency_s(pending.future)
                 pending.ready_at_s = pending.launched_at_s + pending.decision_latency_s
@@ -259,19 +347,33 @@ class RetuneController:
             # must land in the tick that launches the next window.
             if now_s + _EPSILON * self._retune.interval_seconds >= pending.ready_at_s:
                 self._pending = None
-                decisions.append(self._harvest(pending, now_s))
+                harvested = self._harvest_or_rewind(pending, now_s)
+                if harvested is None:
+                    audit.append(f"retune:dropped w={pending.request.window_index}")
+                else:
+                    decisions.append(harvested)
 
         due = self._due_window(now_s)
         if due > self._last_k:
-            self._last_k = due
-            if self._pending is not None:
-                decisions.append(self._skipped(due, now_s, "busy", "sweep in flight"))
+            # The gate runs before both branches: a window this process may
+            # not work on is neither launched nor recorded busy.
+            gate = self._gate(due)
+            if gate is not None and gate.reason in _GATE_RETRY_REASONS:
+                pass
+            elif gate is not None and gate.reason == "already_decided":
+                self._last_k = due
             else:
-                launched = await self._launch(due, now_s)
-                if launched is None:
-                    audit.append(f"retune:launch w={due}")
+                self._last_k = due
+                if self._pending is not None:
+                    decisions.append(
+                        self._skipped(due, now_s, "busy", "sweep in flight")
+                    )
                 else:
-                    decisions.append(launched)
+                    launched = await self._launch(due, now_s, gate)
+                    if launched is None:
+                        audit.append(f"retune:launch w={due}")
+                    else:
+                        decisions.append(launched)
 
         for decision in decisions:
             audit.append(f"retune:{decision.outcome} w={decision.window_index}")
@@ -287,6 +389,101 @@ class RetuneController:
 
         self._cancel.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def drop_pending(self) -> None:
+        """Abandon the in-flight sweep without deciding its window.
+
+        Sets the sweep's abort event, cancels it if it has not started, and
+        forgets it, so a following ``rewind`` takes effect and the window is
+        relaunched (or adopted by another leader) instead of recorded busy.
+        A sweep that is already running keeps the single sweep thread until
+        it sees the abort; a later launch queues behind it.
+        """
+
+        pending = self._pending
+        if pending is None:
+            return
+        self._pending = None
+        if pending.abort is not None:
+            pending.abort.set()
+        if not pending.future.cancel() and not pending.future.done():
+            # Running, so any earlier dropped sweep has finished, or a
+            # predecessor generation's sweep is still running and this one
+            # waits for it: either way this one is now what a new launch
+            # would queue behind.
+            self._dropped = pending.future
+        logger.info(
+            "retune dropped the in-flight sweep of window %d",
+            pending.request.window_index,
+        )
+
+    def rewind(self, last_decided_k: int) -> None:
+        """Make every window after ``last_decided_k`` due again.
+
+        A no-op while a sweep is pending (``drop_pending`` first): its
+        window is consumed until it is harvested or dropped.
+        """
+
+        if self._pending is None:
+            self._last_k = min(self._last_k, int(last_decided_k))
+
+    def restore_desired(self, flat: Mapping[str, float]) -> None:
+        """Re-install persisted desired router values (live re-election).
+
+        ``flat`` maps live router knob names to values and must cover every
+        searched key; extra keys are ignored. The startup point is not
+        touched: it stays a candidate of every sweep.
+        """
+
+        try:
+            values = {key: flat[key] for key in self._router_keys}
+        except KeyError as error:
+            raise ValueError(
+                f"restore_desired needs every searched router key "
+                f"{list(self._router_keys)}; missing {error.args[0]!r}"
+            ) from None
+        # Validates finite, non-negative values and a resolvable config, so
+        # the per-tick desired map can never fail afterwards.
+        router = RetuneParams(router=values).router
+        if self._router_searched:
+            self._router_map(router)
+        self._desired_router = router
+
+    def running_future(self) -> Future[SweepResult] | None:
+        """The sweep that holds or will hold the sweep thread, if any.
+
+        The pending sweep while it runs, else a dropped (or predecessor
+        generation's) sweep that is still running, else a pending sweep
+        that has not started; ``None`` once all of them are done. A host
+        replacing this controller calls it after ``drop_pending`` and
+        ``close`` and passes it as the successor's ``predecessor``.
+        """
+
+        pending = self._pending.future if self._pending is not None else None
+        if pending is not None and pending.running():
+            return pending
+        for future in (self._dropped, pending):
+            if future is not None and not future.done():
+                return future
+        return None
+
+    @property
+    def generation(self) -> int:
+        """The generation the host built this controller with."""
+
+        return self._generation
+
+    @property
+    def router_keys(self) -> tuple[str, ...]:
+        """Searched router knobs, by live (PATCH) name, sorted."""
+
+        return self._router_keys
+
+    @property
+    def router_domain(self) -> dict[str, list[float]]:
+        """The searched router domain: live knob name -> candidate values."""
+
+        return {key: list(values) for key, values in self._router_domain_values.items()}
 
     def current_point(self) -> RetuneParams:
         """The point in effect: desired router values and live planner values.
@@ -491,13 +688,140 @@ class RetuneController:
         return inputs.trace_origin_ms + time_s * 1000.0 * inputs.arrival_speedup_ratio
 
     def _decision_id(self, k: int) -> str:
+        if self._phase_anchored:
+            _, end_s, _ = self._window_times(k)
+            return f"retune-w{int(round(self._ms(end_s)))}"
         return f"retune-{int(self._s0)}-w{k}"
 
-    async def _launch(self, k: int, now_s: float) -> RetuneDecision | None:
+    def _gate(self, k: int) -> GateResult | None:
+        """Ask the live host whether window ``k`` may launch now.
+
+        ``None`` without a gate (replay). A gate that raises or answers an
+        unknown reason holds the window like ``not_ready``: the window stays
+        due and the gate is asked again on the next tick.
+        """
+
+        if self._launch_gate is None:
+            return None
+        try:
+            gate = self._launch_gate(k, self._window_times(k))
+        except Exception:
+            logger.exception("retune launch gate failed for window %d", k)
+            return GateResult(reason="not_ready")
+        if gate.reason is not None and gate.reason not in (
+            *_GATE_RETRY_REASONS,
+            "already_decided",
+        ):
+            logger.warning(
+                "retune launch gate returned unknown reason %r for window %d; "
+                "holding the window",
+                gate.reason,
+                k,
+            )
+            return GateResult(reason="not_ready")
+        return gate
+
+    def _harvest_or_rewind(
+        self, pending: _PendingSweep, now_s: float
+    ) -> RetuneDecision | None:
+        """Turn a finished sweep into a decision, or abandon its window.
+
+        The window is abandoned (no decision, ``_last_k`` rewound so it is
+        due again) when the host refuses the harvest, for instance because
+        this process lost leadership or rebuilt its controller, or when the
+        sweep reports a ``NON_DECISION_FAILURES`` reason.
+        """
+
+        k = pending.request.window_index
+        allowed = True
+        if self._harvest_allowed is not None:
+            try:
+                allowed = bool(self._harvest_allowed(pending.request.generation))
+            except Exception:
+                logger.exception("retune harvest_allowed failed for window %d", k)
+                allowed = False
+        if not allowed:
+            logger.info("retune discards the sweep of window %d: harvest refused", k)
+            self.rewind(k - 1)
+            return None
+        result = self._sweep_result(pending)
+        if result.failure_reason in NON_DECISION_FAILURES:
+            logger.info(
+                "retune abandons window %d: sweep stopped (%s)",
+                k,
+                result.failure_reason,
+            )
+            self.rewind(k - 1)
+            return None
+        return self._decide(pending, result, now_s)
+
+    def _settle_queue_delay(self, pending: _PendingSweep) -> None:
+        """Move a queued sweep's launch time to when it actually started."""
+
+        assert pending.queued is not None
+        submitted, started = pending.queued
+        pending.queued = None
+        if not started:
+            return  # never ran (cancelled at close); keep the submit time
+        delay = max(0.0, started[0] - submitted)
+        pending.launched_at_s += delay
+        if pending.ready_at_s is not None:
+            pending.ready_at_s += delay
+
+    def _replicas_for_launch(
+        self, start_s: float, end_s: float, spec_replicas: Mapping[str, int] | None
+    ) -> tuple[dict[str, int] | None, bool, str | None]:
+        """``(replicas, verified, mismatch)`` for a window launch.
+
+        Without ``spec_replicas`` (replay), the ready counts at window start,
+        verified. With them (live), every ready count recorded over the
+        window, including the one in effect at its start, must equal the
+        spec; a mismatch is reported. The spec replicas are used either way,
+        unverified when no recorded count covers the window start (the
+        window began before this controller started).
+        """
+
+        if spec_replicas is None:
+            return self._replicas_at(start_s), True, None
+        spec = {key: int(value) for key, value in spec_replicas.items()}
+        covering: dict[str, int] | None = None
+        observed: list[dict[str, int]] = []
+        for at_s, counts in self._history:
+            if at_s <= start_s + _EPSILON:
+                covering = counts
+            elif at_s < end_s - _EPSILON:
+                observed.append(counts)
+        if covering is not None:
+            observed.insert(0, covering)
+        for counts in observed:
+            if counts != spec:
+                return spec, covering is not None, json.dumps(counts, sort_keys=True)
+        return spec, covering is not None, None
+
+    async def _launch(
+        self, k: int, now_s: float, gate: GateResult | None = None
+    ) -> RetuneDecision | None:
         """Submit the sweep of window ``k``; a decision only if it cannot run."""
 
         start_s, end_s, as_of_s = self._window_times(k)
-        replicas = self._replicas_at(start_s)
+        spec_replicas = gate.spec_replicas if gate is not None else None
+        replicas, verified, mismatch = self._replicas_for_launch(
+            start_s, end_s, spec_replicas
+        )
+        if mismatch is not None:
+            return self._skipped(
+                k,
+                now_s,
+                "failed",
+                f"ready worker counts {mismatch} differ from the DGD spec "
+                f"replicas {json.dumps(spec_replicas, sort_keys=True)} during "
+                "the window",
+                failure_reason="replicas_changed",
+                details={
+                    "spec_replicas": dict(spec_replicas or {}),
+                    "observed_replicas": json.loads(mismatch),
+                },
+            )
         if replicas is None:
             return self._skipped(
                 k, now_s, "failed", "no ready worker counts recorded at window start"
@@ -535,9 +859,12 @@ class RetuneController:
             sla_itl_ms=self._sla_itl_ms,
             max_parallel=self._retune.max_parallel,
             timeout_s=self._retune.effective_timeout_seconds,
+            # 0 in replay, the field's default.
+            generation=self._generation,
+            **self._live_request_fields(as_of_s, spec_replicas, verified),
         )
-        # Looked up at call time so tests can substitute the sweep function.
-        future = self._executor.submit(run_sweep, request, cancel=self._cancel)
+        abort = gate.abort if gate is not None else None
+        future, queued = self._submit(request, abort, gated=gate is not None)
         if isinstance(self._clock, VirtualClock):
             # Virtual time is frozen while the sweep runs; wait for it here.
             await asyncio.wait([asyncio.wrap_future(future)])
@@ -555,16 +882,79 @@ class RetuneController:
             launched_at_s=now_s,
             decision_latency_s=latency,
             ready_at_s=None if latency is None else now_s + latency,
+            abort=abort,
+            queued=queued,
         )
         logger.info(
-            "retune launched window %d [%s, %s) with %d candidates, replicas %s",
+            "retune launched window %d [%s, %s) with %d candidates, replicas %s%s",
             k,
             start_s,
             end_s,
             len(candidates),
             replicas,
+            ""
+            if verified
+            else " (unverified: the window began before this controller)",
         )
         return None
+
+    def _live_request_fields(
+        self,
+        as_of_s: float,
+        spec_replicas: Mapping[str, int] | None,
+        verified: bool,
+    ) -> dict[str, Any]:
+        """The ``SweepRequest`` fields only a gated (live) launch sets."""
+
+        if self._launch_gate is None:
+            return {}
+        return {
+            "router_domain": {
+                key: tuple(float(value) for value in values)
+                for key, values in self._router_domain_values.items()
+            },
+            "deadline_s": as_of_s + self._retune.effective_timeout_seconds,
+            "spec_replicas": None if spec_replicas is None else dict(spec_replicas),
+            "replicas_verified": verified,
+        }
+
+    def _submit(
+        self,
+        request: SweepRequest,
+        abort: threading.Event | None,
+        *,
+        gated: bool,
+    ) -> tuple[Future[SweepResult], tuple[float, list[float]] | None]:
+        """Submit the sweep to the single sweep thread.
+
+        ``run_sweep`` is looked up at call time so tests can substitute it.
+        A gated launch also passes the gate's abort event. Behind a dropped
+        sweep that still holds the thread, or a predecessor generation's
+        sweep that still runs on its own controller's thread, the call waits
+        for it and records when it really starts (``_settle_queue_delay``).
+        """
+
+        sweep_fn: SweepFn = self._sweep_fn if self._sweep_fn is not None else run_sweep
+        kwargs: dict[str, Any] = {"cancel": self._cancel}
+        if gated:
+            kwargs["abort"] = abort
+        if self._dropped is not None and self._dropped.done():
+            self._dropped = None
+        if self._dropped is None:
+            return self._executor.submit(sweep_fn, request, **kwargs), None
+        clock = self._clock
+        blocker = self._dropped
+        started: list[float] = []
+
+        def queued_sweep() -> SweepResult:
+            # A dropped sweep of this controller has already finished (one
+            # sweep thread); a predecessor generation's may still be running.
+            wait_futures((blocker,))
+            started.append(clock.monotonic())
+            return sweep_fn(request, **kwargs)
+
+        future = self._executor.submit(queued_sweep)
+        return future, (clock.monotonic(), started)
 
     def _decision_latency_s(self, future: Future[SweepResult]) -> float:
         """Delay from launch to decision; ``measured`` needs a done sweep."""
@@ -581,15 +971,16 @@ class RetuneController:
             )
         return max(latency, self._scale_interval_s)
 
-    def _harvest(self, pending: _PendingSweep, now_s: float) -> RetuneDecision:
+    @staticmethod
+    def _sweep_result(pending: _PendingSweep) -> SweepResult:
+        """The finished sweep's result; a raised exception is ``failed``."""
+
         error = pending.future.exception()
         if error is not None:
-            result = SweepResult(
+            return SweepResult(
                 status="failed", error=f"{type(error).__name__}: {error}"
             )
-        else:
-            result = pending.future.result()
-        return self._decide(pending, result, now_s)
+        return pending.future.result()
 
     def _decide(
         self, pending: _PendingSweep, result: SweepResult, now_s: float
@@ -621,6 +1012,8 @@ class RetuneController:
                 "predictor_presweep": result.predictor_presweep,
                 "sweep_wall_s": result.wall_s,
                 "decision_latency_s": pending.decision_latency_s,
+                "failure_reason": result.failure_reason,
+                "details": result.details,
             }
             values.update(overrides)
             return RetuneDecision(**values)
@@ -743,7 +1136,14 @@ class RetuneController:
         return gain > margin
 
     def _skipped(
-        self, k: int, now_s: float, outcome: RetuneOutcome, reason: str
+        self,
+        k: int,
+        now_s: float,
+        outcome: RetuneOutcome,
+        reason: str,
+        *,
+        failure_reason: str | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> RetuneDecision:
         start_s, end_s, as_of_s = self._window_times(k)
         current = self.current_point()
@@ -763,6 +1163,8 @@ class RetuneController:
             baseline_score=None,
             best_score=None,
             reason=reason,
+            failure_reason=failure_reason,
+            details=dict(details or {}),
         )
 
     # ------------------------------------------------------- router helpers
@@ -804,7 +1206,7 @@ class RetuneController:
     def _log_decision(decision: RetuneDecision) -> None:
         logger.info(
             "retune decision %s: %s (baseline=%s best=%s requests=%d "
-            "chosen=%s planner_changes=%s reason=%s)",
+            "chosen=%s planner_changes=%s reason=%s failure_reason=%s)",
             decision.decision_id,
             decision.outcome,
             decision.baseline_score,
@@ -817,6 +1219,7 @@ class RetuneController:
             ),
             decision.planner_changes,
             decision.reason,
+            decision.failure_reason,
         )
 
 
