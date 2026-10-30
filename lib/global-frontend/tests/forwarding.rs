@@ -679,3 +679,80 @@ async fn rotates_across_pools_and_tracks_catalog_changes() {
     assert_eq!(blue_requests.lock().unwrap().len(), 3);
     assert_eq!(green_requests.lock().unwrap().len(), 4);
 }
+
+/// The gRPC `ReplicaSync` stream shares the API listener: a peer subscribes
+/// on the same port the OpenAI routes are served on.
+#[tokio::test]
+async fn replica_sync_is_served_on_the_api_port() {
+    use dynamo_global_router::replica_sync::CONTRACT_MARKER;
+    use dynamo_global_router::replica_sync::proto::SubscribeRequest;
+    use dynamo_global_router::replica_sync::proto::replica_frame::Frame;
+    use dynamo_global_router::replica_sync::proto::replica_sync_client::ReplicaSyncClient;
+    use dynamo_global_router::{CorePolicy, CoreSelector, GrpcReplicaSync, ReplicaTransport};
+
+    let echo = echo_pool_frontend().await;
+    let blue = pool("blue", MODEL, &echo.url);
+    let core = Arc::new(
+        CoreSelector::with_transport(
+            CorePolicy::RoundRobin,
+            Some(ReplicaTransport::Grpc(GrpcReplicaSync::default())),
+        )
+        .await
+        .unwrap(),
+    );
+    let routes = core.replica_sync_routes().expect("gRPC routes");
+    let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
+    tokio::spawn(core.follow(receiver.clone(), CancellationToken::new()));
+    let (listener, url) = bind().await;
+    let cancel = CancellationToken::new();
+    let in_flight = Arc::new(InFlightTracker::new());
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let app = dynamo_global_frontend::app(receiver, core.clone(), in_flight, client(), metrics)
+        .merge(routes);
+    tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
+    let global = GlobalFrontend {
+        server: Server { url, cancel },
+        pools: sender,
+    };
+    wait_until_ok(&global.server.url.join("live").unwrap()).await;
+
+    // HTTP/1 still answers, including the fallback for unknown routes.
+    let response = client()
+        .get(global.server.url.join("nowhere").unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // And a replica subscribes over h2c on the same port.
+    let channel = tonic::transport::Endpoint::from_shared(global.server.url.to_string())
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = ReplicaSyncClient::new(channel);
+    let subscribe = |marker| SubscribeRequest {
+        subscriber_id: 1,
+        routing_group: String::new(),
+        contract_marker: marker,
+    };
+    let rejected = client.subscribe_replica_events(subscribe(0)).await.err();
+    assert_eq!(
+        rejected.map(|status| status.code()),
+        Some(tonic::Code::FailedPrecondition)
+    );
+    let mut frames = client
+        .subscribe_replica_events(subscribe(CONTRACT_MARKER))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = frames.message().await.unwrap().unwrap();
+    assert!(matches!(first.frame, Some(Frame::Snapshot(_))), "{first:?}");
+}

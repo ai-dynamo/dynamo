@@ -107,25 +107,43 @@ for each family.
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
 
-## Replica sync wire contract
+## Replica sync
 
-With `--router-policy affinity`, each Global Frontend's embedded router core
-books requests on pools and pins sessions to them. Replicas share those
-bookings and pins so every frontend sees every frontend's requests in flight
-(DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639), companion
-[#17638](https://github.com/ai-dynamo/dynamo/issues/17638)). The contract they
-share them over is the gRPC `ReplicaSync` service in
+With `--selection core`, each Global Frontend's embedded router core books
+requests on pools and, under `--router-policy affinity`, pins sessions to them.
+Replicas share those bookings and pins so every frontend sees every frontend's
+requests in flight (DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639),
+companion [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)). Two
+transports carry them; a frontend uses one or the other, and `--peer` names
+the other frontends.
+
+| Flags | Transport |
+|-------|-----------|
+| `--peer http://host:port` | The gRPC `ReplicaSync` stream, served on this frontend's API port (`--port`) beside the OpenAI routes. Each peer is another frontend's API address. No extra port. |
+| `--replica-sync-port N --peer tcp://host:port` | The router core's own ZMQ mesh. This frontend publishes on port `N`; each peer is another frontend's `--replica-sync-port` endpoint. |
+
+Rules: every `--peer` must use the same scheme; `tcp://` peers need
+`--replica-sync-port`; `http://` peers refuse it, since the gRPC stream serves
+on the API port; any of these flags needs `--selection core`; `https://` peers
+are refused until the stream carries TLS.
+
+The gRPC contract is the `ReplicaSync` service in
 `lib/global-common/proto/replica_sync.proto`, package
-`dynamo.globalrouter.replica.v1`: a subscriber opens
-`SubscribeReplicaEvents` with its process id and `CONTRACT_MARKER`, receives
-a snapshot of the publisher's open bookings and session bindings, then event
-batches as they happen. Each event names its core partition (`model_name`,
-`routing_group`) and its publisher (`router_id` / `writer_id`), which a
-receiver uses to drop its own echoes; a prompt's `token_sequence` is never
-carried, since a pool has no KV blocks the core could match.
+`dynamo.globalrouter.replica.v1`: a subscriber opens `SubscribeReplicaEvents`
+with its process id and `CONTRACT_MARKER` (a mismatch is refused with
+`FAILED_PRECONDITION`), receives a snapshot frame, then event batches as they
+happen. Each event names its core partition (`model_name`, `routing_group`)
+and its publisher (`router_id` / `writer_id`), which a receiver uses to drop
+its own echoes; a prompt's `token_sequence` is never carried, since a pool has
+no KV blocks the core could match. The snapshot is empty for now: the core
+exports neither its live bindings nor its open bookings, so a peer that joins
+sees bookings already open only when they free. A subscriber that falls behind
+by more than the publisher's frame buffer loses the oldest frames (counted in
+`ReplicaSyncStats`), as with the mesh. The dialer reconnects with a growing
+delay (0.5 s to 30 s) as the Relay client does.
 `dynamo-global-common` generates the code behind its `grpc` feature;
-`dynamo_global_router::replica_sync::wire` converts the messages to and from
-the core's event types. Nothing serves or dials the stream yet.
+`dynamo_global_router::replica_sync` holds the conversions, the hub, the
+server routes and the dialer.
 
 ## Limitations
 

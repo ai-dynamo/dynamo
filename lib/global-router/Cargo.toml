@@ -17,11 +17,16 @@ dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+# The gRPC replica-sync stream is served as routes on the host's API router.
+axum = { workspace = true }
 dashmap = { workspace = true }
+futures = { workspace = true }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tokio-util = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 xxhash-rust = { workspace = true }
