@@ -123,9 +123,20 @@ func (r *Reconciler) prepareCandidates(ctx context.Context, run *v1beta2.DynamoG
 	if r.preparedCandidates == nil {
 		r.preparedCandidates = map[string]dgdcreconcile.DesiredCandidate{}
 	}
-	live := map[string]bool{}
-	for i, candidate := range desired.Candidates {
+
+	// Drop obsolete entries before preparation can return a retryable error.
+	live := make(map[string]bool, len(desired.Candidates))
+	for _, candidate := range desired.Candidates {
 		live[candidate.ID] = true
+	}
+	for id := range r.preparedCandidates {
+		if !live[id] {
+			delete(r.preparedCandidates, id)
+		}
+	}
+
+	// Preserve successful preparation for retries within the current projection.
+	for i, candidate := range desired.Candidates {
 		prepared, found := r.preparedCandidates[candidate.ID]
 		if !found {
 			var existing v1beta2.DynamoGraphDeploymentCandidate
@@ -165,11 +176,6 @@ func (r *Reconciler) prepareCandidates(ctx context.Context, run *v1beta2.DynamoG
 			if desired.FirstFailure == "" {
 				desired.FirstFailure = boundDiagnostic(prepared.ID + ": " + prepared.Validity.Message)
 			}
-		}
-	}
-	for id := range r.preparedCandidates {
-		if !live[id] {
-			delete(r.preparedCandidates, id)
 		}
 	}
 	return nil

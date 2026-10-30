@@ -117,6 +117,9 @@ func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGrap
 func createdVersion(name string) string { return "created-" + name }
 
 func (w *memWriter) PrepareCandidate(_ context.Context, _ *v1beta2.DynamoGraphDeploymentRun, candidate dgdcreconcile.DesiredCandidate) (dgdcreconcile.DesiredCandidate, error) {
+	if err := w.fail("prepare:" + candidate.ID); err != nil {
+		return candidate, err
+	}
 	candidate.Validity = metav1.Condition{Type: v1beta2.DGDCConditionValid, Status: metav1.ConditionTrue, Reason: "ValidationSucceeded", LastTransitionTime: metav1.Now()}
 	if w.invalid[candidate.ID] {
 		candidate.Validity.Status = metav1.ConditionFalse
@@ -150,6 +153,61 @@ func TestInvalidCandidatesRemainRankedAndCountTowardTheLimit(t *testing.T) {
 			}
 			if len(invalid.Status.Conditions) != 1 || invalid.Status.Conditions[0].Status != metav1.ConditionFalse {
 				t.Fatalf("invalid Candidate was lost: %+v", invalid.Status)
+			}
+		})
+	}
+}
+
+func TestPreparationCacheTracksTheProjectionAcrossRetries(t *testing.T) {
+	f := newFixture(t)
+	run := f.currentRun()
+	run.Spec.Recommendation.MaxCandidates = 2
+	transient := errors.New("temporary dry-run failure")
+	tests := []struct {
+		name       string
+		ids        []string
+		failID     string
+		cachedID   string
+		wantCached []string
+	}{
+		{name: "initial successful projection", ids: []string{"a", "b"}, wantCached: []string{"a", "b"}},
+		{name: "early failure preserves a later live entry", ids: []string{"c", "b"}, failID: "c", wantCached: []string{"b"}},
+		{name: "late failure removes the previous projection", ids: []string{"c", "d"}, failID: "d", wantCached: []string{"c"}},
+		{name: "repeated failure cannot accumulate old entries", ids: []string{"e", "f"}, failID: "f", wantCached: []string{"e"}},
+		{name: "retry reuses successful preparation", ids: []string{"e", "f"}, cachedID: "e", wantCached: []string{"e", "f"}},
+		{name: "empty projection clears the cache"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Prepare the next bounded projection, with a transient failure where requested")
+			var candidates []cand
+			for _, id := range test.ids {
+				candidates = append(candidates, cand{id: id})
+			}
+			snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, candidates...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.failID != "" {
+				f.w.failOn["prepare:"+test.failID] = transient
+			}
+			if test.cachedID != "" {
+				f.w.failOn["prepare:"+test.cachedID] = errors.New("cached Candidate must not be prepared again")
+			}
+			desired := Desire(run.Name, string(run.UID), snapshot)
+			err = f.r.prepareCandidates(t.Context(), run, &desired)
+			if (test.failID != "" && !errors.Is(err, transient)) || (test.failID == "" && err != nil) {
+				t.Fatalf("prepareCandidates: %v, expected failure on %q", err, test.failID)
+			}
+
+			t.Log("Retain only successfully prepared Candidates in the current projection")
+			if len(f.r.preparedCandidates) != len(test.wantCached) {
+				t.Fatalf("cache has %d entries, want IDs %v", len(f.r.preparedCandidates), test.wantCached)
+			}
+			for _, id := range test.wantCached {
+				if _, found := f.r.preparedCandidates[id]; !found {
+					t.Errorf("cache lost current Candidate %q", id)
+				}
 			}
 		})
 	}
