@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! List-and-watch events. A `Resync` replaces all earlier state.
+//! List-and-watch, as `dynamo_runtime::discovery::Discovery` does it: a watch
+//! starts with one `Upserted` per current item (the runtime's `Added`), then
+//! one `Resync` with the same set, then changes. A `Resync` replaces all
+//! earlier state.
 
 #[derive(Clone, Debug)]
 pub enum WatchEvent<T, K> {
     /// A new or changed item. It replaces any earlier item with the same key.
-    Added(T),
+    Upserted(T),
+    /// An item went away. It can name a key the watcher never got, for an
+    /// item that went away just before the watch started; ignore those.
     Removed(K),
     Resync(Snapshot<T>),
 }
@@ -21,8 +26,8 @@ pub struct Snapshot<T> {
 /// complete list from a partial one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completeness {
-    /// Read from a shared store, so it lists every existing item.
+    /// Read from a shared store: every existing item is listed.
     Exact,
-    /// Built from the updates this replica has received so far.
+    /// Built from what this process has heard so far.
     Estimated,
 }

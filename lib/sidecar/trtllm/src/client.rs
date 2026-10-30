@@ -46,14 +46,15 @@ pub(crate) struct ModelLimits {
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
     /// Whether both portable and engine-specific capabilities advertise images.
-    /// `None` means startup discovery failed transiently and may be retried.
+    /// `None` is reserved for unresolved/test metadata; startup always resolves this.
     pub(crate) supports_image: Option<bool>,
     pub(crate) supports_image_routing: bool,
 }
 
-pub(crate) enum ModelInfoResponse {
-    Available(ModelLimits),
-    Unsupported(tonic::Status),
+#[derive(Clone, Debug)]
+pub(crate) struct ModelInfo {
+    pub(crate) limits: ModelLimits,
+    pub(crate) served_model_name: String,
 }
 
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
@@ -181,7 +182,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelInfo, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -208,34 +209,21 @@ impl TrtllmClient {
                         _ => false,
                     })
             });
-        Ok(ModelLimits {
-            context_length: info.max_context_length.filter(|len| *len > 0),
-            engine_context_length: info.max_context_length.filter(|len| *len > 0),
-            max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-            supports_image: Some(supports_image),
-            supports_image_routing: supports_image && info.extra.as_ref().is_some_and(|extra| {
-                matches!(
-                    extra.fields.get("trtllm_image_routing_version").and_then(|v| v.kind.as_ref()),
-                    Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
-                )
-            }),
+        Ok(ModelInfo {
+            limits: ModelLimits {
+                context_length: info.max_context_length.filter(|len| *len > 0),
+                engine_context_length: info.max_context_length.filter(|len| *len > 0),
+                max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+                supports_image: Some(supports_image),
+                supports_image_routing: supports_image && info.extra.as_ref().is_some_and(|extra| {
+                    matches!(
+                        extra.fields.get("trtllm_image_routing_version").and_then(|v| v.kind.as_ref()),
+                        Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+                    )
+                }),
+            },
+            served_model_name: info.served_model_name,
         })
-    }
-
-    /// One `GetModelInfo` call, for when `--context-length` already supplies the
-    /// window and the engine is consulted only to cross-check it and to learn
-    /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelInfoResponse, DynamoError> {
-        match tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model)).await {
-            Ok(Ok(metadata)) => Ok(ModelInfoResponse::Available(metadata)),
-            Ok(Err(status)) if is_request_itself_wrong(&status) => {
-                Ok(ModelInfoResponse::Unsupported(status))
-            }
-            Ok(Err(status)) => Err(status_to_dynamo("GetModelInfo", status)),
-            Err(_) => Err(connection_timeout(format!(
-                "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
-            ))),
-        }
     }
 
     pub(crate) async fn server_info(&self) -> Result<Option<pb::ServerInfo>, DynamoError> {
@@ -303,37 +291,44 @@ impl TrtllmClient {
         }
     }
 
-    /// Polls `GetModelInfo` until the engine reports a usable context length or
-    /// `deadline` passes.
-    ///
-    /// Used only when no `--context-length` was supplied, which makes the engine
-    /// the sole source. TensorRT-LLM binds its gRPC port only once the model has
-    /// loaded, so waiting is for the engine not being up yet, and only transport
-    /// failures are worth retrying. An engine that answers has finished loading:
-    /// if that answer carries no window it was started without `--max_seq_len`
-    /// and will say the same thing at the deadline, so fail now with the fix
-    /// rather than polling for half an hour and then blaming a slow load. An
-    /// answer that says the request itself is wrong ends the wait for the same
-    /// reason.
-    pub(crate) async fn wait_for_model_limits(
+    /// Transient RPC failures are retried; unsupported Control, invalid model
+    /// identity and other terminal errors fail without registering a worker.
+    pub(crate) async fn wait_for_model_info(
         &self,
         model: &str,
+        configured_context_length: Option<u32>,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelLimits, DynamoError> {
+    ) -> Result<ModelInfo, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {
-                Ok(Ok(limits)) if limits.context_length.is_some() => return Ok(limits),
-                Ok(Ok(_)) => {
-                    return Err(protocol_error(format!(
-                        "TensorRT-LLM answered GetModelInfo for {model} with no \
-                         max_context_length, which means it was started without \
-                         --max_seq_len. Start the engine with --max_seq_len, or give the \
-                         sidecar --context-length."
-                    )));
+                Ok(Ok(mut info)) => {
+                    if info.served_model_name.trim().is_empty() {
+                        return Err(protocol_error(
+                            "GetModelInfo returned an empty served_model_name; configure the engine's served model name",
+                        ));
+                    }
+                    if let Some(configured) = configured_context_length {
+                        if let Some(reported) = info.limits.context_length
+                            && reported != configured
+                        {
+                            tracing::warn!(
+                                configured_context_length = configured,
+                                engine_context_length = reported,
+                                "--context-length disagrees with the engine; using the configured value"
+                            );
+                        }
+                        info.limits.context_length = Some(configured);
+                    }
+                    if info.limits.context_length.is_none() {
+                        return Err(protocol_error(format!(
+                            "TensorRT-LLM answered GetModelInfo for {model} with no max_context_length. Start the engine with --max_seq_len, or give the sidecar --context-length."
+                        )));
+                    }
+                    return Ok(info);
                 }
-                Ok(Err(status)) if is_request_itself_wrong(&status) => {
+                Ok(Err(status)) if is_terminal_discovery_error(&status) => {
                     return Err(status_to_dynamo("GetModelInfo", status));
                 }
                 Ok(Err(status)) => last = format!("{}: {}", status.code(), status.message()),
@@ -347,9 +342,7 @@ impl TrtllmClient {
             sleep_until(next_attempt).await;
         }
         Err(connection_timeout(format!(
-            "TensorRT-LLM never answered GetModelInfo before the gRPC startup deadline \
-             ({last}). Raise --grpc-startup-deadline-secs if the engine is still starting, \
-             or pin the window with --context-length."
+            "TensorRT-LLM did not resolve GetModelInfo before the gRPC startup deadline ({last}). Raise --grpc-startup-deadline-secs if the engine is still starting."
         )))
     }
 
@@ -389,13 +382,15 @@ fn metadata_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     }
 }
 
-/// Whether the server answered that the request itself is wrong -- a model it
-/// does not serve, or no Control service at all. Waiting cannot change any of
-/// these, so a startup probe stops rather than burning its whole deadline.
-fn is_request_itself_wrong(status: &tonic::Status) -> bool {
+/// These model/configuration/authentication errors cannot recover by waiting.
+fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
-        tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::Unimplemented
+        tonic::Code::InvalidArgument
+            | tonic::Code::NotFound
+            | tonic::Code::Unimplemented
+            | tonic::Code::Unauthenticated
+            | tonic::Code::PermissionDenied
     )
 }
 

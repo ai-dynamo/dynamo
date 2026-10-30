@@ -68,11 +68,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -115,7 +117,6 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
-
 	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
@@ -156,6 +157,7 @@ func main() {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
+	var dgdrV1beta2Enabled bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -167,8 +169,15 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
-	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
-		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
+	flag.StringVar(
+		&dgdrDefaultImage,
+		"dgdr-default-image",
+		"",
+		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; "+
+			"empty derives dynamo-planner:<operator-version>",
+	)
+	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
+		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -189,11 +198,18 @@ func main() {
 	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
 
 	// Validate and normalize operator version to semver
-	if _, err := semver.NewVersion(operatorVersion); err != nil {
+	parsedOperatorVersion, err := semver.NewVersion(operatorVersion)
+	if err != nil {
 		setupLog.Error(err, "operator-version is not valid semver",
 			"provided", operatorVersion, "error", err.Error())
 		os.Exit(1)
 	}
+	dynamoVersion := fmt.Sprintf(
+		"%d.%d.%d",
+		parsedOperatorVersion.Major(),
+		parsedOperatorVersion.Minor(),
+		parsedOperatorVersion.Patch(),
+	)
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
@@ -491,10 +507,12 @@ func main() {
 
 	// Register controllers synchronously before mgr.Start().
 	// Controllers don't depend on TLS certificates.
+	plannerImage := webhookdefaulting.PlannerImageFor(operatorVersion, dgdrDefaultImage)
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
-		operatorImage, pullPolicy,
+		operatorImage, pullPolicy, plannerImage, dynamoVersion,
+		dgdrV1beta2Enabled,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -544,6 +562,9 @@ func registerControllers(
 	sshKeyManager *secret.SSHKeyManager,
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
+	plannerImage string,
+	dynamoVersion string,
+	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
 		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
@@ -604,6 +625,21 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
+	if dgdrV1beta2Enabled {
+		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+			return err
+		}
+		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
+			SetupOptions:            setupOptions,
+			DockerSecretRetriever:   dockerSecretRetriever,
+			PlannerImage:            plannerImage,
+			DynamoVersion:           dynamoVersion,
+			OperatorImage:           operatorImage,
+			OperatorImagePullPolicy: operatorPullPolicy,
+		}); err != nil {
+			return err
+		}
+	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,
 	}); err != nil {
@@ -648,10 +684,22 @@ func registerWebhookHandlers(
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
-		Config:            operatorCfg,
-		RuntimeConfig:     runtimeConfig,
-		OperatorVersion:   operatorVersion,
-		DGDRDefaultImage:  dgdrDefaultImage,
+		Config:          operatorCfg,
+		RuntimeConfig:   runtimeConfig,
+		OperatorVersion: operatorVersion,
+		DGDRV1beta1: webhookdefaulting.DGDRV1beta1Options{
+			DefaultImage: dgdrDefaultImage,
+		},
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when
+			// the GPUDiscovery gate is on. The webhook keeps its own short-lived cache.
+			Hardware: &gpu.Discoverer{
+				Reader:     mgr.GetAPIReader(),
+				DCGM:       gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+				Cache:      gpu.NewGPUDiscoveryCache(),
+				NodeLabels: func() bool { return gate.Enabled(features.GPUDiscovery) },
+			},
+		},
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,
 	}); err != nil {

@@ -82,7 +82,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
-            response_plane: Response plane transport ("tcp" or "quic")
+            response_plane: Response plane transport ("tcp", "quic", or "velo")
         """
         ...
 
@@ -3174,6 +3174,7 @@ class EntrypointArgs:
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
+        enable_systemone_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
@@ -3212,6 +3213,7 @@ class EntrypointArgs:
             ais_perf_config: Canonical AIS configuration for default KV routing
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
+            enable_systemone_api: Optional System One typed-decisions API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override

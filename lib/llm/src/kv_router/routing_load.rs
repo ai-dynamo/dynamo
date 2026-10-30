@@ -15,7 +15,7 @@ use dynamo_runtime::component::Client;
 use dynamo_runtime::engine::EngineContextGuard;
 use dynamo_runtime::pipeline::WorkerLoadMonitor;
 
-use crate::discovery::{KvWorkerMonitor, LoadThresholdHandle};
+use crate::discovery::{KvWorkerMonitor, LoadThresholdHandle, RoutableThresholds};
 use crate::kv_router::KvRouter;
 use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use crate::worker_type::WorkerType;
@@ -197,6 +197,7 @@ pub struct SchedulerLoadSender {
     wake_tx: Option<mpsc::Sender<()>>,
     shared: Arc<SchedulerLoadShared>,
     cancellation_token: CancellationToken,
+    busy_thresholds: Option<RoutableThresholds>,
 }
 
 impl SchedulerLoadSender {
@@ -205,7 +206,15 @@ impl SchedulerLoadSender {
             wake_tx: None,
             shared: Arc::new(SchedulerLoadShared::new(SCHEDULER_LOAD_CHANNEL_CAPACITY)),
             cancellation_token,
+            busy_thresholds: None,
         }
+    }
+
+    /// Hand enforcement of the booked-load checks to the caller's queue, which applies the
+    /// returned live handle to the load it books itself. The worker monitor keeps judging
+    /// worker-published load against the decode threshold.
+    pub(crate) fn route_busy_thresholds(&self) -> Option<LoadThresholdHandle> {
+        self.busy_thresholds.as_ref().map(RoutableThresholds::route)
     }
 
     pub fn publish(&self, snapshot: SchedulerLoadSnapshot) {
@@ -271,12 +280,18 @@ impl SchedulerLoadReceiver {
 
 pub(crate) fn scheduler_load_channel(
     cancellation_token: CancellationToken,
+    busy_thresholds: Option<RoutableThresholds>,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
-    scheduler_load_channel_with_capacity(cancellation_token, SCHEDULER_LOAD_CHANNEL_CAPACITY)
+    scheduler_load_channel_with_capacity(
+        cancellation_token,
+        busy_thresholds,
+        SCHEDULER_LOAD_CHANNEL_CAPACITY,
+    )
 }
 
 fn scheduler_load_channel_with_capacity(
     cancellation_token: CancellationToken,
+    busy_thresholds: Option<RoutableThresholds>,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
     let (wake_tx, wake_rx) = mpsc::channel(1);
@@ -286,6 +301,7 @@ fn scheduler_load_channel_with_capacity(
             wake_tx: Some(wake_tx),
             shared: shared.clone(),
             cancellation_token,
+            busy_thresholds,
         },
         SchedulerLoadReceiver { wake_rx, shared },
     )
@@ -316,13 +332,14 @@ impl RoutingLoadContext {
     ) -> anyhow::Result<Arc<Self>> {
         let cancellation_token = parent_token.child_token();
         let (scheduler_load, monitor) = if source.monitors_sequence_load() {
+            let routable = RoutableThresholds::new(thresholds.clone());
             let (scheduler_load, scheduler_load_rx) =
-                scheduler_load_channel(cancellation_token.child_token());
+                scheduler_load_channel(cancellation_token.child_token(), Some(routable.clone()));
             let monitor = KvWorkerMonitor::new(
                 client.clone(),
                 source,
                 scheduler_load_rx,
-                thresholds.clone(),
+                routable,
                 cancellation_token.child_token(),
                 task_guard.clone(),
             );
@@ -420,6 +437,7 @@ impl ManagedKvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::LoadThresholdConfig;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     fn snapshot(worker_id: u64, active_decode_blocks: u64) -> SchedulerLoadSnapshot {
@@ -433,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 1);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, None, 1);
 
         sender.publish(snapshot(1, 90));
         sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
@@ -459,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_preserves_queued_updates_before_coalesced_updates() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 2);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, None, 2);
 
         sender.publish(snapshot(2, 20));
         sender.publish(snapshot(1, 10));
@@ -479,6 +497,60 @@ mod tests {
             received,
             vec![snapshot(2, 20), snapshot(1, 10), snapshot(1, 30)]
         );
+    }
+
+    #[tokio::test]
+    async fn routed_busy_thresholds_stay_live_and_hand_booked_load_to_the_queue() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("routed-busy-thresholds".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let parent_token = distributed.child_token();
+        let load_context = RoutingLoadContext::start(
+            client,
+            RouterLoadSource::Decode,
+            LoadThresholdHandle::new(LoadThresholdConfig {
+                active_prefill_tokens_threshold_frac: Some(0.5),
+                ..Default::default()
+            }),
+            &parent_token,
+            None,
+        )
+        .await
+        .unwrap();
+        let monitor = load_context.monitor().unwrap();
+        assert!(!monitor.thresholds().is_routed());
+
+        let thresholds = load_context
+            .scheduler_load_sender()
+            .route_busy_thresholds()
+            .expect("a decode context routes its busy thresholds");
+        assert!(monitor.thresholds().is_routed());
+
+        // A `/busy_threshold` update reaches the routed handle.
+        load_context.load_thresholds().update(&LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            ..Default::default()
+        });
+        assert_eq!(
+            thresholds.get(),
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.9),
+                active_prefill_tokens_threshold_frac: Some(0.5),
+                ..Default::default()
+            }
+        );
+
+        drop(load_context);
+        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -511,6 +583,12 @@ mod tests {
         assert_eq!(load_context.client().endpoint.id(), client.endpoint.id());
         assert!(load_context.monitor().is_none());
         assert!(!load_context.scheduler_load_sender().is_enabled());
+        assert!(
+            load_context
+                .scheduler_load_sender()
+                .route_busy_thresholds()
+                .is_none()
+        );
         load_context
             .scheduler_load_sender()
             .publish(snapshot(1, 100));
