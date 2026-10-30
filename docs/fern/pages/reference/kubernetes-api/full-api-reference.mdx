@@ -828,6 +828,7 @@ AutoApply indicates whether to automatically create a DynamoGraphDeployment afte
 
 <ParamField path="unauthenticated" type="boolean">
 Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
@@ -928,6 +929,7 @@ AutoApply indicates whether to automatically create a DynamoGraphDeployment afte
 
 <ParamField path="unauthenticated" type="boolean">
 Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">

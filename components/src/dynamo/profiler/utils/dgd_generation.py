@@ -199,8 +199,10 @@ def apply_unauthenticated_mode(dgdr, config_dict: dict) -> None:
     """Omit hf-token-secret references for unauthenticated model access.
 
     When the DGDR declares the model needs no Hugging Face credentials, the
-    generated deployment must not reference hf-token-secret at all. The default
-    keeps the reference required, preserving the wait-for-credentials behavior.
+    generated deployment must not reference hf-token-secret at all. Every
+    container and init container is scanned for both envFrom secretRef
+    entries and env valueFrom secretKeyRef entries. The default keeps the
+    reference required, preserving the wait-for-credentials behavior.
     """
     if not dgdr.unauthenticated:
         return
@@ -210,26 +212,56 @@ def apply_unauthenticated_mode(dgdr, config_dict: dict) -> None:
     for component in components:
         if not isinstance(component, dict):
             continue
-        containers = (
-            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
-        )
-        if not isinstance(containers, list):
+        pod_spec = component.get("podTemplate", {}).get("spec", {})
+        if not isinstance(pod_spec, dict):
             continue
-        for container in containers:
-            if not isinstance(container, dict):
+        for key in ("containers", "initContainers"):
+            containers = pod_spec.get(key)
+            if not isinstance(containers, list):
                 continue
-            env_from = container.get("envFrom")
-            if not isinstance(env_from, list):
-                continue
-            container["envFrom"] = [
-                entry
-                for entry in env_from
-                if not (
-                    isinstance(entry, dict)
-                    and isinstance(entry.get("secretRef"), dict)
-                    and entry["secretRef"].get("name") == "hf-token-secret"
+            for container in containers:
+                _strip_hf_token_secret(container)
+
+
+def finalize_unauthenticated_output(dgdr, final_config: Any) -> Any:
+    if not final_config:
+        return final_config
+    dgd_doc = final_config[-1] if isinstance(final_config, list) else final_config
+    apply_unauthenticated_mode(dgdr, dgd_doc)
+    return final_config
+
+
+def _is_hf_token_secret_ref(ref: Any) -> bool:
+    return isinstance(ref, dict) and ref.get("name") == "hf-token-secret"
+
+
+def _strip_hf_token_secret(container: Any) -> None:
+    if not isinstance(container, dict):
+        return
+    env_from = container.get("envFrom")
+    if isinstance(env_from, list):
+        container["envFrom"] = [
+            entry
+            for entry in env_from
+            if not (
+                isinstance(entry, dict)
+                and _is_hf_token_secret_ref(entry.get("secretRef"))
+            )
+        ]
+    env = container.get("env")
+    if isinstance(env, list):
+        container["env"] = [
+            entry
+            for entry in env
+            if not (
+                isinstance(entry, dict)
+                and _is_hf_token_secret_ref(
+                    entry.get("valueFrom", {}).get("secretKeyRef")
+                    if isinstance(entry.get("valueFrom"), dict)
+                    else None
                 )
-            ]
+            )
+        ]
 
 
 def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
