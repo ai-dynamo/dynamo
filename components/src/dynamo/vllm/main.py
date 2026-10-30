@@ -39,6 +39,7 @@ from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
@@ -375,6 +376,7 @@ def setup_metrics_collection(
         == "DynamoMultimodalEmbeddingCacheConnector"
     ):
         engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+    engine_metric_prefixes.extend(get_extra_metric_prefixes())
 
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
