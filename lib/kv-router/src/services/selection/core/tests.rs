@@ -2647,6 +2647,15 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     // Freeze time only after async setup so background timers cannot expire the fixture.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
+    // Scheduler work arriving during the lookup abandons the optional refresh. Let the work
+    // the clock jump woke finish, and run the real clock again so an auto-advance cannot wake
+    // more of it while the lookup waits on the indexer.
+    tokio::time::resume();
+    entry
+        .scheduler
+        .admission_barrier()
+        .await
+        .expect("scheduler barrier");
     core.free_reservation("occupy-2")
         .await
         .expect("release worker 2");
