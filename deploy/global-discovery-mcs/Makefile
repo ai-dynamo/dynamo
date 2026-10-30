@@ -216,6 +216,29 @@ e2e: kind ## Run the kind end-to-end test of the registry, the controller and th
 e2e-down: kind ## Delete the kind clusters of the end-to-end test.
 	KIND=$(KIND) $(E2E_DIR)/run.sh down
 
+##@ Upstream MCS conformance
+
+# The opt-in build tag keeps real-cluster tests out of the unit/envtest run.
+.PHONY: conformance-bin
+conformance-bin: $(LOCALBIN) ## Compile the upstream MCS conformance runner.
+	$(GO) test -tags conformance -c -o $(LOCALBIN)/mcs-conformance.test ./test/conformance
+
+.PHONY: conformance
+conformance: kind conformance-bin ## Run the full upstream suite on two isolated kind clusters.
+	KIND=$(KIND) test/conformance/run.sh
+
+.PHONY: conformance-setup
+conformance-setup: kind ## Create and deploy the isolated conformance clusters, retaining them.
+	KIND=$(KIND) test/conformance/run.sh setup
+
+.PHONY: conformance-test
+conformance-test: kind conformance-bin ## Run upstream tests against retained conformance clusters.
+	KIND=$(KIND) test/conformance/run.sh test
+
+.PHONY: conformance-down
+conformance-down: kind ## Delete only the isolated conformance clusters.
+	KIND=$(KIND) test/conformance/run.sh down
+
 ##@ Dependencies
 
 ## Location to install dependencies to
