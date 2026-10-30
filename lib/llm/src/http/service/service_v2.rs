@@ -321,6 +321,11 @@ fn effective_sse_keep_alive(
     configured.or(response_can_defer_all_output.then_some(DEFERRED_RESPONSE_KEEP_ALIVE))
 }
 
+/// Pre-commit peek window used when `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` is
+/// unset. The check returns on the first non-annotation event, so a healthy
+/// stream waits `min(time-to-first-event, window)`, not the full window.
+pub(crate) const DEFAULT_PRE_COMMIT_ERROR_PEEK: Duration = Duration::from_millis(100);
+
 /// How a handler waits on the backend stream before committing the HTTP status.
 ///
 /// Non-streaming handlers always wait for the first event because they need it
@@ -343,10 +348,10 @@ pub enum BackendErrorCheck {
 }
 
 impl BackendErrorCheck {
-    /// Policy from `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`: unset or `0` is `Skip`;
-    /// any other value is `Bounded` for that many milliseconds. A value that
-    /// cannot be read is `Skip` and warns, so a typo does not silently disable
-    /// the peek someone meant to turn on.
+    /// Policy from `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`: unset is `Bounded` for
+    /// [`DEFAULT_PRE_COMMIT_ERROR_PEEK`], `0` is `Skip`, and any other value is
+    /// `Bounded` for that many milliseconds. A value that cannot be read warns
+    /// and keeps the default window, so a typo does not silently change it.
     fn from_env() -> Self {
         Self::parse(std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS))
     }
@@ -354,14 +359,16 @@ impl BackendErrorCheck {
     fn parse(value: Result<String, std::env::VarError>) -> Self {
         let value = match value {
             Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return Self::Skip,
+            Err(std::env::VarError::NotPresent) => {
+                return Self::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK);
+            }
             Err(error @ std::env::VarError::NotUnicode(_)) => {
                 tracing::warn!(
                     env = env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
                     %error,
                     "ignoring invalid pre-commit error peek window"
                 );
-                return Self::Skip;
+                return Self::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK);
             }
         };
 
@@ -375,7 +382,7 @@ impl BackendErrorCheck {
                     %error,
                     "ignoring invalid pre-commit error peek window"
                 );
-                Self::Skip
+                Self::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK)
             }
         }
     }
@@ -3824,7 +3831,7 @@ mod tests {
     fn test_backend_error_check_env_var() {
         assert_eq!(
             BackendErrorCheck::parse(Err(std::env::VarError::NotPresent)),
-            BackendErrorCheck::Skip
+            BackendErrorCheck::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK)
         );
         assert_eq!(
             BackendErrorCheck::parse(Ok("0".to_string())),
@@ -3832,11 +3839,11 @@ mod tests {
         );
         assert_eq!(
             BackendErrorCheck::parse(Ok("invalid".to_string())),
-            BackendErrorCheck::Skip
+            BackendErrorCheck::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK)
         );
         assert_eq!(
             BackendErrorCheck::parse(Err(std::env::VarError::NotUnicode("500".into()))),
-            BackendErrorCheck::Skip
+            BackendErrorCheck::Bounded(DEFAULT_PRE_COMMIT_ERROR_PEEK)
         );
         assert_eq!(
             BackendErrorCheck::parse(Ok("500".to_string())),
