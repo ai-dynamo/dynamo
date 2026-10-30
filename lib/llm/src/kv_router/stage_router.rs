@@ -35,6 +35,9 @@ pub(crate) trait StageRouter: Send + Sync {
 
     /// Choose and book where this stage runs. A caller that does not dispatch
     /// the plan must give its booking back through the plan type.
+    // No caller yet: `PrefillRouter::generate` runs schedule's steps one by
+    // one to keep its error logging. The EPP is the intended first caller.
+    #[allow(dead_code)]
     async fn schedule(&self, request: &SingleIn<PreprocessedRequest>) -> Result<Self::Plan>;
 
     /// Look at the next stage for this request without dispatching anything.

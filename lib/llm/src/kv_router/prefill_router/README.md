@@ -38,8 +38,7 @@ and the router knowledge-base pages).
   failures into the decode stream.
 - `query.rs`: `reserve_prefill_worker` and `PrefillReservation`.
 - `stage.rs`: `PrefillRouter` as a `StageRouter` (`schedule`, `preview`,
-  `dispatch`) and `generate_v2`, the request path composed from them. Not
-  wired into the pipeline yet.
+  `dispatch`), and the helpers `generate` is composed from.
 
 ## Core: Target, Binding, and Activation
 
