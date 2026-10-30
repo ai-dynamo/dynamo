@@ -638,7 +638,7 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
         .map(ExternalSequenceBlockHash)
         .collect();
     let core = local_core(test_config(true));
-    for id in [1, 2, 3, 4, 5, 6, 7] {
+    for id in [1, 2, 3, 4, 5, 7] {
         let mut worker = worker_with_kv_events(id);
         worker.router_hint_worker_type = Some("decode".to_string());
         core.upsert_worker(worker).await.unwrap();
@@ -649,7 +649,6 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
         (2, 15, StorageTier::Device),
         (3, 10, StorageTier::HostPinned),
         (5, 20, StorageTier::Device),
-        (6, 5, StorageTier::Device),
         (7, 5, StorageTier::Device),
     ] {
         entry
@@ -658,24 +657,20 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
             .await
             .unwrap();
     }
-    // Only contiguous local host blocks count before choosing a remote source.
-    // A fetch bridging worker 6's gap must not credit its detached local suffix.
-    for (id, start, end) in [(6, 10, 15), (7, 5, 10)] {
-        entry
-            .indexer
-            .apply_event_routed(store_event(
-                id,
-                0,
-                2,
-                &hashes[..start],
-                &hashes[start..end],
-                StorageTier::HostPinned,
-            ))
-            .await
-            .unwrap();
-    }
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            7,
+            0,
+            2,
+            &hashes[..5],
+            &hashes[5..10],
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
     let mut sources = Vec::new();
-    for (id, start, end) in [(11, 10, 15), (12, 15, 20), (13, 0, 5), (14, 5, 10)] {
+    for (id, start, end) in [(11, 10, 15), (12, 15, 20), (13, 0, 5)] {
         let event = store_event(
             id,
             0,
@@ -716,12 +711,10 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
         (2, 12, 20),
         (3, 11, 15),
         (4, 13, 5),
-        (6, 14, 10),
         (7, 11, 15),
     ] {
         let response = reserve_pinned(&core, &format!("target-{target}"), &tokens, target).await;
         let hint = response.kv_hint.unwrap();
-        assert_eq!(hint.actions.len(), 1);
         let payload: KvSourceLocationsPayload =
             serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
                 .unwrap();

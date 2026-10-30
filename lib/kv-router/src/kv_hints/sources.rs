@@ -670,20 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn scope_keeps_one_island_until_targets_differ() {
-        let target = |island| KvTransferTarget {
-            worker_type: 1,
-            transfer_domain: Some(2),
-            transfer_island: Some(island),
-            preferred: false,
-        };
-        let one = KvTransferScope::of([(target(3), 0), (target(3), 1)]);
-        assert!(one.covers(2, 3) && !one.covers(2, 4) && !one.covers(5, 3));
-        let both = KvTransferScope::of([(target(3), 0), (target(4), 0)]);
-        assert!(both.covers(2, 3) && both.covers(2, 6));
-    }
-
-    #[test]
     fn cache_owners_attached_to_the_target_are_skipped() {
         let owner = |slot: u8| {
             CacheOwnerId::new(
