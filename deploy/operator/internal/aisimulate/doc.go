@@ -30,7 +30,7 @@
 // aggregated-and-disaggregated search. It then translates the typed spec (model, backends,
 // hardware, workload, objective) into that input. The derived defaults that no API field
 // carries are added next: the request count (not for a trace, which accepts only a virtual-time
-// stop), a bounded trial budget for a KV-load range search, and optimization.strict_sla when an
+// stop), a bounded trial budget for every search, and optimization.strict_sla when an
 // SLA bound is set. Last, spec.aisim.inputOverrides is applied on top as a JSON Merge
 // Patch (RFC 7386): upstream objects merge recursively, arrays and scalars replace the value,
 // and null deletes it. The input overrides are authoritative: they win on every path they name,
