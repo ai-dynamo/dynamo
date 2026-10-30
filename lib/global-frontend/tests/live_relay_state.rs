@@ -8,9 +8,7 @@ use std::time::Duration;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolsResponse, V1PoolIdDeriver, grpc};
 use dynamo_global_discovery_client::GlobalDiscoveryClient;
-use dynamo_global_frontend::{
-    RelayGatedPoolCatalog, TrustedNetworkAdmission, discover_pools, serve_relay_views,
-};
+use dynamo_global_frontend::{RelayGatedPoolCatalog, discover_pools, serve_relay_views};
 use dynamo_global_router::{InFlightTracker, PoolSignals};
 use dynamo_llm::pool_relay::wan::grpc::protocol as relay;
 use grpc::pool_view_frame::Event;
@@ -76,7 +74,7 @@ async fn publisher(
 }
 
 #[tokio::test]
-async fn readiness_generation_and_relay_loss_gate_live_gds_candidates() {
+async fn cached_discovery_does_not_keep_a_disconnected_relay_routable() {
     let listed: PoolsResponse = serde_json::from_value(serde_json::json!({
         "complete": true, "pools": [{
             "key": {"cluster_id": "east", "namespace": "dynamo", "dgd_name": "blue"},
@@ -129,94 +127,32 @@ async fn readiness_generation_and_relay_loss_gate_live_gds_candidates() {
     let current = catalog.subscribe();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let receiver = tokio::spawn(serve_relay_views(
-        listener,
-        catalog,
-        Arc::new(TrustedNetworkAdmission),
-        cancel.clone(),
-    ));
-    let (sender, task) = publisher(address, state(false, 1, 1, 1)).await;
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 1,
-                state: Some(state(true, 1, 1, 2)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| current.borrow().pools().len() == 1).await;
-    let load = signals.occupancy(&pool).unwrap();
-    assert_eq!(load.slots, 0.125);
-    assert_eq!(load.kv, Some(0.2));
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 2,
-                state: Some(state(false, 1, 1, 2)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| current.borrow().pools().is_empty()).await;
-    assert!(signals.occupancy(&pool).is_none());
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 3,
-                state: Some(state(true, 1, 1, 2)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| current.borrow().pools().len() == 1).await;
-
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 4,
-                state: Some(state(true, 2, 1, 2)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| signals.occupancy(&pool).is_none()).await;
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 5,
-                state: Some(state(true, 2, 2, 3)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| signals.occupancy(&pool).is_some()).await;
-
-    let (replacement, replacement_task) = publisher(address, state(true, 2, 2, 4)).await;
-    replacement
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 1,
-                state: Some(state(false, 2, 2, 4)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| current.borrow().pools().is_empty()).await;
-    replacement
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 2,
-                state: Some(state(true, 2, 2, 4)),
-            })),
-        })
-        .await
-        .unwrap();
-    until(|| current.borrow().pools().len() == 1).await;
+    let receiver = tokio::spawn(serve_relay_views(listener, catalog, cancel.clone()));
+    let (sender, task) = publisher(address, state(true, 1, 1, 1)).await;
+    until(|| current.borrow().pools().len() == 1 && signals.occupancy(&pool).is_some()).await;
+    let mut next = state(true, 1, 1, 2);
+    let mut load = relay::ServingLoadUpdate::decode(next.serving_load).unwrap();
+    load.models[0]
+        .load
+        .as_mut()
+        .unwrap()
+        .requests
+        .as_mut()
+        .unwrap()
+        .requests_generating = Some(16);
+    next.serving_load = load.encode_to_vec().into();
+    let (replacement, replacement_task) = publisher(address, next).await;
+    until(|| {
+        signals
+            .occupancy(&pool)
+            .is_some_and(|load| load.slots == 0.25)
+    })
+    .await;
     drop(sender);
     task.await.unwrap().unwrap();
-    assert!(
-        signals.occupancy(&pool).is_some(),
+    assert_eq!(
+        signals.occupancy(&pool).unwrap().slots,
+        0.25,
         "an old guard must not clear its replacement's load"
     );
     let sender = replacement;
@@ -231,28 +167,6 @@ async fn readiness_generation_and_relay_loss_gate_live_gds_candidates() {
     assert_eq!(discovered.borrow().pools().len(), 1);
     assert!(signals.occupancy(&pool).is_none());
 
-    let (sender, task) = publisher(address, state(true, 2, 2, 4)).await;
-    until(|| current.borrow().pools().len() == 1).await;
-    let mut mismatched = state(true, 2, 2, 5);
-    let mut load = relay::KvPoolLoadUpdate::decode(mismatched.kv_load).unwrap();
-    load.relay.as_mut().unwrap().relay_incarnation = 2;
-    mismatched.kv_load = load.encode_to_vec().into();
-    sender
-        .send(grpc::PoolViewFrame {
-            event: Some(Event::Upsert(grpc::Upsert {
-                revision: 1,
-                state: Some(mismatched),
-            })),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        task.await.unwrap().unwrap_err().code(),
-        tonic::Code::InvalidArgument
-    );
-    until(|| current.borrow().pools().is_empty()).await;
-    assert!(signals.occupancy(&pool).is_none());
-    drop(sender);
     cancel.cancel();
     receiver.await.unwrap().unwrap();
 }
@@ -419,9 +333,9 @@ async fn shared_state_contract(router_initiated: bool) {
         vec!["http://pool:8000".parse().unwrap()],
     );
     candidate.relay = Some(format!("http://{address}").parse().unwrap());
-    let (_discovery, discovered) =
+    let (discovery, discovered) =
         tokio::sync::watch::channel(Arc::new(dynamo_global_frontend::PoolSnapshot::new(vec![
-            candidate,
+            candidate.clone(),
         ])));
     let signals = Arc::new(PoolSignals::new(Arc::new(InFlightTracker::new())));
     let catalog = Arc::new(RelayGatedPoolCatalog::with_signals(
@@ -462,7 +376,6 @@ async fn shared_state_contract(router_initiated: bool) {
         server = AbortOnDropHandle::new(tokio::spawn(serve_relay_views(
             listener,
             catalog.clone(),
-            Arc::new(TrustedNetworkAdmission),
             cancel.clone(),
         )));
         let (sender, task) = publisher(address, initial).await;
@@ -495,6 +408,20 @@ async fn shared_state_contract(router_initiated: bool) {
             "all four subscriptions must reach the same Relay replica"
         );
     }
+    if router_initiated {
+        candidate.model = "qwen-canonical".into();
+        discovery.send_replace(Arc::new(dynamo_global_frontend::PoolSnapshot::new(vec![
+            candidate,
+        ])));
+        until(|| {
+            current
+                .borrow()
+                .pools()
+                .first()
+                .is_some_and(|pool| pool.model == "qwen-canonical")
+        })
+        .await;
+    }
     input.update(state(false, 1, 1, 2)).await;
     until(|| current.borrow().pools().is_empty()).await;
     assert!(signals.occupancy(&pool).is_none());
@@ -511,6 +438,13 @@ async fn shared_state_contract(router_initiated: bool) {
             .is_some_and(|load| load.kv == Some(0.2))
     })
     .await;
+    if router_initiated {
+        assert_eq!(
+            peers.lock().len(),
+            4,
+            "model-only changes must reuse the Relay connection"
+        );
+    }
     input.disconnect().await;
     until(|| current.borrow().pools().is_empty()).await;
     assert_eq!(discovered.borrow().pools().len(), 1);

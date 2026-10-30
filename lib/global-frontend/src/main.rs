@@ -11,8 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, TrustedNetworkAdmission, app, discover_pools,
-    follow_relays, measure_round_trips, serve, serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, discover_pools, follow_relays,
+    measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -274,13 +274,7 @@ async fn main() -> Result<()> {
             result.context("serve the Global Frontend")
         };
         let relay = async {
-            let result = serve_relay_views(
-                relay_listener,
-                catalog,
-                Arc::new(TrustedNetworkAdmission),
-                shutdown.clone(),
-            )
-            .await;
+            let result = serve_relay_views(relay_listener, catalog, shutdown.clone()).await;
             shutdown.cancel();
             result.context("serve Relay views")
         };

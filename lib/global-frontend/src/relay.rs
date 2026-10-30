@@ -42,29 +42,26 @@ pub async fn follow_relays(
     cancel: CancellationToken,
 ) {
     let mut subscriptions =
-        HashMap::<PoolId, (Url, String, CancellationToken, AbortOnDropHandle<()>)>::new();
+        HashMap::<PoolId, (Url, CancellationToken, AbortOnDropHandle<()>)>::new();
     loop {
         let snapshot = pools.borrow_and_update().clone();
         let wanted = snapshot
             .pools()
             .iter()
-            .filter_map(|pool| Some((pool.id.clone(), (pool.relay.clone()?, pool.model.clone()))))
+            .filter_map(|pool| Some((pool.id.clone(), pool.relay.clone()?)))
             .collect::<HashMap<_, _>>();
         let removed = subscriptions
             .iter()
-            .filter(|(pool, (relay, model, _, _))| {
-                !wanted.get(*pool).is_some_and(|(want_relay, want_model)| {
-                    want_relay == relay && want_model == model
-                })
-            })
+            .filter(|(pool, (relay, _, _))| wanted.get(*pool) != Some(relay))
             .map(|(pool, _)| pool.clone())
             .collect::<Vec<_>>();
         for pool in removed {
-            let (_, _, subscription, task) = subscriptions.remove(&pool).unwrap();
-            subscription.cancel();
-            let _ = task.await;
+            if let Some((_, subscription, task)) = subscriptions.remove(&pool) {
+                subscription.cancel();
+                let _ = task.await;
+            }
         }
-        for (pool, (relay, model)) in wanted {
+        for (pool, relay) in wanted {
             if subscriptions.contains_key(&pool) {
                 continue;
             }
@@ -75,10 +72,7 @@ pub async fn follow_relays(
                 Arc::clone(&catalog),
                 subscription.clone(),
             ));
-            subscriptions.insert(
-                pool,
-                (relay, model, subscription, AbortOnDropHandle::new(task)),
-            );
+            subscriptions.insert(pool, (relay, subscription, AbortOnDropHandle::new(task)));
         }
         tokio::select! {
             _ = cancel.cancelled() => return,
@@ -186,7 +180,7 @@ async fn stream_pool(
         replica: source.runtime_id.to_string(),
     });
     let mut revision = 0_u64;
-    view.replace_state_snapshot(revision, [(pool.clone(), Some(Arc::new(initial)))])?;
+    view.replace_state_snapshot(revision, [(pool.clone(), Arc::new(initial))])?;
     tracing::info!(%pool, %relay, "following the pool's Relay state");
     loop {
         tokio::select! {
@@ -213,7 +207,7 @@ async fn stream_pool(
         revision = revision
             .checked_add(1)
             .context("Relay receiving revision exhausted")?;
-        view.upsert_state(revision, pool.clone(), Some(Arc::new(state)))?;
+        view.upsert_state(revision, pool.clone(), Arc::new(state))?;
     }
 }
 

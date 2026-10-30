@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{PoolSnapshot, RelayPoolState};
 
-type View = Option<Arc<RelayPoolState>>;
+type View = Arc<RelayPoolState>;
 type Views = PoolViews<RelaySourceKey, PoolId, ReceivedView>;
 
 #[derive(Clone)]
@@ -30,11 +30,8 @@ impl ReceivedView {
         pool: &PoolId,
         signals: Option<&PoolSignals>,
     ) -> Self {
-        let previous =
-            previous.filter(|old| old.source() == state.as_ref().map(|state| state.source()));
-        let (serving_sequence, kv_sequence) = state
-            .as_ref()
-            .map_or((None, None), |state| state.window_sequences());
+        let previous = previous.filter(|old| old.source() == state.source());
+        let (serving_sequence, kv_sequence) = state.window_sequences();
         let receipt = signals.map(|signals| signals.receive_report(pool));
         let retain = |sequence, old: Option<(u64, ReportReceipt)>| match sequence {
             Some(sequence) if old.is_some_and(|(old, _)| old == sequence) => old,
@@ -48,37 +45,33 @@ impl ReceivedView {
         }
     }
 
-    fn source(&self) -> Option<RelaySource> {
-        self.state.as_ref().map(|state| state.source())
+    fn source(&self) -> RelaySource {
+        self.state.source()
     }
     fn ready_for(&self, model: &str) -> bool {
-        self.state
-            .as_ref()
-            .is_none_or(|state| state.ready_for(model))
+        self.state.ready_for(model)
     }
     fn project(&self, pool: &Pool, signals: &PoolSignals) {
-        if let Some(state) = &self.state {
-            state.project(
-                &pool.id,
-                &pool.model,
-                signals,
-                self.serving.map(|(_, receipt)| receipt),
-                self.kv.map(|(_, receipt)| receipt),
-            );
-        }
+        self.state.project(
+            &pool.id,
+            &pool.model,
+            signals,
+            self.serving.map(|(_, receipt)| receipt),
+            self.kv.map(|(_, receipt)| receipt),
+        );
     }
 }
 
 /// One Relay Pod reporting one routing pool. Replica names need only be unique within a pool.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RelaySourceKey {
+pub(crate) struct RelaySourceKey {
     pub pool: PoolId,
     pub service: String,
     pub replica: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReceiveError {
+pub(crate) enum ReceiveError {
     #[error(transparent)]
     Apply(#[from] ApplyError),
     #[error("relay view revision gap: expected {expected}, got {received}")]
@@ -159,7 +152,7 @@ impl Inner {
     }
 }
 
-/// Discovery pools with a current Relay view, gated by model readiness when state is supplied.
+/// Discovery pools gated by live, model-ready Relay views.
 pub struct RelayGatedPoolCatalog {
     inner: Arc<Inner>,
 }
@@ -213,13 +206,13 @@ impl RelayGatedPoolCatalog {
         Self { inner }
     }
     /// A replacement stream withdraws its predecessor until it sends a snapshot.
-    pub fn open(&self, relay: RelaySourceKey) -> RelayStreamGuard {
+    pub(crate) fn open(&self, relay: RelaySourceKey) -> RelayStreamGuard {
         let token = {
             let mut views = self.inner.views.lock();
             let previous = views
                 .pool_views(&relay.pool)
                 .find(|(source, _)| *source == &relay)
-                .and_then(|(_, view)| view.source());
+                .map(|(_, view)| view.source());
             let token = views.open(relay.clone());
             self.inner.forget_source(&relay.pool, previous);
             token
@@ -238,7 +231,7 @@ impl RelayGatedPoolCatalog {
 }
 
 /// A receiving task owns this guard. Dropping the task withdraws its Relay view.
-pub struct RelayStreamGuard {
+pub(crate) struct RelayStreamGuard {
     inner: Arc<Inner>,
     token: StreamToken<RelaySourceKey>,
     revision: Option<u64>,
@@ -246,14 +239,6 @@ pub struct RelayStreamGuard {
 }
 
 impl RelayStreamGuard {
-    /// Presence-only helper for transport-independent view consumers.
-    pub fn replace_snapshot(
-        &mut self,
-        revision: u64,
-        pools: impl IntoIterator<Item = PoolId>,
-    ) -> Result<(), ReceiveError> {
-        self.replace_state_snapshot(revision, pools.into_iter().map(|pool| (pool, None)))
-    }
     pub(crate) fn replace_state_snapshot(
         &mut self,
         revision: u64,
@@ -273,7 +258,7 @@ impl RelayStreamGuard {
             let previous = views
                 .pool_views(&self.source.pool)
                 .find(|(source, _)| *source == &self.source)
-                .and_then(|(_, view)| view.source());
+                .map(|(_, view)| view.source());
             let pools = pools
                 .into_iter()
                 .map(|(pool, state)| {
@@ -290,14 +275,10 @@ impl RelayStreamGuard {
             if previous != next {
                 inner.forget_source(&self.source.pool, previous);
             }
-            inner.project_pool(&self.source.pool, &views);
         }
         self.revision = Some(revision);
         self.inner.refresh();
         Ok(())
-    }
-    pub fn upsert(&mut self, revision: u64, pool: PoolId) -> Result<(), ReceiveError> {
-        self.upsert_state(revision, pool, None)
     }
     pub(crate) fn upsert_state(
         &mut self,
@@ -312,18 +293,18 @@ impl RelayStreamGuard {
             .pool_views(&pool)
             .find(|(source, _)| *source == &self.source)
             .map(|(_, view)| view);
-        let readiness_changed = previous.is_none_or(|old| {
-            old.state.as_ref().map(|state| state.ready_models())
-                != state.as_ref().map(|state| state.ready_models())
-        });
-        let old_source = previous.and_then(|view| view.source());
+        let readiness_changed =
+            previous.is_none_or(|old| old.state.ready_models() != state.ready_models());
+        let old_source = previous.map(|view| view.source());
         let received = ReceivedView::new(state, previous, &pool, inner.signals.as_deref());
         let new_source = received.source();
         views.upsert(&self.token, pool.clone(), received)?;
-        if old_source != new_source {
+        if old_source != Some(new_source) {
             inner.forget_source(&pool, old_source);
         }
-        inner.project_pool(&pool, &views);
+        if !readiness_changed {
+            inner.project_pool(&pool, &views);
+        }
         drop(views);
         self.revision = Some(revision);
         if readiness_changed {
@@ -365,7 +346,7 @@ impl RelayStreamGuard {
         views
             .pool_views(&self.source.pool)
             .find(|(source, _)| *source == &self.source)
-            .and_then(|(_, view)| view.source())
+            .map(|(_, view)| view.source())
     }
 }
 
@@ -460,11 +441,11 @@ mod tests {
         };
         let mut ready = catalog.open(source("1"));
         ready
-            .replace_state_snapshot(0, [(pool.clone(), Some(state(1, true)))])
+            .replace_state_snapshot(0, [(pool.clone(), state(1, true))])
             .unwrap();
         let mut unready = catalog.open(source("2"));
         unready
-            .replace_state_snapshot(0, [(pool.clone(), Some(state(2, false)))])
+            .replace_state_snapshot(0, [(pool.clone(), state(2, false))])
             .unwrap();
         assert_eq!(current.borrow().pools().len(), 1);
         ready.remove(1, &pool).unwrap();
@@ -512,11 +493,10 @@ mod tests {
             service: pool.to_string(),
             replica: "1".into(),
         });
-        view.replace_state_snapshot(0, [(pool.clone(), Some(state(1, false)))])
+        view.replace_state_snapshot(0, [(pool.clone(), state(1, false))])
             .unwrap();
         assert_eq!(current.borrow().pools().len(), 1);
-        view.upsert_state(1, pool.clone(), Some(state(1, true)))
-            .unwrap();
+        view.upsert_state(1, pool.clone(), state(1, true)).unwrap();
         assert_eq!(current.borrow().pools().len(), 2);
         drop(view);
         assert_eq!(
@@ -581,7 +561,7 @@ mod tests {
         let mut kv = wire::KvPoolLoadUpdate::decode(raw.kv_load).unwrap();
         kv.window_ms = 20;
         raw.kv_load = kv.encode_to_vec().into();
-        view.replace_state_snapshot(0, [(pool.clone(), Some(loaded_state(raw.clone())))])
+        view.replace_state_snapshot(0, [(pool.clone(), loaded_state(raw.clone()))])
             .unwrap();
         assert!(signals.occupancy(&pool).is_some());
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -596,7 +576,7 @@ mod tests {
             .aliases
             .push("another-alias".into());
         raw.catalog = metadata.encode_to_vec().into();
-        view.upsert_state(1, pool.clone(), Some(loaded_state(raw.clone())))
+        view.upsert_state(1, pool.clone(), loaded_state(raw.clone()))
             .unwrap();
         assert!(
             signals.occupancy(&pool).is_none(),
@@ -605,11 +585,11 @@ mod tests {
         let mut ready = wire::ServingReadinessUpdate::decode(raw.readiness).unwrap();
         ready.entries[0].state = wire::ServingReadinessState::Unavailable as i32;
         raw.readiness = ready.encode_to_vec().into();
-        view.upsert_state(2, pool.clone(), Some(loaded_state(raw.clone())))
+        view.upsert_state(2, pool.clone(), loaded_state(raw.clone()))
             .unwrap();
         ready.entries[0].state = wire::ServingReadinessState::Ready as i32;
         raw.readiness = ready.encode_to_vec().into();
-        view.upsert_state(3, pool.clone(), Some(loaded_state(raw)))
+        view.upsert_state(3, pool.clone(), loaded_state(raw))
             .unwrap();
         assert!(
             signals.occupancy(&pool).is_none(),
@@ -618,7 +598,7 @@ mod tests {
         view.upsert_state(
             4,
             pool.clone(),
-            Some(loaded_state(super::fixtures::state(true, 1, 1, 11))),
+            loaded_state(super::fixtures::state(true, 1, 1, 11)),
         )
         .unwrap();
         assert!(
@@ -665,7 +645,7 @@ mod tests {
             .requests_generating = Some(32);
         serving.models.push(other);
         raw.serving_load = serving.encode_to_vec().into();
-        view.replace_state_snapshot(0, [(pool.clone(), Some(loaded_state(raw)))])
+        view.replace_state_snapshot(0, [(pool.clone(), loaded_state(raw))])
             .unwrap();
         assert!(signals.occupancy(&pool).is_none());
         let candidate = |model| {
@@ -706,6 +686,89 @@ mod tests {
         .await
         .unwrap();
         assert!(signals.occupancy(&pool).is_none());
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn revision_gap_withdraws_only_its_source_until_resnapshot() {
+        let key = PoolKey::new("east", "dynamo", "blue").unwrap();
+        let candidate = Pool::new(
+            &key,
+            "model",
+            "east",
+            vec!["http://pool:8000".parse().unwrap()],
+        );
+        let pool = candidate.id.clone();
+        let (_sender, candidates) = watch::channel(Arc::new(PoolSnapshot::new(vec![candidate])));
+        let cancel = CancellationToken::new();
+        let catalog = RelayGatedPoolCatalog::new(candidates, cancel.clone());
+        let snapshot = catalog.subscribe();
+        let source = |replica: &str| RelaySourceKey {
+            pool: pool.clone(),
+            service: pool.to_string(),
+            replica: replica.into(),
+        };
+        let mut first = catalog.open(source("1"));
+        let mut second = catalog.open(source("2"));
+        first
+            .replace_state_snapshot(5, [(pool.clone(), state(1, true))])
+            .unwrap();
+        second
+            .replace_state_snapshot(5, [(pool.clone(), state(2, true))])
+            .unwrap();
+        assert!(matches!(
+            first.replace_state_snapshot(5, []),
+            Err(ReceiveError::StaleSnapshot { .. })
+        ));
+        assert_eq!(snapshot.borrow().pools().len(), 1);
+        assert!(matches!(
+            first.upsert_state(7, pool.clone(), state(1, true)),
+            Err(ReceiveError::RevisionGap { .. })
+        ));
+        assert_eq!(snapshot.borrow().pools().len(), 1);
+        drop(second);
+        assert!(snapshot.borrow().pools().is_empty());
+        assert!(matches!(
+            first.upsert_state(8, pool.clone(), state(1, true)),
+            Err(ReceiveError::Apply(ApplyError::SnapshotRequired))
+        ));
+        first
+            .replace_state_snapshot(9, [(pool, state(1, true))])
+            .unwrap();
+        assert_eq!(snapshot.borrow().pools().len(), 1);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn replica_identity_is_scoped_to_its_routing_pool() {
+        let pools = ["east", "west"].map(|region| {
+            Pool::new(
+                &PoolKey::new(region, "dynamo", "blue").unwrap(),
+                "model",
+                region,
+                vec!["http://pool:8000".parse().unwrap()],
+            )
+        });
+        let (_sender, candidates) = watch::channel(Arc::new(PoolSnapshot::new(pools.to_vec())));
+        let cancel = CancellationToken::new();
+        let catalog = RelayGatedPoolCatalog::new(candidates, cancel.clone());
+        let snapshot = catalog.subscribe();
+        let mut guards = pools
+            .iter()
+            .map(|pool| {
+                let mut view = catalog.open(RelaySourceKey {
+                    pool: pool.id.clone(),
+                    service: "relay".into(),
+                    replica: "1".into(),
+                });
+                view.replace_state_snapshot(0, [(pool.id.clone(), state(1, true))])
+                    .unwrap();
+                view
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot.borrow().pools().len(), 2);
+        guards.pop();
+        assert_eq!(snapshot.borrow().pools().len(), 1);
         cancel.cancel();
     }
 }
