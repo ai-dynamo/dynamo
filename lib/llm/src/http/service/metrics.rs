@@ -532,10 +532,10 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
 /// directly so tests can supply values without mutating the process environment:
 /// concurrent `setenv`/`getenv` is undefined behavior on Unix, and many other tests in
 /// this module construct `Metrics` and read these same variables.
-type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+pub type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 /// The real lookup, used everywhere outside tests.
-fn system_env(name: &str) -> Option<String> {
+pub fn system_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
@@ -646,7 +646,60 @@ fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
     Some(buckets)
 }
 
-fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+/// Factor-of-two edges from 0.031 s to 4100 s. The 2 s to 510 s edges are the ones
+/// earlier releases exported, so existing `le` series continue.
+fn request_duration_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    let (min, max, count) = parse_bucket_config(
+        env,
+        env_metrics::DYN_METRICS_REQUEST_DURATION,
+        1.0 / 64.0,
+        4096.0,
+        19,
+    );
+    generate_log_buckets(min, max, count)
+}
+
+/// Time to first token buckets, configurable via `DYN_METRICS_TTFT_{MIN,MAX,COUNT}`.
+/// Shared by the frontend and the router.
+pub fn time_to_first_token_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    let (min, max, count) =
+        parse_bucket_config(env, env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
+    generate_log_buckets(min, max, count)
+}
+
+/// Input sequence length buckets, configurable via `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}`.
+/// Shared by the frontend's input and cached token histograms, the router, and the EPP.
+///
+/// The top edge, 1.1M tokens, covers 1M-token context windows. The edges up to 130000
+/// are the ones earlier releases exported.
+pub fn input_sequence_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    let (min, max, count) = parse_bucket_config(
+        env,
+        env_metrics::DYN_METRICS_INPUT_SEQUENCE,
+        50.0,
+        1_100_000.0,
+        15,
+    );
+    generate_log_buckets(min, max, count)
+}
+
+/// Output sequence length buckets, configurable via `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}`.
+/// Shared by the frontend and the router. The top edge, 130000 tokens, covers long
+/// reasoning outputs.
+pub fn output_sequence_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    let (min, max, count) = parse_bucket_config(
+        env,
+        env_metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+        50.0,
+        128_000.0,
+        12,
+    );
+    generate_log_buckets(min, max, count)
+}
+
+/// Inter-token latency buckets, from `DYN_METRICS_ITL_BUCKETS` or
+/// `DYN_METRICS_ITL_{MIN,MAX,COUNT}`. Shared by the frontend and the router.
+pub fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
     if let Some(value) = env(env_metrics::DYN_METRICS_ITL_BUCKETS) {
         return parse_bucket_list(&value).unwrap_or_else(|| {
             tracing::warn!(
@@ -1233,12 +1286,13 @@ impl Metrics {
     /// ## Histogram Bucket Configuration
     ///
     /// Histograms use log-spaced buckets rounded to 2 significant figures unless noted otherwise.
-    /// Bucket configuration can be customized via environment variables (MIN: minimum value,
-    /// MAX: maximum value, COUNT: number of buckets):
+    /// Bucket configuration can be customized via environment variables (MIN: start of the
+    /// log range, replaced by the leading 0 edge; MAX: top edge; COUNT: number of edges,
+    /// including the leading 0):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
-    /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
-    /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
+    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 0.015625, 4096.0, 19)
+    /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 1100000.0, 15)
+    /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
     /// - `DYN_METRICS_ITL_BUCKETS` - Comma-separated inter-token latency bucket boundaries
     /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Log-spaced inter-token latency configuration (defaults: 0.001, 80.0, 20)
@@ -1379,16 +1433,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
-        let (req_dur_min, req_dur_max, req_dur_count) = parse_bucket_config(
-            env,
-            env_metrics::DYN_METRICS_REQUEST_DURATION,
-            1.0,
-            512.0,
-            10,
-        );
-        let request_duration_buckets =
-            generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
+        let request_duration_buckets = request_duration_buckets(env);
 
         let request_duration = HistogramVec::new(
             HistogramOpts::new(
@@ -1400,15 +1445,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (isl_min, isl_max, isl_count) = parse_bucket_config(
-            env,
-            env_metrics::DYN_METRICS_INPUT_SEQUENCE,
-            50.0,
-            128000.0,
-            12,
-        );
-        let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
+        let input_sequence_buckets = input_sequence_buckets(env);
 
         let input_sequence_length = HistogramVec::new(
             HistogramOpts::new(
@@ -1420,15 +1457,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (osl_min, osl_max, osl_count) = parse_bucket_config(
-            env,
-            env_metrics::DYN_METRICS_OUTPUT_SEQUENCE,
-            50.0,
-            32000.0,
-            10,
-        );
-        let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
+        let output_sequence_buckets = output_sequence_buckets(env);
 
         let output_sequence_length = HistogramVec::new(
             HistogramOpts::new(
@@ -1449,10 +1478,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
-        let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config(env, env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
-        let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
+        let time_to_first_token_buckets = time_to_first_token_buckets(env);
 
         let time_to_first_token = HistogramVec::new(
             HistogramOpts::new(
@@ -1478,8 +1504,8 @@ impl Metrics {
 
         // Embedding latency buckets: pooling-model inference is typically
         // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
-        // range), so 1ms..10s on a log scale gives p50/p99 resolution that
-        // the 1..512s `request_duration` buckets cannot.
+        // range), so 1ms..10s on a log scale gives p50/p99 resolution below
+        // the 31ms bottom edge of the `request_duration` buckets.
         let (emb_min, emb_max, emb_count) = parse_bucket_config(
             env,
             env_metrics::DYN_METRICS_EMBEDDING_LATENCY,
@@ -3476,6 +3502,103 @@ mod tests {
         );
     }
 
+    /// `histogram_quantile` as Prometheus computes it: interpolate linearly inside the
+    /// bucket that holds the rank, or return the top finite edge when the rank is in `+Inf`.
+    fn histogram_quantile(q: f64, histogram: &prometheus::proto::Histogram) -> f64 {
+        let rank = q * histogram.sample_count() as f64;
+        let (mut lower, mut below) = (0.0, 0.0);
+        for bucket in histogram.get_bucket() {
+            let count = bucket.cumulative_count() as f64;
+            if count >= rank {
+                return lower + (bucket.upper_bound() - lower) * (rank - below) / (count - below);
+            }
+            lower = bucket.upper_bound();
+            below = count;
+        }
+        lower
+    }
+
+    #[test]
+    fn request_duration_default_buckets_resolve_fast_and_slow_requests() {
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &fake_env(&[]));
+        metrics.register(&registry).unwrap();
+        let name = format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::REQUEST_DURATION_SECONDS
+        );
+
+        // Log-uniform samples between `low` and `high` seconds, so every true quantile
+        // is known in closed form.
+        let workloads: [(&str, f64, f64); 3] = [
+            ("fast", 0.08, 0.3),
+            ("chat", 2.0, 40.0),
+            ("reasoning", 600.0, 2400.0),
+        ];
+        let samples = 1000;
+        for (model, low, high) in workloads {
+            for i in 0..samples {
+                let fraction = (i as f64 + 0.5) / samples as f64;
+                metrics
+                    .request_duration
+                    .with_label_values(&[model])
+                    .observe(low * (high / low).powf(fraction));
+            }
+        }
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .expect("histogram not registered");
+        for (model, low, high) in workloads {
+            let histogram = family
+                .get_metric()
+                .iter()
+                .find(|metric| metric.get_label().iter().any(|l| l.value() == model))
+                .expect("series not exported")
+                .get_histogram();
+            for q in [0.5, 0.9, 0.99] {
+                let truth = low * (high / low).powf(q);
+                let reported = histogram_quantile(q, histogram);
+                // Within one factor-of-two bucket of the true value.
+                assert!(
+                    (0.5..2.0).contains(&(reported / truth)),
+                    "{model}: q{q} reported {reported}s, true {truth}s"
+                );
+            }
+        }
+
+        // Every edge of the previous default (2 through 510) is still exported.
+        assert_eq!(
+            bucket_upper_bounds(&registry, &name),
+            vec![
+                0.0, 0.031, 0.063, 0.13, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 130.0,
+                260.0, 510.0, 1000.0, 2000.0, 4100.0
+            ],
+        );
+    }
+
+    #[test]
+    fn sequence_length_default_buckets_cover_long_contexts() {
+        // Input keeps every edge earlier releases exported; output shares input's edges.
+        assert_eq!(
+            input_sequence_buckets(&fake_env(&[])),
+            vec![
+                0.0, 100.0, 210.0, 430.0, 870.0, 1800.0, 3600.0, 7400.0, 15000.0, 31000.0, 63000.0,
+                130000.0, 260000.0, 540000.0, 1100000.0
+            ],
+        );
+        assert_eq!(
+            output_sequence_buckets(&fake_env(&[])),
+            vec![
+                0.0, 100.0, 210.0, 430.0, 870.0, 1800.0, 3600.0, 7400.0, 15000.0, 31000.0, 63000.0,
+                130000.0
+            ],
+        );
+    }
+
     #[test]
     fn explicit_itl_buckets_take_precedence_over_log_config() {
         let env = fake_env(&[
@@ -3567,9 +3690,9 @@ mod tests {
     #[test]
     fn test_all_buckets_are_two_sig_figs() {
         let test_cases = vec![
-            (1.0, 512.0, 10),
+            (1.0 / 64.0, 4096.0, 19),
+            (50.0, 1_100_000.0, 15),
             (50.0, 128000.0, 12),
-            (50.0, 32000.0, 10),
             (0.001, 480.0, 18),
             (0.001, 80.0, 20),
             (0.001, 10.0, 14),
