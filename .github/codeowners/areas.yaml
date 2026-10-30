@@ -620,6 +620,10 @@ shared:
   owners:
   - process
   - agents
+- glob: .ai/metrics-guidelines.md
+  owners:
+  - process
+  - observability
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops

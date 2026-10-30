@@ -15,13 +15,19 @@
 //!
 //! ## Naming Conventions
 //!
+//! Before adding or changing a name here, read `.ai/metrics-guidelines.md`, which also covers
+//! labels, registration, stability, and documentation. Existing names that break these
+//! conventions are kept for compatibility; do not copy them, and do not rename them as a
+//! side effect of another change.
+//!
 //! All metric names should follow: `{prefix}_{name}_{suffix}`
 //!
 //! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
 //! **Name**: Descriptive snake_case name indicating what is measured
 //! **Suffix**:
-//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`, `_messages`, `_connections`
-//!   - Counters: `_total` (not `total_` prefix) - for cumulative metrics that only increase
+//!   - Units, in base form: `_seconds` (not `_ms`), `_bytes`, `_tokens`, and `_ratio` for a
+//!     value from 0 to 1 (not `_percent`)
+//!   - Counters: `_total` (not `total_` prefix), after the unit - for cumulative metrics that only increase
 //!   - Gauges: No `_total` suffix - for current state metrics that can go up and down
 //!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
 //!
@@ -29,14 +35,13 @@
 //! - ❌ `_counter` → ✅ `_total`
 //! - ❌ `_sum` → ✅ `_total`
 //! - ❌ `_gauge` → ✅ (no suffix needed for current values)
-//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
-//! - ❌ `_time_total` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
-//! - ❌ `_total_time` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_time`, `_ms` → ✅ `_seconds`, `_duration_seconds`
+//! - ❌ `_time_total`, `_total_time`, `_ms_total` → ✅ `_seconds_total`
 //! - ❌ `_total_time_seconds` → ✅ `_seconds_total`
-//! - ❌ `_average_time` → ✅ `_seconds_avg`, `_ms_avg`
-//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
-//! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
-//! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//! - ❌ `_average_time` → ✅ a `_seconds` histogram; its average is `rate(x_sum) / rate(x_count)`
+//! - ❌ `_size` → ✅ `_bytes`, `_tokens`
+//! - ❌ `_percent` → ✅ `_ratio` (0 to 1)
+//! - ❌ `_rate`, `_per_second` → ✅ a `_total` counter, charted with `rate()`
 //! - ❌ `disconnected_clients_total` → ✅ `disconnected_clients` (gauge, not counter)
 //! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
 //! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
@@ -47,9 +52,9 @@
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
 //! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
-//! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
-//! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
-//! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_component_cpu_usage_ratio` - CPU usage from 0 to 1
+//! - ✅ `dynamo_frontend_output_tokens_total` - Output token counter; `rate()` gives tokens per second
+//! - ✅ `dynamo_messaging_client_connection_duration_seconds` - Connection time histogram
 //! - ✅ `dynamo_messaging_client_current_connections` - Current active connections gauge
 //! - ✅ `dynamo_messaging_client_in_messages_total` - Total messages received counter
 //!
