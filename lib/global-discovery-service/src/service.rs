@@ -19,7 +19,8 @@
 //!   waits for a complete list to remove any. A caller that knows no pools
 //!   yet still uses a partial list.
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
-//!   for readiness; liveness needs only the TCP port.
+//!   for readiness; liveness needs only the TCP port. Ready does not mean the
+//!   pool list is complete: `GET /pools` says that in `complete`.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
 //! traits. It runs on `dynamo-http-server`, so it gets TLS the way the Dynamo
@@ -33,8 +34,8 @@ use std::sync::Arc;
 use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
 };
-use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -70,12 +71,17 @@ pub struct Tls {
     pub key: PathBuf,
 }
 
+/// The largest request body. A registration is a few hundred bytes, and the
+/// backend keeps each one for its lease. axum's default is 2 MiB.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
 /// The service's HTTP routes.
 pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers).post(register_router))
         .route("/healthz", get(healthz))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(Arc::new(backend))
 }
 
@@ -398,6 +404,27 @@ mod tests {
             response.status(),
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_registration_over_the_body_limit_is_refused() {
+        // A registration of exactly `size` bytes: a capability fills the rest.
+        let registration_of = |size: usize| {
+            let mut body = registration();
+            body["capabilities"] = json!([""]);
+            let padding = size - body.to_string().len();
+            body["capabilities"] = json!(["c".repeat(padding)]);
+            body
+        };
+        let (base, shutdown) = start(registrations_backend()).await;
+        let (status, _) = post_pool(&base, &registration_of(MAX_BODY_BYTES + 1)).await;
+        assert_eq!(status, reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        let (_, pools) = get_json(&base, "/pools").await;
+        assert_eq!(pools["pools"], json!([]));
+
+        let (status, _) = post_pool(&base, &registration_of(MAX_BODY_BYTES)).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
         shutdown.cancel();
     }
 
