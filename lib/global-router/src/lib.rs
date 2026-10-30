@@ -23,7 +23,7 @@ mod selector;
 mod signals;
 
 pub use affinity::AffinitySelector;
-pub use core::{AffinityConfig, CorePolicy, CoreSelector, Reservation};
+pub use core::{AffinityConfig, CorePolicy, CoreSelector, MAX_SESSION_ID_BYTES, Reservation};
 pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;
 pub use selector::{

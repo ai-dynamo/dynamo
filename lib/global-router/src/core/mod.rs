@@ -49,6 +49,10 @@ use crate::{Pool, RoutingRequest};
 
 pub use catalog::{PoolCatalogSource, ROUTING_GROUP, worker_id};
 pub use directory::{PoolDirectory, PoolEntry};
+/// The longest session id the core's session table accepts; the frontend
+/// rejects longer ones before selection, so they are a client error and not
+/// an unavailable pool.
+pub use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES as MAX_SESSION_ID_BYTES;
 pub use policies::{HeadroomPicker, LeastRequestsPicker, RoundRobinPicker};
 
 /// How the core picks among a model's pools.
