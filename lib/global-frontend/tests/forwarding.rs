@@ -680,8 +680,6 @@ async fn rotates_across_pools_and_tracks_catalog_changes() {
     assert_eq!(green_requests.lock().unwrap().len(), 4);
 }
 
-/// The gRPC `ReplicaSync` stream shares the API listener: a peer subscribes
-/// on the same port the OpenAI routes are served on.
 #[tokio::test]
 async fn replica_sync_is_served_on_the_api_port() {
     use dynamo_global_router::replica_sync::CONTRACT_MARKER;

@@ -125,7 +125,6 @@ struct Args {
     peers: Vec<Peer>,
 }
 
-/// A replica peer, as one of the two transports dials it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Peer {
     /// A `--replica-sync-port` endpoint of the core's mesh.
@@ -223,8 +222,6 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
     Ok(Pool::new(&key, model, key.cluster_id(), frontends))
 }
 
-/// The replica transport `args` asks for, if any: the mesh with
-/// `--replica-sync-port`, gRPC with `http://` peers alone.
 fn replica_transport(args: &Args) -> Result<Option<ReplicaTransport>> {
     let mut mesh = Vec::new();
     let mut grpc = Vec::new();
@@ -542,7 +539,6 @@ mod tests {
 
     #[test]
     fn peers_need_the_core_and_one_transport() {
-        // Any peer needs the core.
         assert!(transport(&["--peer", "http://10.0.0.2:8000"]).is_err());
         assert!(
             transport(&[

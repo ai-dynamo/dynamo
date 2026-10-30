@@ -332,6 +332,10 @@ async fn publish_events(
             received = outbound.recv_many(&mut events, MAX_REPLICA_BATCH_EVENTS) => received,
         };
         if received == 0 {
+            // The core dropped the partition: forget its inbound channel too,
+            // unless a new partition of the same key has replaced it.
+            hub.partitions
+                .remove_if(&partition, |_, inbound| inbound.is_closed());
             return;
         }
         if events.len() < MAX_REPLICA_BATCH_EVENTS {
