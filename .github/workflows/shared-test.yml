@@ -102,6 +102,11 @@ on:
         required: false
         type: boolean
         default: true
+      prepare_upstream_vllm_chat:
+        description: 'Prepare the pinned vLLM test tree for the dedicated chat behavior suite'
+        required: false
+        type: boolean
+        default: false
       gpu_test_markers:
         description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
@@ -291,6 +296,36 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      - name: Select tests matching the installed vLLM release
+        if: ${{ inputs.prepare_upstream_vllm_chat }}
+        id: upstream-vllm-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import re; from importlib.metadata import version; v = version("vllm").split("+", 1)[0]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+)?", v), f"Use a release vLLM image to select matching tests, got {v}"; print(v)')"
+          echo "ref=v${version}" >> "$GITHUB_OUTPUT"
+      - name: Checkout matching upstream vLLM tests
+        if: ${{ inputs.prepare_upstream_vllm_chat }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ steps.upstream-vllm-version.outputs.ref }}
+          path: upstream-vllm-source
+          persist-credentials: false
+      - name: Prepare upstream client environment
+        if: ${{ inputs.prepare_upstream_vllm_chat }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C upstream-vllm-source rev-parse HEAD
+          upstream_tests="$(mktemp -d "${RUNNER_TEMP}/vllm-tests.XXXXXX")"
+          # Test fixtures need examples; exclude vllm/ so the installed wheel is used.
+          git -C upstream-vllm-source archive HEAD tests examples pyproject.toml | tar -x -C "$upstream_tests"
+          client_env="$(mktemp -d "${RUNNER_TEMP}/vllm-client.XXXXXX")"
+          uv venv --python "$(command -v python)" --system-site-packages "$client_env"
+          uv pip install --python "$client_env/bin/python" --no-deps tblib==3.1.0 pytest-mock==3.15.1
+          echo "VLLM_TESTS_DIR=$upstream_tests" >> "$GITHUB_ENV"
+          echo "VLLM_TEST_PYTHON=$client_env/bin/python" >> "$GITHUB_ENV"
       # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
       # is the inner job id — "test" for every caller — so every test session
       # lands under one job name and cannot be attributed to a CI lane.
@@ -529,6 +564,15 @@ jobs:
           path: test-results/dynamo-tests-logs/
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Upload upstream chat logs and results
+        if: ${{ always() && inputs.prepare_upstream_vllm_chat }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: upstream-chat-evidence-${{ github.run_id }}-${{ job.check_run_id }}
+          path: /tmp/dynamo_tests/upstream-vllm-chat/
+          retention-days: 7
+          if-no-files-found: warn
 
       # One JUnit upload per job (one XML per stage inside). The name must keep
       # the test-results-* prefix consumed by the report workflows. Allure and
