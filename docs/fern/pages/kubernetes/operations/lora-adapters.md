@@ -44,11 +44,126 @@ See the [feature support matrix](../../reference/general/compatibility.mdx#featu
         ManagerNode --> HF["hf://<br/>(custom)"]
     ```
 
-    - **Rust core** (`lib/llm/src/lora/`): Downloading, caching, and validation
-    - **Python manager** (`components/src/dynamo/common/lora/`): Custom source support
+    - **Rust core** (`lib/llm/`): Explicit-load downloading/caching; with protocol version 2, envelope validation, opaque source transport, routing identity and capability-aware selection
+    - **Python manager** (`components/src/dynamo/common/lora/`): Custom explicit-load sources; with protocol version 2, resolver imports, scheme dispatch, provider integration and worker snapshot validation
     - **Worker handlers** (`components/src/dynamo/vllm/handlers.py` and `components/src/dynamo/sglang/request_handlers/handler_base.py`): Backend load/unload and inference integration
   </Accordion>
 </AccordionGroup>
+
+## Resolve Adapters at Request Time
+
+> [!NOTE]
+> These instructions require a build containing the protocol-version-2 frontend routing, common Python resolver, and vLLM integration. Confirm those capabilities in your build; environment variables alone do not add them.
+
+**Experimental.** Protocol version 2 supports aggregated vLLM workers using Dynamo frontend tokenization. Disaggregated vLLM workers and `--use-vllm-tokenizer` reject this configuration at startup. SGLang and TensorRT-LLM do not implement this plugin integration; a frontend with no compatible worker rejects runtime requests.
+
+> [!WARNING]
+> Any inference caller can trigger artifact downloads through the worker's credentials. The plugin has no authenticated caller identity, and warm hits bypass it. Use one trust domain or authorize every source in an upstream gateway. Enforce request-rate and storage limits.
+
+Set the OpenAI-compatible `model` field to one of these forms:
+
+| Form | Behavior |
+| --- | --- |
+| `<base-model>\|<opaque-source>` | Resolve an adapter for the named canonical base model |
+| `<opaque-source>` | Resolve an adapter only when the frontend has exactly one canonical base model |
+
+An exact registered model or preloaded adapter takes precedence. Otherwise, Rust splits `base|source` once, checks bounded strings, and forwards the source unchanged. Rust does not parse URI syntax. Python extracts the scheme for allowlisted dispatch. The plugin owns provider grammar, worker credential policy, immutable revision lookup, downloading, and atomic publication; it does not authorize individual callers.
+
+Prefer explicit bases: adding another canonical base makes bare sources ambiguous. Unknown bare model names enter runtime validation when enabled; a name without a URI scheme returns HTTP 400 `invalid_lora_model_id` with one canonical base. Bare sources must not contain `|`; use an explicit base when the source contains that character. Limits are 4,096 UTF-8 bytes overall, 512 for the base, and 3,072 for the source; ASCII controls are rejected. There is no default-base environment variable.
+
+For example, a W&B resolver can accept this request without adding W&B logic to Dynamo:
+
+```json
+{
+  "model": "Qwen/Qwen3-0.6B|wandb-artifact:///team/project/adapter:v1",
+  "messages": [{"role": "user", "content": "Summarize this request."}]
+}
+```
+
+Set these variables on the frontend container:
+
+```yaml
+env:
+- name: DYN_LORA_ENABLED
+  value: "true"
+- name: DYN_LORA_RUNTIME_LOAD_ENABLED
+  value: "true"
+```
+
+> [!IMPORTANT]
+> With `DYN_LORA_ENABLED` on the frontend, only KV, random, and round-robin routing are supported; other router modes fail startup. Session affinity with LoRA requires KV mode. Runtime adapters can still reject a hard affinity that conflicts with their selected worker.
+
+Configure plugin settings and storage on each eligible worker pod. This worker PodSpec fragment uses a private `emptyDir` and an 8 GiB application ceiling below the volume's 12 GiB limit:
+
+```yaml
+containers:
+- name: main
+  env:
+  - name: DYN_LORA_ENABLED
+    value: "true"
+  - name: DYN_LORA_RUNTIME_LOAD_ENABLED
+    value: "true"
+  - name: DYN_LORA_DOWNLOADER_PLUGIN
+    value: my_package.wandb_resolver:resolver
+  - name: DYN_LORA_ALLOWED_SCHEMES
+    value: wandb-artifact
+  - name: DYN_LORA_PATH
+    value: /var/cache/dynamo/loras
+  - name: DYN_LORA_MAX_CACHE_BYTES
+    value: "8589934592"
+  - name: DYN_LORA_MAX_DOWNLOAD_BYTES
+    value: "2147483648"
+  volumeMounts:
+  - name: runtime-lora-cache
+    mountPath: /var/cache/dynamo/loras
+volumes:
+- name: runtime-lora-cache
+  emptyDir:
+    sizeLimit: 12Gi
+```
+
+Use worker arguments such as `--enable-lora --max-lora-rank 64 --max-loras 4 --max-cpu-loras 4` with the rank/capacity required by the exported adapters. Ensure the container user can write the mounted directory and reserve adequate ephemeral storage. Keep provider credentials in the worker's secret mounts. An `emptyDir` is removed when the pod is removed, not on an ordinary container restart; a persistent volume also retains snapshots until explicit cleanup.
+
+Scope runtime loading to the frontend and eligible aggregated vLLM containers. Leave the flag disabled for other backends and disaggregated workers; their existing explicit-load behavior remains unchanged. Do not share a cache directory between worker processes without external coordination.
+
+Mount `DYN_LORA_PATH` and provider credentials only into worker pods. Keep the plugin package in the worker image. `DYN_LORA_DOWNLOADER_PLUGIN` accepts a resolver instance, a class with a zero-argument constructor, or a zero-argument factory in `module:object` or `module.object` form. The resulting object must expose `protocol_version = 2`, a non-empty lowercase `schemes` set, and an asynchronous `resolve(*, source_uri, context)` method. It returns a `ResolvedLoRA` whose `local_path` is an immutable snapshot directory under `DYN_LORA_PATH` and whose `source_revision` identifies an immutable provider revision. `DYN_LORA_ALLOWED_SCHEMES` must explicitly intersect the plugin's declared schemes; built-in explicit-load schemes are not enabled automatically.
+
+`ResolveContext` and `ResolvedLoRA` are exported from `dynamo.common.lora.runtime`. Separate allowed schemes with commas, for example `wandb-artifact,custom`. Scheme matching ignores case; the source spelling reaches the plugin unchanged.
+
+| Worker Variable | Default | Purpose |
+| --- | --- | --- |
+| `DYN_LORA_RESOLVE_TIMEOUT_SECONDS` | `300` | Caller wait for resolution and admission |
+| `DYN_LORA_MAX_CONCURRENT_RESOLUTIONS` | `2` | Active plugin calls |
+| `DYN_LORA_MAX_PENDING_RUNTIME_KEYS` | `64` | Distinct unresolved adapter identities |
+| `DYN_LORA_MAX_PENDING_ADMISSIONS` | vLLM `--max-num-seqs` when set; otherwise `256` | Initial waiters and requests holding a pending adapter lease |
+| `DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS` | `30` | Fallback expiry for pending leases without request-owned cleanup |
+| `DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS` | vLLM CPU LoRA capacity | Resident request-time adapters |
+| `DYN_LORA_MAX_DOWNLOAD_BYTES` | `10737418240` | Maximum validated snapshot size |
+| `DYN_LORA_MAX_CACHE_BYTES` | `107374182400` | Cache admission ceiling, including in-flight reservations |
+
+The resolver is trusted in-process Python. Honor `ResolveContext.max_download_bytes`, support concurrent calls, atomically publish complete snapshots, and clean temporary files after cancellation/failure. Canceling one inference waiter does not cancel a shared worker-owned load. The plugin must manage SDK threads that outlive coroutine cancellation. Typed provider errors become sanitized client codes; keep credentials, signed URLs, response bodies, and local paths out of custom errors and logs.
+
+Each source spelling must permanently map to one immutable revision and snapshot path. Reject mutable aliases such as `:latest`; the example's `:v1` denotes a pinned version. Dynamo checks revision/path consistency on reload within one worker lifetime, not across workers. Reject non-canonical variants and deduplicate disk storage by immutable revision.
+
+Each worker retains revision/path history for at most 4,096 runtime adapter identities, including identities evicted from the engine. After reaching that limit, new identities return HTTP 429 `lora_capacity_exceeded` before provider resolution; previously recorded identities can still reload. History is never evicted. Drain and restart or replace the worker to reset its history; restarting does not remove persistent snapshots.
+
+Return an absolute snapshot directory strictly below the cache root, containing only flat regular `adapter_config.json`, `adapter_model.safetensors`, and optional `new_embeddings.safetensors` files. Symlinks, hardlinks, nested, unrelated, and pickle files are rejected. Copy supported files from SDK layouts; account separately for SDK caches outside `DYN_LORA_PATH`.
+
+Dynamo checks measured size, bounded JSON, rank, exact accepted base names, and target-name structure; vLLM checks final compatibility. Preserve exported configuration rather than rewriting its base name to bypass a mismatch. The base tokenizer/chat template remain in use; adapter-specific tokenizer files/templates are not loaded.
+
+Protocol version 2 deterministically pins each runtime adapter key to one healthy capable worker. It does not spill that key to another worker when the selected worker is overloaded, so throughput for one adapter is bounded by one worker and a membership change can trigger a cold load on a different worker. Residency-aware spillover and replication are future protocol work.
+
+The caller's runtime resolution/admission wait is bounded by `DYN_LORA_RESOLVE_TIMEOUT_SECONDS`, including initial eviction transitions, resolution queueing, and engine loading. A timed-out caller stops waiting while the shared worker-owned load can continue; it does not cancel an engine operation or release its ownership. Request-owned pending leases remain protected while waiting for engine admission and are released when the request exits. The fallback pending-admission timer applies to direct coordinator calls without that cleanup owner. These settings do not impose an end-to-end deadline on generation or paused engine admission. Budget proxy/client timeouts for all phases.
+
+During worker teardown, asynchronous handler drain waits for vLLM's positive `shutdown_timeout`, or 30 seconds when that value is unset or nonpositive. If drain exceeds that budget, Dynamo retains the unfinished close task and proceeds to engine shutdown. Engine RPC ownership is not released to admit competing work. Use the deployment supervisor's termination policy to bound a permanently hung engine or uncooperative SDK.
+
+Returned paths remain immutable for the worker lifetime. Engine eviction and worker shutdown do not remove persistent snapshots. Staging files, failed downloads, pre-existing files, and administrative downloads under the same root consume the byte budget. Restarting with that persistent cache does not free space.
+
+Use a writable, worker-private absolute `DYN_LORA_PATH`, defaulting to `$HOME/.cache/dynamo_loras`. Reservations/accounting are process-local, not filesystem quotas. Set the byte limit below volume capacity with headroom and enforce storage quotas independently. A full pinned worker can repeatedly return 429 while another worker has space. Drain every process sharing a cache before external cleanup, or restart with a fresh isolated cache.
+
+Runtime LoRA requests do not support speculative-prefill hints or cross-worker migration retries. KV routing can reject conflicting hard session-affinity or explicit worker pins; use an eligible adapter placement rather than relying on spillover.
+
+Administrative hot swaps must reset the prefix cache before committing replacement weights. If another request still owns KV blocks, the reset can return false: drain the worker or pause generation in abort mode, then retry. Failed rollback can quarantine engine IDs; those slots remain unavailable until engine state is reconciled or the worker restarts.
 
 ## Serve a LoRA Adapter
 
@@ -424,6 +539,8 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
 </AccordionGroup>
 
 ## Troubleshooting
+
+With request-time loading enabled and exactly one canonical base model, an unknown bare model name without a URI scheme returns HTTP 400 `invalid_lora_model_id`. With multiple canonical bases, a bare source returns HTTP 400 `runtime_lora_base_model_required`; use the explicit `base|source` form.
 
 <AccordionGroup>
   <Accordion title="LoRA fails to load">
