@@ -4,7 +4,7 @@
 //! Pools from imported EndpointSlices: the Global Discovery Service's MCS
 //! backend.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 
 use crate::pool_discovery::{
@@ -111,28 +111,21 @@ fn location(cluster: &str) -> PoolLocation {
 /// when a cluster loses contact with the MCS implementation, so the runtime
 /// also drops a pool whose Relay connection is gone.
 ///
-/// Each Ready address comes with its pod: the endpoint's `targetRef`, or the
-/// address itself when the endpoint has none. A dual-stack pod is in two
-/// slices, one per address family.
-fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
+/// A dual-stack pod is in two slices, one per address family. An
+/// IPv4-mapped IPv6 address counts as its IPv4 address, as
+/// [`address_identity`] writes it.
+fn ready_relays(slice: &EndpointSlice) -> Vec<IpAddr> {
     ready_endpoints(slice)
-        .flat_map(|endpoint| {
-            let pod = endpoint
-                .target_ref
-                .as_ref()
-                .and_then(|target| target.name.as_deref());
-            endpoint.addresses.iter().filter_map(move |address| {
-                let address: IpAddr = address.parse().ok()?;
-                let pod = pod.map_or_else(|| address.to_string(), str::to_owned);
-                Some((pod, address))
-            })
-        })
+        .flat_map(|endpoint| &endpoint.addresses)
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .map(|address| address.to_canonical())
         .collect()
 }
 
 struct SliceEntry {
     pool: PoolKey,
-    relays: Vec<(String, IpAddr)>,
+    /// Ready PoolRelay addresses.
+    relays: Vec<IpAddr>,
 }
 
 #[derive(Default)]
@@ -225,34 +218,28 @@ impl PoolIndex {
     /// the listing changed.
     fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
-        let mut relays: BTreeMap<&str, BTreeSet<IpAddr>> = BTreeMap::new();
-        for entry in state
+        // Every Ready PoolRelay pod streams the pool's state: the operator runs
+        // active-active replicas, each reports to every router, and routers
+        // dedupe the overlapping reports. So the listing names every Ready
+        // PoolRelay address. They are sorted, so every service instance lists
+        // the same identities, and a rolling update lists the old and the new
+        // pods while both are Ready.
+        let relays: BTreeSet<IpAddr> = state
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
-        {
-            for (pod, address) in &entry.relays {
-                relays.entry(pod).or_default().insert(*address);
-            }
-        }
-        // Bind the Ready PoolRelay pod with the lowest address. The choice
-        // depends only on the current slices, so every service instance binds
-        // the same pod, and routers that ask different instances admit the
-        // same PoolRelay. A rolling update can move the binding to the new
-        // pod while the old one is still Ready.
-        let relay_identities: Option<Vec<String>> = relays
-            .values()
-            .min_by_key(|addresses| addresses.first())
-            .map(|addresses| addresses.iter().copied().map(address_identity).collect());
+            .flat_map(|entry| entry.relays.iter().copied())
+            .collect();
 
         let state = self.pools.get_mut(key)?;
-        let Some(relay_identities) = relay_identities else {
+        if relays.is_empty() {
             let was_live = state.listing.take().is_some();
             if state.slices.is_empty() {
                 self.pools.remove(key);
             }
             return was_live.then(|| WatchEvent::Removed(key.clone()));
-        };
+        }
+        let relay_identities = relays.into_iter().map(address_identity).collect();
         let listing = PoolListing {
             key: key.clone(),
             location: location(key.cluster_id()),
@@ -458,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dual_stack_relay_is_one_pod_with_both_addresses() {
+    fn every_ready_relay_pod_is_listed_by_each_address() {
         let cache = cache();
         sync(
             &cache,
@@ -478,7 +465,45 @@ mod tests {
             ],
         );
         let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
-        assert_eq!(listing.relay_identities, ["ip:10.43.0.7", "ip:fd00::7"]);
+        assert_eq!(
+            listing.relay_identities,
+            ["ip:10.43.0.7", "ip:10.43.0.9", "ip:fd00::1", "ip:fd00::7"]
+        );
+    }
+
+    #[test]
+    fn a_mapped_relay_address_is_listed_once() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![
+                pod_slice("west", "a1b2c", "IPv4", &[("relay-a", "10.43.0.7")]),
+                pod_slice("west", "d3e4f", "IPv6", &[("relay-a", "::ffff:10.43.0.7")]),
+            ],
+        );
+        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
+        assert_eq!(listing.relay_identities, ["ip:10.43.0.7"]);
+    }
+
+    #[test]
+    fn a_relay_that_stops_being_ready_leaves_the_listing() {
+        let cache = cache();
+        let relays = |second_ready| {
+            slice(
+                "west",
+                "mocker",
+                "a1b2c",
+                &[("10.43.0.2", true), ("10.43.0.9", second_ready)],
+            )
+        };
+        sync(&cache, vec![relays(true)]);
+        let mut events = cache.events.subscribe();
+
+        cache.apply(watcher::Event::Apply(relays(false)));
+        let Ok(WatchEvent::Upserted(listing)) = events.try_recv() else {
+            panic!("the pool stays live with one Ready relay");
+        };
+        assert_eq!(listing.relay_identities, ["ip:10.43.0.2"]);
     }
 
     #[test]
@@ -574,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn every_instance_binds_the_same_relay() {
+    fn every_instance_lists_the_same_relays() {
         let pool = key("west", "mocker");
         let both = || {
             slice(
@@ -584,7 +609,7 @@ mod tests {
                 &[("10.43.0.9", true), ("10.43.0.2", true)],
             )
         };
-        // One instance saw the old PoolRelay alone first.
+        // One instance saw one PoolRelay alone first.
         let first = cache();
         sync(
             &first,
@@ -594,12 +619,10 @@ mod tests {
         // Another started later.
         let second = cache();
         sync(&second, vec![both()]);
-        let bound = |cache: &SliceCache<PoolIndex>| listing(cache, &pool).unwrap().relay_identities;
-        assert_eq!(bound(&first), bound(&second));
-        assert_eq!(
-            bound(&first),
-            [address_identity("10.43.0.2".parse().unwrap())]
-        );
+        let listed =
+            |cache: &SliceCache<PoolIndex>| listing(cache, &pool).unwrap().relay_identities;
+        assert_eq!(listed(&first), listed(&second));
+        assert_eq!(listed(&first), ["ip:10.43.0.2", "ip:10.43.0.9"]);
     }
 
     #[tokio::test(start_paused = true)]
