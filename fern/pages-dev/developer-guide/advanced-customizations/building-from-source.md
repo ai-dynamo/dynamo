@@ -18,6 +18,21 @@ This guide covers Ubuntu and macOS. For a containerized dev environment that han
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
 ```
 
+Dynamo needs `protoc` 3.15 or newer:
+
+- **Ubuntu 24.04:** the `protobuf-compiler` package above is enough.
+- **Ubuntu 22.04:** also install protoc 30.2 from the protobuf releases:
+
+```bash
+sudo apt install -y unzip
+PROTOC_ZIP="protoc-30.2-linux-$(uname -m | sed s/aarch64/aarch_64/).zip"
+curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v30.2/${PROTOC_ZIP}"
+unzip -o "${PROTOC_ZIP}" -d "$HOME/.local"
+rm "${PROTOC_ZIP}"
+export PATH="$HOME/.local/bin:$PATH"
+protoc --version
+```
+
 **macOS:**
 
 ```bash
@@ -42,10 +57,10 @@ Install [uv](https://docs.astral.sh/uv/#installation) if you don't have it:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Create and activate a virtual environment:
+Create and activate a Python 3.12 virtual environment. If Python 3.12 is not installed, uv downloads it.
 
 ```bash
-uv venv .venv
+uv venv --python 3.12 .venv
 source .venv/bin/activate
 ```
 
@@ -59,10 +74,21 @@ uv pip install pip 'maturin[patchelf]'
 
 ## 5. Build the Rust Bindings
 
+Run one of these builds:
+
 ```bash
 cd lib/bindings/python
+
+# Minimal build
 maturin develop --uv
+
+# Build with the same features as the release wheels
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
+
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
+
+To annotate Nsight Systems profiles, add `nvtx` to the feature list.
 
 ## 6. Install GPU Memory Service
 
@@ -123,6 +149,14 @@ If `maturin develop` fails with linker errors, verify all system dependencies ar
 ```bash
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
 ```
+
+**`protoc failed: relay.proto: This file contains proto3 optional fields`**
+
+Install protoc 30.2 as shown in step 1, then check that `protoc --version` prints `libprotoc 30.2`.
+
+**`dynamo.indexer is not available in this build`**
+
+Rebuild the bindings with the release-wheel `--features` list from step 5.
 
 **Virtual environment not activated**
 
