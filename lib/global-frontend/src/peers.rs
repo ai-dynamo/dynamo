@@ -41,7 +41,7 @@ pub async fn poll_replica_peers(
             Err(error) => {
                 if !failing {
                     tracing::warn!(
-                        error = format!("{error:#}"),
+                        error = bounded(format!("{error:#}")),
                         "listing the replicas from Global Discovery failed; keeping the last set"
                     );
                 }
@@ -73,4 +73,16 @@ pub async fn poll_replica_peers(
             true
         });
     }
+}
+
+const ERROR_LOG_BYTES: usize = 512;
+
+/// At most `ERROR_LOG_BYTES` of `text`: a discovery error may carry the
+/// response body, which the frontend does not control.
+fn bounded(mut text: String) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(ERROR_LOG_BYTES) {
+        text.truncate(cut);
+        text.push('\u{2026}');
+    }
+    text
 }

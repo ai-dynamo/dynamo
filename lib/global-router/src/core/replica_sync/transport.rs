@@ -14,8 +14,8 @@
 //! [`SelectionService::apply_session_binding`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -104,6 +104,14 @@ struct OpenBooking {
     opened_at: Instant,
 }
 
+/// One following of a peer. A peer removed and added back is a new
+/// generation, so a frame the old stream still holds is not applied.
+#[derive(Clone)]
+pub(super) struct Follow {
+    pub(super) generation: u64,
+    pub(super) cancel: CancellationToken,
+}
+
 /// The bookings one router id has opened here and not yet freed. A free
 /// can be lost (a stream that drops between the add and the free, a lagged
 /// subscriber), and the core expires such a booking on its own, so an entry
@@ -126,19 +134,13 @@ impl Ledger {
         if now.saturating_duration_since(self.pruned_at) < expiry {
             return;
         }
+        self.prune_expired(now, expiry);
+    }
+
+    fn prune_expired(&mut self, now: Instant, expiry: Duration) {
         self.entries
             .retain(|_, booking| now.saturating_duration_since(booking.opened_at) < expiry);
         self.pruned_at = now;
-    }
-
-    fn live(
-        self,
-        now: Instant,
-        expiry: Duration,
-    ) -> impl Iterator<Item = ((RoutingPartitionId, String), OpenBooking)> {
-        self.entries
-            .into_iter()
-            .filter(move |(_, booking)| now.saturating_duration_since(booking.opened_at) < expiry)
     }
 }
 
@@ -171,8 +173,10 @@ pub struct ReplicaHub {
     partitions: DashMap<RoutingPartitionId, mpsc::Sender<ActiveSequenceEvent>>,
     /// Every frame this replica publishes; each subscriber reads a copy.
     frames: broadcast::Sender<proto::ReplicaFrame>,
-    /// The peers to follow, each with the token that stops following it.
-    peers: DashMap<Url, CancellationToken>,
+    /// The peers to follow, each with the token that stops following it
+    /// and the generation of that following.
+    peers: DashMap<Url, Follow>,
+    generations: AtomicU64,
     peers_changed: Notify,
     /// The bookings each peer's events have opened and not yet freed, by
     /// the router id the events carry (the peer's process), so a peer that
@@ -199,18 +203,31 @@ impl ReplicaHub {
             }
         };
         let (frames, _) = broadcast::channel(FRAME_BUFFER);
-        Arc::new(Self {
+        let hub = Arc::new(Self {
             process_id,
             partitions: DashMap::new(),
             frames,
             peers: DashMap::new(),
+            generations: AtomicU64::new(0),
             peers_changed: Notify::new(),
             open: DashMap::new(),
             booking_expiry: active_request_expiry_duration(),
             routers_of: DashMap::new(),
             cancel,
             counters: Arc::default(),
-        })
+        });
+        tokio::spawn(prune_ledgers(Arc::downgrade(&hub)));
+        hub
+    }
+
+    /// Drops every ledger entry the core has expired, and every empty
+    /// ledger, so an idle peer's lost frees do not accumulate.
+    fn prune_ledgers(&self) {
+        let now = Instant::now();
+        self.open.retain(|_, ledger| {
+            ledger.prune_expired(now, self.booking_expiry);
+            !ledger.entries.is_empty()
+        });
     }
 
     /// The id this replica stamps on its events as `router_id` and
@@ -268,7 +285,10 @@ impl ReplicaHub {
         let added = match self.peers.entry(peer) {
             dashmap::Entry::Occupied(_) => false,
             dashmap::Entry::Vacant(entry) => {
-                entry.insert(self.cancel.child_token());
+                entry.insert(Follow {
+                    generation: self.generations.fetch_add(1, Relaxed),
+                    cancel: self.cancel.child_token(),
+                });
                 true
             }
         };
@@ -286,7 +306,7 @@ impl ReplicaHub {
         let Some((_, follow)) = self.peers.remove(peer) else {
             return false;
         };
-        follow.cancel();
+        follow.cancel.cancel();
         self.peers_changed.notify_one();
         self.release_bookings_of(peer);
         true
@@ -295,12 +315,13 @@ impl ReplicaHub {
     /// Frees, in the core, every booking still open from the router ids
     /// `peer`'s stream carried, unless another peer still carries them. A
     /// free the partition cannot take at once is delivered as soon as it
-    /// can, never lost.
+    /// can, never lost. Every tracked booking is freed, including one old
+    /// enough for the core to have expired: that free is a no-op there,
+    /// while skipping it could leave a booking the core has not yet swept.
     fn release_bookings_of(&self, peer: &Url) {
         let Some((_, routers)) = self.routers_of.remove(peer) else {
             return;
         };
-        let now = Instant::now();
         let mut released = 0u64;
         let mut pending = Vec::new();
         for router_id in routers {
@@ -314,7 +335,7 @@ impl ReplicaHub {
             let Some((_, ledger)) = self.open.remove(&router_id) else {
                 continue;
             };
-            for ((partition, request_id), booking) in ledger.live(now, self.booking_expiry) {
+            for ((partition, request_id), booking) in ledger.entries {
                 let free = ActiveSequenceEvent {
                     request_id,
                     worker: booking.worker,
@@ -357,8 +378,8 @@ impl ReplicaHub {
         self.peers.iter().map(|peer| peer.key().clone()).collect()
     }
 
-    /// Each peer with the token that stops following it.
-    pub(super) fn peer_tokens(&self) -> Vec<(Url, CancellationToken)> {
+    /// Each peer with its current following.
+    pub(super) fn follows(&self) -> Vec<(Url, Follow)> {
         self.peers
             .iter()
             .map(|peer| (peer.key().clone(), peer.value().clone()))
@@ -400,16 +421,26 @@ impl ReplicaHub {
         self.apply_inner(None, frame, service);
     }
 
-    /// [`Self::apply`] for a frame read from `peer`'s stream, so the
-    /// bookings it opens can be freed if the peer leaves. A frame from a
-    /// peer no longer followed is ignored: it cannot re-book what
+    /// [`Self::apply`] for a frame read from `peer`'s stream in following
+    /// `generation`, so the bookings it opens can be freed if the peer
+    /// leaves. A frame from a peer no longer followed, or from an earlier
+    /// following of it, is ignored: it cannot re-book what
     /// [`Self::remove_peer`] freed.
-    pub fn apply_from(&self, peer: &Url, frame: proto::ReplicaFrame, service: &SelectionService) {
+    pub(super) fn apply_from(
+        &self,
+        peer: &Url,
+        generation: u64,
+        frame: proto::ReplicaFrame,
+        service: &SelectionService,
+    ) {
         // Held while the frame is applied, so `remove_peer` waits for it:
         // nothing lands after the peer's bookings are freed.
-        let Some(_followed) = self.peers.get(peer) else {
+        let Some(followed) = self.peers.get(peer) else {
             return;
         };
+        if followed.generation != generation {
+            return;
+        }
         self.apply_inner(Some(peer), frame, service);
     }
 
@@ -527,6 +558,26 @@ impl ReplicaHub {
 /// [`MAX_REPLICA_BATCH_EVENTS`] events or [`MAX_REPLICA_BATCH_DURATION`]
 /// after its first, as the core's own mesh batches. Ends when the channel
 /// closes or the hub shuts down.
+/// Prunes the ledgers twice per expiry window while the hub lives.
+async fn prune_ledgers(hub: Weak<ReplicaHub>) {
+    let Some(expiry) = hub.upgrade().map(|hub| hub.booking_expiry) else {
+        return;
+    };
+    let mut ticks = tokio::time::interval(expiry / 2);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticks.tick().await;
+    loop {
+        ticks.tick().await;
+        let Some(hub) = hub.upgrade() else {
+            return;
+        };
+        if hub.cancel.is_cancelled() {
+            return;
+        }
+        hub.prune_ledgers();
+    }
+}
+
 async fn publish_events(
     hub: Arc<ReplicaHub>,
     partition: RoutingPartitionId,
@@ -606,16 +657,20 @@ mod tests {
         ledger.prune(start + Duration::from_secs(301), expiry);
         assert_eq!(ledger.entries.keys().collect::<Vec<_>>(), [&key("young")]);
 
-        // Only live entries are freed for a peer that leaves.
-        let mut ledger = Ledger::new(start);
-        ledger.entries.insert(key("old"), booking(start));
-        ledger
-            .entries
-            .insert(key("young"), booking(start + Duration::from_secs(200)));
-        let live = ledger
-            .live(start + Duration::from_secs(301), expiry)
-            .map(|(key, _)| key.1)
-            .collect::<Vec<_>>();
-        assert_eq!(live, ["young"]);
+        // The timer's pass is not rate limited and empties what expired.
+        ledger.prune_expired(start + Duration::from_secs(501), expiry);
+        assert!(ledger.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_frame_from_an_earlier_following_is_ignored() {
+        let hub = ReplicaHub::new(CancellationToken::new());
+        let peer: Url = "http://peer:8000".parse().unwrap();
+        assert!(hub.add_peer(peer.clone()));
+        let first = hub.follows()[0].1.generation;
+        assert!(hub.remove_peer(&peer));
+        assert!(hub.add_peer(peer.clone()));
+        let second = hub.follows()[0].1.generation;
+        assert_ne!(first, second);
     }
 }
