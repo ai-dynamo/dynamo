@@ -108,6 +108,7 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     struct ExternalSnapshotSource {
@@ -115,6 +116,91 @@ mod tests {
     }
 
     struct FailingSource;
+
+    #[derive(Default)]
+    struct UriIdentifiedSource {
+        downloads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LoRASource for UriIdentifiedSource {
+        async fn download(&self, lora_uri: &str, dest_path: &Path) -> Result<PathBuf> {
+            self.downloads.fetch_add(1, Ordering::Relaxed);
+            std::fs::create_dir_all(dest_path)?;
+            std::fs::write(dest_path.join("adapter_config.json"), "{}")?;
+            // Distinct source URIs stand in for distinct adapter weights.
+            std::fs::write(dest_path.join("adapter_model.safetensors"), lora_uri)?;
+            Ok(dest_path.to_path_buf())
+        }
+
+        async fn exists(&self, _lora_uri: &str) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn distinct_remote_uris_do_not_reuse_another_adapters_cache() {
+        let cache = TempDir::new().unwrap();
+        let source = Arc::new(UriIdentifiedSource::default());
+        let downloader = LoRADownloader::new(
+            vec![source.clone()],
+            LoRACache::new(cache.path().to_path_buf()),
+        );
+        let first_uri = "s3://bucket/adapter.v1";
+        let second_uri = "s3://bucket/adapter_v1";
+        let first = downloader.download_if_needed(first_uri).await.unwrap();
+        let second = downloader.download_if_needed(second_uri).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(second.join("adapter_model.safetensors")).unwrap(),
+            second_uri,
+            "a cache hit must belong to the requested adapter URI"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.join("adapter_model.safetensors")).unwrap(),
+            first_uri
+        );
+        assert_ne!(first, second);
+        assert!(downloader.is_cached(first_uri).unwrap());
+        assert!(downloader.is_cached(second_uri).unwrap());
+        assert_eq!(
+            downloader.download_if_needed(first_uri).await.unwrap(),
+            first
+        );
+        assert_eq!(
+            downloader.download_if_needed(second_uri).await.unwrap(),
+            second
+        );
+        assert_eq!(source.downloads.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn leaves_ambiguous_legacy_cache_untouched() {
+        let cache = TempDir::new().unwrap();
+        let legacy = cache.path().join("s3__bucket_adapter_v1");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("adapter_config.json"), "{}").unwrap();
+        std::fs::write(legacy.join("adapter_model.safetensors"), "legacy weights").unwrap();
+        let uri = "s3://bucket/adapter_v1";
+        let source = Arc::new(UriIdentifiedSource::default());
+        let downloader = LoRADownloader::new(
+            vec![source.clone()],
+            LoRACache::new(cache.path().to_path_buf()),
+        );
+
+        assert!(!downloader.is_cached(uri).unwrap());
+        let downloaded = downloader.download_if_needed(uri).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(downloaded.join("adapter_model.safetensors")).unwrap(),
+            uri
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("adapter_model.safetensors")).unwrap(),
+            "legacy weights"
+        );
+        assert_ne!(downloaded, legacy);
+        assert_eq!(source.downloads.load(Ordering::Relaxed), 1);
+    }
 
     #[async_trait]
     impl LoRASource for FailingSource {

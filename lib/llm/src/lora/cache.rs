@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::config::environment_names::llm;
@@ -43,11 +44,11 @@ impl LoRACache {
         self.get_cache_path(lora_id).exists()
     }
 
-    /// Convert a LoRA URI to a cache key.
-    /// This is a static method to ensure consistent cache key generation
-    /// across Rust and Python code.
+    /// Convert the exact LoRA URI to a bounded filesystem cache key shared by
+    /// Rust and Python. Legacy underscore-separated keys are ambiguous and
+    /// cannot be reused without source-URI provenance; leave them untouched.
     pub fn uri_to_cache_key(uri: &str) -> String {
-        uri.replace("://", "__").replace(['/', '\\', '.'], "_")
+        format!("lora-v2-{:x}", Sha256::digest(uri.as_bytes()))
     }
 
     /// Validate cached LoRA has required files
@@ -148,11 +149,35 @@ mod tests {
     fn test_uri_to_cache_key() {
         assert_eq!(
             LoRACache::uri_to_cache_key("s3://bucket/path/to/lora"),
-            "s3__bucket_path_to_lora"
+            "lora-v2-76606d1d1fa1089ee492b990f060b13ad4e07a09d9a6f69dc823ff405ab67dc4"
         );
-        assert_eq!(
-            LoRACache::uri_to_cache_key("file:///local/path"),
-            "file___local_path"
+    }
+
+    #[test]
+    fn cache_keys_preserve_uri_distinctions() {
+        let uris = [
+            "s3://bucket/adapter.v1",
+            "s3://bucket/adapter_v1",
+            "s3://bucket/team/adapter",
+            "s3://bucket/team_adapter",
+            "custom://adapter?revision=v1",
+            "custom://adapter?revision=v2",
+        ];
+        let keys: std::collections::HashSet<_> =
+            uris.into_iter().map(LoRACache::uri_to_cache_key).collect();
+        assert_eq!(keys.len(), uris.len());
+    }
+
+    #[test]
+    fn long_uri_uses_one_bounded_cache_component() {
+        let uri = format!("s3://bucket/{}", "adapter/".repeat(100));
+        let key = LoRACache::uri_to_cache_key(&uri);
+        assert_eq!(key.len(), "lora-v2-".len() + 64);
+        assert_eq!(Path::new(&key).components().count(), 1);
+        assert!(
+            key["lora-v2-".len()..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
         );
     }
 }
