@@ -320,29 +320,44 @@ impl SessionPrefixIndexer {
         }
 
         let mut state = self.state.write();
-        // Reject the whole update before mutating the arena.
-        state.validate_chain(parent_hash, block_hashes)?;
-
-        let mut parent = parent_hash.map(|hash| state.resolve_or_insert_root(hash));
-        for &block_hash in block_hashes {
-            let node = match state.hash_to_node.get(&block_hash).copied() {
-                Some(existing) => {
-                    // Graft nodes previously known only as roots.
-                    if let (None, Some(expected)) = (state.nodes[existing].parent, parent) {
-                        state.nodes[existing].parent = Some(expected);
-                        state.nodes[expected].child_count += 1;
-                    }
-                    existing
-                }
-                None => state.insert_node(block_hash, parent),
-            };
-            parent = Some(node);
-        }
-
-        let leaf = parent.expect("non-empty block chain always yields a node");
-        let updated = state.advance_frontier(session_id, (owner, tier), leaf);
+        let updated = state.store_chain(session_id, (owner, tier), parent_hash, block_hashes)?;
         state.maybe_cleanup();
         Ok(updated)
+    }
+
+    /// Records single blocks that one owner tier stored for sessions, each beneath the
+    /// parent the index already holds for it. Event sources without lineage, such as
+    /// Mooncake object events, use this so a stored block never conflicts with the
+    /// parent its device events recorded; a block not known yet becomes a root that a
+    /// later device event grafts. Parents are resolved under the write lock, so a device
+    /// store landing between lookup and update cannot turn into a conflict. Returns the
+    /// number of frontiers advanced.
+    pub fn update_sessions_from_stored_blocks_with_recorded_parents(
+        &self,
+        owner: SessionResidencyOwner,
+        stored: &[(&str, StorageTier, ExternalSequenceBlockHash)],
+    ) -> usize {
+        if stored.is_empty() {
+            return 0;
+        }
+
+        let mut state = self.state.write();
+        let mut advanced = 0;
+        for &(session_id, tier, block_hash) in stored {
+            if !valid_session_id(session_id) {
+                continue;
+            }
+            let parent_hash = state.recorded_parent_hash(block_hash);
+            match state.store_chain(session_id, (owner, tier), parent_hash, &[block_hash]) {
+                Ok(true) => advanced += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, session_id, "failed to record session residency")
+                }
+            }
+        }
+        state.maybe_cleanup();
+        advanced
     }
 
     /// Attributes blocks that an owner tier stored without a session to every session
@@ -455,6 +470,46 @@ impl IndexState {
             self.nodes[parent].child_count += 1;
         }
         node
+    }
+
+    fn recorded_parent_hash(
+        &self,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Option<ExternalSequenceBlockHash> {
+        let node = *self.hash_to_node.get(&block_hash)?;
+        let parent = self.nodes[node].parent?;
+        Some(self.nodes[parent].block_hash)
+    }
+
+    // Validate, then attach the chain and advance the frontier of one owner tier.
+    fn store_chain(
+        &mut self,
+        session_id: &str,
+        key: FrontierKey,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> Result<bool, SessionPrefixIndexError> {
+        // Reject the whole update before mutating the arena.
+        self.validate_chain(parent_hash, block_hashes)?;
+
+        let mut parent = parent_hash.map(|hash| self.resolve_or_insert_root(hash));
+        for &block_hash in block_hashes {
+            let node = match self.hash_to_node.get(&block_hash).copied() {
+                Some(existing) => {
+                    // Graft nodes previously known only as roots.
+                    if let (None, Some(expected)) = (self.nodes[existing].parent, parent) {
+                        self.nodes[existing].parent = Some(expected);
+                        self.nodes[expected].child_count += 1;
+                    }
+                    existing
+                }
+                None => self.insert_node(block_hash, parent),
+            };
+            parent = Some(node);
+        }
+
+        let leaf = parent.expect("non-empty block chain always yields a node");
+        Ok(self.advance_frontier(session_id, key, leaf))
     }
 
     // Reject conflicting parents and graft cycles before mutation.
@@ -1801,5 +1856,50 @@ mod tests {
                 vec![chain.clone()]
             );
         }
+    }
+
+    #[test]
+    fn recorded_parent_store_reuses_device_lineage_and_roots_unknown_blocks() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+        let shared = SessionResidencyOwner::SharedCache(SharedCacheBackend::Mooncake);
+        indexer
+            .update_session_from_stored_blocks("s", worker(1), None, &chain)
+            .unwrap();
+
+        // Known blocks attach beneath their recorded parent, so the store cannot
+        // conflict with the device chain; the deepest one becomes the frontier.
+        let advanced = indexer.update_sessions_from_stored_blocks_with_recorded_parents(
+            shared,
+            &[
+                ("s", StorageTier::HostPinned, chain[1]),
+                ("s", StorageTier::HostPinned, chain[2]),
+            ],
+        );
+        assert_eq!(advanced, 2);
+        let shared_frontiers: Vec<_> = indexer
+            .get_session_residency("s")
+            .into_iter()
+            .filter(|(owner, _, _)| *owner == shared)
+            .map(|(_, tier, node)| (tier, indexer.get_node(node).unwrap().block_hash()))
+            .collect();
+        assert_eq!(shared_frontiers, vec![(StorageTier::HostPinned, chain[2])]);
+        assert_eq!(lineage_of(&indexer, "s"), vec![chain.clone()]);
+
+        // An unknown block becomes a root that a later device chain grafts.
+        let unknown = hashes(vec![9])[0];
+        assert_eq!(
+            indexer.update_sessions_from_stored_blocks_with_recorded_parents(
+                shared,
+                &[("t", StorageTier::Disk, unknown)],
+            ),
+            1
+        );
+        indexer
+            .update_session_from_stored_blocks("t", worker(1), Some(chain[2]), &[unknown])
+            .unwrap();
+        let mut extended = chain.clone();
+        extended.push(unknown);
+        assert_eq!(lineage_on_worker(&indexer, "t", worker(1)), vec![extended]);
     }
 }

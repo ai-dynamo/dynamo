@@ -416,9 +416,20 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     ):
         return None
 
-    extra_config = _parse_hicache_storage_extra_config(
-        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    # Since sgl-project/sglang#46388 the linker reads its storage options from
+    # --unified-cache-external-linker-config (a JSON object) and falls back to the
+    # deprecated --hicache-storage-backend-extra-config only when that is unset.
+    linker_config = (
+        getattr(server_args, "unified_cache_external_linker_config", None)
+        if linker
+        else None
     )
+    if isinstance(linker_config, dict):
+        extra_config = dict(linker_config)
+    else:
+        extra_config = _parse_hicache_storage_extra_config(
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
+        )
 
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
