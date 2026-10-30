@@ -29,8 +29,8 @@ trusted. A status-check job with no `needs` is rejected too: `all` over no
 results is vacuously true.
 
 Usage:
-    python3 validate_ci_status_gates.py [repo_root]
-    python3 validate_ci_status_gates.py --test
+    python3 scripts/validate_ci_status_gates.py [repo_root]
+    python3 scripts/validate_ci_status_gates.py --test
 """
 
 import json
