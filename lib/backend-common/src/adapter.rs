@@ -27,11 +27,13 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use futures::{Stream, StreamExt, stream::BoxStream};
 use opentelemetry::trace::{SpanContext, SpanId, Status, TraceFlags, TraceId, TraceState};
 use tokio::sync::{oneshot, watch};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
-use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
+use crate::engine::{FinishReason, FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
+use crate::error::{BackendError, DynamoError, ErrorType};
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -153,6 +155,7 @@ pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
     first_token_source: Option<FirstTokenSource>,
+    engine_cleanup: CancellationToken,
 }
 
 impl EngineAdapter {
@@ -161,6 +164,7 @@ impl EngineAdapter {
             engine,
             mode,
             first_token_source: None,
+            engine_cleanup: CancellationToken::new(),
         }
     }
 
@@ -168,6 +172,26 @@ impl EngineAdapter {
         self.first_token_source = Some(source);
         self
     }
+
+    /// `token` is cancelled when the worker starts `engine.cleanup()`. A
+    /// request the engine then ends as cancelled, while its client is still
+    /// waiting, becomes `EngineShutdown`, which the frontend migrates to
+    /// another worker.
+    pub(crate) fn with_engine_cleanup(mut self, token: CancellationToken) -> Self {
+        self.engine_cleanup = token;
+        self
+    }
+}
+
+fn ended_by_engine_cleanup(
+    chunk: &LLMEngineOutput,
+    engine_cleanup: &CancellationToken,
+    ctx: &dyn AsyncEngineContext,
+) -> bool {
+    matches!(chunk.finish_reason, Some(FinishReason::Cancelled))
+        && engine_cleanup.is_cancelled()
+        && !ctx.is_stopped()
+        && !ctx.is_killed()
 }
 
 /// JSON-shaped wrapper around [`EngineAdapter`] for the `local_endpoint_registry`.
@@ -424,6 +448,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // the terminal even when the chunk has no tokens.
         let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
         let finalizer_span = span.clone();
+        let engine_cleanup = self.engine_cleanup.clone();
         let mapped = async_stream::stream! {
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = guard;
@@ -437,6 +462,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut last_token_at: Option<Instant> = None;
             while let Some(item) = inner.next().await {
                 chunk_count += 1;
+                let item = match item {
+                    Ok(chunk) if ended_by_engine_cleanup(&chunk, &engine_cleanup, &*stream_ctx) => {
+                        Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                            .message("worker shut down before the request finished")
+                            .build())
+                    }
+                    item => item,
+                };
                 match item {
                     Ok(mut chunk) => {
                         // First non-empty chunk: release deferred abort, record
@@ -1032,6 +1066,75 @@ mod tests {
 
         // No items after the typed error.
         assert!(stream.next().await.is_none());
+    }
+
+    /// Ends every request as cancelled after one token, as a sidecar engine
+    /// does when `cleanup()` tears down its native streams.
+    struct CancelledAfterTokenEngine;
+
+    #[async_trait]
+    impl LLMEngine for CancelledAfterTokenEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _context: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            Ok(Box::pin(futures::stream::iter([
+                Ok(chunk::token(11)),
+                Ok(LLMEngineOutput::cancelled()),
+            ])))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    /// A request the engine ends as cancelled after the worker starts
+    /// `engine.cleanup()` reaches the frontend as `EngineShutdown`, which it
+    /// migrates, unless the client has already gone.
+    #[tokio::test]
+    async fn adapter_reports_cleanup_cancellation_as_engine_shutdown() {
+        for (cleanup_started, client_stopped, is_engine_shutdown) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let cleanup = CancellationToken::new();
+            let adapter = EngineAdapter::new(
+                Arc::new(CancelledAfterTokenEngine),
+                DisaggregationMode::Aggregated,
+            )
+            .with_engine_cleanup(cleanup.clone());
+            let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            let first = stream.next().await.expect("first chunk");
+            assert_eq!(first.data.expect("token").token_ids, vec![11]);
+
+            if cleanup_started {
+                cleanup.cancel();
+            }
+            if client_stopped {
+                ctrl.stop_generating();
+            }
+            let terminal = stream.next().await.expect("terminal");
+            if is_engine_shutdown {
+                let err = terminal.error.expect("EngineShutdown error");
+                assert_eq!(
+                    err.error_type(),
+                    ErrorType::Backend(BackendError::EngineShutdown)
+                );
+            } else {
+                let chunk = terminal.data.expect("cancelled terminal");
+                assert!(matches!(chunk.finish_reason, Some(FinishReason::Cancelled)));
+            }
+            assert!(stream.next().await.is_none());
+        }
     }
 
     // -------------------------------------------------------------------

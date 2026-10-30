@@ -32,8 +32,6 @@ use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, reso
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
-const SHUTDOWN_MESSAGE: &str = "vLLM sidecar shut down before the request finished";
-
 pub struct VllmSidecarEngine {
     endpoint: GrpcEndpoint,
     model: DiscoveredModel,
@@ -899,13 +897,6 @@ impl LLMEngine for VllmSidecarEngine {
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
         let shutdown = self.cancel.child_token();
-        // Shutdown migrates an unfinished request, as in-process; one whose
-        // client is gone just ends.
-        let migrate_on_shutdown = {
-            let shutdown = shutdown.clone();
-            let client = ctx.inner_arc();
-            move || shutdown.is_cancelled() && !client.is_stopped()
-        };
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
         let stream = tokio::select! {
@@ -916,9 +907,6 @@ impl LLMEngine for VllmSidecarEngine {
             result = submit => Some(result?),
         };
         let Some(mut stream) = stream else {
-            if migrate_on_shutdown() {
-                return Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
-            }
             let output = cancelled(&state);
             return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
         };
@@ -949,11 +937,7 @@ impl LLMEngine for VllmSidecarEngine {
                 };
 
                 let Some(message) = message else {
-                    if migrate_on_shutdown() {
-                        yield Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
-                    } else {
-                        yield Ok(cancelled(&state));
-                    }
+                    yield Ok(cancelled(&state));
                     break;
                 };
                 match message {

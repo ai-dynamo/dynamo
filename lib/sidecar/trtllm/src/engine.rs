@@ -31,7 +31,6 @@ use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
-const SHUTDOWN_MESSAGE: &str = "TensorRT-LLM sidecar shut down before the request finished";
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -525,13 +524,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         // token.
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let shutdown = self.cancel.child_token();
-        // Shutdown migrates an unfinished request, as in-process; one whose
-        // client is gone just ends.
-        let migrate_on_shutdown = {
-            let shutdown = shutdown.clone();
-            let client = ctx.inner_arc();
-            move || shutdown.is_cancelled() && !client.is_stopped()
-        };
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
         // The same deferral applies here, not just to the streaming loop below.
@@ -563,9 +555,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             } => Some(result?),
         };
         let Some(mut stream) = stream else {
-            if migrate_on_shutdown() {
-                return Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
-            }
             let output = cancelled(&state);
             return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
         };
@@ -580,11 +569,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                         break;
                     }
                     _ = &mut shutdown_cancellation => {
-                        if migrate_on_shutdown() {
-                            yield Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
-                        } else {
-                            yield Ok(cancelled(&state));
-                        }
+                        yield Ok(cancelled(&state));
                         break;
                     }
                     message = stream.message() => {
