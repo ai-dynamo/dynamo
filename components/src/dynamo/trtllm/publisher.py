@@ -1023,6 +1023,12 @@ class Publisher:
         if self.additional_metrics is not None:
             self.additional_metrics.record_kv_event_drain_batch(batch_size)
 
+    def _suppress_blocks(self, blocks) -> None:
+        for block in blocks:
+            block_hash = _to_signed_i64(block["block_hash"])
+            if block_hash is not None:
+                self.suppressed_block_hashes.add(block_hash)
+
     def _normalize_kv_event(self, event):
         event_id = event["event_id"]
         attention_dp_rank = event.get("attention_dp_rank", 0)
@@ -1066,12 +1072,9 @@ class Publisher:
             block_mm_infos: list[dict | None] = []
             kv_block_size = self.kv_block_size
             partial_block_hashes = self.partial_block_hashes
-            suppressed_block_hashes = self.suppressed_block_hashes
-            if parent_hash is not None and parent_hash in suppressed_block_hashes:
+            if parent_hash is not None and parent_hash in self.suppressed_block_hashes:
                 # The router never saw the parent, so it cannot place these.
-                suppressed_block_hashes.update(
-                    _to_signed_i64(block["block_hash"]) for block in data["blocks"]
-                )
+                self._suppress_blocks(data["blocks"])
                 return
             for block_idx, block in enumerate(data["blocks"]):
                 block_tokens = block["tokens"]
@@ -1095,10 +1098,7 @@ class Publisher:
                     # KV cache manager v2 marks multimodal items with digest
                     # strings the router cannot hash. Publish the prefix before
                     # this block and suppress the rest of the chain.
-                    suppressed_block_hashes.update(
-                        _to_signed_i64(b["block_hash"])
-                        for b in data["blocks"][block_idx:]
-                    )
+                    self._suppress_blocks(data["blocks"][block_idx:])
                     logger.warning(
                         "Suppressing KV event blocks with non-integer token ids "
                         "(multimodal digests from KV cache manager v2): "
