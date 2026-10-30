@@ -805,6 +805,24 @@ def test_qwen3_vl_multimodal_engine_configs_set_torch_dtype(config_file):
     ), f"{config_path} missing model_kwargs.text_config.torch_dtype"
 
 
+@pytest.mark.unit
+@pytest.mark.trtllm
+@pytest.mark.multimodal
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("config_file", ("agg.yaml", "agg_kv_router.yaml"))
+def test_qwen3_vl_aggregated_engine_configs_omit_cache_transceiver(config_file):
+    # Aggregated workers, including the E/PD "pd" worker that reuses agg.yaml,
+    # never transfer KV; a transceiver config only reserves an unused buffer.
+    config_path = os.path.join(qwen3_vl_engine_config_dir, config_file)
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    assert (
+        "cache_transceiver_config" not in config
+    ), f"{config_path} sets cache_transceiver_config, which only disaggregated serving uses"
+
+
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
