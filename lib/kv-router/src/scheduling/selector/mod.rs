@@ -24,6 +24,7 @@ use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+    resolve_transfer_sources,
 };
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerCapacityExt, WorkerInfo,
@@ -224,10 +225,13 @@ impl<'a> MaterializedSelectionInput<'a> {
         scope: impl FnOnce() -> KvTransferScope,
     ) -> Option<&KvTransferSourceSummary> {
         let candidates = self.request.kv_transfer_candidates.as_ref()?;
-        Some(
-            self.kv_transfer_sources
-                .get_or_init(|| KvTransferSourceSummary::new(candidates, workers, scope())),
-        )
+        Some(self.kv_transfer_sources.get_or_init(|| {
+            let scope = scope();
+            KvTransferSourceSummary::new(
+                resolve_transfer_sources(candidates, workers, &scope),
+                scope,
+            )
+        }))
     }
 
     /// Fill every row's fetch input once all rows are built, so the sources

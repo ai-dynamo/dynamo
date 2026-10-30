@@ -3533,8 +3533,11 @@ fn transfer_hint_for_selection(
         .kv_transfer_keys()
         .target()?;
     let scope = crate::kv_hints::KvTransferScope::of([(target_keys, local)]);
-    let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs, scope)
-        .source_for(target, target_keys, local)?;
+    let source = crate::kv_hints::KvTransferSourceSummary::new(
+        crate::kv_hints::resolve_transfer_sources(candidates, configs, &scope),
+        scope,
+    )
+    .source_for(target, target_keys, local)?;
     transfer_hint_payload(configs, source, candidates)
 }
 

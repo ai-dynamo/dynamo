@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::block_hash::ExternalSequenceBlockHash;
+use crate::residency::ResidencyOwnerKey;
+use crate::worker::WorkerWithDpRank;
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
 // TODO: Rename these constants and wire values with the matching KVCC names.
@@ -90,5 +92,21 @@ impl KvHint {
             message_id: message_id.into(),
             actions,
         }
+    }
+}
+
+/// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner known by its
+/// compact residency key. Produced by the indexer, consumed by worker selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KvTransferCandidateSource {
+    /// A worker's data-parallel rank.
+    Worker(WorkerWithDpRank),
+    /// A cache owner, by the compact key of its residency owner.
+    CacheOwner(ResidencyOwnerKey),
+}
+
+impl From<WorkerWithDpRank> for KvTransferCandidateSource {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::Worker(worker)
     }
 }

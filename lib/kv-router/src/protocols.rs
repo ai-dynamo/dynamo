@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use dynamo_tokens::Token;
 use serde::{Deserialize, Serialize};
 
-use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys};
+use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 
 pub use dynamo_kv_events::event::{
     KV_EVENT_SUBJECT, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheEvents,
@@ -110,7 +110,7 @@ pub trait WorkerConfigLike {
     /// This worker's router-hint identity with hashed labels, used to choose
     /// KV fetch sources. Configs read by many selections should cache it.
     fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
-        Cow::Owned(WorkerKvTransferKeys::new(self))
+        Cow::Owned(WorkerKvTransferKeys::of(self))
     }
 }
 

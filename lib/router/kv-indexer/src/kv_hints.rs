@@ -11,22 +11,10 @@ use std::sync::Arc;
 
 use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-use dynamo_router_protocol::residency::ResidencyOwnerKey;
-use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use crate::residency::ResidencyRoutingSnapshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum KvTransferCandidateSource {
-    Worker(WorkerWithDpRank),
-    CacheOwner(ResidencyOwnerKey),
-}
-
-impl From<WorkerWithDpRank> for KvTransferCandidateSource {
-    fn from(worker: WorkerWithDpRank) -> Self {
-        Self::Worker(worker)
-    }
-}
+pub use dynamo_router_protocol::kv_hints::KvTransferCandidateSource;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvTransferCandidates {

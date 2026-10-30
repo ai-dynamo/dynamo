@@ -12,16 +12,13 @@
 //! enforcement, a cross-island source is used only when no same-island source
 //! qualifies.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
-use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
-use super::{KvTransferCandidateSource, KvTransferCandidates};
-use crate::protocols::{KvTransferEnforcement, WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use dynamo_kv_indexer::kv_hints::{label_key, topology_keys};
+use super::KvTransferCandidateSource;
+use crate::protocols::WorkerWithDpRank;
 
 /// A worker's router-hint identity, with its labels hashed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,27 +36,15 @@ pub struct WorkerKvTransferKeys {
 }
 
 impl WorkerKvTransferKeys {
-    pub fn new<C: WorkerConfigLike + ?Sized>(config: &C) -> Self {
-        let start = config.data_parallel_start_rank();
-        let mut worker_type = None;
-        let mut source_ranks = Vec::new();
-        for rank in start..start.saturating_add(config.data_parallel_size()) {
-            let Some(metadata) = config.kv_hint_transfer_metadata_for_dp_rank(rank) else {
-                continue;
-            };
-            worker_type.get_or_insert_with(|| label_key(metadata.worker_type));
-            if metadata
-                .source_control_endpoint
-                .is_some_and(|endpoint| !endpoint.is_empty())
-            {
-                source_ranks.push(rank);
-            }
-        }
-        let topology = config
-            .topology_domains()
-            .map(topology_keys)
-            .unwrap_or_default();
-        let transfer_domain = config.kv_transfer_domain().map(label_key);
+    /// Assemble the keys from already-hashed labels. The router derives them from a worker's
+    /// runtime config; see `WorkerKvTransferKeysExt` in `dynamo_kv_router::kv_hints`.
+    pub fn from_parts(
+        worker_type: Option<u64>,
+        source_ranks: Vec<u32>,
+        topology: Vec<(u64, u64)>,
+        transfer_domain: Option<u64>,
+        preferred: bool,
+    ) -> Self {
         let transfer_island = transfer_domain.and_then(|domain| island(&topology, domain));
         Self {
             worker_type,
@@ -67,12 +52,23 @@ impl WorkerKvTransferKeys {
             topology,
             transfer_domain,
             transfer_island,
-            preferred: config.kv_transfer_enforcement() == Some(KvTransferEnforcement::Preferred),
+            preferred,
         }
     }
 
-    fn is_source(&self, dp_rank: u32) -> bool {
+    /// Whether `dp_rank` publishes a source control endpoint.
+    pub fn is_source(&self, dp_rank: u32) -> bool {
         self.source_ranks.binary_search(&dp_rank).is_ok()
+    }
+
+    /// Hashed hint worker type; `None` when the worker cannot consume hints.
+    pub fn worker_type(&self) -> Option<u64> {
+        self.worker_type
+    }
+
+    /// `(domain, value)` topology labels, hashed and sorted.
+    pub fn topology(&self) -> &[(u64, u64)] {
+        &self.topology
     }
 
     /// What a selection needs to find this worker's source; `None` when the
@@ -150,6 +146,16 @@ impl KvTransferScope {
         scope
     }
 
+    /// The shortest local prefix of any target in this scope.
+    pub fn min_local_prefix_blocks(&self) -> usize {
+        self.min_local_prefix_blocks
+    }
+
+    /// Whether some target fetches within an island, so sources need their topology.
+    pub fn needs_islands(&self) -> bool {
+        self.islands != IslandScope::Unused
+    }
+
     fn covers(&self, domain: u64, island: u64) -> bool {
         self.islands == IslandScope::Any || self.islands == IslandScope::One(domain, island)
     }
@@ -161,21 +167,21 @@ fn island(topology: &[(u64, u64)], domain: u64) -> Option<u64> {
         .find_map(|&(label, value)| (label == domain).then_some(value))
 }
 
-/// [`WorkerKvTransferKeys`] derived from a worker config on first use. The
-/// config's other fields decide equality, and it must not change afterwards.
-#[derive(Clone, Debug, Default)]
-pub struct WorkerKvTransferKeysCache(OnceLock<WorkerKvTransferKeys>);
-
-impl WorkerKvTransferKeysCache {
-    pub fn get_or_init<C: WorkerConfigLike + ?Sized>(&self, config: &C) -> &WorkerKvTransferKeys {
-        self.0.get_or_init(|| WorkerKvTransferKeys::new(config))
-    }
-}
-
-impl PartialEq for WorkerKvTransferKeysCache {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
+/// One eligible KV source as the router resolved it for a selection: who holds the prefix,
+/// how long it is, the hashed hint worker type, the worker it is attached to (which never
+/// fetches from it), and its topology labels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTransferSource {
+    /// The source.
+    pub source: KvTransferCandidateSource,
+    /// Prefix the source holds, in blocks.
+    pub prefix_blocks: usize,
+    /// Hashed hint worker type the source serves.
+    pub worker_type: u64,
+    /// The worker this source belongs to; it never fetches from it.
+    pub attachment: Option<WorkerWithDpRank>,
+    /// `(domain, value)` topology labels, hashed.
+    pub topology: Vec<(u64, u64)>,
 }
 
 /// The source a target fetches from, and the prefix it holds in blocks.
@@ -261,84 +267,33 @@ pub struct KvTransferSourceSummary {
 }
 
 impl KvTransferSourceSummary {
-    /// Summarize the sources the targets in `scope` can use. Sources no
-    /// longer than every target's local prefix are skipped before their
-    /// metadata is read.
-    pub fn new<C: WorkerConfigLike>(
-        candidates: &KvTransferCandidates,
-        workers: &HashMap<WorkerId, C>,
+    /// Summarize `sources` for the targets in `scope`. The router resolves the request's
+    /// candidates into [`ResolvedTransferSource`]s (skipping any no longer than every target's
+    /// local prefix) before calling this.
+    pub fn new(
+        sources: impl IntoIterator<Item = ResolvedTransferSource>,
         scope: KvTransferScope,
     ) -> Self {
-        let min_local_prefix_blocks = scope.min_local_prefix_blocks;
-        let needs_islands = scope.islands != IslandScope::Unused;
         let mut summary = Self {
             by_type: FxHashMap::default(),
             by_island: FxHashMap::default(),
             scope,
         };
-        let snapshot = candidates.routing_snapshot.as_deref();
-        for &(source, prefix_blocks) in &candidates.owner_prefix_blocks {
-            // A source cannot share more of the prompt than the retained chain.
-            if prefix_blocks <= min_local_prefix_blocks
-                || prefix_blocks > candidates.block_hashes.len()
-            {
-                continue;
-            }
-            let worker_keys;
-            let attached_worker_keys;
-            let (worker_type, attachment, topology) = match source {
-                KvTransferCandidateSource::Worker(worker) => {
-                    let Some(config) = workers.get(&worker.worker_id) else {
-                        continue;
-                    };
-                    worker_keys = config.kv_transfer_keys();
-                    let Some(worker_type) = worker_keys.worker_type else {
-                        continue;
-                    };
-                    if !worker_keys.is_source(worker.dp_rank) {
-                        continue;
-                    }
-                    (worker_type, Some(worker), worker_keys.topology.as_slice())
-                }
-                KvTransferCandidateSource::CacheOwner(owner) => {
-                    let Some(owner) =
-                        snapshot.and_then(|snapshot| snapshot.router_hint_source(owner))
-                    else {
-                        continue;
-                    };
-                    let keys = &owner.kv_transfer_keys;
-                    if !keys.is_source {
-                        continue;
-                    }
-                    // An owner that publishes no topology is in its attached worker's island.
-                    let topology = if keys.topology.is_empty() && needs_islands {
-                        attached_worker_keys = owner
-                            .attached_worker
-                            .and_then(|worker| workers.get(&worker.worker_id))
-                            .map(|config| config.kv_transfer_keys());
-                        attached_worker_keys
-                            .as_deref()
-                            .map_or(&[][..], |keys| keys.topology.as_slice())
-                    } else {
-                        keys.topology.as_slice()
-                    };
-                    (keys.worker_type, owner.attached_worker, topology)
-                }
-            };
+        for source in sources {
             let ranked = RankedSource {
                 choice: KvTransferSourceChoice {
-                    source,
-                    prefix_blocks,
+                    source: source.source,
+                    prefix_blocks: source.prefix_blocks,
                 },
-                attachment,
+                attachment: source.attachment,
             };
             if summary.scope.any_island {
-                TopSources::offer(summary.by_type.entry(worker_type), ranked);
+                TopSources::offer(summary.by_type.entry(source.worker_type), ranked);
             }
-            for &(domain, value) in topology {
+            for &(domain, value) in &source.topology {
                 if summary.scope.covers(domain, value) {
                     TopSources::offer(
-                        summary.by_island.entry((worker_type, domain, value)),
+                        summary.by_island.entry((source.worker_type, domain, value)),
                         ranked,
                     );
                 }
@@ -378,7 +333,11 @@ impl KvTransferSourceSummary {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use super::super::KvTransferCandidates;
     use crate::protocols::ResidencyOwnerKeyExt;
+    use crate::protocols::{WorkerConfigLike, WorkerId};
     use std::sync::Arc;
 
     use super::*;
@@ -441,9 +400,12 @@ mod tests {
         let workers = workers();
         let target_keys = workers[&target.worker_id].kv_transfer_keys().target()?;
         let scope = KvTransferScope::of([(target_keys, local_prefix_blocks)]);
-        KvTransferSourceSummary::new(candidates, &workers, scope)
-            .source_for(target, target_keys, local_prefix_blocks)
-            .map(|choice| (choice.source, choice.prefix_blocks))
+        KvTransferSourceSummary::new(
+            crate::kv_hints::resolve_transfer_sources(candidates, &workers, &scope),
+            scope,
+        )
+        .source_for(target, target_keys, local_prefix_blocks)
+        .map(|choice| (choice.source, choice.prefix_blocks))
     }
 
     #[test]
