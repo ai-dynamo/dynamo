@@ -220,7 +220,6 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
                     ).rstrip("\n")
                 )
             except kr8s.ServerError as e:
-                # A container that never restarted has no previous instance.
                 if not (previous and _NO_PREVIOUS_INSTANCE in str(e)):
                     raise
                 logger.debug(
