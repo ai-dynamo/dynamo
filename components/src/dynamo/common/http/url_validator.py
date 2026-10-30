@@ -12,8 +12,11 @@ To loosen the defaults, either build a ``UrlValidationPolicy(...)`` directly
 or call ``UrlValidationPolicy.from_env()`` to pick up the ``DYN_MM_*`` vars
 below.
 
+Set ``DYN_MM_ALLOW_REMOTE_URLS=0`` to refuse every ``http(s)://`` URL.
+
 """
 
+import argparse
 import asyncio
 import ipaddress
 import logging
@@ -24,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 from urllib.parse import unquote, urlparse
+
+from dynamo.common.configuration.utils import parse_bool
 
 logger = logging.getLogger(__name__)
 
@@ -218,23 +223,48 @@ class UrlValidationPolicy:
     allow_http: bool = False
     allow_private_ips: bool = False
     allowed_local_path: str | None = None
+    allow_remote_urls: bool = True
 
     @classmethod
     def from_env(cls) -> "UrlValidationPolicy":
         """Build a policy by reading the ``DYN_MM_*`` environment variables."""
         allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        raw_allow_remote = os.getenv("DYN_MM_ALLOW_REMOTE_URLS", "").strip()
+        try:
+            allow_remote = parse_bool(raw_allow_remote) if raw_allow_remote else True
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(
+                f"Invalid DYN_MM_ALLOW_REMOTE_URLS={raw_allow_remote!r}: {exc}"
+            ) from exc
         return cls(
             allow_http=allow_internal,
             allow_private_ips=allow_internal,
             allowed_local_path=os.getenv("DYN_MM_LOCAL_PATH", "").strip() or None,
+            allow_remote_urls=allow_remote,
+        )
+
+
+def check_remote_url_allowed(url: str, policy: UrlValidationPolicy) -> None:
+    """Raise ``UrlValidationError`` if ``url`` is ``http(s)://`` and ``policy``
+    disables remote URLs.
+
+    For call sites that hand URLs to an engine's own downloader, where the full
+    :func:`validate_url` check does not run.
+    """
+    scheme = urlparse(url).scheme.lower()
+    if scheme in ("http", "https") and not policy.allow_remote_urls:
+        raise UrlValidationError(
+            f"{scheme}:// media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); "
+            "send the media inline as a data: URL instead"
         )
 
 
 async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     """Check ``url`` against ``policy`` and return it unchanged if it passes.
 
-    ``https://`` and ``data:`` always pass. ``http://`` needs
-    ``allow_http=True``. Anything else is rejected outright.
+    ``data:`` always passes. ``https://`` needs ``allow_remote_urls=True``
+    (the default); ``http://`` additionally needs ``allow_http=True``.
+    Anything else is rejected outright.
 
     For URLs with a hostname, we resolve it here (off the event loop via
     ``loop.getaddrinfo``) and check the resulting IPs against the blocked
@@ -278,6 +308,8 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
         raise UrlValidationError(
             f"URL scheme '{describe_media_source(scheme)}' not allowed"
         )
+
+    check_remote_url_allowed(url, policy)
 
     if scheme == "http" and not policy.allow_http:
         raise UrlValidationError(

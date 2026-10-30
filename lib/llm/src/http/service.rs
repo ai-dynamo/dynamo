@@ -39,6 +39,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -126,8 +127,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -227,7 +228,8 @@ mod tests {
                         match family {
                             "gpt_oss" => false,
                             "beam" => false,
-                            "gemma4" => thinking != Some(true),
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
                             // Spark's template has no reasoning-off mode; keep parsing
                             // its private channel even when thinking=false is requested.
                             "muse_spark" => false,
@@ -876,6 +878,8 @@ pub enum OpenApiRouteKind {
     Completions,
     Embeddings,
     Responses,
+    Decisions,
+    SystemOne,
 }
 
 /// Documentation for a route, with optional handler-specific schema metadata.

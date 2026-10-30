@@ -22,7 +22,7 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-29";
+export const GENERATED_ON = "2026-10-30";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [];
 
@@ -51,7 +51,7 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "isPast": true,
     "location": null,
     "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=%3Ca+href%3D%22https%3A%2F%2Fdocs.google.com%2Fdocument%2Fd%2F1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8%2Fview%3Fpli%3D1%26amp%3Btab%3Dt.pgw0qvggnec%22+class%3D%22pastedDriveLink-0%22%3EDynamo+Engineering+Sync+Meeting+Notes+-+Google+Docs%3C%2Fa%3E%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
     "title": "Dynamo community meeting",
