@@ -251,9 +251,9 @@ dynamo-operator:
     # Services (MCS) API, for the Global Discovery Service's Kubernetes stores.
     multiCluster:
       # -- MCS implementation that imports the exports: "mcs" for the SIG
-      # Multicluster API or "karmada". For each DGD annotated
-      # `nvidia.com/global-router-pool: "true"`, the operator then creates a
-      # ServiceExport for `<DGD name>-pool-relay` and `<DGD name>-frontend`.
+      # Multicluster API or "karmada". For each DGD with a DynamoPoolRelay of
+      # the same name, the operator then creates a ServiceExport for
+      # `<DGD name>-pool-relay` and for each frontend component's Service.
       # Needs the multicluster.x-k8s.io/v1alpha1 ServiceExport API in this
       # cluster. Empty exports nothing; clearing it leaves earlier exports in
       # place until their DGDs are deleted.

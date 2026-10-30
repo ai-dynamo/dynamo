@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -78,6 +80,16 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              events.EventRecorder
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
+	// APIReader reads objects that the cache does not hold, such as the cluster's
+	// ID in its ClusterSet.
+	APIReader client.Reader
+	// Cache reads unstructured objects, such as ServiceExports, from the
+	// informers that the controller's watches start. The manager's client reads
+	// unstructured objects from the API server.
+	Cache client.Reader
+	// clusterSetIDs keeps the cluster's ID in its ClusterSet between reconciles.
+	// Nil skips the check of a pool's cluster ID.
+	clusterSetIDs *clusterSetIDs
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -95,6 +107,8 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=multicluster.x-k8s.io,resources=serviceexports,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays,verbs=get;list;watch
+// +kubebuilder:rbac:groups=about.k8s.io,resources=clusterproperties,verbs=get
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
@@ -135,10 +149,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// A Global Router pool's exports follow its annotation whatever happens to its
-	// workloads below. A failed export never fails the DGD: it is logged, recorded
-	// as an event, and retried.
-	if r.reconcilePoolExports(ctx, dynamoDeployment) {
+	// A Global Router pool's exports follow its DynamoPoolRelay whatever happens to
+	// its workloads below. A failed export never fails the DGD: it is logged,
+	// recorded as an event and in the pool's condition, and retried.
+	poolExports := r.reconcilePoolExports(ctx, dynamoDeployment)
+	if poolExports.retry {
 		defer func() { result = retryPoolExports(result, err) }()
 	}
 
@@ -146,7 +161,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if dynamoDeployment.HasLPXComponent() && !r.RuntimeConfig.Gate.Enabled(features.LPX) {
 		programResult := newWorkloadProgramResult(dynamoDeployment)
 		programResult.Fail(dynamoDeployment.Generation, "lpx_disabled", errors.New("LPX integration is disabled"))
-		return programResult.Result, r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult)
+		return programResult.Result, r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult, poolExports.condition)
 	}
 
 	// Lock in the provider before allowing any other reconciliation effects.
@@ -161,7 +176,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		// Persist the invalid selection diagnosis before suppressing automatic retries.
 		programResult := newWorkloadProgramResult(dynamoDeployment)
 		programResult.Fail(dynamoDeployment.Generation, reasonUnsupportedWorkloadProvider, err)
-		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult, poolExports.condition); statusErr != nil {
 			return programResult.Result, statusErr
 		}
 		return programResult.Result, reconcile.TerminalError(err)
@@ -184,7 +199,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if compatibilityErr := errors.Join(compatibilityErrs...); compatibilityErr != nil {
 		programResult := newWorkloadProgramResult(dynamoDeployment)
 		programResult.Fail(dynamoDeployment.Generation, reasonFailedToReconcileResources, compatibilityErr)
-		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult, poolExports.condition); statusErr != nil {
 			logger.Error(statusErr, "unable to update status after compatibility failure")
 			return ctrl.Result{}, statusErr
 		}
@@ -196,7 +211,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "failed to handle the finalizer")
 		programResult := newWorkloadProgramResult(dynamoDeployment)
 		programResult.Fail(dynamoDeployment.Generation, "failed_to_handle_the_finalizer", err)
-		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult, poolExports.condition); statusErr != nil {
 			logger.Error(statusErr, "unable to update status after finalizer failure")
 		}
 		return ctrl.Result{}, err
@@ -222,7 +237,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
 	}
 	result = programResult.Result
-	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult, poolExports.condition); statusErr != nil {
 		logger.Error(statusErr, "unable to persist workload program status")
 		return result, statusErr
 	}
@@ -235,11 +250,15 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	return result, nil
 }
 
+// persistWorkloadProgramResult writes result's status, with the Global Router
+// pool's condition, and records result's events once the status is written.
 func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	result workloadProgramResult,
+	poolCondition *metav1.Condition,
 ) error {
+	applyPoolExportCondition(dgd, &result, poolCondition)
 	dgd.Status = result.Status
 	if err := r.Status().Update(ctx, dgd); err != nil {
 		return fmt.Errorf("update DynamoGraphDeployment status: %w", err)
@@ -278,24 +297,80 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 // poolExportRetry is how soon a DGD whose pool exports failed is reconciled again.
 const poolExportRetry = 30 * time.Second
 
-// reconcilePoolExports converges a Global Router pool's ServiceExports and reports
-// whether that failed, so that the DGD is reconciled again. A failure is logged
-// and recorded as a Warning event.
+// poolExportResult is the outcome of reconciling a Global Router pool's exports.
+type poolExportResult struct {
+	// retry asks for the DGD to be reconciled again because the exports failed.
+	retry bool
+	// condition is the GlobalRouterPoolExported condition for the DGD, or nil to
+	// remove it.
+	condition *metav1.Condition
+}
+
+// reconcilePoolExports converges a Global Router pool's ServiceExports. A failure
+// is logged, recorded as a Warning event and, when the DGD is known to be a
+// pool, in its condition, and retried.
 func (r *DynamoGraphDeploymentReconciler) reconcilePoolExports(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) bool {
-	exports := newDGDServiceExportReconciler(newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate)
-	err := exports.Reconcile(ctx, dgd)
+) poolExportResult {
+	exports := newDGDServiceExportReconciler(
+		newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate,
+		r.serviceExportReader(), r.clusterSetID)
+	condition, err := exports.Reconcile(ctx, dgd)
 	if err == nil {
-		return false
+		return poolExportResult{condition: condition}
 	}
 	log.FromContext(ctx).Error(err, "Failed to reconcile Global Router pool ServiceExports")
 	if r.Recorder != nil {
 		r.Recorder.Eventf(dgd, nil, corev1.EventTypeWarning, "PoolExportFailed", "Export",
 			"Failed to reconcile Global Router pool ServiceExports: %v", err)
 	}
-	return true
+	// Whether the DGD is a pool is unknown, so its condition stays as it is.
+	if condition == nil {
+		if previous := meta.FindStatusCondition(dgd.Status.Conditions, globalRouterPoolExportedConditionType); previous != nil {
+			kept := *previous
+			condition = &kept
+		}
+	}
+	return poolExportResult{retry: true, condition: condition}
+}
+
+// serviceExportReader returns the reader of ServiceExports: the cache, or the
+// client when the controller has no cache, as in tests.
+func (r *DynamoGraphDeploymentReconciler) serviceExportReader() client.Reader {
+	if r.Cache != nil {
+		return r.Cache
+	}
+	return r.Client
+}
+
+// clusterSetID returns the cluster's ID in its ClusterSet, or "" when it is
+// unknown.
+func (r *DynamoGraphDeploymentReconciler) clusterSetID(ctx context.Context) string {
+	if r.APIReader == nil || r.clusterSetIDs == nil {
+		return ""
+	}
+	return r.clusterSetIDs.get(ctx, r.APIReader, time.Now())
+}
+
+// applyPoolExportCondition sets the GlobalRouterPoolExported condition in the
+// status about to be persisted, or removes it when condition is nil. A problem
+// that the condition newly reports is also recorded as a Warning event.
+func applyPoolExportCondition(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	result *workloadProgramResult,
+	condition *metav1.Condition,
+) {
+	if condition == nil {
+		meta.RemoveStatusCondition(&result.Status.Conditions, globalRouterPoolExportedConditionType)
+		return
+	}
+	previous := meta.FindStatusCondition(dgd.Status.Conditions, globalRouterPoolExportedConditionType)
+	meta.SetStatusCondition(&result.Status.Conditions, *condition)
+	raised := previous == nil || previous.Status != condition.Status || previous.Reason != condition.Reason
+	if raised && slices.Contains(poolProblemReasons, condition.Reason) {
+		result.Eventf(corev1.EventTypeWarning, condition.Reason, "%s", condition.Message)
+	}
 }
 
 // retryPoolExports makes a reconcile run again within poolExportRetry, unless it
@@ -429,15 +504,26 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		}))
 	}
 	// A Global Router pool's exports converge once the cache sees them created or
-	// deleted, the DGD's own and a user's of the same Service alike.
+	// deleted, the DGD's own and a user's of the same Service alike, and its
+	// condition follows what the MCS implementation reports on them. A
+	// DynamoPoolRelay makes the DGD of the same name a pool.
 	if r.RuntimeConfig.Gate.Enabled(features.MultiClusterExport) {
 		ctrlBuilder = ctrlBuilder.Watches(
-			multicluster.ServiceExportMetadata(),
+			multicluster.NewServiceExport(),
 			handler.EnqueueRequestsFromMapFunc(r.mapServiceExportToDGDRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc:  func(ce event.CreateEvent) bool { return true },
 				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(ue event.UpdateEvent) bool { return false },
+				UpdateFunc:  serviceExportStateChanged,
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		).Watches(
+			&nvidiacomv1alpha1.DynamoPoolRelay{},
+			handler.EnqueueRequestsFromMapFunc(mapPoolRelayToDGDRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return true },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  poolRelayChanged,
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
 		)

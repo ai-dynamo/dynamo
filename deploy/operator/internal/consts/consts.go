@@ -61,11 +61,6 @@ const (
 	// when the namespace carries istio-injection=enabled.
 	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
 
-	// KubeAnnotationGlobalRouterPool set to "true" marks a DGD as a Global Router
-	// pool. When the operator is configured with a Multi-Cluster Services
-	// implementation, it exports the pool's PoolRelay and frontend Services.
-	KubeAnnotationGlobalRouterPool = "nvidia.com/global-router-pool"
-
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"

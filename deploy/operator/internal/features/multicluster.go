@@ -10,14 +10,14 @@ import (
 )
 
 // MultiClusterExport exports the PoolRelay and frontend Services of each DGD
-// marked as a Global Router pool through the Multi-Cluster Services (MCS) API.
+// that is a Global Router pool through the Multi-Cluster Services (MCS) API.
 //
 // Owner: @atchernych
 // Experimental since: v1.7.0
 // Beta since: N/A
 // GA since: N/A
-// Configuration: multiCluster.mcsImplementation, and the
-// nvidia.com/global-router-pool annotation on each DGD
+// Configuration: multiCluster.mcsImplementation, and a DynamoPoolRelay named
+// after each pool's DGD
 // Auto-detection: N/A; API availability is verified when an implementation is configured
 // Requires: an MCS implementation, such as Karmada, serving
 // multicluster.x-k8s.io/v1alpha1 ServiceExport resources

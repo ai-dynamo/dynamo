@@ -403,8 +403,7 @@ type DiscoveryConfiguration struct {
 // MultiClusterConfiguration configures how the operator exports Global Router
 // pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
 // Discovery Service's Kubernetes stores. The operator exports a pool only when
-// MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
-// annotation.
+// MCSImplementation is set and a DynamoPoolRelay with its DGD's name exists.
 type MultiClusterConfiguration struct {
 	// MCSImplementation is the MCS implementation that imports the exports. Empty,
 	// the default, exports nothing: Global Router pools are then discovered without

@@ -4346,8 +4346,7 @@ _Appears in:_
 MultiClusterConfiguration configures how the operator exports Global Router
 pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
 Discovery Service's Kubernetes stores. The operator exports a pool only when
-MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
-annotation.
+MCSImplementation is set and a DynamoPoolRelay with its DGD's name exists.
 
 
 

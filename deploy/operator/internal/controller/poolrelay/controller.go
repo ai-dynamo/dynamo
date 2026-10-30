@@ -451,7 +451,7 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func serviceName(dgdName string) string { return dgdName + multicluster.PoolRelayServiceSuffix }
+func serviceName(dgdName string) string { return multicluster.PoolRelayServiceName(dgdName) }
 
 func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := serviceName(relay.Name)

@@ -145,9 +145,23 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 
 ## Global Router pool export
 
-Set `metadata.annotations["nvidia.com/global-router-pool"]: "true"` to mark the DGD as a Global Router pool. When the operator is configured with a Multi-Cluster Services implementation (the platform chart's `dynamo-operator.dynamo.multiCluster.mcsImplementation`, `mcs` or `karmada`), it creates a `multicluster.x-k8s.io/v1alpha1` `ServiceExport` in the DGD's namespace for the Services `<DGD name>-pool-relay` and `<DGD name>-frontend`, with any dots in the DGD name replaced by dashes. The Global Discovery Service reads the imported EndpointSlices of those Services to list the pool. A [`DynamoPoolRelay`](../../kubernetes/kv-aware-routing/pool-relay.md) with the DGD's name creates `<DGD name>-pool-relay`, and the operator creates `<DGD name>-frontend` for a frontend component named `Frontend`.
+A DGD is a Global Router pool while a [`DynamoPoolRelay`](../../kubernetes/kv-aware-routing/pool-relay.md) with its name exists in its namespace. When the operator is configured with a Multi-Cluster Services implementation (the platform chart's `dynamo-operator.dynamo.multiCluster.mcsImplementation`, `mcs` or `karmada`), it creates a `multicluster.x-k8s.io/v1alpha1` `ServiceExport` in the DGD's namespace for the PoolRelay Service, `<DGD name>-pool-relay`, and for the Service of each frontend component, `<DGD name>-<component name>` in lowercase with dots replaced by dashes. The Global Discovery Service reads the imported EndpointSlices of those Services to list the pool. It finds the frontends by a Service name suffix, `-frontend` by default, which matches a frontend component named `Frontend`. The operator does not know that suffix, so a frontend component with another name is exported but not found until the suffix matches it.
 
-The DGD owns these exports: removing the annotation withdraws them, and deleting the DGD deletes them. A `ServiceExport` of the same name that the DGD does not own is left alone. With `karmada`, a Service name longer than 55 characters is not exported, because Karmada cannot import it. Without a configured implementation, the annotation has no effect.
+The DGD owns these exports: deleting the `DynamoPoolRelay` withdraws them, renaming or removing a frontend component withdraws that component's export, and deleting the DGD deletes them. A `ServiceExport` of the same name that the DGD does not own is left alone. Without a configured implementation, nothing is exported.
+
+The `GlobalRouterPoolExported` condition reports on a pool's exports. It never fails the DGD or holds back its workloads. A new problem is also recorded as a Warning event on the DGD.
+
+| Reason | Status | Meaning |
+| --- | --- | --- |
+| `Exported` | True | Every Service is exported, and the MCS implementation reports no problem. Karmada reports nothing on its exports. |
+| `ExportConflict` | True | Every Service is exported, but the MCS implementation reports `Conflict` as True: a property of an export differs from another cluster's export of the same Service, and the implementation resolved it. The message quotes that condition. |
+| `ExportPending` | Unknown | An export was just created or is waiting to be replaced, a standard implementation has not reported on it yet, or it reports `Ready` as Unknown, or as False with the reason `Pending`. |
+| `ExportRejected` | False | The MCS implementation reports `Valid` as False, or `Ready` as False for a reason other than `Pending`, on an export. The message quotes that condition. |
+| `InvalidServiceName` | False | No Service can have a name that the pool needs, so that Service is not exported. For example, a DGD whose name has a dot has no PoolRelay Service. |
+| `ServiceNameTooLong` | False | With `karmada`, a Service name is longer than 55 characters, which Karmada cannot import, so that Service is not exported. |
+| `NoFrontend` | False | The DGD has no frontend component, so the Global Router has nowhere to send the pool's requests. |
+| `ClusterIDMismatch` | False | With `mcs`, the `DynamoPoolRelay`'s `clusterId` differs from the cluster's ID in its ClusterSet, which the About API's `ClusterProperty` `cluster.clusterset.k8s.io` holds. The Global Discovery Service lists the pool only when they match. The operator reads the ID at most once a minute, and skips the check when the cluster has no such property or the operator may not read it, as in a namespace-restricted install. |
+| `ExportFailed` | False | Listing, creating or deleting an export failed. The operator retries within 30 seconds, or, when the DGD's own reconcile fails, the next time it reconciles the DGD. |
 
 ## Spec reference
 

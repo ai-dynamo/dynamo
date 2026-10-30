@@ -102,6 +102,9 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
 		SSHKeyManager:         opts.SSHKeyManager,
+		APIReader:             mgr.GetAPIReader(),
+		Cache:                 mgr.GetCache(),
+		clusterSetIDs:         &clusterSetIDs{},
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
