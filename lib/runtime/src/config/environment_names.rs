@@ -417,6 +417,20 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Enable the experimental System One typed-decisions endpoint (/v1/systemone)
+    pub const DYN_ENABLE_SYSTEMONE_API: &str = "DYN_ENABLE_SYSTEMONE_API";
+
+    /// Maximum concurrent System One question branches (default 256, ceiling 4,096).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES: &str = "DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES";
+
+    /// Maximum cumulative prompt tokens per System One request (default 65,536, ceiling 1,048,576).
+    /// Context and tokenization-work limits apply independently; increases warn, above-ceiling values clamp.
+    pub const DYN_SYSTEMONE_MAX_INPUT_TOKENS: &str = "DYN_SYSTEMONE_MAX_INPUT_TOKENS";
+    /// Total decision preflight and execution deadline (default 300 seconds, ceiling 3,600).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS: &str = "DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS";
+
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
@@ -438,11 +452,18 @@ pub mod llm {
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// The admin API is **enabled by default**; this variable disables it.
-    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
-    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
-    /// models, health, and liveness routes are unaffected.
-    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
+    /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
+    /// `DYN_FRONTEND_ADMIN_PORT`), which serves `/router_policy`, its busy-threshold
+    /// subresource, and the legacy `/busy_threshold` routes.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
+    /// Host the frontend admin listener binds to. Default `127.0.0.1`.
+    pub const DYN_FRONTEND_ADMIN_HOST: &str = "DYN_FRONTEND_ADMIN_HOST";
+
+    /// Port of the frontend admin listener. Default `8002`. When the admin API is
+    /// enabled and this port cannot be bound, startup aborts.
+    pub const DYN_FRONTEND_ADMIN_PORT: &str = "DYN_FRONTEND_ADMIN_PORT";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
@@ -569,7 +590,7 @@ pub mod llm {
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
-    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// Publish the serving-load streams the Pool Relay aggregates: frontend
     /// request load and router scheduler load. Off unless truthy.
     pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
@@ -880,8 +901,14 @@ pub mod request_plane {
 
 /// Response plane transport configuration.
 pub mod response_plane {
-    /// Response transport used by every runtime in this process: "tcp" or "quic".
-    /// Defaults to "tcp".
+    /// Response transport used by every runtime in this process: "tcp", "quic"
+    /// or "velo". Defaults to "tcp".
+    ///
+    /// Velo has no TLS, so a velo runtime refuses to start while any
+    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    ///
+    /// On a graceful Stop, velo still delivers what the worker's engine
+    /// yields, final chunk included; tcp and quic end the stream at the worker.
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
 
     /// Seconds a frontend waits, after a worker ACKs a unary request, for that
@@ -901,12 +928,31 @@ pub mod response_plane {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS: &str =
         "DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS";
+    /// Messenger transport for Velo responses: tcp (default) or ucx. A ucx
+    /// service also listens on TCP, so a frontend and worker set differently
+    /// still reach each other, and the worker reports the mismatch.
+    pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
+    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Set to 0 for greedy flushing after transport admission. Full batches and
+    /// lifecycle records can flush sooner. Read once when the service starts.
+    pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
+    /// Heartbeat interval of each Velo response stream in milliseconds
+    /// (default: 1000). A frontend ends a stream, as Disconnected, once its
+    /// worker misses three to four heartbeats. Must be positive. Set on the
+    /// frontend; workers follow it. Read once when the service starts.
+    pub const DYN_VELO_RESPONSE_HEARTBEAT_MS: &str = "DYN_VELO_RESPONSE_HEARTBEAT_MS";
+    /// TCP port of the Velo response listener. Every Velo process, workers
+    /// included, opens one, and frontends connect to the workers' listeners as
+    /// well as workers to the frontends'. Only one process per IP address can
+    /// use a given port. If unset or 0, the OS assigns a free ephemeral port.
+    pub const DYN_VELO_RESPONSE_PORT: &str = "DYN_VELO_RESPONSE_PORT";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
-    /// If unset or 0, the OS assigns a free ephemeral port.
+    /// If unset or 0, the OS assigns a free ephemeral port. Velo responses
+    /// use `DYN_VELO_RESPONSE_PORT` instead.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
     /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
@@ -1178,10 +1224,16 @@ mod tests {
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
+            llm::DYN_ENABLE_SYSTEMONE_API,
+            llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+            llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_FRONTEND_ADMIN_HOST,
+            llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
@@ -1262,6 +1314,10 @@ mod tests {
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,
             response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS,
+            response_plane::DYN_VELO_RESPONSE_TRANSPORT,
+            response_plane::DYN_VELO_RESPONSE_BATCH_MS,
+            response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS,
+            response_plane::DYN_VELO_RESPONSE_PORT,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

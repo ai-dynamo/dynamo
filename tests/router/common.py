@@ -30,6 +30,8 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.constants import DynamoPortRange
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     parse_kv_event_diagnostics,
     select_kv_event_diagnostics,
@@ -885,6 +887,80 @@ def _test_remote_indexer_decisions(
             dp_rank_b,
         )
 
+        async def wait_for_serving_indexers_live(
+            worker_id: int, dp_rank: Optional[int]
+        ) -> None:
+            """Send fresh pinned probes until every serving router indexes one.
+
+            Workers start their KV event publishers just after the generate
+            endpoint registers, so the first requests race KV source activation
+            in the serving routers. A new probe per attempt replaces any event
+            lost in that window instead of waiting for it.
+            """
+            key = (worker_id, dp_rank if dp_rank is not None else 0)
+            deadline = time.monotonic() + 45
+            attempt = 0
+            stale: dict[int, int] = {}
+            while time.monotonic() < deadline:
+                attempt += 1
+                probe = [random.randint(1, 10000) for _ in range(2 * block_size)]
+                try:
+                    await asyncio.wait_for(
+                        send_request_via_python_kv_router(
+                            kv_python_router=serving_routers[0],
+                            model_name=model_name,
+                            token_ids=probe,
+                            stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                            worker_id=worker_id,
+                            dp_rank=dp_rank,
+                        ),
+                        timeout=max(deadline - time.monotonic(), 0.1),
+                    )
+                except asyncio.TimeoutError:
+                    raise AssertionError(
+                        f"Probe request for {key} outlived the readiness deadline "
+                        f"on attempt {attempt}"
+                    ) from None
+                probe_deadline = min(deadline, time.monotonic() + 2.0)
+                while True:
+                    stale = {}
+                    for idx, serving_router in enumerate(serving_routers):
+                        try:
+                            scores = await asyncio.wait_for(
+                                serving_router.get_overlap_scores(
+                                    probe, include_shared=False
+                                ),
+                                timeout=max(probe_deadline - time.monotonic(), 0.1),
+                            )
+                        except asyncio.TimeoutError:
+                            stale[idx] = -1
+                            continue
+                        blocks_by_rank = {
+                            (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                            for row in scores["workers"]
+                        }
+                        if blocks_by_rank.get(key, 0) < 2:
+                            stale[idx] = blocks_by_rank.get(key, 0)
+                    if not stale or time.monotonic() >= probe_deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                if not stale:
+                    if attempt > 1:
+                        logger.warning(
+                            "Serving routers indexed %s only after %d probes",
+                            key,
+                            attempt,
+                        )
+                    return
+            raise AssertionError(
+                f"Serving routers {sorted(stale)} never indexed probes for {key} "
+                f"after {attempt} attempts: device_blocks={stale}"
+            )
+
+        if use_kv_events:
+            await wait_for_serving_indexers_live(worker_a_id, dp_rank_a)
+            await wait_for_serving_indexers_live(worker_b_id, dp_rank_b)
+
         blocks = [
             [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
         ]
@@ -1641,7 +1717,7 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port,
     )
 
-    with KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request=request,
         block_size=block_size,
         frontend_port=frontend_port,
@@ -1649,10 +1725,14 @@ def _test_router_threshold_none_disables_rejection(
         blocks_threshold="None",
         tokens_threshold="None",
         tokens_threshold_frac="None",
+        extra_env={
+            "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
+            "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
+        },
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
         model_name = test_payload.get("model", "test-model")
         load_payload = {
             **test_payload,
@@ -3247,6 +3327,146 @@ def _test_router_cache_salt_isolation(
     asyncio.run(test_sync())
 
 
+def _test_router_lora_isolation(
+    engine_workers,
+    endpoint,
+    model_name: str,
+    block_size: int,
+    lora_name: str,
+    lora_uri: str,
+):
+    """Verify LoRA adapter blocks are reused by adapter requests and stay
+    isolated from base-model blocks in the router index."""
+    from tests.serve.lora_utils import load_lora_adapter
+
+    async def test_sync():
+        expected_num_instances = engine_workers.num_workers
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=KvRouterConfig(
+                    use_kv_events=True,
+                    router_event_threads=4,
+                ),
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
+
+        worker_ids = await wait_for_workers_ready(
+            endpoint,
+            kv_router,
+            expected_num_workers=expected_num_instances,
+            model_name=model_name,
+        )
+        assert len(worker_ids) >= 2, "LoRA isolation requires two workers"
+
+        for system_port in engine_workers.system_ports:
+            await asyncio.to_thread(load_lora_adapter, system_port, lora_name, lora_uri)
+
+        worker_a = (worker_ids[0], 0)
+        worker_b = (worker_ids[1], 0)
+        token_ids = list(range(1_000, 1_000 + block_size * 2))
+        expected_blocks = len(token_ids) // block_size
+
+        async def generate(lora: Optional[str], worker_id: Optional[int] = None) -> int:
+            """Run one request and return the worker it was routed to."""
+            routing: dict[str, Any] = {}
+            if lora is not None:
+                routing["lora_name"] = lora
+            if worker_id is not None:
+                routing["backend_instance_id"] = worker_id
+            request = {
+                "model": lora or model_name,
+                "token_ids": token_ids,
+                "stop_conditions": {"ignore_eos": True, "max_tokens": 2},
+                "sampling_options": {},
+                "output_options": {},
+                "eos_token_ids": [],
+                "routing": routing,
+            }
+            stream = await kv_router.generate_from_request(request)
+            routed_worker = None
+            terminal = None
+            async for response in stream:
+                if not isinstance(response, dict):
+                    continue
+                worker_info = (response.get("routing_data") or {}).get("worker_id")
+                if worker_info and routed_worker is None:
+                    routed_worker = worker_info.get("decode_worker_id")
+                if response.get("finish_reason") is not None:
+                    terminal = response
+            assert terminal is not None, f"lora={lora!r} request did not finish"
+            assert routed_worker is not None, f"lora={lora!r}: no routed worker"
+            return routed_worker
+
+        async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
+            scores = await kv_router.get_overlap_scores(
+                token_ids,
+                include_shared=False,
+                lora_name=lora,
+            )
+            assert scores["block_size"] == block_size
+            assert scores["num_blocks"] == expected_blocks
+            return {
+                (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                for row in scores["workers"]
+            }
+
+        async def wait_for_scores(
+            lora: Optional[str],
+            expected: dict[tuple[int, int], int],
+        ) -> None:
+            deadline = time.monotonic() + 10
+            last_scores: dict[tuple[int, int], int] = {}
+            while time.monotonic() < deadline:
+                last_scores = await device_blocks(lora)
+                if {k: v for k, v in last_scores.items() if v} == expected:
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"lora={lora!r}: expected {expected}, got {last_scores}"
+            )
+
+        async def wait_for_worker(lora: Optional[str], expected: tuple[int, int]):
+            deadline = time.monotonic() + 10
+            last_selection: tuple[int, int, int] | None = None
+            while time.monotonic() < deadline:
+                last_selection = await kv_router.best_worker(token_ids, lora_name=lora)
+                if (
+                    last_selection[:2] == expected
+                    and last_selection[2] == expected_blocks
+                ):
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"lora={lora!r}: expected worker {expected} with "
+                f"{expected_blocks} overlap blocks, got {last_selection}"
+            )
+
+        # Adapter blocks are indexed under the adapter, not the base model.
+        await generate(lora_name, worker_a[0])
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_scores(None, {})
+
+        # The same prompt on the base model is cached separately.
+        await generate(None, worker_b[0])
+        await wait_for_scores(None, {worker_b: expected_blocks})
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_worker(lora_name, worker_a)
+        await wait_for_worker(None, worker_b)
+
+        # Unpinned repeats must go back to the worker that holds their blocks,
+        # and must not leave a copy on the other worker.
+        assert await generate(lora_name) == worker_a[0]
+        assert await generate(None) == worker_b[0]
+        await wait_for_scores(lora_name, {worker_a: expected_blocks})
+        await wait_for_scores(None, {worker_b: expected_blocks})
+
+    asyncio.run(test_sync())
+
+
 def _test_busy_threshold_endpoint(
     engine_workers,
     block_size: int,
@@ -3281,7 +3501,7 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    with KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request,
         block_size,
         frontend_port,
@@ -3290,12 +3510,16 @@ def _test_busy_threshold_endpoint(
         blocks_threshold=initial_active_decode_blocks_threshold,
         tokens_threshold=initial_active_prefill_tokens_threshold,
         request_plane=request_plane,
+        extra_env={
+            "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
+            "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
+        },
     ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
         frontend_url = f"http://localhost:{frontend_port}"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
 
         # Wait for workers to register with frontend
         logger.info("Waiting for workers to register with frontend...")
