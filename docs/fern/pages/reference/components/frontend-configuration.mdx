@@ -893,6 +893,36 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
+<Note>
+These behaviors require a build containing
+[PR #17367](https://github.com/ai-dynamo/dynamo/pull/17367).
+</Note>
+
+Responses from the Messages handlers, including request parsing and validation errors, return
+the assigned request ID in the `request-id` response header. HTTP errors from these handlers
+use the [Anthropic error envelope](https://platform.claude.com/docs/en/api/errors), including
+the same ID in `request_id`. Malformed JSON, invalid request shapes, and missing or incorrect
+JSON content types return HTTP 400. Requests exceeding `DYN_HTTP_BODY_LIMIT_MB` return HTTP
+413 with `request_too_large`; the default is 45 MiB.
+
+Successful Messages streams end with `message_stop`, without an additional `[DONE]` event.
+Before conversion, the frontend validates these
+[Messages request fields](https://platform.claude.com/docs/en/api/http/messages/create):
+
+- `tool_choice.type` selects `auto`, `any`, `none`, or `tool`. Only `tool` accepts and requires
+  a nonempty `name`. `disable_parallel_tool_use` must be a boolean and is unavailable with `none`.
+- `system` accepts a string or text blocks, each with `type: "text"` and nonempty string `text`.
+- `metadata` accepts an object; `user_id`, when supplied, accepts a string of at most 512
+  characters or `null`.
+- `thinking.type: "enabled"` requires an integer `budget_tokens` of at least 1,024 and less
+  than `max_tokens`, except when `anthropic-beta` includes
+  `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
+  or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
+- `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
+
+For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
+These checks validate admission; thinking-budget enforcement by the backend is not implemented.
+
 ### Infrastructure
 
 | Method | Path | Description |
