@@ -21331,8 +21331,7 @@ spec:
                           include a non-empty image and restartPolicy: Always.
 
                           Sidecar mode supports worker, prefill, and decode components.
-                          Multinode sidecars currently support backendFramework: sglang and vllm.
-                          Multinode support for TensorRT-LLM is planned.
+                          Multinode sidecars support backendFramework: sglang, vllm, and trtllm.
                           Multinode sidecars require complete leader and worker roles[].podTemplate
                           definitions instead of this shared template.
                           The leader must declare a runtime init container. The worker may omit it.
