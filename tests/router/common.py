@@ -26,6 +26,7 @@ from tests.router.helper import (
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
+    unique_request_id,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
@@ -4177,8 +4178,6 @@ def run_frontend_epp_token_parity(
     after unchanged-request parity succeeds and requires the same comparator
     to reject the live mismatch.
     """
-    from tests.router.epp_parity import unique_request_id
-
     if not cases:
         raise AssertionError("token parity requires at least one actual request case")
 
@@ -4206,7 +4205,7 @@ def run_frontend_epp_token_parity(
             len(frontend_tokens),
         )
 
-    kube_api = getattr(stack, "kube_api", None)
+    kube_api = stack.kube_api
     if kube_api is not None and kube_api.failures:
         raise AssertionError(
             "Loopback Kubernetes API recorded unexpected requests: "
@@ -4344,9 +4343,6 @@ def run_frontend_epp_tools_token_parity(
     rejected. The declaration case also collects original, tools-omitted, and
     changed-schema bodies on each arm so a silent ignore of tools cannot pass.
     """
-    # epp_parity pulls gRPC; common.py is imported by unrelated router tests.
-    from tests.router.epp_parity import unique_request_id
-
     if not cases:
         raise AssertionError(
             "tools token parity requires at least one actual request case"

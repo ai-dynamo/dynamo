@@ -35,9 +35,12 @@ from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qs, urlparse
 
 import grpc
+import requests
 from filelock import FileLock
+from grpc_tools import protoc
 
 from tests.router.helper import generate_random_suffix
+from tests.router.mocker_process import MockerProcess
 from tests.router.router_process import (
     FrontendRouterProcess,
     RuntimeEppProcess,
@@ -128,6 +131,10 @@ def acquire_epp_session_lock() -> FileLock:
 
 
 def assert_epp_ports_free() -> None:
+    """Fail fast if hardcoded /epp ports 9002/9003 are already bound.
+
+    Does not kill the occupant. Serial dedicated-container execution is required.
+    """
     busy = [
         port for port in (EPP_GRPC_PORT, EPP_HEALTH_PORT) if _port_is_occupied(port)
     ]
@@ -215,6 +222,11 @@ def discovery_process_env(
     identity: PodIdentity,
     container_name: str,
 ) -> dict[str, str | None]:
+    """Kubernetes discovery identity for a child process.
+
+    Clears cluster service host/port so children cannot reach a real API. None
+    values are deletions applied by the process wrappers.
+    """
     return {
         "KUBECONFIG": str(kubeconfig),
         "KUBERNETES_SERVICE_HOST": None,
@@ -288,6 +300,7 @@ class LoopbackKubeAPI:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
+        """Bind the loopback HTTP server on this fixture's allocated port."""
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -319,6 +332,7 @@ class LoopbackKubeAPI:
         logger.info("Loopback Kubernetes API listening on %s", self.url)
 
     def stop(self) -> None:
+        """Close watchers and the HTTP server; does not touch a real cluster."""
         self._closed.set()
         with self._cv:
             for watcher in list(self._watchers):
@@ -340,6 +354,7 @@ class LoopbackKubeAPI:
         container_name: str,
         http_port: int,
     ) -> None:
+        """Publish the ready worker Pod for discovery and owner-UID join."""
         pod = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -389,6 +404,7 @@ class LoopbackKubeAPI:
         return str(self._resource_version)
 
     def _store_pod(self, pod: dict[str, Any], event_type: str) -> dict[str, Any]:
+        """Deep-copy and persist a Pod, assigning RV/UID, then notify watchers."""
         with self._cv:
             stored = json.loads(json.dumps(pod))
             stored.setdefault("metadata", {})["resourceVersion"] = self._next_rv()
@@ -402,6 +418,7 @@ class LoopbackKubeAPI:
             return stored
 
     def _store_metadata(self, obj: dict[str, Any], event_type: str) -> dict[str, Any]:
+        """Deep-copy and persist DynamoWorkerMetadata in this fixture namespace."""
         with self._cv:
             stored = json.loads(json.dumps(obj))
             metadata = stored.setdefault("metadata", {})
@@ -423,8 +440,12 @@ class LoopbackKubeAPI:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{kind}:{self.namespace}:{name}"))
 
     def _publish(self, kind: str, event_type: str, obj: dict[str, Any]) -> None:
-        # Caller holds self._cv. Persist then fan out so LIST-to-WATCH cannot drop
-        # a mutation that happened before the watcher registered.
+        """Append a bounded history event and fan it to matching live watchers.
+
+        Caller holds self._cv. Persist then fan out so LIST-to-WATCH cannot drop
+        a mutation that happened before the watcher registered. History older
+        than WATCH_HISTORY_BOUND is dropped.
+        """
         event = {"type": event_type, "object": obj}
         self._history.append(_HistoryEvent(kind=kind, event_type=event_type, obj=obj))
         overflow = len(self._history) - WATCH_HISTORY_BOUND
@@ -445,6 +466,7 @@ class LoopbackKubeAPI:
         logger.error("Loopback Kubernetes API fixture failure: %s", detail)
 
     def _handle(self, handler: BaseHTTPRequestHandler, method: str) -> None:
+        """Route one request; unknown paths and handler bugs are recorded failures."""
         parsed = urlparse(handler.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -480,6 +502,7 @@ class LoopbackKubeAPI:
         )
 
     def _read_body(self, handler: BaseHTTPRequestHandler) -> bytes:
+        """Read at most MAX_KUBE_BODY_BYTES; oversized or invalid length is 413."""
         length_header = handler.headers.get("Content-Length", "0")
         try:
             length = int(length_header)
@@ -499,6 +522,10 @@ class LoopbackKubeAPI:
         query: dict[str, list[str]],
         body: bytes,
     ) -> bool:
+        """Serve only Pod and DynamoWorkerMetadata verbs in this fixture namespace.
+
+        Returns False for unknown paths so _handle records a fixture failure.
+        """
         pods_prefix = f"/api/v1/namespaces/{self.namespace}/pods"
         dwm_prefix = f"/apis/nvidia.com/v1alpha1/namespaces/{self.namespace}/dynamoworkermetadatas"
         if path == pods_prefix:
@@ -631,6 +658,12 @@ class LoopbackKubeAPI:
         kind: str,
         query: dict[str, list[str]],
     ) -> None:
+        """Stream chunked watch events until timeout, close, or client disconnect.
+
+        sendInitialEvents emits a snapshot plus bookmark; otherwise history after
+        resourceVersion is replayed. Callers that outrun WATCH_HISTORY_BOUND can
+        miss events.
+        """
         start_rv = _requested_rv(query)
         send_initial = _query_flag(query, "sendInitialEvents")
         watcher = _WatchClient(
@@ -763,6 +796,7 @@ def _object_rv(obj: Mapping[str, Any]) -> int:
 
 
 def _watch_timeout_s(query: dict[str, list[str]]) -> float:
+    """Watch deadline from timeoutSeconds; invalid values default to 30s, minimum 1s."""
     raw = query.get("timeoutSeconds", ["30"])[0]
     try:
         return max(1.0, float(raw))
@@ -771,6 +805,7 @@ def _watch_timeout_s(query: dict[str, list[str]]) -> float:
 
 
 def _matches_labels(labels: Mapping[str, str], query: dict[str, list[str]]) -> bool:
+    """Require every labelSelector key=value pair; empty selector matches all."""
     selector = query.get("labelSelector", [""])[0]
     if not selector:
         return True
@@ -789,6 +824,11 @@ def _matches_labels(labels: Mapping[str, str], query: dict[str, list[str]]) -> b
 def _paginate(
     items: list[dict[str, Any]], query: dict[str, list[str]]
 ) -> tuple[list[dict[str, Any]], str | None]:
+    """Page items by limit/continue.
+
+    Invalid or nonpositive limit returns the full unpaged list. Invalid
+    continue resets the start index to zero and keeps a positive limit.
+    """
     try:
         limit = int(query.get("limit", ["0"])[0] or 0)
     except ValueError:
@@ -851,25 +891,20 @@ def _not_found(resource: str, name: str) -> dict[str, Any]:
 
 
 def _write_chunk(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
+    """Write one chunked JSON watch event; caller owns the handler socket."""
     data = json.dumps(payload).encode("utf-8") + b"\n"
     handler.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
     handler.wfile.flush()
 
 
 def _end_chunks(handler: BaseHTTPRequestHandler) -> None:
+    """Terminate the chunked watch body; caller handles client disconnect."""
     handler.wfile.write(b"0\r\n\r\n")
     handler.wfile.flush()
 
 
 def compile_ext_proc_protos(output_dir: Path) -> None:
     """Compile vendored ext_proc protos into tmp_path. Never writes the source tree."""
-    try:
-        from grpc_tools import protoc
-    except ImportError as exc:
-        raise RuntimeError(
-            "grpcio-tools is required to generate ext_proc stubs into tmp_path"
-        ) from exc
-
     include = Path(sys.modules["grpc_tools"].__file__).resolve().parent / "_proto"
     output_dir.mkdir(parents=True, exist_ok=True)
     proto_files = [
@@ -909,6 +944,12 @@ def compile_ext_proc_protos(output_dir: Path) -> None:
 
 
 class _ExtProcModules:
+    """Compile vendored ext_proc stubs into tmp_path and load them for one stack.
+
+    Generated files never enter the source tree. close() drops the temporary
+    sys.path entry; it does not delete tmp_path (pytest owns that).
+    """
+
     def __init__(self, output_dir: Path) -> None:
         compile_ext_proc_protos(output_dir)
         self._output_dir = str(output_dir)
@@ -930,6 +971,8 @@ class _ExtProcModules:
 
 
 class _RequestStream:
+    """Thread-safe iterator the ext_proc stub consumes; close() ends the stream."""
+
     def __init__(self) -> None:
         self._queue: queue.Queue[Any] = queue.Queue()
 
@@ -950,6 +993,10 @@ class _RequestStream:
 
 
 def _loopback_epp_channel(timeout_s: float) -> grpc.Channel:
+    """Open a TLS channel to 127.0.0.1:9002 trusting only this fetch's peer cert.
+
+    Disables grpc HTTP proxy for this channel only. Caller must close the channel.
+    """
     pem = fetch_loopback_tls_cert(
         "127.0.0.1", EPP_GRPC_PORT, min(timeout_s, TLS_HANDSHAKE_TIMEOUT_S)
     ).encode("ascii")
@@ -983,6 +1030,7 @@ def _header_map(pb2: Any, headers: list[tuple[str, str]]) -> Any:
 
 
 def _request_body_mutation_status(response: Any) -> str | None:
+    """Classify a ProcessingResponse RequestBody mutation, or None if absent."""
     if not response.HasField("request_body"):
         return None
     body = response.request_body
@@ -1036,6 +1084,10 @@ def _extract_unique_terminal_request_body(pb2: Any, responses: list[Any]) -> byt
 
 
 def decode_epp_token_data(body: bytes) -> list[int]:
+    """Parse nvext.token_data from a mutated JSON body.
+
+    Rejects non-JSON, missing nvext, empty token_data, and non-integer tokens.
+    """
     try:
         parsed = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1069,6 +1121,12 @@ class ExtProcParityDriver:
         request_id: str,
         timeout_s: float = EXT_PROC_TIMEOUT_S,
     ) -> list[int]:
+        """Drive a full-duplex ext_proc stream and return EPP nvext.token_data.
+
+        Completes the response half/stream lifecycle with SYNTHETIC_EXT_PROC_SSE.
+        Rejects ImmediateResponse, missing/non-terminal body mutations, and
+        timeout. The channel is closed before return.
+        """
         pb2 = self._modules.pb2
         stub_cls = self._modules.grpc.ExternalProcessorStub
         stream = _RequestStream()
@@ -1182,8 +1240,11 @@ def collect_frontend_query_token_ids(
     request_id: str,
     timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
 ) -> list[int]:
-    import requests
+    """POST query_instance_id to native Frontend HTTP and parse nvext.token_ids.
 
+    Adds the query annotation when absent so Frontend does not generate. Session
+    trust_env is off. Non-200, incomplete SSE, or missing tokens fail the test.
+    """
     annotated = json.loads(json.dumps(payload))
     nvext = dict(annotated.get("nvext") or {})
     annotations = list(nvext.get("annotations") or [])
@@ -1286,6 +1347,7 @@ class EppFrontendParityStack:
     def collect_frontend_tokens(
         self, payload: dict[str, Any], *, path: str, request_id: str
     ) -> list[int]:
+        """Collect query_instance_id tokens from the started Frontend HTTP port."""
         return collect_frontend_query_token_ids(
             self.frontend_url, payload, path=path, request_id=request_id
         )
@@ -1293,13 +1355,13 @@ class EppFrontendParityStack:
     def collect_epp_tokens(
         self, payload: dict[str, Any], *, path: str, request_id: str
     ) -> list[int]:
+        """Collect token_data from the started /epp ext_proc listener."""
         if self.driver is None:
             raise RuntimeError("parity stack has not started")
         return self.driver.collect_token_data(payload, path=path, request_id=request_id)
 
     def __enter__(self) -> EppFrontendParityStack:
-        from tests.router.mocker_process import MockerProcess
-
+        """Acquire the session lock and start API, mocker, Frontend, and /epp."""
         try:
             return self._start(MockerProcess)
         except Exception:
@@ -1307,6 +1369,7 @@ class EppFrontendParityStack:
             raise
 
     def _start(self, mocker_cls) -> EppFrontendParityStack:
+        """Launch children against the loopback API; fail if the fixture recorded errors."""
         self._lock = acquire_epp_session_lock()
         self._stack.callback(self._lock.release)
         assert_epp_ports_free()
@@ -1394,6 +1457,7 @@ class EppFrontendParityStack:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        """Tear down children, then fail on recorded fixture API errors if the body passed."""
         close_error = None
         try:
             self._stack.close()
@@ -1415,8 +1479,7 @@ class EppFrontendParityStack:
         return None
 
     def _wait_for_frontend_models(self) -> None:
-        import requests
-
+        """Poll Frontend /v1/models until a model appears or PROCESS_TIMEOUT_S elapses."""
         deadline = time.monotonic() + PROCESS_TIMEOUT_S
         last_error = "frontend /v1/models not checked"
         with requests.Session() as session:
@@ -1436,7 +1499,3 @@ class EppFrontendParityStack:
                     last_error = str(exc)
                 time.sleep(0.25)
         raise TimeoutError(f"Frontend models were not ready: {last_error}")
-
-
-def unique_request_id(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4()}"

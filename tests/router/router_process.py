@@ -194,16 +194,13 @@ def fetch_loopback_tls_cert(host: str, port: int, timeout_s: float) -> str:
     """
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("TLS cert fetch is limited to loopback")
-    raw = socket.create_connection((host, port), timeout=timeout_s)
-    raw.settimeout(timeout_s)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    tls = context.wrap_socket(raw, server_hostname="localhost")
-    try:
-        der = tls.getpeercert(binary_form=True)
-    finally:
-        tls.close()
+    with socket.create_connection((host, port), timeout=timeout_s) as raw:
+        raw.settimeout(timeout_s)
+        with context.wrap_socket(raw, server_hostname="localhost") as tls:
+            der = tls.getpeercert(binary_form=True)
     if not der:
         raise OSError("loopback TLS peer certificate missing")
     return ssl.DER_cert_to_PEM_cert(der)
