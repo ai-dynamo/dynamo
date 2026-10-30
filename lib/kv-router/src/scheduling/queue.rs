@@ -48,7 +48,7 @@ use crate::protocols::{
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
-    WorkerLoadProjection,
+    WorkerLoadProjection, WorkerLoadReader,
 };
 
 // The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
@@ -588,9 +588,6 @@ struct SchedulerQueueActor<
     /// Rows prepared for the request enqueued this turn, dropped when the turn ends.
     turn_prepared: Option<Box<PreparedAdmission>>,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
-    /// Request-agnostic load snapshot the class-queue gate judges `has_room` on. Refilled in
-    /// place once per gate pass; the actor never allocates it per admission.
-    gate_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
@@ -791,7 +788,6 @@ impl<
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::default(),
-            gate_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             block_size,
             selector,
@@ -1476,15 +1472,9 @@ impl<
                 .and_then(|provider| provider(&request));
             let should_queue = class.queueing_enabled()
                 && (self.pending.has_backlog(class_index) || {
-                    self.slots.project_worker_loads_into(
-                        None,
-                        decay_now,
-                        &mut self.gate_loads,
-                        None,
-                    );
                     let configs = self.workers_with_configs.borrow();
                     Self::all_eligible_workers_full(
-                        &self.gate_loads,
+                        &self.slots.worker_load_reader(decay_now),
                         &configs,
                         class.busy_thresholds,
                         request
@@ -1656,25 +1646,19 @@ impl<
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
 
-    fn has_dispatchable_ready_head(&mut self) -> bool {
+    fn has_dispatchable_ready_head(&self) -> bool {
         let decay_now = Instant::now();
         let slots = &self.slots;
         let provider = self.available_worker_provider.as_ref();
         let workers = &self.workers_with_configs;
-        let gate_loads = &mut self.gate_loads;
-        let mut gate_fresh = false;
         self.pending.any_ready_head(|_, class, queued| {
             if !class.queueing_enabled() {
                 return true;
             }
-            if !gate_fresh {
-                slots.project_worker_loads_into(None, decay_now, gate_loads, None);
-                gate_fresh = true;
-            }
             let available = provider.and_then(|provider| provider(&queued.request));
             let configs = workers.borrow();
             !Self::all_eligible_workers_full(
-                gate_loads,
+                &slots.worker_load_reader(decay_now),
                 &configs,
                 class.busy_thresholds,
                 queued
@@ -1756,21 +1740,16 @@ impl<
                 break;
             }
             let decay_now = Instant::now();
-            // Share a capacity snapshot within this pass only. The next admission
-            // must observe the capacity reserved by the previous one.
+            // Load is read after the previous admission booked, so this one sees that
+            // reservation. Frees and peer bookings from other tasks can land between
+            // two reads, as they can right after the gate.
             let popped = {
                 let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
                 let workers = &self.workers_with_configs;
-                let gate_loads = &mut self.gate_loads;
-                let mut gate_fresh = false;
                 self.pending.pop_next(|_, class, queued| {
                     if !class.queueing_enabled() {
                         return true;
-                    }
-                    if !gate_fresh {
-                        slots.project_worker_loads_into(None, decay_now, gate_loads, None);
-                        gate_fresh = true;
                     }
                     let available = provider.and_then(|provider| provider(&queued.request));
                     let configs = workers.borrow();
@@ -1778,7 +1757,7 @@ impl<
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
                     !Self::all_eligible_workers_full(
-                        gate_loads,
+                        &slots.worker_load_reader(decay_now),
                         &configs,
                         class.busy_thresholds,
                         queued
@@ -2243,14 +2222,16 @@ impl<
     /// Whether every eligible rank is past `limits`, judged on the same `LOAD` row worker
     /// selection reads.
     fn all_eligible_workers_full(
-        worker_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        worker_loads: &WorkerLoadReader<'_>,
         configs: &HashMap<WorkerId, C>,
         limits: BusyThresholds,
         eligibility: RoutingEligibility<'_>,
     ) -> bool {
         let has_room = |worker: WorkerWithDpRank, config: &C| {
-            let load =
-                WorkerLoadInput::for_worker(worker_loads, worker, WorkerLoadProjection::default);
+            let load = WorkerLoadInput::from_observed(
+                worker_loads.get(worker),
+                WorkerLoadProjection::default,
+            );
             limits.has_room(&load, WorkerCapacity::of(config))
         };
 
@@ -3884,7 +3865,6 @@ policy_classes:
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
-            gate_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             block_size: 16,
             selector,
@@ -4180,35 +4160,6 @@ policy_classes:
         let selected = rx.await.unwrap().unwrap().best_worker;
         assert_eq!(selected, WorkerWithDpRank::new(1, 0));
         assert_eq!(prepared_queue.prepared_selections(), 1);
-    }
-
-    #[tokio::test]
-    async fn gate_snapshot_reuses_the_actor_scratch_across_admissions() {
-        // Queueing enabled, nothing ever full: every enqueue runs the gate and admits.
-        let (queue, slots) = make_queue(1, 16, 64, Some(1.0));
-        let mut actor = actor_for_test(&queue, &slots, DefaultWorkerSelector::new(None, "test"));
-        assert_eq!(actor.gate_loads.capacity(), 0);
-
-        let (first, mut first_rx) = make_request("first", 64);
-        let metadata = queue.default_queue_metadata(&first, Instant::now());
-        assert!(actor.handle_enqueue(first, None, None, None, None, metadata));
-        actor.handle_enqueued().await;
-        assert!(first_rx.try_recv().unwrap().is_ok());
-        let capacity = actor.gate_loads.capacity();
-        assert!(
-            capacity > 0,
-            "the gate projected load into the actor's scratch"
-        );
-
-        let (second, _second_rx) = make_request("second", 64);
-        let metadata = queue.default_queue_metadata(&second, Instant::now());
-        assert!(actor.handle_enqueue(second, None, None, None, None, metadata));
-        actor.handle_enqueued().await;
-        assert_eq!(
-            actor.gate_loads.capacity(),
-            capacity,
-            "a later gate pass refills the same allocation"
-        );
     }
 
     #[tokio::test]

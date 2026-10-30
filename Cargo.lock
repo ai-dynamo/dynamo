@@ -2415,6 +2415,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-decisions"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
+dependencies = [
+ "dynamo-protocols",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
 version = "1.7.0"
 dependencies = [
@@ -2517,6 +2529,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
+ "prometheus",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2650,6 +2663,7 @@ dependencies = [
  "dialoguer",
  "dynamo-bench",
  "dynamo-custom-policy-builtin",
+ "dynamo-decisions",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",

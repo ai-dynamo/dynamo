@@ -10,7 +10,7 @@
 use std::future::IntoFuture;
 use std::io;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, State};
@@ -22,6 +22,7 @@ use axum::{Json, Router};
 use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
+use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -31,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::PoolSnapshot;
+use crate::metrics::Metrics;
 
 /// The request body limit when `DYN_HTTP_BODY_LIMIT_MB` is unset, as for
 /// Dynamo's HTTP service: enough for 500k-token prompts.
@@ -43,6 +45,7 @@ struct Proxy {
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
+    metrics: Metrics,
 }
 
 /// The Global Frontend's routes over the pools `pools` publishes.
@@ -51,21 +54,25 @@ struct Proxy {
 /// response ends; selectors and signals that weigh this process's own
 /// requests must read the same tracker. `http` must not set a total request
 /// timeout, because a response streams for as long as the pool generates.
+/// `/metrics` serves `metrics`.
 pub fn app(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
+    metrics: Metrics,
 ) -> Router {
     let proxy = Arc::new(Proxy {
         pools,
         selector,
         in_flight,
         http,
+        metrics,
     });
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/{*route}", post(forward))
+        .route("/metrics", get(scrape))
         .route("/health", get(health))
         .route("/live", get(|| async { Json(json!({"status": "live"})) }))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "no such route".to_owned()) })
@@ -121,13 +128,17 @@ async fn forward(
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let received = Instant::now();
+    let metrics = &proxy.metrics;
     let Ok(Model { model }) = serde_json::from_slice(&body) else {
+        metrics.rejected(error_type::VALIDATION);
         let message = "the request body must be a JSON object with a string `model`";
         return error(StatusCode::BAD_REQUEST, message.to_owned());
     };
     let snapshot = proxy.pools.borrow().clone();
     let candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
     if candidates.is_empty() {
+        metrics.rejected(error_type::NOT_FOUND);
         return error(
             StatusCode::NOT_FOUND,
             format!("model {model} is not served"),
@@ -141,15 +152,17 @@ async fn forward(
         .and_then(|session| session.to_str().ok());
     let request = RoutingRequest::new(&model).with_session(session);
     let Some(target) = proxy.selector.select(&request, &candidates) else {
+        metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);
     };
-    let pool = &target.pool.id;
-    let in_flight = proxy.in_flight.start(pool);
+    let pool = target.pool;
+    let in_flight = proxy.in_flight.start(&pool.id);
     let Some(url) = route_url(target.frontend, &uri) else {
+        metrics.rejected(error_type::VALIDATION);
         return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
     };
-    tracing::debug!(%pool, %url, "forwarding request");
+    tracing::debug!(pool = %pool.id, %url, "forwarding request");
     // A stream body cannot be copied, so reqwest keeps none for redirects,
     // and the bytes are freed once written to the pool.
     let upload = reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
@@ -160,7 +173,8 @@ async fn forward(
     ))));
     // If the client leaves while the pool queues the request, this handler
     // is dropped, which drops the send and closes the pool connection,
-    // cancelling the request there.
+    // cancelling the request there, and counts it as cancelled.
+    let sending = metrics.sending(pool);
     let upstream = match proxy
         .http
         .request(method, url.clone())
@@ -171,12 +185,13 @@ async fn forward(
     {
         Ok(upstream) => upstream,
         Err(failure) => {
+            sending.answered(None);
             // reqwest names only the outermost failure ("error sending
             // request"); the cause, such as a refused or reset connection,
             // is in its sources.
             let failure = anyhow::Error::new(failure);
             tracing::warn!(
-                %pool,
+                pool = %pool.id,
                 %url,
                 error = format!("{failure:#}"),
                 "pool frontend failed"
@@ -187,12 +202,19 @@ async fn forward(
     };
 
     let status = upstream.status();
+    sending.answered(Some(status));
+    let mut timing = status
+        .is_success()
+        .then(|| metrics.response(pool, received));
     let mut headers = upstream.headers().clone();
     remove_hop_headers(&mut headers);
-    // The stream keeps the request counted in flight until it ends or the
-    // client drops it; dropping it closes the pool connection.
+    // The stream keeps the request counted in flight, and times it, until it
+    // ends or the client drops it; dropping it closes the pool connection.
     let body = upstream.bytes_stream().map(move |chunk| {
         let _in_flight = &in_flight;
+        if let Some(timing) = &mut timing {
+            timing.chunk(&chunk);
+        }
         chunk
     });
     let mut response = Response::new(Body::from_stream(body));
@@ -222,6 +244,18 @@ async fn models(State(proxy): State<Arc<Proxy>>) -> Json<serde_json::Value> {
         .map(|model| json!({"id": model, "object": "model", "created": created, "owned_by": "nvidia"}))
         .collect::<Vec<_>>();
     Json(json!({"object": "list", "data": data}))
+}
+
+async fn scrape(State(proxy): State<Arc<Proxy>>) -> Response {
+    let pools = proxy.pools.borrow().clone();
+    match proxy.metrics.render(&pools) {
+        Ok(text) => ([(header::CONTENT_TYPE, prometheus::TEXT_FORMAT)], text).into_response(),
+        Err(failure) => {
+            tracing::warn!(error = %failure, "failed to encode metrics");
+            let message = "failed to encode metrics".to_owned();
+            error(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
+    }
 }
 
 /// Healthy while some pool has a frontend to send to.

@@ -49,10 +49,6 @@ inputs:
     description: 'render.py --variant value; must match the build job''s render. Empty = default.'
     required: false
     default: ''
-  extra_build_args:
-    description: 'Caller build args (newline-separated KEY=VALUE) the build passed; forwarded so the extract builds the same image.'
-    required: false
-    default: ''
   artifact_retention_days:
     description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
     required: false
@@ -71,6 +67,10 @@ inputs:
     default: ''
   sccache_region:
     description: 'SCCACHE region (= aws_default_region the build passed). See sccache_bucket.'
+    required: false
+    default: ''
+  extra_build_args:
+    description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) — must equal the extra_build_args the build passed to docker-remote-build, so the stages they affect cache-hit instead of rebuilding here.'
     required: false
     default: ''
   diff_base_sha:
@@ -152,6 +152,7 @@ runs:
         #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
         #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
         #     cache key lines up and the warm layers cache-hit.
+        #   - extra_build_args: whatever else the caller passed to the build.
         # The warm cache is best-effort though: the shared buildkit pods GC under
         # concurrent load, so a stage can legitimately re-run here (seen post-merge
         # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
@@ -187,10 +188,11 @@ runs:
         # --build-arg (it would clear the ARG and reintroduce the failure).
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        # Caller build args the image build also received (e.g. image overrides).
-        EXTRA_ARGS=()
-        while IFS= read -r arg; do
-          [ -n "$arg" ] && EXTRA_ARGS+=(--build-arg "$arg")
+        EXTRA_ARGS=""
+        while IFS= read -r BUILD_ARG; do
+          if [ -n "$BUILD_ARG" ]; then
+            EXTRA_ARGS+=" --build-arg ${BUILD_ARG}"
+          fi
         done <<< "${EXTRA_BUILD_ARGS}"
         bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/compliance \
             docker buildx build \
@@ -202,7 +204,7 @@ runs:
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             $EPP_IMAGE_ARG \
-            "${EXTRA_ARGS[@]}" \
+            $EXTRA_ARGS \
             --progress=plain \
             -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
@@ -404,9 +406,11 @@ runs:
         # resolves the GC'd default staging tag. Empty for non-frontend targets.
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        EXTRA_ARGS=()
-        while IFS= read -r arg; do
-          [ -n "$arg" ] && EXTRA_ARGS+=(--build-arg "$arg")
+        EXTRA_ARGS=""
+        while IFS= read -r BUILD_ARG; do
+          if [ -n "$BUILD_ARG" ]; then
+            EXTRA_ARGS+=" --build-arg ${BUILD_ARG}"
+          fi
         done <<< "${EXTRA_BUILD_ARGS}"
         bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/sources \
             docker buildx build \
@@ -419,7 +423,7 @@ runs:
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             --build-arg ENABLE_SOURCE_ARCHIVAL=true \
             $EPP_IMAGE_ARG \
-            "${EXTRA_ARGS[@]}" \
+            $EXTRA_ARGS \
             --progress=plain \
             -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \

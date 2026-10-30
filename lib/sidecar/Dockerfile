@@ -82,6 +82,9 @@ FROM builder-base AS sidecar-builder
 
 ARG TARGETARCH
 ARG CARGO_CYCLONEDX_VERSION=0.5.9
+# PR checks set this to compile with codegen-units=16 and no LTO, in less than
+# half the time. Published images keep the shipping profile.
+ARG FAST_RELEASE_PROFILE=false
 
 # Build all four sidecars and their compliance inventory in one RUN. The target
 # directory exists only during this RUN. The final step removes it so the
@@ -111,6 +114,9 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     CARGO_TARGET_DIR=/tmp/cargo-tools \
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
+    if [ "${FAST_RELEASE_PROFILE}" = "true" ]; then \
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off; \
+    fi; \
     cargo build --release --locked \
         -p dynamo-vllm-sidecar \
         -p dynamo-sglang-sidecar \
