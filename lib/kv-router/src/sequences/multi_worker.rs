@@ -24,7 +24,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
-use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
+use super::prompt_registry::{PromptRegistry, WorkerLoadReader, WorkerLoadSnapshot};
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
@@ -1338,6 +1338,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) {
         self.prompt_registry
             .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
+    /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
+    pub(crate) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+        self.prompt_registry.worker_load_reader(decay_now)
     }
 
     /// Record the capacity each worker's ranks report, so the projection pass can judge a

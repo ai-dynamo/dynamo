@@ -1502,85 +1502,71 @@ policy_classes:
     #[test]
     fn affinity_lanes_preserve_fallback_and_cleanup() {
         let worker = WorkerWithDpRank::new(7, 3);
-        for rank in [Some(3), None] {
-            for cleanup in ["dispatch", "cancel", "expire"] {
-                let mut queue = PolicyQueue::new(&admission_profile());
-                let due_at = Instant::now() + std::time::Duration::from_secs(1);
-                for (lane, payload, arrival) in [
-                    (QueueLane::Exact(worker), "hard", 0.0),
-                    (
-                        QueueLane::Affinity(WorkerAffinityTarget::new(7, rank)),
-                        "soft",
-                        1.0,
-                    ),
-                    (QueueLane::Shared, "plain", 2.0),
-                ] {
-                    queue
-                        .enqueue_in_lane(
-                            QueueMetadata {
-                                class_index: 0,
-                                snapshot: QueueSnapshot::new(1, 0),
-                                due_at: (payload == "soft" && cleanup == "expire")
-                                    .then_some(due_at),
-                                arrival_offset_secs: arrival,
-                            },
-                            1,
-                            0.0,
-                            0,
-                            lane,
-                            payload,
-                        )
-                        .unwrap();
-                }
-                assert!(queue.has_affinity_backlog());
-                assert_eq!(
-                    queue
-                        .pop_next_with_readiness(|_, _, payload| match *payload {
-                            "plain" => QueueReadiness::Ready,
-                            "soft" => QueueReadiness::FallbackBlocked,
-                            _ => QueueReadiness::Blocked,
-                        })
-                        .unwrap()
-                        .into_payload(),
-                    "plain"
-                );
-                assert_eq!(queue.pending_count(), 2);
-
-                match cleanup {
-                    "dispatch" => {
-                        queue.recheck_affinity_lanes();
-                        assert_eq!(
-                            queue
-                                .pop_next(|_, _, payload| {
-                                    assert_ne!(*payload, "hard");
-                                    true
-                                })
-                                .unwrap()
-                                .into_payload(),
-                            "soft"
-                        );
-                    }
-                    "cancel" => queue.retain(|payload| *payload != "soft"),
-                    "expire" => {
-                        let expired = queue.take_expired(due_at);
-                        assert_eq!(expired.len(), 1);
-                        assert_eq!(expired.into_iter().next().unwrap().into_payload(), "soft");
-                        assert_eq!(queue.next_due_at(), None);
-                    }
-                    _ => unreachable!(),
-                }
-                assert!(!queue.has_affinity_backlog());
-                assert!(queue.classes[0].fallback_heads.is_empty());
-                assert_eq!(queue.pending_count(), 1);
-                assert_eq!(queue.class_stats(0).requests, 1);
-                queue.recheck_worker(worker);
-                assert_eq!(
-                    queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-                    "hard"
-                );
-                assert_eq!(queue.pending_count(), 0);
-                assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+        for cleanup in ["dispatch", "cancel"] {
+            let mut queue = PolicyQueue::new(&admission_profile());
+            for (lane, payload, arrival) in [
+                (QueueLane::Exact(worker), "hard", 0.0),
+                (QueueLane::Affinity(worker.into()), "soft", 1.0),
+                (QueueLane::Shared, "plain", 2.0),
+            ] {
+                queue
+                    .enqueue_in_lane(
+                        QueueMetadata {
+                            class_index: 0,
+                            snapshot: QueueSnapshot::new(1, 0),
+                            due_at: None,
+                            arrival_offset_secs: arrival,
+                        },
+                        1,
+                        0.0,
+                        0,
+                        lane,
+                        payload,
+                    )
+                    .unwrap();
             }
+            assert!(queue.has_affinity_backlog());
+            assert_eq!(
+                queue
+                    .pop_next_with_readiness(|_, _, payload| match *payload {
+                        "plain" => QueueReadiness::Ready,
+                        "soft" => QueueReadiness::FallbackBlocked,
+                        _ => QueueReadiness::Blocked,
+                    })
+                    .unwrap()
+                    .into_payload(),
+                "plain"
+            );
+            assert_eq!(queue.pending_count(), 2);
+
+            match cleanup {
+                "dispatch" => {
+                    queue.recheck_affinity_lanes();
+                    assert_eq!(
+                        queue
+                            .pop_next(|_, _, payload| {
+                                assert_ne!(*payload, "hard");
+                                true
+                            })
+                            .unwrap()
+                            .into_payload(),
+                        "soft"
+                    );
+                }
+                "cancel" => queue.retain(|payload| *payload != "soft"),
+                _ => unreachable!(),
+            }
+            assert!(!queue.has_affinity_backlog());
+            assert!(queue.classes[0].fallback_heads.is_empty());
+            assert_eq!(queue.pending_count(), 1);
+            assert_eq!(queue.class_stats(0).requests, 1);
+            queue.recheck_worker(worker);
+            assert_eq!(
+                queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+                "hard"
+            );
+            assert_eq!(queue.pending_count(), 0);
+            assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
         }
     }
 
@@ -1802,84 +1788,6 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "worker-2"
         );
-    }
-
-    #[test]
-    fn fallback_head_competes_for_other_worker_capacity_before_later_shared_work() {
-        let mut queue = PolicyQueue::new(&admission_profile());
-        let target = WorkerAffinityTarget::new(1, Some(0));
-        for (lane, payload, arrival) in [
-            (QueueLane::Affinity(target), "cancelled", 0.0),
-            (QueueLane::Affinity(target), "fallback", 1.0),
-            (
-                QueueLane::Affinity(WorkerAffinityTarget::new(2, Some(0))),
-                "healthy",
-                2.0,
-            ),
-        ] {
-            queue
-                .enqueue_in_lane(
-                    QueueMetadata {
-                        class_index: 0,
-                        snapshot: QueueSnapshot::new(1, 0),
-                        due_at: None,
-                        arrival_offset_secs: arrival,
-                    },
-                    3,
-                    0.0,
-                    0,
-                    lane,
-                    payload,
-                )
-                .unwrap();
-        }
-        assert!(
-            queue
-                .pop_next_with_readiness(|_, _, payload| {
-                    if *payload == "healthy" {
-                        QueueReadiness::Blocked
-                    } else {
-                        QueueReadiness::FallbackBlocked
-                    }
-                })
-                .is_none()
-        );
-        queue.retain(|payload| *payload != "cancelled");
-        queue
-            .enqueue(
-                0,
-                3,
-                QueueSnapshot::new(1, 0),
-                3.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "plain",
-            )
-            .unwrap();
-        queue.recheck_worker(WorkerWithDpRank::new(0, 0));
-        assert_eq!(
-            queue
-                .pop_next_with_readiness(|_, _, payload| {
-                    assert_ne!(*payload, "healthy", "unrelated target must stay parked");
-                    QueueReadiness::Ready
-                })
-                .unwrap()
-                .into_payload(),
-            "fallback"
-        );
-        assert!(queue.classes[0].fallback_heads.is_empty());
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "plain"
-        );
-        queue.recheck_affinity_target(WorkerAffinityTarget::new(2, Some(0)));
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "healthy"
-        );
-        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
-        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]

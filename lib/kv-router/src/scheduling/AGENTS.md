@@ -16,7 +16,7 @@ sequenceDiagram
     end
     participant S as WorkerSelector
 
-    H->>H: Resolve class_index, sample snapshot, stamp arrival
+    H->>H: Resolve class_index, sample snapshot, stamp arrival, prepare candidate rows
     H->>A: Enqueue(request, metadata)
     alt Direct path (never-queues class or zero workers)
         A->>S: select_worker(request)
@@ -39,6 +39,14 @@ sequenceDiagram
 - `SchedulerQueue` is the public handle. It resolves the class index, samples the
   cache-overlap snapshot, and stamps the arrival offset on the caller task before
   sending the Enqueue command.
+- For a selector with a `candidate_preparer`, the handle also builds the candidate
+  rows on the caller task: eligibility plus cache, preferred-taint, and fetch inputs.
+  The actor fills only load inputs, which depend on its earlier bookings. It uses the
+  rows only when it would build the same ones: the worker configuration, availability,
+  and overload it reads at selection match preparation, no rank is past the host's
+  reject thresholds, and the request is admitted in the actor turn that received it.
+  Otherwise it rebuilds them, and rows for a request that stays queued are dropped
+  when that turn ends.
 - `SchedulerQueueActor` routes every request through the policy queue and drains the
   ready backlog in the same actor turn, so freed capacity can go to another class's
   queued head under DRR rather than to the arriving request. The direct path remains
@@ -60,20 +68,33 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
-├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
-│   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
-│   └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
-├── blocked_workers: FxHashSet<WorkerWithDpRank>
-└── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+├── pending: BinaryHeap<PolicyQueueEntry>                 # shared requests
+├── ready_by_worker: FxHashMap<WorkerLane, BinaryHeap<PolicyQueueEntry>>
+│   ├── Exact(7, dp_rank=0) → requests hard-pinned to that rank
+│   ├── Affinity(7, dp_rank=0) → soft requests targeting that rank
+│   └── WorkerAffinity(9) → soft requests targeting any rank of that worker
+├── blocked_workers: FxHashSet<WorkerLane>
+├── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+└── fallback_heads: BTreeSet<WorkerLaneHead>               # soft heads awaiting fallback capacity
 ```
 
 - `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
-- `ready_by_worker` contains requests pinned to a particular worker and data-parallel rank. Each worker/rank heap is removed when its last request leaves.
-- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes.
-- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` only identifies a queue pinned to one worker/rank; the actor and selector retain worker knowledge.
+- `ready_by_worker` separates hard pins from soft affinity, so a hard pin cannot
+  hide a soft request that can fall back. Each lane is removed when its last request leaves.
+- `candidate_worker_heads` tracks one highest-priority head per unblocked lane.
+  A full lane leaves this index until it is rechecked.
+- Affinity lanes wake on target capacity changes, an enqueue to the same target,
+  or the 100 ms affinity recheck while affinity backlog exists.
+- `fallback_heads` contains soft heads whose target is ineligible and whose
+  fallback workers are full. These heads are rechecked on every dispatch pass,
+  so another worker's freed capacity can admit them before later shared work.
+- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring
+  state. `WorkerLane` identifies the target and whether it is hard or soft;
+  the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
+- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest
+  indexed lane head. Healthy blocked lanes stay parked until a wake; fallback
+  heads remain eligible for a recheck on every pass.
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
@@ -85,6 +106,9 @@ PolicyClassQueue("agents")
 - Before an unpinned retry, exclude every worker already failed by that migration state machine. Preserve caller allowlists and routing constraints. An affinity-derived pin may be invalidated and rebound; an explicit request pin remains exact.
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
 - Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)` and the admission lifecycle lease remains request-ID-only until handoff.
+- Prepared candidate rows must not hold anything the actor's bookings change. Load
+  inputs are filled on the actor at selection, so each admission still observes
+  every earlier booking.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery
