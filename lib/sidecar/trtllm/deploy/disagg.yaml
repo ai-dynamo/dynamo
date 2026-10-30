@@ -97,7 +97,6 @@ spec:
           # engine's own state rather than just a connectable socket.
           # The pinned engine ships OpenEngine bindings under tensorrt_llm,
           # but importing them loads TensorRT-LLM for every exec probe.
-          # It does not yet serve grpc.health.v1.Health; use Control.Health.
           # HealthResponse.state is protobuf field 1 (varint); READY is 2.
           # Int32Value decodes that field and skips any other fields.
           startupProbe:
