@@ -25,6 +25,7 @@ from dynamo.vllm.kv_connector_protocols import (
     LMCacheMPConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
+    PureKVAConnectorProtocol,
     make_kv_connector_protocol,
 )
 
@@ -230,6 +231,35 @@ def test_lmcache_mp_decode_returns_empty_and_ignores_engine_params():
 
 
 # ---------------------------------------------------------------------------
+# PureKVAConnectorProtocol
+# ---------------------------------------------------------------------------
+
+
+def test_purekva_prefill_request_shape():
+    proto = PureKVAConnectorProtocol(_config("PureKVConnector_V1"))
+    params = proto.prefill_request_kv_transfer_params()
+    assert params["do_remote_decode"] is True
+    assert params["do_remote_prefill"] is False
+    assert params["purekva_handoff"] is True
+    assert isinstance(params["purekva_handoff_id"], str)
+
+
+def test_purekva_decode_request_shape():
+    proto = PureKVAConnectorProtocol(_config("PureKVConnector_V1"))
+    prefill_id = proto.prefill_request_kv_transfer_params()["purekva_handoff_id"]
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params == {
+        "do_remote_decode": False,
+        "do_remote_prefill": True,
+        "purekva_handoff": True,
+        "purekva_handoff_id": prefill_id,
+        "expected_remote_kv": True,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Factory + registry
 # ---------------------------------------------------------------------------
 
@@ -275,6 +305,16 @@ def test_make_kv_connector_protocol_dispatches_nixl():
 def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     proto = make_kv_connector_protocol(_config("MooncakeConnector"))
     assert isinstance(proto, MooncakeConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_purekva():
+    proto = make_kv_connector_protocol(_config("PureKVConnector_V1"))
+    assert isinstance(proto, PureKVAConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_purekva_alias():
+    proto = make_kv_connector_protocol(_config("PureKVAPlugin"))
+    assert isinstance(proto, PureKVAConnectorProtocol)
 
 
 def test_make_kv_connector_protocol_dispatches_multiconnector_to_nixl():
@@ -533,7 +573,8 @@ def test_registry_keys_match_vllm_connector_names():
         "MooncakeConnector",
         "LMCacheMPConnector",
         "NeuronNixlConnector",
-        "MooncakeConnector",
+        "PureKVConnector_V1",
+        "PureKVAPlugin",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
