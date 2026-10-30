@@ -5,6 +5,10 @@
 //! sources agree: MCS imports a Ready PoolRelay endpoint for it, and its
 //! PoolRelay has registered within the lease (`POST /pools`).
 //!
+//! The two are matched by pool key, so a registration's `cluster_id` must be
+//! the name MCS gives the pool's cluster: its About API cluster ID with
+//! standard MCS, or its member cluster name with Karmada.
+//!
 //! Each source gives what it knows best. The registration says what the pool
 //! serves: model, capabilities, capacity and location. MCS gives the
 //! addresses other clusters can reach: the Relay's, and the frontends'.
