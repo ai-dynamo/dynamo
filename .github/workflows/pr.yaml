@@ -33,6 +33,7 @@ jobs:
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
+      sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-config-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -165,6 +167,9 @@ jobs:
       - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          if [[ '${{ needs.changed-files.outputs.sidecar_trtllm_image }}' == 'true' ]]; then
+            test '${{ needs.sidecar-trtllm-nightly-config-test.result }}' = 'success'
+          fi
 
   deploy-status-check:
     runs-on: ubuntu-24.04
@@ -338,6 +343,19 @@ jobs:
 # ============================================================================
 # Sidecar
 # ============================================================================
+
+  sidecar-trtllm-nightly-config-test:
+    name: TRT-LLM nightly configuration (CPU)
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar_trtllm_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Test nightly selection
+        run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
 
   sidecar-build:
     name: dynamo-sidecar
