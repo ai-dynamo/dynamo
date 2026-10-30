@@ -600,14 +600,16 @@ async fn unlabeled_image_is_excluded_with_its_descendants() {
     );
     assert!(is_noop(&child));
 
-    // Removals of excluded blocks never reach the index.
+    // Removals of excluded blocks never reach the index; only E_T passes through.
     let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
     assert_eq!(removed_ids(&evict), vec![E_T]);
+    indexes.apply(A, &evict).await;
 
     let stats = normalizer.engine_mm_stats();
     assert_eq!(stats.excluded_unmapped, 2);
     assert_eq!(stats.excluded_parent, 1);
-    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+    // Both indexes must reach zero after the text-prefix block is evicted.
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
 }
 
 /// The id map never evicts a live mapping. When it is full, a new multimodal
