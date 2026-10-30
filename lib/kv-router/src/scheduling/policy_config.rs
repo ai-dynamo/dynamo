@@ -51,8 +51,13 @@ pub struct PolicyClassConfig {
     pub quantum: usize,
     /// Time-to-first-token budget in whole milliseconds, or `None` when the class sets none.
     /// An EDF class orders a request without its own deadline by its router ingress time
-    /// plus this budget. Nothing rejects or expires a request when the budget passes.
+    /// plus this budget. Other orders neither sort nor expire by it.
     pub slo_ttft_ms: Option<NonZeroU64>,
+    /// Controlled delay, EDF classes only: the online router rejects a request still waiting
+    /// for admission when its due time passes. That is its explicit deadline, which wins even
+    /// when later, else router ingress plus `slo_ttft_ms`. Off by default, when the class
+    /// budget only orders the class. Explicit deadlines expire either way.
+    pub controlled_delay: bool,
     /// The limits this class waits on.
     pub busy_thresholds: BusyThresholds,
     pub request_queue_limit_per_worker: Option<usize>,
@@ -63,6 +68,12 @@ pub struct PolicyClassConfig {
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
         self.busy_thresholds.is_configured()
+    }
+
+    /// Whether an online queue expires this class's budget: controlled delay in an EDF class,
+    /// the only order whose head always carries the class's earliest due time.
+    pub(crate) fn expires_class_budget(&self) -> bool {
+        self.controlled_delay && self.queue_policy == RouterQueuePolicy::Edf
     }
 
     /// Any zero per-worker limit means `queue_rejection` rejects every queued
@@ -238,6 +249,7 @@ impl PolicyProfile {
             queue_policy: router_queue_policy,
             quantum: 1,
             slo_ttft_ms: None,
+            controlled_delay: false,
             busy_thresholds: BusyThresholds {
                 prefill_busy_threshold: None,
                 prefill_busy_threshold_frac: router_queue_threshold,
@@ -515,6 +527,8 @@ struct RawPolicyClassConfig {
     queue_policy: RouterQueuePolicy,
     quantum: usize,
     slo_ttft_ms: Option<u64>,
+    #[serde(default)]
+    controlled_delay: bool,
     prefill_busy_threshold: Option<usize>,
     prefill_busy_threshold_frac: Option<f64>,
     decode_busy_threshold_frac: Option<f64>,
@@ -618,6 +632,12 @@ fn resolve_policy_class(
             raw.name
         )));
     }
+    if raw.controlled_delay && raw.queue_policy != RouterQueuePolicy::Edf {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} policy class {:?} controlled_delay requires queue_policy edf",
+            raw.name
+        )));
+    }
     for (field, value) in [
         (
             "prefill_busy_threshold_frac",
@@ -653,6 +673,7 @@ fn resolve_policy_class(
         queue_policy: raw.queue_policy,
         quantum: raw.quantum,
         slo_ttft_ms,
+        controlled_delay: raw.controlled_delay,
         busy_thresholds: BusyThresholds {
             prefill_busy_threshold: raw.prefill_busy_threshold,
             prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
@@ -1173,6 +1194,118 @@ policy_classes:
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn controlled_delay_is_a_per_class_edf_opt_in() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_class: omitted
+policy_classes:
+  - name: enabled
+    quantum: 1
+    slo_ttft_ms: 100
+    controlled_delay: true
+  - name: omitted
+    quantum: 1
+    slo_ttft_ms: 100
+  - name: disabled
+    quantum: 1
+    controlled_delay: false
+  - name: ordered
+    queue_policy: wspt
+    quantum: 1
+    controlled_delay: false
+models:
+  m:
+    policy_classes:
+      - name: enabled
+        quantum: 1
+        slo_ttft_ms: 100
+"#,
+        )
+        .unwrap();
+        let enabled = |model| -> Vec<(String, bool)> {
+            config
+                .resolve_profile(model, None, RouterQueuePolicy::Fcfs)
+                .classes()
+                .iter()
+                .map(|class| (class.name.clone(), class.controlled_delay))
+                .collect()
+        };
+        let expected = |pairs: &[(&str, bool)]| -> Vec<(String, bool)> {
+            pairs
+                .iter()
+                .map(|&(name, on)| (name.to_string(), on))
+                .collect()
+        };
+        // Each class opts in alone; omitted is off, and any order may say false.
+        let root = expected(&[
+            ("enabled", true),
+            ("omitted", false),
+            ("disabled", false),
+            ("ordered", false),
+        ]);
+        assert_eq!(enabled(None), root);
+        assert_eq!(enabled(Some("other")), root);
+        // A model profile replaces the root wholesale, settings included.
+        assert_eq!(enabled(Some("m")), expected(&[("enabled", false)]));
+        // Without a configured profile, the synthetic class is off.
+        assert!(
+            !PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Edf)
+                .default_class()
+                .controlled_delay
+        );
+
+        // The setting is a YAML boolean, and only EDF can enforce it.
+        let class = |setting: &str| {
+            RouterPolicyConfig::from_yaml(&format!(
+                "policy_classes:\n  - name: c\n    quantum: 1\n{setting}"
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+        for setting in [
+            "    controlled_delay: \"true\"\n",
+            "    controlled_delay: 1\n",
+            "    controlled_delay: null\n",
+        ] {
+            assert!(class(setting).is_err(), "{setting}");
+        }
+        for policy in ["fcfs", "wspt"] {
+            let error = class(&format!(
+                "    queue_policy: {policy}\n    controlled_delay: true\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .contains("root policy class \"c\" controlled_delay requires queue_policy edf"),
+                "{error}"
+            );
+        }
+        class("    queue_policy: edf\n    controlled_delay: true\n").unwrap();
+
+        // A queue expires a class budget only where the class opts in and orders by EDF.
+        let base = PolicyProfile::synthetic(None, RouterQueuePolicy::Edf)
+            .default_class()
+            .clone();
+        for (queue_policy, controlled_delay, expires) in [
+            (RouterQueuePolicy::Edf, true, true),
+            (RouterQueuePolicy::Edf, false, false),
+            (RouterQueuePolicy::Wspt, true, false),
+            (RouterQueuePolicy::Fcfs, true, false),
+        ] {
+            let class = PolicyClassConfig {
+                queue_policy,
+                controlled_delay,
+                ..base.clone()
+            };
+            assert_eq!(
+                class.expires_class_budget(),
+                expires,
+                "{queue_policy:?} {controlled_delay}"
+            );
         }
     }
 

@@ -86,7 +86,9 @@ For how queue backpressure differs from candidate filtering and busy-threshold o
 `edf`, the default, orders by earliest due time: a request classifier's explicit deadline, else
 router ingress plus the class's `slo_ttft_ms`. A request with neither sorts after every request
 with a due time, and equal or absent due times keep enqueue order. Strict priority and priority
-jumps do not reorder `edf`.
+jumps do not reorder `edf`. An `edf` class with `controlled_delay: true` rejects a request that is
+still waiting when its due time passes, and an explicit deadline expires a waiting request in every
+class; see [Policy-Class Queues](#policy-class-queues).
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
 `scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. Both the CLI and policy-class
@@ -254,8 +256,8 @@ To write your own policy instead of using a built-in one, see
 ### Policy-Class Queues
 
 A policy profile is one flat list of named classes. Each class has one queue
-and directly sets its DRR quantum, an optional TTFT budget, its queue limits,
-and its busy thresholds:
+and directly sets its DRR quantum, an optional TTFT budget and whether it
+enforces it, its queue limits, and its busy thresholds:
 
 ```yaml
 default_policy_class: standard
@@ -263,6 +265,7 @@ policy_classes:
   - name: priority
     quantum: 800
     slo_ttft_ms: 1000
+    controlled_delay: true
   - name: standard
     quantum: 200
     slo_ttft_ms: 3000
@@ -333,9 +336,25 @@ and `0` is rejected. An `edf` class orders each request by its router ingress
 time plus `slo_ttft_ms`, unless a request classifier sets an explicit deadline.
 The budget counts from when the request entered the router, so classification
 and queue waits spend it, and a later capacity recheck or cache refresh does
-not restart it. `fcfs` and `wspt` classes do not order by it. A request whose
-class budget has passed is not rejected and can still be dispatched; only a
-classifier's explicit deadline expires queued requests.
+not restart it.
+
+`controlled_delay` is an optional boolean, `false` by default, and only an
+`edf` class may set it to `true`; any other `queue_policy` with `true` is
+rejected at startup. With it, the class rejects a request that is still waiting
+for admission when its due time passes: the request's explicit deadline, which
+wins even when later, else router ingress plus `slo_ttft_ms`. The request gets
+the router's queue-deadline error (HTTP 429), spends none of its class's
+scheduling credit, and is counted in
+`dynamo_frontend_router_admission_rejected_total` with
+`reason="due_time_passed"`. A request whose client has already disconnected
+when the router checks it is dropped uncounted. Each class queue keeps its own
+expiry timer, so a request expires on time even when no request arrives and no
+capacity frees. Without `controlled_delay`, the budget only orders the class.
+`fcfs` and `wspt` classes neither order by the budget nor expire on it. In
+every class, a classifier's explicit deadline expires a waiting request,
+including one waiting behind an `edf` head whose class due time only orders
+it. The budget bounds waiting for router admission only: it does not limit an
+admitted request or predict its TTFT.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
@@ -663,7 +682,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](worker-filtering.md).
 
-Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh.
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. The refresh is best effort: when another request arrives, capacity changes, or a queue deadline passes first, the router dispatches with the original overlap scores instead of waiting.
 
 **Note for the SGLang backend.** In Dynamo v1.1.0 and later, the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 

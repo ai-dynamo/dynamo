@@ -118,7 +118,11 @@ scheduler adds no bulk credit.
 ## Charging and Cursor Movement
 
 After selecting a request, the scheduler subtracts its immutable scheduling
-cost from the class deficit.
+cost from the class deficit once the request is admitted. A selected request
+that is not admitted, because its due time passed, its client went away, or
+worker selection or booking failed, spends no credit, and its class keeps that
+credit for its next head. A request that expires while it waits leaves its
+queue without spending credit either.
 
 - If the class becomes empty, its deficit resets and the cursor advances.
 - If the next head is already affordable, the cursor stays on the class so it
@@ -191,8 +195,9 @@ tokens, and `standard`'s next request costs 200. One round dispatches both
 `priority` requests for 800 credit and the `standard` request for 200: an
 80/20 split of charged cost, but a 2:1 split of requests. When `standard` has no
 dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` orders
-requests within each EDF class; it does not give a class with a shorter budget
-a larger share.
+requests within each EDF class, and with `controlled_delay: true` it also rejects
+a request still waiting when its budget passes; it does not give a class with a
+shorter budget a larger share.
 
 Use larger quantum ratios only when the corresponding classes should receive
 larger shares of uncached-token service. For the complete policy-class schema,

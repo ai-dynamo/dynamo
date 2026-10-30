@@ -25,13 +25,14 @@ sequenceDiagram
     else Policy-queue path (every other request)
         A->>P: enqueue(metadata, request)
         P->>C: Push into the selected class queue
-        A->>P: pop_next() in the same actor turn
+        A->>P: extract_next() in the same actor turn
         P->>C: Get one candidate per dispatchable class
         C-->>P: Dispatch candidate
-        P-->>A: DRR winner
+        P-->>A: DRR winner, cost unpaid
         A->>S: select_worker(request)
         S-->>A: Selected worker
         A->>A: Reserve worker capacity and respond
+        A->>P: settle(): charge the cost only if admitted
     end
     H->>A: Update after capacity changes drains the remaining backlog
 ```
@@ -53,9 +54,29 @@ sequenceDiagram
 - FCFS/LCFS/WSPT classes keep their order: within one strict-priority tier, entries with
   an explicit deadline order earliest-due-first ahead of the rest before the policy score
   applies. Class due times never enter their order.
-- Only explicit deadlines enter the deadline index and its conditional actor timer, which
-  rejects expired entries. Class due times order EDF but never expire. All deadline math
-  uses `tokio::time::Instant` so paused-clock tests stay coherent.
+- Controlled delay is a per-class setting (`controlled_delay`, default off) of EDF classes;
+  configuration rejects it for any other order. The actor's queue
+  (`PolicyQueue::with_class_budget_expiry`) fixes each class's expiry at construction: an EDF
+  class with controlled delay expires every finite due time at its head, explicit or class
+  budget. Every other class, including EDF without it, expires only explicit deadlines,
+  through its deadline index, because its head can hide an earlier explicit deadline. Offline
+  replay uses `PolicyQueue::new`, where every class expires only explicit deadlines.
+- Each class queue has its own expiry timer (`ClassTimers`), armed at that class's earliest
+  enforced due time. When it fires, the actor rejects that class's overdue entries, spends no
+  DRR credit, and rearms the class at its next due time. A due time is also checked before
+  enqueue limits, right before each queue insertion attempt (the expiry sweep or a limit cleanup
+  can outlast the first check, and an arrival due by then never enters the queue or its pending
+  counts), before each extraction, after an optional overlap refresh, right before worker
+  selection, and right before booking or untracked delivery. When a limit rejects an arrival,
+  due times are judged again at a fresh instant: the arrival's own first, then its class's. Class
+  entries due by then leave and the limits judge again; a rejection stands only once no entry of
+  the class was due, and each repeat removes an existing entry, so it ends. Expiry that leaves a
+  class with entries can expose a head that runs, so an enqueue that expired entries reports ready
+  work even when it refuses the arrival, and the actor drains. A
+  deadline or queue-limit rejection whose response receiver is already closed at the rejection
+  check is dropped uncounted, the precedence booking uses; a receiver closed after the check can
+  still be counted.
+  All deadline math uses `tokio::time::Instant` so paused-clock tests stay coherent.
 - `SchedulerQueueActor::admit_one` performs final worker selection and reserves worker capacity after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
 
@@ -65,17 +86,19 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-└── pending: BTreeSet<PolicyQueueEntry>                   # one dispatch order per class
-PolicyQueue
-└── deadlines: BTreeMap<(Instant, seq), QueueEntryHandle>  # explicit deadlines only
+├── pending: BTreeSet<PolicyQueueEntry>             # one dispatch order per class
+└── deadlines: BTreeMap<(Instant, seq), QueueOrder>  # explicit deadlines; empty for an EDF class
+                                                     # with controlled delay, whose head carries
+                                                     # every due time
 ```
 
 - `pending` holds every queued request of the class in one dispatch order, pinned or not. Worker constraints (exact pins, DP ranks, allow-lists) stay on the request; `PolicyQueue` never reads them and keeps no per-worker queues or indexes.
 - A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. The actor's dispatch gate checks the class head against the workers its constraints allow (only the pinned rank for a pinned request), and worker selection enforces the same constraints after the head dispatches. A pinned request is never routed to another worker.
 - The class's last entry dispatches first. An ordered tree, not a heap or hash map, gives worst-case O(log n) insert, dispatch, and removal of a known entry, with no rebuild, scan, or deferred cleanup.
 - `enqueue` returns a `QueueEntryHandle` naming the entry's class and order. Enqueue sequences are never reused, so a stale handle matches nothing. The actor keeps the handle in the pending lifecycle state and cancels exactly that entry; a request ID could also name a later attempt. `retain` is a bulk O(n + k log n) operation, not cancellation.
-- `PolicyClassQueue::dispatchable_head_cost` checks only the class head, once per `pop_next`. No blocked state is cached, so a capacity hint only wakes the actor; the next drain reads every head again.
+- `PolicyClassQueue::dispatchable_head_cost` checks only the class head, once per `extract_next`. No blocked state is cached, so a capacity hint only wakes the actor; the next drain reads every head again.
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `dispatchable_head_cost` confirms that its head can run.
+- `extract_next` returns the winning head with a `DispatchCharge`; `settle` spends that cost only for an admitted request. Expiry, cancellation, and failed selection, booking, or delivery spend no credit, and the class keeps it for its next head. `pop_next` charges at once, for callers without an admission step.
 - Head-of-line blocking is class-wide. A blocked head, such as a request pinned to a full worker, holds every later entry of its class, including requests another worker could serve now; other classes keep competing under DRR. Do not add per-worker subqueues or a scan past the head to bypass it.
 
 ## Guardrails
@@ -87,9 +110,15 @@ PolicyQueue
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
 - Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)`. Until handoff, the admission lifecycle lease names its queued entry by `QueueEntryHandle` and its booking by `(request_id, worker, attempt_id)`.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
-  load, select a worker, skip the capacity reservation if the response receiver
-  is closed, then reserve capacity before responding. Failed response delivery
-  must release that capacity. Do not bypass this for normal scheduling.
+  load, reject a request whose due time has passed, select a worker, skip the capacity
+  reservation if the response receiver is closed or the due time has passed, then reserve
+  capacity before responding.
+  Failed response delivery must release that capacity. Do not bypass this for
+  normal scheduling.
+- The optional overlap refresh is the only await inside a drain. It races class timers,
+  commands, capacity wakes, and the candidate's response closing. An interruption abandons the
+  refresh, settles the candidate against its own due time, and handles the event before the
+  next candidate. Never hold a command reply across that await.
 - Do not remove or weaken `admission_gate` without proving selection and
   capacity reservation cannot assign more work than the workers can hold.
 - Potential-load projection must go through

@@ -506,6 +506,10 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   Queue rejections by configured limit reason. Also labeled by `reason`.
 </ParamField>
 
+<ParamField path="dynamo_frontend_router_admission_rejected_total" type="counter">
+  Scheduling attempts rejected before admission, counted once each and labeled by `reason`: `due_time_passed` when the request's explicit deadline, or the budget of an `edf` class with `controlled_delay`, passes before admission, or `queue_size_exceeded` when a class queue request or token limit rejects it. An attempt whose response receiver is already closed when the router checks it, because the client went away, is not counted; a receiver that closes after that check can still be counted. `predicted_miss` is reserved and stays zero. A `queue_size_exceeded` rejection is also counted, by limit, in `dynamo_frontend_router_queue_backpressure_total` when the frontend's selection call returns that queue rejection; a cancellation can drop the call before it returns, so the two counts can differ. They describe the same rejections: do not add them together.
+</ParamField>
+
 ### KV indexer metrics
 
 <ParamField path="dynamo_component_kv_cache_events_applied" type="counter">
