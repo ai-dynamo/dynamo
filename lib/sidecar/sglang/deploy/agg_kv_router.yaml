@@ -40,7 +40,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:v0.5.23
           # All probes pass only for HealthCheckResponse.healthy=true;
           # its raw protobuf encoding is 0x08 0x01.
           startupProbe:

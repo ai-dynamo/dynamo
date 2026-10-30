@@ -46,7 +46,7 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:v0.5.23
             startupProbe:
               exec:
                 command:
@@ -129,7 +129,7 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:v0.5.23
             envFrom:
             - secretRef:
                 name: hf-token-secret
