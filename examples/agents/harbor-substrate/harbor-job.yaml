@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+job_name: swe-one
+jobs_dir: /work/jobs
+n_attempts: 1
+n_concurrent_trials: 1
+agents:
+  - import_path: dynamo_pi:DynamoPi
+    model_name: dynamo/${SERVED_MODEL}
+    kwargs:
+      version: "0.72.1"
+      thinking: "off"
+      preinstalled: true
+    env:
+      DYNAMO_BASE_URL: ${MODEL_BASE_URL}
+      DYNAMO_CONTEXT_WINDOW: "${MODEL_CONTEXT_WINDOW}"
+      DYNAMO_MAX_TOKENS: "${MODEL_MAX_TOKENS}"
+      DYN_AGENT_SESSION_FINAL: "${DYN_AGENT_SESSION_FINAL}"
+environment:
+  import_path: substrate_environment:SubstrateEnvironment
+  delete: true
+  kwargs:
+    endpoint: ate-env-api.ate-env.svc:7777
+    kube_context: in-cluster
+    ate_cli: /work/kubectl-ate
+    ate_endpoint: api.ate-system.svc:443
+    ate_token_file: /var/run/secrets/ateapi/token
+    egress_policy: /work/example/egress.yaml
+    ready_timeout: 1200
+    template_map:
+      astropy__astropy-12907: ${ACTOR_TEMPLATE}
+tasks:
+  - path: /work/tasks/astropy__astropy-12907

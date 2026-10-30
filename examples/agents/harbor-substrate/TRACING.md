@@ -54,31 +54,84 @@ installation.
 
 ## Add capture to the recipe frontend
 
-Set `DEPLOYMENT_YAML` to the manifest selected from the model recipe.
-It must contain one DGD; accompanying resources such as ConfigMaps are preserved.
-Save that original file for cleanup. Install PyYAML if the tutorial's local
-Python environment has not been created yet:
+Set `DEPLOYMENT_YAML` to the manifest selected from the model recipe. Save a
+copy for the trace additions:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install pyyaml
-.venv/bin/python add_tracing.py "$DEPLOYMENT_YAML" .local/traced-dgd.yaml
+cp "$DEPLOYMENT_YAML" .local/traced-dgd.yaml
 ```
 
-Review `.local/traced-dgd.yaml` before applying it, particularly if the endpoint
-serves other users. Then deploy the reviewed file:
+Edit `.local/traced-dgd.yaml`. In the `Frontend` entry under `spec.components`,
+merge the following fields into `podTemplate.spec`. Append to the existing
+`main` container's `env` and `volumeMounts` lists, add the sidecar to
+`containers`, and add the volumes. Preserve the recipe's images, arguments,
+other environment variables, worker components, and accompanying resources.
+This fragment is not a standalone DGD:
+
+```yaml
+containers:
+  - name: main
+    env:
+      - name: DYN_REQUEST_TRACE
+        value: "1"
+      - name: DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT
+        value: tcp://127.0.0.1:20390
+      - name: DYN_REQUEST_TRACE_OUTPUT_PATH
+        value: /traces/request-trace
+      - name: DYN_REQUEST_TRACE_FILE_FORMAT
+        value: jsonl
+    volumeMounts:
+      - name: harbor-traces
+        mountPath: /traces
+  - name: tool-events-tls
+    image: alpine:3.22
+    command:
+      - sh
+      - -ec
+      - apk add --no-cache stunnel; exec stunnel /config/stunnel.conf
+    ports:
+      - name: tls-zmq
+        containerPort: 20391
+    volumeMounts:
+      - name: tool-trace-tls
+        mountPath: /tls
+        readOnly: true
+      - name: tool-trace-config
+        mountPath: /config
+        readOnly: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: "1"
+        memory: 128Mi
+volumes:
+  - name: harbor-traces
+    emptyDir:
+      sizeLimit: 2Gi
+  - name: tool-trace-tls
+    secret:
+      secretName: harbor-tool-trace-tls
+  - name: tool-trace-config
+    configMap:
+      name: harbor-tool-trace-tls
+```
+
+The main container writes native JSONL records under `/traces`. The sidecar
+terminates TLS on port 20391 and forwards events to the receiver on loopback
+port 20390. It installs stunnel from Alpine repositories at startup. Use a
+prebuilt approved image if Pod egress does not permit that.
+
+If the frontend already has trace settings or these volume names, merge the
+configuration without duplicate entries. Inspect the diff, then apply it:
 
 ```bash
+diff -u "$DEPLOYMENT_YAML" .local/traced-dgd.yaml
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" apply -f .local/traced-dgd.yaml
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" wait \
   --for=condition=Ready "dgd/$DGD_NAME" --timeout=1800s
 ```
-
-The helper changes only the `Frontend` component. It adds the native request
-trace settings, a `/traces` volume, and the TLS sidecar. It leaves the engine
-configuration unchanged and refuses to overwrite existing trace settings.
-The sidecar installs stunnel from Alpine repositories at
-startup; use a prebuilt approved image if Pod egress does not permit that.
 
 This example uses one frontend replica and an ephemeral 2-GiB trace volume.
 For more replicas, collect every frontend's trace. For longer runs, use a
@@ -87,26 +140,45 @@ replacing or deleting the frontend Pod.
 
 ## Connect actor tool events
 
-Add the trace Service to the rendered actor egress policy:
+Append a rule to `rules` in `.local/egress.yaml`. Replace the example hostname
+with the value of `TRACE_HOST` from the certificate step:
+
+```yaml
+  - tlsPassthrough:
+      hostnames:
+        - harbor-tool-events.inference.svc.cluster.local
+      ports:
+        numbers: [20391]
+```
+
+In `.local/harbor-job.yaml`, append these entries to the existing
+`agents[0].env` mapping:
+
+```yaml
+DYN_REQUEST_TRACE: "1"
+DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: tcp://127.0.0.1:20390
+DYN_TOOL_TRACE_TLS_CONFIG: /opt/tool-trace/stunnel-client.conf
+```
+
+Add this mapping under `environment.kwargs`:
+
+```yaml
+uploads:
+  /work/tool-trace: /opt/tool-trace
+```
+
+The upload supplies the public certificate and stunnel configuration. The Pi
+adapter starts stunnel, and the provider publishes tool events to its loopback
+listener. These settings require the Dynamo frontend capture configured above.
+Omit them when using an external endpoint.
+
+Copy the policy and public client files to the runner, then return to the
+tutorial to upload the edited job:
 
 ```bash
-.venv/bin/python - <<'PY'
-import os
-from pathlib import Path
-import yaml
-p = Path('.local/egress.yaml')
-policy = yaml.safe_load(p.read_text())
-policy['rules'].append({'tlsPassthrough': {'hostnames': [os.environ['TRACE_HOST']], 'ports': {'numbers': [20391]}}})
-p.write_text(yaml.safe_dump(policy, sort_keys=False))
-PY
 kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/egress.yaml harbor-runner:/work/example/egress.yaml
 kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/tool-trace harbor-runner:/work/tool-trace
 ```
-
-Add `--trace` when generating the Harbor job with `prepare_workload.py`. That
-option enables the existing Pi publisher, starts the local TLS client, and
-uploads its public configuration. It is available only for `--endpoint-kind
-dynamo`. It does not change routing decisions or suspend actors.
 
 Run one trial and confirm that Pi's `toolCallId` values appear in native tool
 records alongside model requests with the same session ID. Missing tool events

@@ -184,17 +184,16 @@ jobs:
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
       with:
         node-version: '22.23.4'
-    - name: Install execution and test dependencies
-      run: python -m pip install -r requirements.txt pytest pytest-asyncio pyyaml
+    - name: Install execution dependencies
+      run: python -m pip install -r requirements.txt pyyaml
     - name: Apply pinned Pi adapter patches
       run: |
         git clone https://github.com/ai-dynamo/agent-plugins deps/agent-plugins
         git -C deps/agent-plugins checkout 223a0b8823610d042e7479bfff9b93eeac4a23ec
-        for patch in pi-context-window pi-model-limits pi-atif pi-tool-trace-tls pi-preinstalled; do
+        for patch in pi-context-window pi-model-limits pi-tool-trace-tls pi-preinstalled; do
           git -C deps/agent-plugins apply "$PWD/$patch.patch"
         done
-        cp pi_trajectory.py deps/agent-plugins/pi-plugin/harbor/
-    - name: Test provider and tutorial helpers
+    - name: Test provider and validate job configuration
       run: |
         (
           cd deps/agent-plugins/pi-plugin
@@ -203,9 +202,17 @@ jobs:
           npm run check
           npm test
         )
-        PYTHONPATH="$PWD:$PWD/deps/agent-plugins/pi-plugin/harbor" \
-          python -m pytest --noconftest -c pytest.ini -q \
-          test_pi_trajectory.py test_tutorial.py
+        PYTHONPATH="$PWD:$PWD/deps/agent-plugins/pi-plugin/harbor" python - <<'PY'
+        from pathlib import Path
+        import yaml
+        from harbor.models.job.config import JobConfig
+        from dynamo_pi import DynamoPi
+        from substrate_environment import SubstrateEnvironment
+
+        config = JobConfig.model_validate(yaml.safe_load(Path("harbor-job.yaml").read_text()))
+        assert config.agents[0].import_path == "dynamo_pi:DynamoPi"
+        assert config.environment.import_path == "substrate_environment:SubstrateEnvironment"
+        PY
 
   api-docs:
     name: Generated API References

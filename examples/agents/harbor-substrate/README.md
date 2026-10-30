@@ -13,11 +13,10 @@ golden snapshots, one trial, a concurrent batch, result inspection, and cleanup.
 This directory contains the runnable files:
 
 - `substrate_environment.py`: Harbor's external environment provider.
-- `tutorial_pi.py`: upstream Pi adapter with runtime-only credential injection.
-- `pi_trajectory.py`: conversion of recorded Pi events to Harbor ATIF.
-- `prepare_workload.py`: task copies, image locks, actor templates, and Harbor configuration.
+- `harbor-job.yaml`: editable Harbor job with task-to-template mappings.
 - `Dockerfile.pi`: prepared task image with pinned Pi and provider dependencies.
 - YAML manifests: environment API, runner, worker pool, task template, and network policy.
+- `runner-kubeconfig.yaml`: in-cluster CLI identity using projected token files.
 - `*.patch`: compatibility changes applied to the pinned upstream sources.
 - [Install Substrate integration](INSTALL.md), [Capture inference and tools](TRACING.md),
   and [Collect Substrate metrics](METRICS.md): supporting procedures.
