@@ -150,7 +150,6 @@ retune:
     engine:
       mode: aggregated
       backend: vllm
-      backend_version: "0.11.0"
       context_length: 32768
       workers:
         aggregated:
@@ -213,6 +212,9 @@ AISimulate searches by default, would make the Run search engine settings as wel
   sets `spec.hardware.gpu.budget` to their GPU total.
 - Write roles the mode does not use as `null`, or leave them out.
 - Set the model and GPU with `retune.dgdr.model` and `retune.dgdr.sku`, not in the engine.
+- Leave `backend_version` out to let the pinned AISimulate pick its version for
+  `retune.dgdr.sku`. If you set it, it must be a version AISimulate accepts for that GPU;
+  otherwise every Run fails with `UnlistedQueryVersionError`.
 
 ### Time budget
 
@@ -371,6 +373,7 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Retune with load or throughput scaling, or of Planner parameters | A DGDR Run has no base Planner configuration, warm-up or predictor pre-sweep |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
 | Workers that set their own router mode (`--router-mode` or `DYN_ROUTER_MODE`) | A worker's advertised router configuration replaces the frontend's for its workers, and the Run replays only the frontend's |
+| Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |
 | EPP or Gateway API Inference Extension frontends, `frontendSidecar`, TLS frontends | No `/router_policy` there, different addressing, or certificates |
