@@ -377,22 +377,11 @@ planner:
   - '!**/*.rst'
 
 sidecar_trtllm_image:
-  - 'lib/sidecar/trtllm/**'
-  - 'lib/sidecar/common/**'
-  - 'lib/sidecar/Dockerfile'
-  - 'lib/backend-common/**'
-  - 'lib/llm/**'
-  - 'lib/runtime/**'
-  - 'Cargo.toml'
-  - 'Cargo.lock'
-  - 'rust-toolchain.toml'
-  - '.cargo/**'
-  - '.github/actions/builder-refresher/**'
+  # PR CI runs resolver CPU tests; the GPU test runs independently in nightly CI.
+  - 'lib/sidecar/trtllm/ci/**'
   - '.github/actions/changed-files/**'
   - '.github/filters.yaml'
-  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
   - '.github/workflows/pr.yaml'
-  - '.github/workflows/nightly-ci.yml'
   - '!**/*.md'
   - '!**/*.rst'
 

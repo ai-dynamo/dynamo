@@ -197,11 +197,11 @@ def run(args, results):
     result_path.write_text(json.dumps(response, indent=2) + "\n")
     print(f"Image response: {caption}", flush=True)
     words = caption.lower().replace("-", " ").split()
-    # Accept punctuation and phrasing differences, but require both fixture colors.
-    colors = {word.strip(".,:;!?()\"'") for word in words}
-    if not {"red", "blue"} <= colors:
+    # Accept phrasing differences, but require the fixture colors left to right.
+    colors = [word.strip(".,:;!?()\"'") for word in words]
+    if [color for color in colors if color in ("red", "blue")][:2] != ["red", "blue"]:
         raise AssertionError(
-            f"Expected red and blue in the image description, got: {caption}"
+            f"Expected red, then blue, in the image description, got: {caption}"
         )
     if response["completion_tokens"] <= 0 or response["prompt_tokens"] <= len(
         expected_ids

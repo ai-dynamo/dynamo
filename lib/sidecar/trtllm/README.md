@@ -28,9 +28,11 @@ supported, even when `--context-length` is supplied.
 > which carries the latest gRPC server updates. Nightly builds are the
 > `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
-> KV routing is available in
-> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820`, which includes
-> native KVCM2 event streaming and OpenEngine routing load support.
+> The standalone launch and deployment examples use
+> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`, which includes
+> image URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
+> The nightly CI job tests image passthrough against the latest regular upstream nightly;
+> it also supports manual dispatch. The examples below stay pinned to the validated version.
 
 ## Support matrix
 
@@ -79,7 +81,7 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
-For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007` for the engine.
 
 ## Topologies
 

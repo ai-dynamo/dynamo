@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
+# Never reuse compiled artifacts across checkouts on shared builders.
+CARGO_TARGET_DIR="$(mktemp -d)"
+export CARGO_TARGET_DIR
+trap 'rm -rf "$CARGO_TARGET_DIR"' EXIT
+
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
     cargo test --locked -p dynamo-trtllm-sidecar --lib --no-run \
     --message-format=json > /tmp/trtllm-test-artifacts.json
