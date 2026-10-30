@@ -258,6 +258,8 @@ sidecar_configs = {
         request_payloads=[
             *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
             # Public disconnect/recovery only: no native scheduler observations.
+            # TODO: assert engine-side cleanup once TensorRT-LLM serves metrics
+            # alongside its gRPC server.
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
     ),
@@ -309,6 +311,8 @@ sidecar_configs = {
         request_payloads=[
             disaggregated_token_count_payload(logprobs=True),
             # Public disconnect/recovery only: no native scheduler observations.
+            # TODO: assert engine-side cleanup once TensorRT-LLM serves metrics
+            # alongside its gRPC server.
             *http_cancellation_payloads(
                 None, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
             ),
