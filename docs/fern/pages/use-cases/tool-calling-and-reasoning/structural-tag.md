@@ -189,12 +189,12 @@ Currently tested and supported:
 
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`
-- `deepseek_v3_2`, `deepseek_v4`
+- `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
 - `glm47` with parsers v2
 
-The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
+The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, `deepseek_v41`, and `glm47` require
 a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
 
 Contributions adding structural tag support for new parsers are welcome.
@@ -203,6 +203,22 @@ This list describes Dynamo's Rust parser registry. The Python vLLM and SGLang
 frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
+
+### Checking Grammar Availability
+
+Output-parser availability does not guarantee structural-tag support. Query the registered grammar builders separately:
+
+```python
+from dynamo._core import get_structural_tag_parser_names, get_tool_parser_names
+
+assert "deepseek_v41" in get_tool_parser_names()
+assert "deepseek_v41" in get_structural_tag_parser_names()
+assert "gemma4" not in get_structural_tag_parser_names()
+```
+
+`get_structural_tag_parser_names()` returns a sorted, deduplicated inventory across the V1 and V2 registries. It does not select a parser generation, validate a tool/reasoning parser pair, or qualify the backend's installed XGrammar version. Check those deployment requirements separately.
+
+On a compatible V2 route, `deepseek_v41` uses its V4.1 framing and `deepseek_v4_1_xml` argument style; `deepseek_v4` retains `deepseek_xml`. With structural tags enabled, the registered V4.1 builder supplies guidance by default. Set `--dyn-structural-tag false` to disable optional guidance.
 
 ## Activation Scope
 
