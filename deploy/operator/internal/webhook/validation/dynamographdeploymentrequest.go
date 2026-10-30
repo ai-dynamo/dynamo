@@ -65,9 +65,9 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 		return nil, fmt.Errorf("get admission request: %w", err)
 	}
 	validation := &dynamoGraphDeploymentRequestValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
-		requestVersion:   internalwebhook.RequestedVersion(req),
+		requestVersion: internalwebhook.RequestedVersion(req),
 	}
+	validation.ctx = ctx
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
@@ -84,9 +84,9 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 		return nil, fmt.Errorf("get admission request: %w", err)
 	}
 	validation := &dynamoGraphDeploymentRequestValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
-		requestVersion:   internalwebhook.RequestedVersion(req),
+		requestVersion: internalwebhook.RequestedVersion(req),
 	}
+	validation.ctx = ctx
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
 	validation.warnDeprecatedGPUSKU(&newRequest.Spec)
