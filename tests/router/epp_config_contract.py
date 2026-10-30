@@ -13,9 +13,13 @@ strict xfail. Setup, warning, FE sentinel, parse, and other mismatches
 stay ordinary hard failures. Other profiles stay ordinary tests.
 
 ``admission_control`` and ``enforce_disagg`` are ignored-compatibility
-parser contracts. The five conditional scalar envs are a not-FE-honored
-grouped row. ``shared_cache_multiplier`` is a supported_candidate profile
-pending runtime evidence. Remaining rows stay pending.
+parser contracts. The five conditional scalar envs and
+``positional_search_mode`` are separate not-FE-honored rows.
+``use_remote_indexer`` binds the existing first-selection query-counter
+observer. ``session_affinity_ttl_secs`` binds TTL enable-presence only on
+the existing session_id gap. ``shared_cache_multiplier`` is a
+supported_candidate profile pending runtime evidence. Remaining rows stay
+pending.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -103,6 +107,47 @@ CONDITIONAL_SCALAR_PROBES = (
 CONDITIONAL_SCALAR_ENV_NAMES = tuple(name for name, _ in CONDITIONAL_SCALAR_PROBES)
 NOT_FE_HONORED_ROW = "conditional_disagg_epp_scalar_envs"
 NOT_FE_HONORED_TEST = "test_conditional_scalar_not_fe_honored"
+REMOTE_INDEXER_ROW = "use_remote_indexer"
+REMOTE_INDEXER_OBSERVER = "provider_query_counter+worker_rank_token_parity"
+REMOTE_INDEXER_ITEM = (
+    "tests/router/test_epp_frontend_routing_parity.py::"
+    "test_epp_frontend_first_selection_parity"
+)
+SESSION_TTL_ROW = "session_affinity_ttl_secs"
+SESSION_TTL_OBSERVER = "fe_session_ttl_enable+session_affinity_parity_mismatch"
+SESSION_TTL_ITEM = (
+    "tests/router/test_epp_frontend_inputs_parity.py::"
+    "test_epp_frontend_inputs_parity[session_id]"
+)
+SESSION_TTL_SECS = 300
+INPUTS_PARITY = REPO_ROOT / "tests/router/test_epp_frontend_inputs_parity.py"
+POSITIONAL_ROW = "positional_search_mode"
+POSITIONAL_ENV = "DYN_ROUTER_POSITIONAL_SEARCH_MODE"
+POSITIONAL_SENTINEL = "binary"
+POSITIONAL_TEST = "test_positional_search_not_fe_honored"
+POSITIONAL_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{POSITIONAL_TEST}"
+)
+NOT_FE_HONORED_ROWS = frozenset({NOT_FE_HONORED_ROW, POSITIONAL_ROW})
+KV_INDEXER_MOD = REPO_ROOT / "lib/kv-router/src/indexer/mod.rs"
+POSITIONAL_RS = REPO_ROOT / "lib/kv-router/src/indexer/positional.rs"
+KV_INDEXER_RS = REPO_ROOT / "lib/kv-router/src/indexer/kv_indexer.rs"
+KV_ROUTER_LIB = REPO_ROOT / "lib/kv-router/src/lib.rs"
+LLM_INDEXER_MOD = REPO_ROOT / "lib/llm/src/kv_router/indexer/mod.rs"
+INDEXER_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/tests.rs"
+INDEXER_DELEGATE_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/delegate_tests.rs"
+POSITIONAL_LIB_EXPORTS = (
+    "pub use indexer::positional as nested_map;",
+    "pub use nested_map::PositionalIndexer;",
+)
+POSITIONAL_INDEXER_MOD = "pub mod positional;"
+_POSITIONAL_REF_RE = re.compile(
+    r"\bPositionalIndexer\b|"
+    r"\bnested_map\b|"
+    r"(?:pub\s+)?mod\s+positional\b|"
+    r"indexer::positional\b|"
+    r"::positional\b"
+)
 _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "overlap_score_credit",
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY": "overlap_score_credit_decay",
@@ -920,12 +965,13 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--router-session-affinity-ttl-secs",),
         ("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",),
         ("session_affinity_ttl_secs",),
-        STATUS_PENDING,
-        None,
+        STATUS_KNOWN_GAP,
+        SESSION_TTL_OBSERVER,
         (),
-        (),
-        "RouterConfig session field. Not in KvRouterConfig to_json or the EPP "
-        "init event. No live observer in this increment.",
+        ("session_affinity_ttl_secs",),
+        "Existing session_id Item enables nondefault TTL 300 versus default "
+        "None, then FE-A/EPP-B raises SessionAffinityParityMismatch. Not a "
+        "300-second expiration sweep. session_affinity_mode stays pending.",
     ),
     SettingDecision(
         "session_affinity_mode",
@@ -1004,12 +1050,13 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--use-remote-indexer", "--no-use-remote-indexer"),
         ("DYN_USE_REMOTE_INDEXER",),
         ("use_remote_indexer",),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        REMOTE_INDEXER_OBSERVER,
         (),
-        (),
-        "FE/EPP field exists. No profile exercises it. No live observer in "
-        "this increment.",
+        ("use_remote_indexer",),
+        "Existing first-selection Item observes provider kv_indexer_query via "
+        "provider_query_count; each consumer arm requires a stable baseline, "
+        "a fresh increment, and worker/rank/token parity.",
     ),
     SettingDecision(
         "active_request_expiry_secs",
@@ -1062,14 +1109,15 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
     SettingDecision(
         "positional_search_mode",
         (),
-        ("DYN_ROUTER_POSITIONAL_SEARCH_MODE",),
+        (POSITIONAL_ENV,),
         (),
-        STATUS_PENDING,
-        None,
+        STATUS_NOT_FE_HONORED,
+        NOT_FE_HONORED_OBSERVER,
         (),
         (),
-        "Rust env consumed by positional search. No FE CLI dest. No live "
-        "observer in this increment.",
+        "SearchMode::from_env is read only by PositionalIndexer::new. "
+        "Production FE/EPP factory chooses ConcurrentRadixTreeCompressed or "
+        "KvIndexer/RadixTree. Isolated FE full-JSON probe must stay unchanged.",
     ),
     SettingDecision(
         "worker_selection_policy",
@@ -1333,10 +1381,20 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {STATUS_IGNORED_COMPAT}; only "
                 f"{sorted(IGNORED_COMPAT_CONTRACTS)} may"
             )
-        if row.status == STATUS_NOT_FE_HONORED and row.name != NOT_FE_HONORED_ROW:
+        if row.status == STATUS_NOT_FE_HONORED and row.name not in NOT_FE_HONORED_ROWS:
             raise AssertionError(
                 f"{row.name} may not use {STATUS_NOT_FE_HONORED}; only "
-                f"{NOT_FE_HONORED_ROW} may"
+                f"{sorted(NOT_FE_HONORED_ROWS)} may"
+            )
+        if row.observer == REMOTE_INDEXER_OBSERVER and row.name != REMOTE_INDEXER_ROW:
+            raise AssertionError(
+                f"{row.name} may not use {REMOTE_INDEXER_OBSERVER}; only "
+                f"{REMOTE_INDEXER_ROW} may"
+            )
+        if row.observer == SESSION_TTL_OBSERVER and row.name != SESSION_TTL_ROW:
+            raise AssertionError(
+                f"{row.name} may not use {SESSION_TTL_OBSERVER}; only "
+                f"{SESSION_TTL_ROW} may"
             )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
@@ -1468,8 +1526,7 @@ def _assert_ignored_compat_binding(row: SettingDecision, items: Iterable[Any]) -
         )
     if row.profiles != spec.case_ids:
         raise AssertionError(
-            f"{row.name} profiles {row.profiles} != fixed case IDs "
-            f"{spec.case_ids}"
+            f"{row.name} profiles {row.profiles} != fixed case IDs " f"{spec.case_ids}"
         )
     if row.affected_fields != spec.affected_fields:
         raise AssertionError(
@@ -1489,7 +1546,47 @@ def _assert_ignored_compat_binding(row: SettingDecision, items: Iterable[Any]) -
         _assert_ordinary_collected_item(f"{spec.test_name}[{case_id}]", item)
 
 
-def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+def _canonical_item_nodeids(token: str) -> frozenset[str]:
+    if not token.startswith("tests/router/") or token.count("::") != 1:
+        raise AssertionError(
+            f"canonical Item {token!r} must be tests/router/<file>::<id>"
+        )
+    rel_file, ident = token.split("::", 1)
+    if (
+        not rel_file.endswith(".py")
+        or ".." in rel_file
+        or "/" in ident
+        or "\\" in ident
+    ):
+        raise AssertionError(
+            f"canonical Item {token!r} is not tests/router/<file>::<id>"
+        )
+    abs_file = REPO_ROOT / rel_file
+    names = {token, f"{abs_file.as_posix()}::{ident}"}
+    native = str(abs_file)
+    if native != abs_file.as_posix():
+        names.add(f"{native}::{ident}")
+    return frozenset(names)
+
+
+def _require_unique_nodeid_item(items: Iterable[Any], token: str) -> Any:
+    allowed = _canonical_item_nodeids(token)
+    matched: list[Any] = []
+    for raw in items:
+        item = _require_collected_item(raw)
+        if item.nodeid not in allowed:
+            continue
+        matched.append(item)
+    if len(matched) != 1:
+        raise AssertionError(
+            f"{token} must collect exactly one Item, found {len(matched)}"
+        )
+    return matched[0]
+
+
+def _assert_conditional_scalar_not_fe_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
     if row.name != NOT_FE_HONORED_ROW:
         raise AssertionError(
             f"{row.name} is not the fixed {NOT_FE_HONORED_ROW} contract"
@@ -1500,8 +1597,7 @@ def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -
         )
     if row.profiles != CONDITIONAL_SCALAR_ENV_NAMES:
         raise AssertionError(
-            f"{row.name} profiles {row.profiles} != "
-            f"{CONDITIONAL_SCALAR_ENV_NAMES}"
+            f"{row.name} profiles {row.profiles} != " f"{CONDITIONAL_SCALAR_ENV_NAMES}"
         )
     if row.env != CONDITIONAL_SCALAR_ENV_NAMES:
         raise AssertionError(
@@ -1523,6 +1619,140 @@ def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -
         _assert_ordinary_collected_item(f"{NOT_FE_HONORED_TEST}[{case_id}]", item)
 
 
+def _assert_positional_not_fe_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    if row.name != POSITIONAL_ROW:
+        raise AssertionError(f"{row.name} is not the fixed {POSITIONAL_ROW} contract")
+    if row.observer != NOT_FE_HONORED_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {NOT_FE_HONORED_OBSERVER!r}"
+        )
+    if row.env != (POSITIONAL_ENV,):
+        raise AssertionError(f"{row.name} env {row.env} != {(POSITIONAL_ENV,)!r}")
+    if row.flags != ():
+        raise AssertionError(f"{row.name} flags {row.flags} != ()")
+    if row.schema_fields != ():
+        raise AssertionError(f"{row.name} schema_fields {row.schema_fields} != ()")
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    if row.affected_fields != ():
+        raise AssertionError(f"{row.name} affected_fields {row.affected_fields} != ()")
+    item = _require_unique_nodeid_item(items, POSITIONAL_ITEM)
+    _assert_ordinary_collected_item(POSITIONAL_ITEM, item)
+
+
+def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    if row.name == NOT_FE_HONORED_ROW:
+        _assert_conditional_scalar_not_fe_binding(row, items)
+        return
+    if row.name == POSITIONAL_ROW:
+        _assert_positional_not_fe_binding(row, items)
+        return
+    raise AssertionError(
+        f"{row.name} is not an explicit not-FE-honored contract; "
+        f"expected one of {sorted(NOT_FE_HONORED_ROWS)}"
+    )
+
+
+def _assert_remote_indexer_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    if row.name != REMOTE_INDEXER_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {REMOTE_INDEXER_ROW} contract"
+        )
+    if row.status != STATUS_SUPPORTED:
+        raise AssertionError(f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}")
+    if row.observer != REMOTE_INDEXER_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {REMOTE_INDEXER_OBSERVER!r}"
+        )
+    if row.flags != ("--use-remote-indexer", "--no-use-remote-indexer"):
+        raise AssertionError(f"{row.name} flags {row.flags} are not the closed tuple")
+    if row.env != ("DYN_USE_REMOTE_INDEXER",):
+        raise AssertionError(f"{row.name} env {row.env} != ('DYN_USE_REMOTE_INDEXER',)")
+    if row.schema_fields != ("use_remote_indexer",):
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != ('use_remote_indexer',)"
+        )
+    if row.affected_fields != ("use_remote_indexer",):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            "('use_remote_indexer',)"
+        )
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    item = _require_unique_nodeid_item(items, REMOTE_INDEXER_ITEM)
+    _assert_ordinary_collected_item(REMOTE_INDEXER_ITEM, item)
+
+
+def _assert_session_ttl_xfail_marker(mark: Any) -> None:
+    from tests.router.common import SessionAffinityParityMismatch
+
+    if mark.args:
+        raise AssertionError(
+            f"{SESSION_TTL_ROW} xfail has positional condition {mark.args!r}"
+        )
+    if "condition" in mark.kwargs:
+        raise AssertionError(
+            f"{SESSION_TTL_ROW} xfail has condition={mark.kwargs['condition']!r}"
+        )
+    if mark.kwargs.get("strict") is not True:
+        raise AssertionError(
+            f"{SESSION_TTL_ROW} xfail strict={mark.kwargs.get('strict')!r} "
+            "is not True"
+        )
+    if mark.kwargs.get("raises") is not SessionAffinityParityMismatch:
+        raise AssertionError(
+            f"{SESSION_TTL_ROW} xfail raises={mark.kwargs.get('raises')!r} "
+            f"!= {SessionAffinityParityMismatch!r}"
+        )
+    if mark.kwargs.get("run", True) is not True:
+        raise AssertionError(
+            f"{SESSION_TTL_ROW} xfail run={mark.kwargs.get('run')!r} is disabled"
+        )
+
+
+def _assert_session_ttl_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    if row.name != SESSION_TTL_ROW:
+        raise AssertionError(f"{row.name} is not the fixed {SESSION_TTL_ROW} contract")
+    if row.status != STATUS_KNOWN_GAP:
+        raise AssertionError(f"{row.name} status {row.status!r} != {STATUS_KNOWN_GAP!r}")
+    if row.observer != SESSION_TTL_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {SESSION_TTL_OBSERVER!r}"
+        )
+    if row.flags != ("--router-session-affinity-ttl-secs",):
+        raise AssertionError(f"{row.name} flags {row.flags} are not the closed tuple")
+    if row.env != ("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",):
+        raise AssertionError(
+            f"{row.name} env {row.env} != ('DYN_ROUTER_SESSION_AFFINITY_TTL_SECS',)"
+        )
+    if row.schema_fields != ("session_affinity_ttl_secs",):
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != "
+            "('session_affinity_ttl_secs',)"
+        )
+    if row.affected_fields != ("session_affinity_ttl_secs",):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            "('session_affinity_ttl_secs',)"
+        )
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    item = _require_unique_nodeid_item(items, SESSION_TTL_ITEM)
+    skips = list(item.iter_markers(name="skip")) + list(
+        item.iter_markers(name="skipif")
+    )
+    marks = list(item.iter_markers(name="xfail"))
+    if skips or len(marks) != 1:
+        raise AssertionError(
+            f"{SESSION_TTL_ITEM} must collect exactly one xfail and no skip, "
+            f"found xfail={len(marks)} skip={len(skips)}"
+        )
+    _assert_session_ttl_xfail_marker(marks[0])
+    assert_session_inputs_stack_uses_ttl_300()
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -1537,7 +1767,8 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
 
     ignored_compatibility and not_fe_honored rows bind only their fixed
     ordinary case-ID sets and verbatim identifier tuples. Those tests must
-    stay free of xfail/skip.
+    stay free of xfail/skip. use_remote_indexer and session_affinity_ttl_secs
+    bind only their exact existing collected Items.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -1607,6 +1838,12 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.status == STATUS_NOT_FE_HONORED:
             _assert_not_fe_honored_binding(row, item_list)
+            continue
+        if row.name == REMOTE_INDEXER_ROW:
+            _assert_remote_indexer_binding(row, item_list)
+            continue
+        if row.name == SESSION_TTL_ROW:
+            _assert_session_ttl_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -2194,9 +2431,7 @@ def _build_router_config_uses_explicit_kv_constructor() -> bool:
     return False
 
 
-def _unique_scoped_rust_body(
-    text: str, pattern: re.Pattern[str], label: str
-) -> str:
+def _unique_scoped_rust_body(text: str, pattern: re.Pattern[str], label: str) -> str:
     matches = list(pattern.finditer(text))
     if len(matches) != 1:
         raise AssertionError(
@@ -2546,9 +2781,7 @@ def _require_router_args_warning(
 
 def _assert_ignored_options_absent(snapshot: FrontendRouterSnapshot) -> None:
     if "admission_control" in snapshot.namespace:
-        raise AssertionError(
-            "admission_control was stored on the argparse namespace"
-        )
+        raise AssertionError("admission_control was stored on the argparse namespace")
     if "admission_control" in snapshot.config_attrs:
         raise AssertionError("admission_control was stored on FrontendConfig")
     leaked = [
@@ -2739,6 +2972,222 @@ def run_conditional_scalar_not_fe_honored(
     if baseline != changed:
         raise AssertionError(
             f"{env_name}={sentinel!r} changed FE native JSON "
+            f"{baseline} -> {changed}"
+        )
+
+
+def assert_session_inputs_stack_uses_ttl_300() -> None:
+    if not INPUTS_PARITY.is_file():
+        raise AssertionError(f"missing session inputs thin test: {INPUTS_PARITY}")
+    tree = ast.parse(
+        INPUTS_PARITY.read_text(encoding="utf-8"), filename=str(INPUTS_PARITY)
+    )
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name != "test_epp_frontend_inputs_parity":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            name = None
+            if isinstance(func, ast.Name):
+                name = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+            if name != "EppFrontendRoutingParityStack":
+                continue
+            for keyword in child.keywords:
+                if keyword.arg != "session_affinity_ttl_secs":
+                    continue
+                if (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == SESSION_TTL_SECS
+                ):
+                    found = True
+    if not found:
+        raise AssertionError(
+            "session_id stack no longer passes "
+            f"session_affinity_ttl_secs={SESSION_TTL_SECS}"
+        )
+
+
+def _assert_indexer_test_modules_are_cfg_gated() -> None:
+    if not KV_INDEXER_MOD.is_file():
+        raise AssertionError(f"missing kv-router indexer module: {KV_INDEXER_MOD}")
+    text = _strip_rust_comments(KV_INDEXER_MOD.read_text(encoding="utf-8"))
+    if re.search(r"#\[cfg\(test\)\]\s*mod\s+tests;", text) is None:
+        raise AssertionError(
+            "indexer/mod.rs no longer gates tests.rs with #[cfg(test)]"
+        )
+    if re.search(r"#\[cfg\(test\)\]\s*mod\s+delegate_tests;", text) is None:
+        raise AssertionError(
+            "indexer/mod.rs no longer gates delegate_tests.rs with #[cfg(test)]"
+        )
+
+
+def _positional_excluded_rust_paths() -> frozenset[Path]:
+    _assert_indexer_test_modules_are_cfg_gated()
+    return frozenset({INDEXER_TESTS_RS, INDEXER_DELEGATE_TESTS_RS})
+
+
+def _remove_unique_statement(text: str, statement: str, label: str) -> str:
+    count = text.count(statement)
+    if count != 1:
+        raise AssertionError(f"{label} {statement!r} count {count} != 1")
+    return text.replace(statement, "", 1)
+
+
+def _positional_reference_hits(text: str) -> list[str]:
+    return [match.group(0) for match in _POSITIONAL_REF_RE.finditer(text)]
+
+
+def _assert_positional_lib_exports_only() -> None:
+    if not KV_ROUTER_LIB.is_file():
+        raise AssertionError(f"missing kv-router lib.rs: {KV_ROUTER_LIB}")
+    text = _strip_rust_comments(KV_ROUTER_LIB.read_text(encoding="utf-8"))
+    remainder = text
+    for statement in POSITIONAL_LIB_EXPORTS:
+        remainder = _remove_unique_statement(
+            remainder, statement, "kv-router lib.rs export"
+        )
+    extra = _positional_reference_hits(remainder)
+    if extra:
+        raise AssertionError(
+            "kv-router lib.rs has Positional references beyond the two "
+            f"backcompat exports: {extra}"
+        )
+
+
+def _assert_positional_indexer_mod_declaration_only() -> None:
+    if not KV_INDEXER_MOD.is_file():
+        raise AssertionError(f"missing kv-router indexer module: {KV_INDEXER_MOD}")
+    text = _strip_rust_comments(KV_INDEXER_MOD.read_text(encoding="utf-8"))
+    remainder = _remove_unique_statement(
+        text, POSITIONAL_INDEXER_MOD, "indexer/mod.rs module"
+    )
+    extra = _positional_reference_hits(remainder)
+    if extra:
+        raise AssertionError(
+            "indexer/mod.rs has Positional references beyond "
+            f"{POSITIONAL_INDEXER_MOD!r}: {extra}"
+        )
+
+
+def _assert_positional_factory_uses_radix() -> None:
+    missing = [
+        str(path)
+        for path in (LLM_INDEXER_MOD, KV_INDEXER_RS, POSITIONAL_RS)
+        if not path.is_file()
+    ]
+    if missing:
+        raise AssertionError("positional factory sources missing: " + ", ".join(missing))
+    factory = _stripped_production_rust_text(LLM_INDEXER_MOD)
+    if _positional_reference_hits(factory) or POSITIONAL_ENV in factory:
+        raise AssertionError(
+            "FE/EPP indexer factory now references PositionalIndexer or "
+            f"{POSITIONAL_ENV}"
+        )
+    if "ConcurrentRadixTreeCompressed" not in factory or "KvIndexer" not in factory:
+        raise AssertionError(
+            "FE/EPP indexer factory no longer chooses "
+            "ConcurrentRadixTreeCompressed or KvIndexer"
+        )
+    kv_indexer = _stripped_production_rust_text(KV_INDEXER_RS)
+    if _positional_reference_hits(kv_indexer) or POSITIONAL_ENV in kv_indexer:
+        raise AssertionError("KvIndexer now references PositionalIndexer or the env")
+    if "RadixTree::new" not in kv_indexer:
+        raise AssertionError("KvIndexer no longer constructs RadixTree::new")
+    positional = _stripped_production_rust_text(POSITIONAL_RS)
+    if positional.count("SearchMode::from_env()") != 1:
+        raise AssertionError(
+            "positional.rs must contain exactly one production "
+            "SearchMode::from_env() call"
+        )
+    new_body = _unique_scoped_rust_body(
+        positional,
+        re.compile(r"pub fn new\s*\(\s*jump_size\s*:\s*usize\s*\)\s*->\s*Self\s*\{"),
+        "PositionalIndexer::new",
+    )
+    if "SearchMode::from_env()" not in new_body:
+        raise AssertionError(
+            "PositionalIndexer::new no longer calls SearchMode::from_env()"
+        )
+
+
+def _assert_positional_no_new_fe_consumer() -> None:
+    excluded = _positional_excluded_rust_paths()
+    rust_sites: list[str] = []
+    for path in _production_rust_source_paths():
+        if path in excluded or path == POSITIONAL_RS:
+            continue
+        text = _stripped_production_rust_text(path)
+        if path == KV_ROUTER_LIB:
+            for statement in POSITIONAL_LIB_EXPORTS:
+                text = _remove_unique_statement(
+                    text, statement, "kv-router lib.rs export"
+                )
+        elif path == KV_INDEXER_MOD:
+            text = _remove_unique_statement(
+                text, POSITIONAL_INDEXER_MOD, "indexer/mod.rs module"
+            )
+        hits = _positional_reference_hits(text)
+        if POSITIONAL_ENV in text:
+            hits.append(POSITIONAL_ENV)
+        if hits:
+            rust_sites.append(f"{path}:{hits}")
+    if rust_sites:
+        raise AssertionError(
+            "production FE/EPP trees now reference Positional aliases: "
+            + ", ".join(rust_sites)
+        )
+    python_sites: list[str] = []
+    for path in _frontend_python_source_paths():
+        for token in (
+            POSITIONAL_ENV,
+            "PositionalIndexer",
+            "nested_map",
+            "indexer.positional",
+            "indexer::positional",
+        ):
+            if _count_token_in_python_source(path, token):
+                python_sites.append(f"{path}:{token}")
+    if python_sites:
+        raise AssertionError(
+            "FE Python sources now reference positional search: "
+            + ", ".join(python_sites)
+        )
+
+
+def assert_positional_search_is_not_fe_consumer() -> None:
+    _assert_positional_lib_exports_only()
+    _assert_positional_indexer_mod_declaration_only()
+    _assert_positional_factory_uses_radix()
+    _assert_positional_no_new_fe_consumer()
+
+
+def run_positional_search_not_fe_honored(monkeypatch) -> None:
+    assert_positional_search_is_not_fe_consumer()
+    clear_known_manifest_router_envs(monkeypatch)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        baseline = _frontend_full_kv_json()
+    monkeypatch.setenv(POSITIONAL_ENV, POSITIONAL_SENTINEL)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        changed = _frontend_full_kv_json()
+    LOGGER.info(
+        "positional search %s=%s baseline=%r changed=%r",
+        POSITIONAL_ENV,
+        POSITIONAL_SENTINEL,
+        baseline,
+        changed,
+    )
+    if baseline != changed:
+        raise AssertionError(
+            f"{POSITIONAL_ENV}={POSITIONAL_SENTINEL!r} changed FE native JSON "
             f"{baseline} -> {changed}"
         )
 

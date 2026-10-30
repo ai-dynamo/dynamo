@@ -5947,16 +5947,18 @@ def _wait_prefill_booking(
 
 def _wait_pending_prefill(stack, expected: float, deadline: float, case_name: str):
     last = None
+    observed: list[str] = []
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        last = stack.frontend_pending_prefill(timeout_s=min(2.0, remaining))
+        last, observed = stack.frontend_pending_prefill(timeout_s=min(2.0, remaining))
         if last == expected:
             return last
         time.sleep(0.05)
     raise AssertionError(
-        f"{case_name}: frontend prefill pending is {last}, expected {expected}"
+        f"{case_name}: frontend prefill pending is {last}, expected {expected}; "
+        f"observed {observed}"
     )
 
 
@@ -6055,7 +6057,10 @@ def _post_fe_priority_sentinel(
     deadline: float,
     case_name: str,
 ):
-    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT, merge_request_headers
+    from tests.router.epp_parity import (
+        _typed_fe_queue_rejection,
+        merge_request_headers,
+    )
 
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -6070,21 +6075,206 @@ def _post_fe_priority_sentinel(
             headers=headers,
             timeout=remaining,
         )
-    if sentinel.status_code != 503:
+    return _typed_fe_queue_rejection(sentinel)
+
+
+def _assert_priority_hold_pending(
+    stack,
+    *,
+    low_thread,
+    high_thread,
+    low_out,
+    high_out,
+    blocker_id: str,
+    low_id: str,
+    high_id: str,
+    case_name: str,
+) -> None:
+    if "error" in low_out or "error" in high_out:
         raise AssertionError(
-            f"{case_name}: FE sentinel is HTTP {sentinel.status_code}, "
-            f"not typed 503: {sentinel.text[:300]}"
+            f"{case_name}: FE low/high finished with error during hold: "
+            f"{low_out!r} {high_out!r}"
         )
-    if (
-        "limit reached" not in sentinel.text
-        or f"current={PRIORITY_QUEUE_LIMIT}" not in sentinel.text
-        or f"limit={PRIORITY_QUEUE_LIMIT}" not in sentinel.text
-    ):
+    if "status" in low_out or "status" in high_out:
         raise AssertionError(
-            f"{case_name}: FE sentinel is not the typed queue limit: "
-            f"{sentinel.text[:300]}"
+            f"{case_name}: FE low/high HTTP finished during hold: "
+            f"{low_out!r} {high_out!r}"
         )
-    return sentinel
+    if not low_thread.is_alive() or not high_thread.is_alive():
+        raise AssertionError(f"{case_name}: FE low/high thread exited during hold")
+    blocker_booked = False
+    for record in stack.selection_records():
+        rid = record.get("request_id")
+        if rid in {low_id, high_id}:
+            raise AssertionError(
+                f"{case_name}: FE low/high has a typed selection during hold: "
+                f"{record}"
+            )
+        if rid == blocker_id and record.get("worker_type") == "prefill":
+            blocker_booked = True
+    if not blocker_booked:
+        raise AssertionError(
+            f"{case_name}: FE blocker prefill booking missing during hold"
+        )
+
+
+def _wait_blocker_queue_ordering(stack, deadline: float, case_name: str) -> None:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.queue_ordering_records(after_bytes=0)
+        if len(last) > 1:
+            raise AssertionError(
+                f"{case_name}: FE blocker queue ordering records are {last}, "
+                "not exactly 1"
+            )
+        if len(last) == 1:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE blocker queue ordering records are {last}, "
+        "expected exactly 1"
+    )
+
+
+def _wait_priority_queue_ordering(
+    stack,
+    *,
+    after_bytes: int,
+    deadline: float,
+    case_name: str,
+    low_thread,
+    high_thread,
+    low_out,
+    high_out,
+    blocker_id: str,
+    low_id: str,
+    high_id: str,
+) -> None:
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    # Closed traffic, one scheduler actor: "ordering request" is not enqueue
+    # proof. The later single FE 529 is the full-capacity proof.
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        _assert_priority_hold_pending(
+            stack,
+            low_thread=low_thread,
+            high_thread=high_thread,
+            low_out=low_out,
+            high_out=high_out,
+            blocker_id=blocker_id,
+            low_id=low_id,
+            high_id=high_id,
+            case_name=case_name,
+        )
+        last = stack.queue_ordering_records(after_bytes=after_bytes)
+        if len(last) > PRIORITY_QUEUE_LIMIT:
+            raise AssertionError(
+                f"{case_name}: FE queue ordering records are {last}, "
+                f"not exactly {PRIORITY_QUEUE_LIMIT}"
+            )
+        if len(last) == PRIORITY_QUEUE_LIMIT:
+            _assert_priority_hold_pending(
+                stack,
+                low_thread=low_thread,
+                high_thread=high_thread,
+                low_out=low_out,
+                high_out=high_out,
+                blocker_id=blocker_id,
+                low_id=low_id,
+                high_id=high_id,
+                case_name=case_name,
+            )
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE queue ordering records are {last}, "
+        f"expected exactly {PRIORITY_QUEUE_LIMIT}"
+    )
+
+
+def _prove_fe_priority_capacity(
+    stack,
+    case: dict[str, Any],
+    *,
+    catalog: dict[str, int],
+    deadline: float,
+    case_name: str,
+    blocker_id: str,
+    low_id: str,
+    high_id: str,
+    sentinel_id: str,
+    low_payload: dict[str, Any],
+    high_payload: dict[str, Any],
+    low_headers,
+    high_headers,
+    low_label: str,
+    high_label: str,
+):
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    _wait_blocker_queue_ordering(stack, deadline, case_name)
+    log_cursor = stack.frontend_log_bytes()
+    low_thread, low_out = _start_frontend_generation(
+        stack,
+        low_payload,
+        path=case["path"],
+        request_id=low_id,
+        headers=low_headers or None,
+        deadline=deadline,
+        label=low_label,
+    )
+    high_thread, high_out = _start_frontend_generation(
+        stack,
+        high_payload,
+        path=case["path"],
+        request_id=high_id,
+        headers=high_headers or None,
+        deadline=deadline,
+        label=high_label,
+    )
+    _wait_priority_queue_ordering(
+        stack,
+        after_bytes=log_cursor,
+        deadline=deadline,
+        case_name=case_name,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        low_id=low_id,
+        high_id=high_id,
+    )
+    _assert_priority_catalog(stack, catalog, "before FE sentinel")
+    sentinel = _post_fe_priority_sentinel(
+        stack, case, low_payload, sentinel_id, deadline, case_name
+    )
+    _assert_priority_hold_pending(
+        stack,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        low_id=low_id,
+        high_id=high_id,
+        case_name=case_name,
+    )
+    _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, case_name)
+    _assert_priority_hold_pending(
+        stack,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        low_id=low_id,
+        high_id=high_id,
+        case_name=case_name,
+    )
+    _assert_priority_catalog(stack, catalog, "during FE hold")
+    return low_thread, low_out, high_thread, high_out, sentinel
 
 
 def _poll_held_admission(handle, timeout_s: float):
@@ -6166,30 +6356,25 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
             label=f"{kind}-blocker",
         )
         _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
-        low_thread, low_out = _start_frontend_generation(
-            stack,
-            low_payload,
-            path=case["path"],
-            request_id=low_id,
-            headers=low_headers or None,
-            deadline=deadline,
-            label=f"{kind}-low",
+        low_thread, low_out, high_thread, high_out, _fe_sentinel = (
+            _prove_fe_priority_capacity(
+                stack,
+                case,
+                catalog=catalog,
+                deadline=deadline,
+                case_name=kind,
+                blocker_id=blocker_id,
+                low_id=low_id,
+                high_id=high_id,
+                sentinel_id=sentinel_id,
+                low_payload=low_payload,
+                high_payload=high_payload,
+                low_headers=low_headers,
+                high_headers=high_headers,
+                low_label=f"{kind}-low",
+                high_label=f"{kind}-high",
+            )
         )
-        high_thread, high_out = _start_frontend_generation(
-            stack,
-            high_payload,
-            path=case["path"],
-            request_id=high_id,
-            headers=high_headers or None,
-            deadline=deadline,
-            label=f"{kind}-high",
-        )
-        _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, kind)
-        _assert_priority_catalog(stack, catalog, "before FE sentinel")
-        _post_fe_priority_sentinel(
-            stack, case, low_payload, sentinel_id, deadline, kind
-        )
-        _assert_priority_catalog(stack, catalog, "during FE hold")
         stack.resume_owned_prefill()
         join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
         leftover = join_deadline - time.monotonic()
@@ -6370,7 +6555,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
 
 
 def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
-    """Compare FE typed 503 to the EPP third-waiter outcome."""
+    """Compare FE typed 529 to the EPP third-waiter outcome."""
     from tests.router.epp_parity import (
         PRIORITY_HOLD_DEADLINE_S,
         PRIORITY_POLICY_CLASS,
@@ -6405,30 +6590,25 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             label="sentinel-blocker",
         )
         _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
-        low_thread, low_out = _start_frontend_generation(
-            stack,
-            low_payload,
-            path=case["path"],
-            request_id=low_id,
-            headers=low_headers or None,
-            deadline=deadline,
-            label="sentinel-low",
+        low_thread, low_out, high_thread, high_out, fe_sentinel = (
+            _prove_fe_priority_capacity(
+                stack,
+                case,
+                catalog=catalog,
+                deadline=deadline,
+                case_name="sentinel",
+                blocker_id=blocker_id,
+                low_id=low_id,
+                high_id=high_id,
+                sentinel_id=sentinel_id,
+                low_payload=low_payload,
+                high_payload=high_payload,
+                low_headers=low_headers,
+                high_headers=high_headers,
+                low_label="sentinel-low",
+                high_label="sentinel-high",
+            )
         )
-        high_thread, high_out = _start_frontend_generation(
-            stack,
-            high_payload,
-            path=case["path"],
-            request_id=high_id,
-            headers=high_headers or None,
-            deadline=deadline,
-            label="sentinel-high",
-        )
-        _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, "sentinel")
-        _assert_priority_catalog(stack, catalog, "before FE sentinel")
-        fe_sentinel = _post_fe_priority_sentinel(
-            stack, case, low_payload, sentinel_id, deadline, "sentinel"
-        )
-        _assert_priority_catalog(stack, catalog, "during FE hold")
         stack.resume_owned_prefill()
         join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
         leftover = join_deadline - time.monotonic()
@@ -6519,7 +6699,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             )
         if sentinel_kind != "typed":
             raise AssertionError(
-                "FE typed 503 versus EPP aggregated fallback: FE HTTP "
+                "FE typed 529 versus EPP aggregated fallback: FE HTTP "
                 f"{fe_sentinel.status_code} with {fe_sentinel.text[:200]!r}; "
                 f"EPP {sentinel_outcome.routing_mode!r}"
             )

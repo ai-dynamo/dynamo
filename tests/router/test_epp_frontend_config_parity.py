@@ -13,8 +13,9 @@ for this increment. They are ordinary failures, not skip/xfail. The two
 measured gaps are strict xfails of their dedicated mismatch subclasses.
 Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
 hard failures. Other profiles stay ordinary tests. Admission/enforce
-ignored-compatibility cases and the five conditional scalar probes are
-ordinary tests, not xfail.
+ignored-compatibility cases, the five conditional scalar probes, and the
+positional-search probe are ordinary tests, not xfail. Remote-indexer and
+session TTL rows bind existing collected Items rather than new tests.
 """
 
 import pytest
@@ -34,6 +35,7 @@ from tests.router.epp_config_contract import (
     run_effective_config_profile,
     run_ignored_admission_control,
     run_ignored_enforce_disagg,
+    run_positional_search_not_fe_honored,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -141,3 +143,8 @@ def test_ignored_enforce_disagg(monkeypatch, case_id):
 def test_conditional_scalar_not_fe_honored(monkeypatch, env_name, sentinel):
     """Each EPP-only conditional scalar env must leave FE native JSON unchanged."""
     run_conditional_scalar_not_fe_honored(monkeypatch, env_name, sentinel)
+
+
+def test_positional_search_not_fe_honored(monkeypatch):
+    """DYN_ROUTER_POSITIONAL_SEARCH_MODE must leave FE native JSON unchanged."""
+    run_positional_search_not_fe_honored(monkeypatch)

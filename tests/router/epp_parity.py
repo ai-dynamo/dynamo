@@ -80,6 +80,9 @@ PROVIDER_CONTAINER_NAME = "kv-indexer"
 PRIORITY_HOLD_DEADLINE_S = 10.0
 PRIORITY_QUEUE_LIMIT = 2
 PRIORITY_POLICY_CLASS = "default"
+PRIORITY_FE_QUEUE_LOG = "info,dynamo_kv_router::scheduling::queue=trace"
+QUEUE_ORDERING_TARGET = "dynamo_kv_router::scheduling::queue"
+QUEUE_ORDERING_MESSAGE = "ordering request"
 HELD_STREAM_JOIN_S = 2.0
 FRONTEND_CONTAINER_NAME = "frontend"
 EPP_CONTAINER_NAME = "epp"
@@ -1445,6 +1448,78 @@ def _typed_queue_rejection_outcome(response: Any) -> QueueRejectionOutcome:
     )
 
 
+def _typed_fe_queue_rejection(response: Any) -> Any:
+    """Validate native FE HTTP 529 + structured QueueRejection ErrorMessage."""
+    if response.status_code != 529:
+        raise AssertionError(
+            f"FE sentinel is HTTP {response.status_code}, "
+            f"not typed 529: {response.text[:300]}"
+        )
+    try:
+        parsed = json.loads(response.text)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"FE sentinel body is not JSON: {response.text[:300]!r}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise AssertionError(f"FE sentinel body is not a JSON object: {parsed!r}")
+    code = _require_u64("FE sentinel code", parsed.get("code"))
+    if code != 529:
+        raise AssertionError(f"FE sentinel code is {code}, not 529")
+    if parsed.get("type") != "Overloaded":
+        raise AssertionError(
+            f"FE sentinel type is {parsed.get('type')!r}, not Overloaded"
+        )
+    expected = _typed_queue_rejection_display()
+    message = parsed.get("message")
+    if message != expected:
+        raise AssertionError(
+            f"FE sentinel message is {message!r}, not {expected!r}"
+        )
+    details = parsed.get("details")
+    if not isinstance(details, dict):
+        raise AssertionError(f"FE sentinel details is not an object: {details!r}")
+    if details.get("policy_class") != PRIORITY_POLICY_CLASS:
+        raise AssertionError(
+            f"FE sentinel details.policy_class is "
+            f"{details.get('policy_class')!r}, not {PRIORITY_POLICY_CLASS!r}"
+        )
+    if details.get("limit_kind") != "requests":
+        raise AssertionError(
+            f"FE sentinel details.limit_kind is "
+            f"{details.get('limit_kind')!r}, not requests"
+        )
+    current = _require_u64("FE sentinel details.current", details.get("current"))
+    limit = _require_u64("FE sentinel details.limit", details.get("limit"))
+    if current != PRIORITY_QUEUE_LIMIT or limit != PRIORITY_QUEUE_LIMIT:
+        raise AssertionError(
+            f"FE sentinel details current={current} limit={limit}, "
+            f"expected {PRIORITY_QUEUE_LIMIT}/{PRIORITY_QUEUE_LIMIT}"
+        )
+    return response
+
+
+def _queue_ordering_policy_class(line: str) -> str | None:
+    """Return policy_class from a complete readable queue ordering line."""
+    if QUEUE_ORDERING_TARGET not in line or QUEUE_ORDERING_MESSAGE not in line:
+        return None
+    marker = 'policy_class="'
+    start = line.find(marker)
+    if start < 0:
+        raise AssertionError(
+            "owned FE queue ordering record missing quoted policy_class: "
+            f"{line[:300]!r}"
+        )
+    start += len(marker)
+    end = line.find('"', start)
+    if end <= start:
+        raise AssertionError(
+            "owned FE queue ordering record missing quoted policy_class: "
+            f"{line[:300]!r}"
+        )
+    return line[start:end]
+
+
 class ExtProcParityDriver:
     """Drive a complete ext_proc request/response lifecycle against real /epp."""
 
@@ -2030,9 +2105,7 @@ def _typed_request_trace_selection(parsed: Any) -> dict[str, Any]:
         )
     event = parsed.get("event")
     if not isinstance(event, dict):
-        raise AssertionError(
-            f"owned FE request-trace missing event object: {parsed!r}"
-        )
+        raise AssertionError(f"owned FE request-trace missing event object: {parsed!r}")
     if event.get("schema") != "dynamo.request.trace.v1":
         raise AssertionError(
             f"owned FE request-trace schema is {event.get('schema')!r}, "
@@ -2045,9 +2118,7 @@ def _typed_request_trace_selection(parsed: Any) -> dict[str, Any]:
         )
     selection = event.get("selection")
     if not isinstance(selection, dict):
-        raise AssertionError(
-            "owned FE router_selection event missing selection object"
-        )
+        raise AssertionError("owned FE router_selection event missing selection object")
     request_id = selection.get("request_id")
     if not isinstance(request_id, str) or not request_id:
         raise AssertionError(
@@ -2073,12 +2144,8 @@ def _typed_request_trace_selection(parsed: Any) -> dict[str, Any]:
                 f"owned FE selection candidates[{index}] is not a triple: "
                 f"{triple!r}"
             )
-        worker_id = _require_u64(
-            f"selection.candidates[{index}].worker_id", triple[0]
-        )
-        dp_rank = _require_u32(
-            f"selection.candidates[{index}].dp_rank", triple[1]
-        )
+        worker_id = _require_u64(f"selection.candidates[{index}].worker_id", triple[0])
+        dp_rank = _require_u32(f"selection.candidates[{index}].dp_rank", triple[1])
         cost = triple[2]
         if isinstance(cost, bool) or not isinstance(cost, (int, float)):
             raise AssertionError(
@@ -3918,6 +3985,9 @@ class EppFrontendPriorityParityStack:
         )
         consumer["DYN_ROUTER_POLICY_CONFIG"] = str(self.policy_path)
         consumer["DYN_TCP_REQUEST_TIMEOUT"] = "20"
+        consumer["DYN_HTTP_OVERLOAD_STATUS_CODE"] = "529"
+        consumer["NO_COLOR"] = "1"
+        consumer["DYN_SDK_DISABLE_ANSI_LOGGING"] = "1"
         frontend_env = loopback_process_env(
             kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
         )
@@ -3930,6 +4000,8 @@ class EppFrontendPriorityParityStack:
                 "DYN_REQUEST_TRACE_FILE_PATH": str(self.trace_path),
                 "DYN_REQUEST_TRACE_FILE_FORMAT": "jsonl",
                 "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS": "10",
+                "DYN_LOG": PRIORITY_FE_QUEUE_LOG,
+                "RUST_LOG": PRIORITY_FE_QUEUE_LOG,
             }
         )
         frontend = FrontendRouterProcess(
@@ -4067,7 +4139,9 @@ class EppFrontendPriorityParityStack:
             os.kill(proc.pid, signal.SIGCONT)
         self._paused_pid = None
 
-    def frontend_pending_prefill(self, timeout_s: float = 2.0) -> float | None:
+    def frontend_pending_prefill(
+        self, timeout_s: float = 2.0
+    ) -> tuple[float | None, list[str]]:
         if self.frontend_url is None:
             raise RuntimeError("priority stack has not started")
         with requests.Session() as session:
@@ -4079,16 +4153,35 @@ class EppFrontendPriorityParityStack:
             raise AssertionError(
                 f"frontend /metrics returned HTTP {response.status_code}"
             )
-        pending = None
+        observed = []
+        matches = []
         for line in response.text.splitlines():
             if line.startswith("#"):
                 continue
             if "router_queue_pending_requests" not in line:
                 continue
+            observed.append(line)
+            if f'model="{self.model_name}"' not in line:
+                continue
             if 'worker_type="prefill"' not in line:
                 continue
-            pending = float(line.rsplit(" ", 1)[-1])
-        return pending
+            if f'policy_class="{PRIORITY_POLICY_CLASS}"' not in line:
+                continue
+            matches.append(line)
+        if len(matches) > 1:
+            raise AssertionError(
+                f"owned FE pending-prefill samples are not unique: {matches}"
+            )
+        if not matches:
+            return None, observed
+        raw = matches[0].rsplit(" ", 1)[-1]
+        try:
+            pending = float(raw)
+        except ValueError as exc:
+            raise AssertionError(
+                f"owned FE pending-prefill sample is invalid: {matches[0]!r}"
+            ) from exc
+        return pending, observed
 
     def selection_records(self) -> list[dict[str, Any]]:
         if self.trace_path is None or not self.trace_path.is_file():
@@ -4119,6 +4212,57 @@ class EppFrontendPriorityParityStack:
                     f"{line[:300]!r}"
                 ) from exc
             records.append(_typed_request_trace_selection(parsed))
+        return records
+
+    def frontend_log_bytes(self) -> int:
+        log_path = getattr(self.frontend, "log_path", None)
+        if not log_path:
+            raise AssertionError("owned FE process has no log_path")
+        path = Path(log_path)
+        if self.frontend is None or path != Path(self.frontend.log_path):
+            raise AssertionError("FE queue proof is not the owned process log")
+        if not path.is_file():
+            return 0
+        return path.stat().st_size
+
+    def queue_ordering_records(self, *, after_bytes: int = 0) -> list[str]:
+        log_path = getattr(self.frontend, "log_path", None)
+        if not log_path:
+            raise AssertionError("owned FE process has no log_path")
+        path = Path(log_path)
+        if self.frontend is None or path != Path(self.frontend.log_path):
+            raise AssertionError("FE queue proof is not the owned process log")
+        if not path.is_file():
+            return []
+        data = path.read_bytes()
+        if after_bytes > len(data):
+            return []
+        data = data[after_bytes:]
+        if not data:
+            return []
+        split_at = data.rfind(b"\n")
+        if not data.endswith(b"\n"):
+            if split_at < 0:
+                return []
+            data = data[: split_at + 1]
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError("owned FE log completed bytes are not UTF-8") from exc
+        records = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            policy_class = _queue_ordering_policy_class(line)
+            if policy_class is None:
+                continue
+            if policy_class != PRIORITY_POLICY_CLASS:
+                raise AssertionError(
+                    "owned FE queue ordering policy_class is "
+                    f"{policy_class!r}, not {PRIORITY_POLICY_CLASS!r}: "
+                    f"{line[:300]!r}"
+                )
+            records.append(policy_class)
         return records
 
     def epp_log_bytes(self) -> int:
