@@ -134,7 +134,7 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Gate the serialized SGLang execution profile for qualified releases.
+    """Gate the serialized SGLang 0.5.19/0.5.22/0.5.23 execution profile.
 
     CUDA is the qualified deployment; device support is not validated here,
     and XPU remains unqualified.
@@ -164,7 +164,7 @@ def _supports_systemone_serial(
     if re.fullmatch(r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", installed) is None:
         logging.warning(
             "Decision scoring is disabled: the serial worker uses SGLang %s; "
-            "this is not a qualified CUDA profile",
+            "the qualified CUDA profiles require SGLang 0.5.19, 0.5.22, or 0.5.23",
             installed,
         )
         return False
