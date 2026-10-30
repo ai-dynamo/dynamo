@@ -40,7 +40,8 @@ export LC_ALL=C
 #                   printed); '-' skips the check
 # ---------------------------------------------------------------------------
 TABLE=(
-  "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
+  "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
+  "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
 
 # Every crate the split produces (SPLIT_V2 3a-final). Column 2 counts any of

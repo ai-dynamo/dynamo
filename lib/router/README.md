@@ -29,7 +29,7 @@ On the request path but not router crates: `dynamo-llm` (the frontend host) and 
 
 ## Status
 
-Only `protocol` exists here so far. The rest arrive in the order of the split plan: `dynamo-kv-events`, the hash contract in `dynamo-kv-hashing`, `dynamo-zmq`, the five stages (`kv-indexer`, `slot-tracker`, `session-affinity`, `worker-selection`, `admission`), `dynamo-scheduler`, then `dynamo-kv-router` thinned to composition and the host import rewrite; `dynamo-error` and `dynamo-metrics` land on their own tracks. Until a crate arrives, `lib/kv-router` is the monolith and keeps `pub use` shims for every type that has moved.
+So far `protocol` exists here and `dynamo-kv-hashing` (`lib/kv-hashing`) holds the router's hash contract in its `routing` module. The rest arrive in the order of the split plan: `dynamo-kv-events`, `dynamo-zmq`, the five stages (`kv-indexer`, `slot-tracker`, `session-affinity`, `worker-selection`, `admission`), `dynamo-scheduler`, then `dynamo-kv-router` thinned to composition and the host import rewrite; `dynamo-error` and `dynamo-metrics` land on their own tracks. Until a crate arrives, `lib/kv-router` is the monolith and keeps `pub use` shims for every type that has moved.
 
 ## Gate
 

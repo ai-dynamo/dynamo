@@ -2145,10 +2145,12 @@ name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
  "derive_builder",
+ "dynamo-router-protocol",
  "dynamo-tokens",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ mod block;
 mod compute;
 mod error;
 mod request;
+pub mod routing;
 mod salt;
 
 pub use block::UniversalBlock;

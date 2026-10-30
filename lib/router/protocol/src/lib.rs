@@ -19,6 +19,7 @@ pub mod identity;
 pub mod kv_hints;
 pub mod load;
 pub mod metadata;
+pub mod mm;
 pub mod residency;
 pub mod session;
 pub mod worker;

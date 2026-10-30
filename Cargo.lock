@@ -2606,11 +2606,14 @@ version = "1.7.0"
 dependencies = [
  "criterion",
  "derive_builder",
+ "dynamo-router-protocol",
  "dynamo-tokens",
  "rmp-serde",
+ "rstest 0.18.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "xxhash-rust",
 ]
 
 [[package]]
