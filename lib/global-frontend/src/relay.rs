@@ -3,14 +3,10 @@
 
 //! Pool load from each pool's PoolRelay.
 //!
-//! Two tasks per pool follow its Relay: one subscribes to the serving-load
-//! stream and records the pool's requests in flight and how many it can run
-//! at once; the other subscribes to the KV-load stream and records the KV
-//! blocks its workers hold. Both go to [`PoolSignals`], where each report
-//! stays until it ages out, so a reconnect or a briefly incomplete view does
-//! not make a pool's load unknown. A pool's Relay comes from the catalog;
-//! when it changes or the pool leaves, the subscription is replaced or ends
-//! and the pool's load is dropped.
+//! One task per pool follows its Relay's serving-load and KV-load streams over
+//! the same connection. Reports stay in [`PoolSignals`] until they age out.
+//! The Relay address comes from the catalog; when it changes or the pool
+//! leaves, the subscription ends and the pool's load is dropped.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -19,12 +15,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_global_common::PoolId;
-use dynamo_global_router::{LoadReport, PoolSignals};
+use dynamo_global_router::{LoadReport, PoolSignals, RelaySource};
 use dynamo_llm::pool_relay::wan::grpc::protocol::{
     KvEventRelayClient, KvPoolLoadUpdate, RELAY_CONTRACT_MARKER, ServingLoadUpdate,
-    SubscribeKvPoolLoadRequest, SubscribeServingLoadRequest,
+    SubscribeKvPoolLoadRequest, SubscribeServingLoadRequest, validate_protocol_envelope,
 };
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Endpoint};
 use url::Url;
@@ -39,7 +36,6 @@ const FIRST_RETRY: Duration = Duration::from_millis(500);
 const LAST_RETRY: Duration = Duration::from_secs(30);
 /// A stream that lasted this long resets the retry delay.
 const HEALTHY_STREAM: Duration = Duration::from_secs(30);
-
 /// Keeps the Relay subscriptions of every pool in `pools` that names a
 /// Relay, until `cancel` fires.
 pub async fn follow_relays(
@@ -47,7 +43,8 @@ pub async fn follow_relays(
     signals: Arc<PoolSignals>,
     cancel: CancellationToken,
 ) {
-    let mut subscriptions = HashMap::<PoolId, (Url, CancellationToken)>::new();
+    let mut subscriptions =
+        HashMap::<PoolId, (Url, String, CancellationToken, JoinHandle<()>)>::new();
     loop {
         let snapshot = pools.borrow_and_update().clone();
         let wanted = snapshot
@@ -55,29 +52,34 @@ pub async fn follow_relays(
             .iter()
             .filter_map(|pool| Some((pool.id.clone(), (pool.relay.clone()?, pool.model.clone()))))
             .collect::<HashMap<_, _>>();
-        subscriptions.retain(|pool, (relay, subscription)| {
-            let keep = wanted.get(pool).is_some_and(|(want, _)| want == relay);
-            if !keep {
-                subscription.cancel();
-                signals.forget(pool);
-            }
-            keep
-        });
+        let removed = subscriptions
+            .iter()
+            .filter(|(pool, (relay, model, _, _))| {
+                !wanted.get(*pool).is_some_and(|(want_relay, want_model)| {
+                    want_relay == relay && want_model == model
+                })
+            })
+            .map(|(pool, _)| pool.clone())
+            .collect::<Vec<_>>();
+        for pool in removed {
+            let (_, _, subscription, task) = subscriptions.remove(&pool).unwrap();
+            subscription.cancel();
+            let _ = task.await;
+            signals.forget(&pool);
+        }
         for (pool, (relay, model)) in wanted {
             if subscriptions.contains_key(&pool) {
                 continue;
             }
             let subscription = cancel.child_token();
-            for feed in [Feed::Load { model }, Feed::Kv] {
-                tokio::spawn(subscribe(
-                    pool.clone(),
-                    feed,
-                    relay.clone(),
-                    signals.clone(),
-                    subscription.clone(),
-                ));
-            }
-            subscriptions.insert(pool, (relay, subscription));
+            let task = tokio::spawn(subscribe(
+                pool.clone(),
+                model.clone(),
+                relay.clone(),
+                signals.clone(),
+                subscription.clone(),
+            ));
+            subscriptions.insert(pool, (relay, model, subscription, task));
         }
         tokio::select! {
             _ = cancel.cancelled() => return,
@@ -86,18 +88,10 @@ pub async fn follow_relays(
     }
 }
 
-/// Which of a Relay's streams a task follows.
-enum Feed {
-    /// Serving load, for the catalog's `model`.
-    Load { model: String },
-    /// The KV blocks the pool's workers hold.
-    Kv,
-}
-
-/// Streams one pool's `feed`, reconnecting with a growing delay.
+/// Follows both load streams over one Relay connection, retrying them together.
 async fn subscribe(
     pool: PoolId,
-    feed: Feed,
+    model: String,
     relay: Url,
     signals: Arc<PoolSignals>,
     cancel: CancellationToken,
@@ -105,12 +99,7 @@ async fn subscribe(
     let mut retry = FIRST_RETRY;
     loop {
         let started = Instant::now();
-        let stream = async {
-            match &feed {
-                Feed::Load { model } => stream_load(&pool, model, &relay, &signals).await,
-                Feed::Kv => stream_kv(&pool, &relay, &signals).await,
-            }
-        };
+        let stream = stream_pool(&pool, &model, &relay, &signals);
         // Stop as soon as the subscription is cancelled, even while
         // connecting, so a replaced subscription never records over the next.
         let Err(error) = tokio::select! {
@@ -129,63 +118,88 @@ async fn subscribe(
     }
 }
 
-/// Records each load update until the stream fails. An incomplete update is
-/// skipped, leaving the last report to age out.
-async fn stream_load(
+/// Both RPCs share one HTTP/2 connection, so a Service can select one Relay
+/// Pod for the pair. A failed stream ends the pair and triggers a reconnect.
+async fn stream_pool(
     pool: &PoolId,
     model: &str,
     relay: &Url,
     signals: &PoolSignals,
 ) -> Result<Infallible> {
-    let mut client = KvEventRelayClient::new(connect(relay).await?);
-    let request = SubscribeServingLoadRequest {
+    let channel = connect(relay).await?;
+    let mut load_client = KvEventRelayClient::new(channel.clone());
+    let mut kv_client = KvEventRelayClient::new(channel);
+    let load_request = SubscribeServingLoadRequest {
         subscriber_id: SUBSCRIBER_ID.to_owned(),
         contract_marker: RELAY_CONTRACT_MARKER,
     };
-    let mut updates =
-        tokio::time::timeout(SUBSCRIBE_TIMEOUT, client.subscribe_serving_load(request))
-            .await
-            .map_err(|_| anyhow!("subscribe timed out"))?
-            .context("subscribe")?
-            .into_inner();
-    tracing::info!(%pool, %relay, "following the pool's Relay load");
+    let kv_request = SubscribeKvPoolLoadRequest {
+        subscriber_id: SUBSCRIBER_ID.to_owned(),
+        contract_marker: RELAY_CONTRACT_MARKER,
+    };
+    let (load, kv) = tokio::time::timeout(SUBSCRIBE_TIMEOUT, async {
+        tokio::try_join!(
+            load_client.subscribe_serving_load(load_request),
+            kv_client.subscribe_kv_pool_load(kv_request),
+        )
+    })
+    .await
+    .map_err(|_| anyhow!("subscribe timed out"))?
+    .context("subscribe")?;
+    let mut load_updates = load.into_inner();
+    let mut kv_updates = kv.into_inner();
+    tracing::info!(%pool, %relay, "following the pool's Relay load and KV load");
     loop {
-        let Some(update) = updates.message().await.context("read")? else {
-            bail!("the Relay closed the stream");
-        };
-        match pool_report(&update, model) {
-            Some(report) => signals.record_load(pool, report),
-            None => tracing::debug!(%pool, "the Relay's load is incomplete"),
+        tokio::select! {
+            update = load_updates.message() => {
+                let Some(update) = update.context("read serving load")? else {
+                    bail!("the Relay closed the serving-load stream");
+                };
+                record_serving_update(pool, model, signals, &update)?;
+            }
+            update = kv_updates.message() => {
+                let Some(update) = update.context("read KV load")? else {
+                    bail!("the Relay closed the KV-load stream");
+                };
+                record_kv_update(pool, signals, &update)?;
+            }
         }
     }
 }
 
-/// Records each KV-load update until the stream fails. An incomplete update
-/// is skipped, leaving the last report to age out.
-async fn stream_kv(pool: &PoolId, relay: &Url, signals: &PoolSignals) -> Result<Infallible> {
-    let mut client = KvEventRelayClient::new(connect(relay).await?);
-    let request = SubscribeKvPoolLoadRequest {
-        subscriber_id: SUBSCRIBER_ID.to_owned(),
-        contract_marker: RELAY_CONTRACT_MARKER,
+fn record_serving_update(
+    pool: &PoolId,
+    model: &str,
+    signals: &PoolSignals,
+    update: &ServingLoadUpdate,
+) -> Result<()> {
+    validate_protocol_envelope(update.protocol_version, update.contract_marker)?;
+    let relay = update.relay.as_ref().context("missing Relay identity")?;
+    let source = RelaySource {
+        runtime_id: relay.drt_instance_id,
+        incarnation: relay.relay_incarnation,
     };
-    let mut updates =
-        tokio::time::timeout(SUBSCRIBE_TIMEOUT, client.subscribe_kv_pool_load(request))
-            .await
-            .map_err(|_| anyhow!("subscribe timed out"))?
-            .context("subscribe")?
-            .into_inner();
-    tracing::info!(%pool, %relay, "following the pool's Relay KV load");
-    loop {
-        let Some(update) = updates.message().await.context("read")? else {
-            bail!("the Relay closed the stream");
-        };
-        match pool_kv(&update) {
-            Some((used, total)) => {
-                signals.record_kv(pool, used, total, report_window(update.window_ms))
-            }
-            None => tracing::debug!(%pool, "the Relay's KV load is incomplete"),
-        }
+    match pool_report(update, model) {
+        Some(report) => signals.record_load(pool, source, report),
+        None => tracing::debug!(%pool, "the Relay's load is incomplete"),
     }
+    Ok(())
+}
+
+fn record_kv_update(pool: &PoolId, signals: &PoolSignals, update: &KvPoolLoadUpdate) -> Result<()> {
+    validate_protocol_envelope(update.protocol_version, update.contract_marker)?;
+    let relay = update.relay.as_ref().context("missing Relay identity")?;
+    let source = RelaySource {
+        runtime_id: relay.drt_instance_id,
+        incarnation: relay.relay_incarnation,
+    };
+    match pool_kv(update) {
+        Some((used, total)) => {
+            signals.record_kv(pool, source, used, total, report_window(update.window_ms))
+        }
+        None => tracing::debug!(%pool, "the Relay's KV load is incomplete"),
+    }
+    Ok(())
 }
 
 fn report_window(window_ms: u64) -> Duration {
@@ -272,9 +286,11 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+    use dynamo_global_router::InFlightTracker;
     use dynamo_llm::pool_relay::wan::grpc::protocol::{
         KvPoolLoadEntry, LoadView, ModelServingLoad, PoolDeploymentStatus, PoolServingLoad,
-        RequestLifecycleStats,
+        RELAY_PROTOCOL_VERSION, RelayIdentity, RequestLifecycleStats,
     };
 
     use super::*;
@@ -312,6 +328,82 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn pool_id() -> PoolId {
+        V1PoolIdDeriver.derive(&PoolKey::new("ohio", "dynamo", "blue").unwrap())
+    }
+
+    fn relay_identity(runtime_id: u64) -> RelayIdentity {
+        RelayIdentity {
+            drt_instance_id: runtime_id,
+            relay_incarnation: 1,
+        }
+    }
+
+    fn serving_update(runtime_id: u64) -> ServingLoadUpdate {
+        ServingLoadUpdate {
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            contract_marker: RELAY_CONTRACT_MARKER,
+            relay: Some(relay_identity(runtime_id)),
+            window_sequence: 1,
+            ..update(Some(128), &[("qwen", Some(3), Some(20))])
+        }
+    }
+
+    fn kv_update(runtime_id: u64) -> KvPoolLoadUpdate {
+        KvPoolLoadUpdate {
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            contract_marker: RELAY_CONTRACT_MARKER,
+            relay: Some(relay_identity(runtime_id)),
+            window_sequence: 1,
+            window_ms: 2000,
+            pools: vec![KvPoolLoadEntry {
+                kv_used_blocks: 400,
+                total_kv_blocks: 1000,
+                kv_observed_ranks: 1,
+                kv_expected_ranks: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_load_envelopes_before_recording_state() {
+        let pool = pool_id();
+        let signals = PoolSignals::new(Arc::new(InFlightTracker::new()));
+        let mut load = serving_update(1);
+        load.contract_marker = 0;
+        assert!(record_serving_update(&pool, "qwen", &signals, &load).is_err());
+        load = serving_update(1);
+        load.protocol_version += 1;
+        assert!(record_serving_update(&pool, "qwen", &signals, &load).is_err());
+        assert_eq!(signals.occupancy(&pool), None);
+
+        record_serving_update(&pool, "qwen", &signals, &serving_update(1)).unwrap();
+        let mut kv = kv_update(1);
+        kv.contract_marker = 0;
+        assert!(record_kv_update(&pool, &signals, &kv).is_err());
+        kv = kv_update(1);
+        kv.protocol_version += 1;
+        assert!(record_kv_update(&pool, &signals, &kv).is_err());
+        assert_eq!(signals.occupancy(&pool).unwrap().kv, None);
+
+        record_kv_update(&pool, &signals, &kv_update(1)).unwrap();
+        assert!(signals.occupancy(&pool).unwrap().kv.is_some());
+    }
+
+    #[test]
+    fn keeps_separate_streams_on_the_same_relay_replica() {
+        let pool = pool_id();
+        let signals = PoolSignals::new(Arc::new(InFlightTracker::new()));
+        record_serving_update(&pool, "qwen", &signals, &serving_update(1)).unwrap();
+        record_kv_update(&pool, &signals, &kv_update(2)).unwrap();
+        assert_eq!(signals.occupancy(&pool).unwrap().kv, None);
+
+        record_kv_update(&pool, &signals, &kv_update(1)).unwrap();
+        assert!(signals.occupancy(&pool).unwrap().kv.is_some());
     }
 
     #[test]
