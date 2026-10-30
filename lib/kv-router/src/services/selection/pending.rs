@@ -13,7 +13,8 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
-use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
+use crate::kv_hints::{KvFetchSource, KvTransferCandidates};
+use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, WorkerWithDpRank};
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -61,6 +62,17 @@ pub(super) struct PendingSelection {
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
     /// The session the selection steered by, bound when the booking replays.
     pub session_id: Option<String>,
+    /// The selected worker's fetch, for the hint policies the replayed booking runs; `None`
+    /// when no hint policy reads fetches or the selection had no source.
+    pub kv_fetch: Option<PendingKvFetch>,
+}
+
+/// A selection's fetch for its worker, kept until a reservation books it. A retried reservation
+/// reads it again.
+pub(super) struct PendingKvFetch {
+    pub committed: Option<KvFetchSource>,
+    pub source: Option<KvFetchSource>,
+    pub candidates: KvTransferCandidates,
 }
 
 struct Entry {
@@ -84,6 +96,9 @@ fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
         + key.0.routing_group.len()
         + selection.lora_name.as_deref().map_or(0, str::len)
         + selection.session_id.as_deref().map_or(0, str::len)
+        + selection.kv_fetch.as_ref().map_or(0, |fetch| {
+            fetch.candidates.block_hashes.len() * std::mem::size_of::<ExternalSequenceBlockHash>()
+        })
 }
 
 struct State {
@@ -278,6 +293,7 @@ mod tests {
             lora_name: None,
             routing_hashes: None,
             session_id: None,
+            kv_fetch: None,
         }
     }
 

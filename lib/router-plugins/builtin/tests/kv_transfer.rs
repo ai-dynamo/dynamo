@@ -126,7 +126,7 @@ fn config(multiplier: f64) -> KvRouterConfig {
     }
 }
 
-/// The worker `kvcr` selects and the source its fetch hint would name.
+/// The worker `kvcr` selects and the source it commits that worker to.
 fn select(
     workers: &HashMap<u64, HintWorker>,
     request: &SchedulingRequest,
@@ -147,11 +147,15 @@ fn select_with(
     let selected = selector
         .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
         .unwrap();
+    // A policy without a fetch scorer commits nothing; its worker's source stays available to
+    // best-effort hint policies.
+    let fetch = selected.committed_kv_fetch.or(selected.kv_fetch_source);
+    if let Some(committed) = selected.committed_kv_fetch {
+        assert_eq!(selected.kv_fetch_source, Some(committed));
+    }
     (
         selected.worker.worker_id,
-        selected
-            .kv_transfer_source
-            .map(|source| (source.source, source.prefix_blocks)),
+        fetch.map(|source| (source.source(), source.prefix_blocks())),
     )
 }
 
@@ -173,7 +177,7 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     assert_eq!(select(&workers, &request, 0.0), (0, from_c));
     // At half credit A costs 17 and B costs 15: B wins and fetches everything from C.
     assert_eq!(select(&workers, &request, 0.5), (1, from_c));
-    // The default credits no fetch, so A still wins; the router still names C for it.
+    // The default credits and commits no fetch, so A still wins; C stays its best-effort source.
     assert_eq!(
         select_with(
             DefaultWorkerSelector::new_seeded(Some(config(0.5)), "test", 0),
@@ -253,8 +257,9 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                     .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
                     .unwrap();
                 assert_eq!(
-                    (actual.worker, actual.kv_transfer_source),
-                    (expected.worker, expected.kv_transfer_source),
+                    // kvcr commits the source the reference finds after its pick.
+                    (actual.worker, actual.committed_kv_fetch),
+                    (expected.worker, expected.kv_fetch_source),
                     "temperature={temperature} multiplier={multiplier}"
                 );
             }

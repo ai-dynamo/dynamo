@@ -14,7 +14,7 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::identity::CacheOwnerId;
-use crate::kv_hints::{CacheOwnerKvTransferKeys, KvTransferSourceChoice, WorkerKvTransferKeys};
+use crate::kv_hints::{CacheOwnerKvTransferKeys, KvFetchSource, WorkerKvTransferKeys};
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -1115,9 +1115,14 @@ pub struct WorkerSelectionResult {
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
 
-    /// The source the selected worker fetches its KV prefix from, chosen with
-    /// the same rule that credited the fetch during selection.
-    pub kv_transfer_source: Option<KvTransferSourceChoice>,
+    /// The fetch the selected worker's cost assumed, which the booking must
+    /// deliver. Only a [`crate::plugins::worker_selection::KvFetchScorer`]
+    /// commits one.
+    pub committed_kv_fetch: Option<KvFetchSource>,
+
+    /// The selected worker's eligible fetch source, committed or not, for hint
+    /// policies that fetch best effort.
+    pub kv_fetch_source: Option<KvFetchSource>,
 }
 
 /// How many candidates a selection trace retains: the `top_k` lowest-cost rows

@@ -21,14 +21,12 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
-use crate::kv_hints::{
-    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
-};
+use crate::kv_hints::{KvHint, KvHintAction, KvTransferCandidates};
 use crate::plugins::hint_policy::HintPolicyFactory;
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
@@ -140,6 +138,8 @@ struct SelectionEntry {
     affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
     /// This partition's hint policies that run at booking, in configured order.
     hint_policies: Vec<HintPolicySlot>,
+    /// Whether a hint policy reads or delivers fetches, so bookings retain transfer candidates.
+    hints_read_kv_fetch: bool,
 }
 
 impl SelectionEntry {

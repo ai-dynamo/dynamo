@@ -108,7 +108,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
-| `kvcr` | The default cost model plus credit for the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Each worker is committed to the fetch its cost assumes, and the selected worker's hint names that source. Takes the same parameters as `dynamo-default-cost-fn`. |
+| `kvcr` | The default cost model plus credit for the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Each worker is committed to the fetch its cost assumes. List the [`kv_fetch` hint policy](#hint-policies) for the same stage to deliver it; startup fails without it. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 
@@ -246,6 +246,33 @@ for that scope, which makes it a quick way to A/B a policy against the default.
 
 To write your own policy instead of using a built-in one, see
 [Write Custom Routing Strategies](custom-worker-selection.mdx).
+
+### Hint Policies
+
+Hint policies add engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), for the worker a booking selected. They never change worker choice. The `hint_policies` section of the same YAML file lists named instances in order for each worker role; a role without a list runs none.
+
+| Hint-policy type | Behavior |
+|---|---|
+| `kv_fetch` | Sends the booked worker a `kv.fetch` hint. When the worker-selection policy committed the worker to a fetch, as `kvcr` does, it delivers that fetch, and the booking fails if the source can no longer be reached. Otherwise it fetches best effort from the worker's eligible source when the fetch adds at least `min_additional_blocks` (default `1`). |
+
+This pairs `kvcr` with `kv_fetch` on prefill workers:
+
+```yaml
+worker_selection:
+  prefill: kvcr
+  instances:
+    - name: kvcr
+      type: kvcr
+      parameters:
+        shared_cache_multiplier: 0.5
+hint_policies:
+  prefill: [fetch]
+  instances:
+    - name: fetch
+      type: kv_fetch
+```
+
+A worker-selection policy that commits fetches needs exactly one hint policy that delivers them for the same role; otherwise the role's workers are not schedulable, and the reason names the missing pairing. Without a `kv_fetch` instance, the router sends no fetch hints.
 
 ### Policy-Class Queues
 

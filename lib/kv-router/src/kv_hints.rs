@@ -13,6 +13,8 @@ use crate::protocols::{
     ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
 };
 
+#[cfg(feature = "standalone-selection")]
+pub(crate) use sources::kv_fetch_payload;
 pub use sources::{
     CacheOwnerKvTransferKeys, KvFetchSource, KvTransferScope, KvTransferSourceChoice,
     KvTransferSourceSummary, KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
@@ -28,7 +30,9 @@ pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
-const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
+pub(crate) const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
+/// Action ID of a hint's `kv.fetch`; a hint carries at most one.
+pub(crate) const KV_FETCH_ACTION_ID: &str = "a1";
 const KV_FETCH_ACTION_VERSION: &str = "1.0";
 
 /// Typed payload for the `kv.fetch@1.0` point-to-point action.
