@@ -46,15 +46,91 @@ flowchart TD
 The exact child spans depend on the backend and deployment mode; users should treat span names as
 diagnostic structure rather than a stable public API.
 
-If a caller supplies `x-request-id`, Dynamo propagates it with the trace context. Structured log
-events emitted inside a request span can therefore include three correlation keys:
+Every request carries a server-generated `request_id`, and if a caller supplies `x-request-id`,
+Dynamo propagates that too with the trace context. Structured log events emitted inside a request
+span can therefore include four correlation keys:
 
+- `request_id` for the Dynamo-generated identifier of the request
 - `x_request_id` for the caller's application-level identifier
 - `trace_id` for the complete distributed request
 - `span_id` for the component-local operation
 
 This is why JSONL logging is required for reliable log-to-trace correlation: the identifiers remain
 separate fields instead of being embedded in formatted text.
+
+### Request Identifiers
+
+Three families of identifier are involved in one request, and they stay separate by design. The
+caller's identifier is for correlation only. The Dynamo identifier keys functional state. The engine
+identifier is whatever the engine needs internally.
+
+```mermaid
+flowchart LR
+    subgraph client [Client]
+        C1["x-request-id header (any string)"]
+        C2["traceparent / tracestate"]
+        C3["body request_id or rid<br/>(generate and SGLang routes only)"]
+    end
+
+    subgraph fe [Frontend]
+        S["http-request span<br/>request_id = generated UUID<br/>x_request_id = client header<br/>trace_id from traceparent"]
+        CTX["Context id = request_id<br/>(keys in-flight state, routing, migration)"]
+        PUB["public request id = client body or header<br/>(echoed in the body only)"]
+    end
+
+    subgraph wire [Request plane]
+        H["headers: traceparent, tracestate,<br/>x-request-id, request-id"]
+    end
+
+    subgraph wk [Worker]
+        WS["handle_payload span<br/>request_id, x_request_id, trace_id"]
+        WCTX["Context id = request_id<br/>trace headers handed to the engine"]
+    end
+
+    subgraph eng [Engine]
+        V["vLLM: engine request id = request_id"]
+        G["SGLang: own request id,<br/>mapping logged with request_id"]
+        T["TensorRT-LLM: own client id,<br/>mapping logged with request_id"]
+    end
+
+    subgraph resp [Response]
+        R1["x-request-id header echoed"]
+        R2["body id = chatcmpl-/cmpl-request_id<br/>SSE request_id annotation"]
+        R3["generate request_id / SGLang rid echoed"]
+    end
+
+    C1 --> S
+    C2 --> S
+    C3 --> PUB
+    S --> CTX
+    S --> H
+    CTX --> H
+    H --> WS
+    WS --> WCTX
+    WCTX --> V
+    WCTX --> G
+    WCTX --> T
+    C1 --> R1
+    CTX --> R2
+    PUB --> R3
+```
+
+| Identifier | Source | Functional use | Logging and tracing | Returned to the caller |
+| --- | --- | --- | --- | --- |
+| `x-request-id` | Caller header, any string | None; it never keys state | `x_request_id` on the frontend and worker spans and their log events; forwarded in the request plane headers; handed to the engine with the trace headers | Echoed as the `x-request-id` response header |
+| `traceparent` / `tracestate` | Caller header | None | Parent of the frontend span; re-injected into the request plane so the worker's `handle_payload` span is a child; handed to the engine so engine spans join the same trace | No |
+| `request_id` | Generated UUID on the frontend span; the request context uses the same value | Keys the frontend's in-flight response map, the router's request lifecycle, migration retries (the same value is reused per attempt), and the worker's in-flight map | `request_id` on frontend and worker spans and log events; the `request-id` header on the request plane | The response body `id`; a `request_id` SSE annotation when the request opts in with `nvext.annotations: ["request_id"]` |
+| Public request id | Caller body `request_id` or `rid`, or `x-request-id`, on the generate and SGLang routes; the KServe gRPC request `id` | None | Not recorded on spans | Echoed in the generate response body, the SGLang `rid`, and the KServe response `id` |
+| Engine request id | vLLM reuses `request_id`; SGLang generates its own per call; TensorRT-LLM uses its own client id | Engine scheduling and abort | Engine logs and metrics; SGLang and TensorRT-LLM log the mapping to `request_id` | No |
+
+The `request-id` request plane header is always set. The `x-request-id`, `traceparent`, and
+`tracestate` headers are injected from the trace-context layer, so they reach the worker only when the
+sending process runs with JSONL logging, OTLP export, or the legacy `DYN_LOGGING_JSONL=1` switch.
+
+The caller-supplied identifiers are correlation inputs only. Reusing an `x-request-id` across
+requests, or sending the `request-id` or `x-dynamo-request-id` headers, does not change how Dynamo
+keys or routes a request. For the caller-facing rules, see the
+[Logging Reference](../../../reference/observability/logging.mdx#request-correlation).
 
 ## Forward Pass Metrics Persistence
 
