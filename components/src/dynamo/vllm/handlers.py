@@ -3244,7 +3244,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             yield {"status": "error", "message": str(e)}
 
     def cleanup(self):
-        """Clean up resources including temporary directories."""
+        """Stop engine monitoring and release handler-owned resources."""
+        self.engine_monitor.stop()
         if self._ep_capacity_executor is not None:
             # wait=False on purpose: a snapshot stuck on an unresponsive GCS must
             # not hold up worker shutdown, and the process is going away anyway.
@@ -4757,10 +4758,10 @@ class EmbeddingWorkerHandler:
     def cleanup(self) -> None:
         """Release resources owned by this handler.
 
-        AsyncLLM lifecycle is owned by the worker factory / runtime; the
-        engine monitor cancels its background tasks via ``__del__``.
+        Stop engine monitoring explicitly. AsyncLLM lifecycle remains owned
+        by the worker factory / runtime.
         """
-        return None
+        self.engine_monitor.stop()
 
     async def _monitor_abort(self, context: Context, request_id: str) -> None:
         """Background task: abort the encode if context is cancelled or
