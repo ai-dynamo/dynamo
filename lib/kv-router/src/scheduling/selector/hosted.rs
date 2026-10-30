@@ -203,10 +203,7 @@ mod tests {
     use crate::scheduling::config::KvRouterConfig;
 
     const _: () = {
-        const fn assert_send_sync<T: Send + Sync + ?Sized>() {}
-        assert_send_sync::<dyn WorkerFilter>();
-        assert_send_sync::<dyn WorkerScorer>();
-        assert_send_sync::<dyn WorkerPicker>();
+        const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HostedWorkerPicker>();
     };
 

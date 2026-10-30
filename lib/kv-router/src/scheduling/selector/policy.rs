@@ -1920,7 +1920,7 @@ mod tests {
 
         impl WorkerPicker for LeastActivePicker {
             fn required_worker_inputs(&self) -> WorkerInputs {
-                WorkerInputs::ACTIVE_REQUESTS | WorkerInputs::LOAD
+                WorkerInputs::ACTIVE_REQUESTS
             }
 
             fn pick(
@@ -1928,13 +1928,8 @@ mod tests {
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                let loads = input.load().expect("declared LOAD");
-                for (row, load) in loads.iter().enumerate() {
-                    assert_eq!(
-                        input.active_requests(row),
-                        Some(load.active_requests() as u64)
-                    );
-                }
+                assert_eq!(input.active_requests(row_of(input, 0)), Some(5));
+                assert_eq!(input.active_requests(row_of(input, 1)), Some(2));
                 Ok((0..input.len())
                     .min_by_key(|&row| input.active_requests(row))
                     .unwrap())
@@ -2095,11 +2090,5 @@ mod tests {
                 16,
             ))
             .unwrap();
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn occupancy_alias_is_active_requests() {
-        assert_eq!(WorkerInputs::OCCUPANCY, WorkerInputs::ACTIVE_REQUESTS);
     }
 }

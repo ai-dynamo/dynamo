@@ -257,7 +257,7 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
 /// every instance. Instances on many threads, and two roles interleaved on one thread, must
 /// each pick exactly what the single-threaded reference picks with the same seed.
 #[test]
-fn default_picker_scratch_is_safe_across_threads_and_roles() {
+fn default_picker_sampling_buffers_are_safe_across_threads_and_roles() {
     const SELECTIONS: usize = 64;
     let config = KvRouterConfig {
         router_temperature: 0.7,

@@ -62,18 +62,19 @@ fn softmax_sample_index<T>(
     entries.len() - 1
 }
 
-/// Sampling buffers reused across picks. Each call clears what it uses.
+/// The (row, cost) pairs and softmax weights a sampled pick fills. Each pick clears them first,
+/// so only their allocated capacity carries over between picks.
 #[derive(Default)]
-struct Scratch {
+struct SamplingBuffers {
     entries: Vec<(usize, f64)>,
     probabilities: Vec<f64>,
 }
 
 thread_local! {
-    // One slot per thread, shared by every picker instance. A pick takes the buffers out and
-    // puts them back, so a nested pick on this thread allocates its own instead of panicking.
-    static SCRATCH: Cell<Scratch> = const {
-        Cell::new(Scratch {
+    // Each thread keeps one set of sampling buffers, shared by every picker on it, so picks reuse
+    // their memory without a lock.
+    static SAMPLING_BUFFERS: Cell<SamplingBuffers> = const {
+        Cell::new(SamplingBuffers {
             entries: Vec::new(),
             probabilities: Vec::new(),
         })
@@ -123,33 +124,33 @@ impl WorkerPicker for DefaultPicker {
             }
             return Ok(best_row);
         }
-        let mut scratch = SCRATCH.take();
-        let row = self.sample(candidates, &mut scratch);
-        SCRATCH.set(scratch);
+        let mut buffers = SAMPLING_BUFFERS.take();
+        let row = self.sample(candidates, &mut buffers);
+        SAMPLING_BUFFERS.set(buffers);
         Ok(row)
     }
 }
 
 impl DefaultPicker {
-    fn sample(&self, candidates: &[ScoredWorkerCandidate], scratch: &mut Scratch) -> usize {
+    fn sample(&self, candidates: &[ScoredWorkerCandidate], buffers: &mut SamplingBuffers) -> usize {
         let Some(rng) = &self.rng else {
             return softmax_sample_index(
                 candidates,
                 |candidate| candidate.cost(),
                 self.temperature,
                 fastrand::f64(),
-                &mut scratch.probabilities,
+                &mut buffers.probabilities,
             );
         };
-        scratch.entries.clear();
-        scratch.entries.extend(
+        buffers.entries.clear();
+        buffers.entries.extend(
             candidates
                 .iter()
                 .enumerate()
                 .map(|(row, candidate)| (row, candidate.cost())),
         );
         // Canonical order is required only for deterministic replay, never for production ties.
-        scratch.entries.sort_unstable_by_key(|(row, _)| {
+        buffers.entries.sort_unstable_by_key(|(row, _)| {
             let worker = candidates[*row].worker();
             (worker.worker_id, worker.dp_rank)
         });
@@ -158,7 +159,7 @@ impl DefaultPicker {
             let mut best = 0;
             let mut best_cost = f64::INFINITY;
             let mut ties = 0;
-            for (index, (_, cost)) in scratch.entries.iter().enumerate() {
+            for (index, (_, cost)) in buffers.entries.iter().enumerate() {
                 if *cost < best_cost {
                     best = index;
                     best_cost = *cost;
@@ -173,13 +174,13 @@ impl DefaultPicker {
             best
         } else {
             softmax_sample_index(
-                &scratch.entries,
+                &buffers.entries,
                 |(_, cost)| *cost,
                 self.temperature,
                 rng.f64(),
-                &mut scratch.probabilities,
+                &mut buffers.probabilities,
             )
         };
-        scratch.entries[selected].0
+        buffers.entries[selected].0
     }
 }

@@ -781,22 +781,8 @@ impl<'a> WorkerInputView<'a> {
 
     /// Return the number of requests active on the worker at `row`, when the picker declared
     /// [`WorkerInputs::ACTIVE_REQUESTS`]. The host looks the count up on each call, so a
-    /// picker pays only for the rows it reads.
-    ///
-    /// - **With KV state:** the requests the router tracks as active on the row's worker and
-    ///   data-parallel rank, including other router replicas' requests when replica sync is
-    ///   enabled. It comes from the load projection this selection uses, taken on the scheduler
-    ///   before the picker runs, so it counts every earlier booking. It equals
-    ///   [`WorkerLoadInput::active_requests`] in [`Self::load`] for the same row. A candidate
-    ///   with no load observation reads the unobserved fallback that `LOAD` also reports,
-    ///   `Some(0)`.
-    /// - **Without KV state:** this router process's requests in flight to the row's worker,
-    ///   including ones it has reserved but not yet dispatched, read live on each call. It is
-    ///   per worker, not per data-parallel rank. A worker with nothing in flight reads
-    ///   `Some(0)`. When the host commits a selection it reads the counts under its admission
-    ///   lock, so they include every earlier reservation; a preview reads them without it.
-    ///
-    /// None when the picker did not declare `ACTIVE_REQUESTS` or `row` is out of range.
+    /// picker pays only for the rows it reads. A worker with nothing in flight reads `Some(0)`;
+    /// None means the picker did not declare the group or `row` is out of range.
     pub fn active_requests(self, row: usize) -> Option<u64> {
         match self.rows {
             PickerRows::Materialized {
