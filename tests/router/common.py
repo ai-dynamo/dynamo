@@ -4473,6 +4473,10 @@ class PrefillQueueRejectionParityMismatch(AssertionError):
     """Observed FE typed queue rejection versus EPP aggregated fallback."""
 
 
+class PriorityHeaderParityMismatch(AssertionError):
+    """Observed FE high-then-low versus EPP header-precedence low-then-high."""
+
+
 def assert_route_observations_match(
     left,
     right,
@@ -6605,21 +6609,25 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                 f"{catalog['prefill']}: {blocker_obs.prefill_worker_id}"
             )
         _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
-        (epp_low, epp_high, epp_sentinel, sentinel_kind, _) = (
-            _prove_epp_priority_capacity(
-                stack,
-                case,
-                catalog=catalog,
-                case_name=kind,
-                blocker_obs=blocker_obs,
-                low_id=low_id,
-                high_id=high_id,
-                sentinel_id=sentinel_id,
-                low_payload=low_payload,
-                high_payload=high_payload,
-                low_headers=low_headers,
-                high_headers=high_headers,
-            )
+        (
+            epp_low,
+            epp_high,
+            epp_sentinel,
+            sentinel_kind,
+            _,
+        ) = _prove_epp_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            case_name=kind,
+            blocker_obs=blocker_obs,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
         )
         if sentinel_kind == "aggregated":
             epp_sentinel.release()
@@ -6627,7 +6635,9 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
             _poll_held_admission(epp_low, 0.0) is not None
             or _poll_held_admission(epp_high, 0.0) is not None
         ):
-            raise AssertionError(f"{kind}: EPP low/high admitted before blocker release")
+            raise AssertionError(
+                f"{kind}: EPP low/high admitted before blocker release"
+            )
         _assert_priority_catalog(stack, catalog, "while EPP prefill blocker held")
         if stack.kube_api.failures:
             raise AssertionError(
@@ -6682,6 +6692,11 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                     f"{kind}: EPP {label} did not reserve prefill "
                     f"{catalog['prefill']}: {obs.prefill_worker_id}"
                 )
+            if obs.worker_id != catalog["decode"]:
+                raise AssertionError(
+                    f"{kind}: EPP {label} worker_id is {obs.worker_id}, "
+                    f"not catalog decode {catalog['decode']}"
+                )
             if obs.dp_rank != 0:
                 raise AssertionError(
                     f"{kind}: EPP {label} dp_rank is {obs.dp_rank}, not DP0"
@@ -6700,6 +6715,16 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                 + "; ".join(stack.kube_api.failures)
             )
         if admitted != "high" or pending != "low":
+            if (
+                kind in {"header_strict", "header_normal"}
+                and fe_order == [high_id, low_id]
+                and admitted == "low"
+                and pending == "high"
+            ):
+                raise PriorityHeaderParityMismatch(
+                    f"{kind}: EPP admission order is {admitted} then {pending}, "
+                    "not high then low"
+                )
             raise AssertionError(
                 f"{kind}: EPP admission order is {admitted} then {pending}, "
                 "not high then low"

@@ -13,6 +13,7 @@ import pytest
 
 from tests.router.common import (
     PrefillQueueRejectionParityMismatch,
+    PriorityHeaderParityMismatch,
     SessionAffinityParityMismatch,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
@@ -98,8 +99,30 @@ def test_epp_frontend_inputs_parity(request, predownload_tokenizers, tmp_path, f
     "kind",
     (
         "body_strict",
-        "header_strict",
-        "header_normal",
+        pytest.param(
+            "header_strict",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=PriorityHeaderParityMismatch,
+                reason=(
+                    "measured high→low FE versus low→high EPP/"
+                    "header precedence: "
+                    "https://github.com/ai-dynamo/dynamo/issues/16592"
+                ),
+            ),
+        ),
+        pytest.param(
+            "header_normal",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=PriorityHeaderParityMismatch,
+                reason=(
+                    "measured high→low FE versus low→high EPP/"
+                    "header precedence: "
+                    "https://github.com/ai-dynamo/dynamo/issues/16592"
+                ),
+            ),
+        ),
         pytest.param(
             "sentinel_fallback",
             marks=pytest.mark.xfail(
