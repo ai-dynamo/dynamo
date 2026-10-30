@@ -366,9 +366,6 @@ class SGLangConfigModifier(BaseConfigModifier):
             cfg, backend="sglang", sub_component_type=component_type
         )
 
-        # Set up resources
-        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
-
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
@@ -388,6 +385,10 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--data-parallel-size")
 
         get_main_container(worker_service).args = args
+
+        # Set up resources
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
+
         return cfg.model_dump()
 
     @classmethod
@@ -402,9 +403,6 @@ class SGLangConfigModifier(BaseConfigModifier):
         worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
-
-        # Set up resources with multinode configuration
-        setup_worker_component_resources(worker_service, tep_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -429,6 +427,10 @@ class SGLangConfigModifier(BaseConfigModifier):
             args.remove("--enable-dp-attention")
 
         get_main_container(worker_service).args = args
+
+        # Set up resources with multinode configuration
+        setup_worker_component_resources(worker_service, tep_size, num_gpus_per_node)
+
         return cfg.model_dump()
 
     @classmethod
@@ -443,9 +445,6 @@ class SGLangConfigModifier(BaseConfigModifier):
         worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
-
-        # Set up resources with multinode configuration
-        setup_worker_component_resources(worker_service, dep_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -470,6 +469,10 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--expert-parallel-size")
 
         get_main_container(worker_service).args = args
+
+        # Set up resources with multinode configuration
+        setup_worker_component_resources(worker_service, dep_size, num_gpus_per_node)
+
         return cfg.model_dump()
 
     @classmethod
