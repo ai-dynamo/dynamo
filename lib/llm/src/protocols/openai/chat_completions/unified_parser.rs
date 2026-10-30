@@ -260,6 +260,9 @@ impl UnifiedRequestPolicy {
             // Gemma's Response state preserves literal thought delimiters and still parses tools.
             // Nemotron 3 defaults to an implicit open thought; `enable_thinking=false` renders
             // a closed `<think></think>` pair instead, so generation starts in the answer.
+            // MiniMax M3 reaches this only when the rendered prompt closed the thought with
+            // `</mm:think>` or a grammar owns the output (the preprocessor's rendered-prompt
+            // gate), so there is no reasoning channel left to parse.
             UnifiedParserStartingState::Response
         } else {
             inferred

@@ -5779,17 +5779,38 @@ impl OpenAIPreprocessor {
             env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
         );
 
+        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
+        // parsers inspect the stream shape before deciding whether to parse it.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let is_structured_response = Self::has_structured_response_format(request);
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        let is_minimax_m3_explicit_guided_output =
+            Self::is_minimax_m3_family(reasoning_parser, self.tool_call_parser.as_deref())
+                && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
+        let is_guided_output =
+            is_guided_tool_choice || is_structured_response || is_minimax_m3_explicit_guided_output;
+
         if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
             let tool_definitions =
                 crate::preprocessor::tool_choice::effective_tool_definitions(request)?;
             let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
-            let reasoning_disabled = Self::request_disables_reasoning_with_family(
-                request,
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-                None,
-                Some(family),
-            );
+            // MiniMax M3: the same gate as `reasoning_disabled_by_request` below. A
+            // thinking-disabled request turns the parser off only when the rendered
+            // prompt closed reasoning with `</mm:think>` or a grammar owns the output;
+            // a chat template that does not render `thinking_mode` leaves the prompt
+            // open and the model may still write `<mm:think>...</mm:think>`.
+            let reasoning_disabled =
+                Self::request_disables_reasoning_with_family(
+                    request,
+                    self.tool_call_parser.as_deref(),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                    None,
+                    Some(family),
+                ) && (prompt_prefill.reasoning_closed_by_prompt != Some(false) || is_guided_output);
             // TODO: Resolve model-specific prefill and guidance through the parser adapter's
             // UnifiedRequestPolicy and parser capabilities; migrate equivalent batch/stream
             // branches together while preserving legacy/v2 behavior.
@@ -5859,20 +5880,6 @@ impl OpenAIPreprocessor {
             ));
         }
 
-        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
-        // parsers inspect the stream shape before deciding whether to parse it.
-        let is_guided_tool_choice = matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::Required)
-                | Some(ChatCompletionToolChoiceOption::Named(_))
-        );
-        let is_structured_response = Self::has_structured_response_format(request);
-        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
-        let is_minimax_m3_explicit_guided_output =
-            Self::is_minimax_m3_family(reasoning_parser, self.tool_call_parser.as_deref())
-                && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
-        let is_guided_output =
-            is_guided_tool_choice || is_structured_response || is_minimax_m3_explicit_guided_output;
         // Force parsers opt in by capability; prompt-seeded parsers opt in per request.
         // Structural-tag tool formats do not use this guided-JSON detection path.
         let inspect_force_reasoning_guided_output = is_guided_output
@@ -18543,8 +18550,9 @@ responses_tools: None,
         // A template that renders `thinking_mode` closes reasoning with
         // `</mm:think>` for a thinking-disabled request, so the parser stays
         // off as before and the answer streams as it arrives. Where the
-        // prompt left thinking open, the parser holds marker-free text until
-        // the end of the turn shows it was not reasoning.
+        // prompt left thinking open, the v1 parser holds marker-free text
+        // until the end of the turn shows it was not reasoning; v2 streams
+        // it as it arrives.
         let streams_as_it_arrives = vec![
             ("Hello".to_string(), String::new(), false),
             (" there".to_string(), String::new(), false),
@@ -18563,7 +18571,14 @@ responses_tools: None,
                         MiniMaxM3Template::RendersThinkingMode,
                         &streams_as_it_arrives,
                     ),
-                    (MiniMaxM3Template::IgnoresThinkingMode, &held_until_the_end),
+                    (
+                        MiniMaxM3Template::IgnoresThinkingMode,
+                        if minimax_m3_uses_unified_parser() {
+                            &streams_as_it_arrives
+                        } else {
+                            &held_until_the_end
+                        },
+                    ),
                 ] {
                     let trip = minimax_m3_round_trip_on(
                         template,
