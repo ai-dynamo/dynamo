@@ -16,7 +16,6 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.common.kv_state_agent import validate_advertise_host
-from dynamo.llm import WorkerType
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     resolved_server_args,
@@ -132,10 +131,7 @@ def publish_kvcr_hint_capabilities(
 ) -> None:
     """Publish KVCR sources explicitly reported by a supported SGLang worker."""
     server_args = resolved_server_args(server_args)
-    linker = (
-        is_supported_kvcr_linker_topology(server_args)
-        and worker_type == WorkerType.Aggregated
-    )
+    linker = is_supported_kvcr_linker_topology(server_args)
     if (
         not (getattr(server_args, "enable_hierarchical_cache", False) or linker)
         or getattr(server_args, "nnodes", 1) != 1

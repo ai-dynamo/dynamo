@@ -32,6 +32,12 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+LINKER_WORKER_MODES = (
+    DisaggregationMode.AGGREGATED,
+    DisaggregationMode.PREFILL,
+    DisaggregationMode.DECODE,
+)
+
 
 def fixture():
     source = {
@@ -111,9 +117,11 @@ def linker_fixture():
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size):
+@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size, mode):
     engine, config, source, _ = linker_fixture()
     config.server_args.tp_size = tp_size
+    config.serving_mode = mode
     (descriptor,) = state_agent_descriptors(engine, config)
     assert descriptor["cache_owner_id"] == source["cache_owner_id"]
     assert descriptor["raw_zmq_endpoint"] == "tcp://worker:24020"
@@ -123,12 +131,19 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size
     assert descriptor["kv_block_size"] == 64
     assert descriptor["router_hint_source"] == {
         "source_control_endpoint": "tcp://worker:24100",
-        "worker_type": "aggregated",
+        "worker_type": {
+            DisaggregationMode.AGGREGATED: "aggregated",
+            DisaggregationMode.PREFILL: "prefill",
+            DisaggregationMode.DECODE: "decode",
+        }[mode],
     }
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_linker_registration_uses_state_agent(monkeypatch, tp_size):
+@pytest.mark.parametrize(
+    "worker_type", [WorkerType.Aggregated, WorkerType.Prefill, WorkerType.Decode]
+)
+def test_linker_registration_uses_state_agent(monkeypatch, tp_size, worker_type):
     engine, config, source, _ = linker_fixture()
     config.server_args.tp_size = tp_size
     config.server_args.model_path = config.server_args.served_model_name = "test-model"
@@ -148,7 +163,7 @@ def test_linker_registration_uses_state_agent(monkeypatch, tp_size):
             None,
             config.server_args,
             config.dynamo_args,
-            worker_type=WorkerType.Aggregated,
+            worker_type=worker_type,
             forwards_kv_hints=True,
         )
     )
@@ -163,7 +178,7 @@ def test_linker_registration_uses_state_agent(monkeypatch, tp_size):
     [
         ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
-        ({}, DisaggregationMode.PREFILL, "aggregated hint-forwarding"),
+        ({}, DisaggregationMode.ENCODE, "hint-forwarding LLM worker"),
     ],
 )
 def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
@@ -175,9 +190,13 @@ def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(tp_size):
+@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
+def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(
+    tp_size, mode
+):
     engine, config, source, info = linker_fixture()
     config.server_args.tp_size = tp_size
+    config.serving_mode = mode
     engine.async_generate = lambda: None
     with pytest.raises(ValueError, match="hint-forwarding"):
         state_agent_descriptors(engine, config)
@@ -188,6 +207,7 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(tp_siz
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
 @pytest.mark.parametrize(
     "change,match",
     [
@@ -198,9 +218,12 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(tp_siz
         ("topic", "topic must identify"),
     ],
 )
-def test_linker_inventory_rejects_wrong_ownership_contract(change, match, tp_size):
+def test_linker_inventory_rejects_wrong_ownership_contract(
+    change, match, tp_size, mode
+):
     engine, config, source, info = linker_fixture()
     config.server_args.tp_size = tp_size
+    config.serving_mode = mode
     if change == "lifetime":
         source["inventory_lifetime"] = "persistent"
     elif change == "reset":

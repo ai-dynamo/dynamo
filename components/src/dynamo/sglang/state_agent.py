@@ -74,13 +74,10 @@ def state_agent_descriptors(engine, config) -> list[dict]:
             "KVCR inventory requires a single-host HiCache or supported linker worker, one tokenizer "
             "worker, PP=1 and KV event emission"
         )
-    if linker and (
-        config.serving_mode != DisaggregationMode.AGGREGATED
-        or not filter_supported_async_generate_kwargs(engine, {"kv_hints": None})
+    if linker and not filter_supported_async_generate_kwargs(
+        engine, {"kv_hints": None}
     ):
-        raise ValueError(
-            "KVCR linker inventory requires an aggregated hint-forwarding worker"
-        )
+        raise ValueError("KVCR linker inventory requires a hint-forwarding worker")
     roles = {
         DisaggregationMode.AGGREGATED: "aggregated",
         DisaggregationMode.PREFILL: "prefill",
