@@ -12,12 +12,12 @@
 //! Each pool's PoolRelay Service, named `<DGD name>-pool-relay` by default,
 //! needs a `ServiceExport`, and so does the router's Service in the hub, so
 //! its replicas appear in every importing cluster. Read alone, a pool is live
-//! while a PoolRelay endpoint is Ready. Its `relay_identities` are that
-//! PoolRelay pod's addresses, for routers on a trusted network to admit it.
-//! The service also needs a live registration, which says what the pool
-//! serves ([`crate::backends::registered`]), and reads the pool's frontend
-//! addresses from its exported frontend Service, named `<DGD name>-frontend`
-//! by default.
+//! while a PoolRelay endpoint is Ready. Its `relay_identities` are the
+//! addresses of every Ready PoolRelay pod, for routers on a trusted network to
+//! admit each of the pool's active-active replicas. The service also needs a
+//! live registration, which says what the pool serves
+//! ([`crate::backends::registered`]), and reads the pool's frontend addresses
+//! from its exported frontend Service, named `<DGD name>-frontend` by default.
 //!
 //! With Karmada, a Service name may have at most 55 characters: DGD names up
 //! to 44 with the default `-pool-relay` suffix. Karmada imports a Service as

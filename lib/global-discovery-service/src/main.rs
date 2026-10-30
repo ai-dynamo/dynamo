@@ -397,10 +397,10 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
 }
 
 /// Pools from what MCS imports, joined with registrations: a pool is listed
-/// while MCS imports a Ready PoolRelay endpoint for it and its PoolRelay has
-/// registered within the lease. MCS gives the addresses; the registration
-/// gives the model, capabilities, capacity and location. Router replicas
-/// come from the router Service's imports.
+/// while MCS imports a Ready PoolRelay endpoint for it and one of its
+/// PoolRelays has registered within the lease. MCS gives the addresses; the
+/// registration gives the model, capabilities, capacity and location. Router
+/// replicas come from the router Service's imports.
 async fn mcs_backend(
     args: &Args,
     mcs: McsImplementation,
