@@ -1764,6 +1764,27 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     return SimpleNamespace(**defaults)
 
 
+class TestPushEgressOptIn:
+    """The Rust ingress selects push egress per handler by probing for a
+    `response_sender` parameter (see dynamo.common.backend.push_egress). The
+    text handlers must expose it, or every response falls back to the pull
+    path with its per-chunk GIL round trips and nothing logged.
+    """
+
+    @pytest.mark.parametrize(
+        "handler_name", ["DecodeWorkerHandler", "PrefillWorkerHandler"]
+    )
+    def test_generate_declares_response_sender(self, handler_name):
+        import inspect
+
+        from dynamo.vllm import handlers
+
+        params = inspect.signature(getattr(handlers, handler_name).generate).parameters
+        assert "response_sender" in params
+        # Pull callers (in-process, canary) pass no sender and must still work.
+        assert params["response_sender"].default is None
+
+
 class TestPoolingWorkerPrefixCachingDefault:
     """Pooling-family workers must not default prefix caching on: pooling
     engines never decode, and force-enabling it crashes hybrid-attention
