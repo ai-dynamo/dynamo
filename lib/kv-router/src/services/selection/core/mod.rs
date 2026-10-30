@@ -555,9 +555,8 @@ impl SelectionCore {
         {
             return;
         }
-        // Worker upserts commit to the catalog before draining the held
-        // bindings, so checking placement under this lock means a binding is
-        // either applied here or still held when that drain runs.
+        // Upserts commit to the catalog before draining held bindings, so checking
+        // placement under this lock means a binding is applied here or still held.
         let mut held = self.held_bindings.lock();
         let entry = self.entry(&event.partition);
         let Some(table) = entry.as_ref().and_then(|entry| entry.affinity.get()) else {
