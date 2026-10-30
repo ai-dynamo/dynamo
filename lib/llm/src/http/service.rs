@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
@@ -38,6 +39,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -225,6 +227,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "beam" => false,
                             // Kept on with the Gemma 4 tool-call parser.
                             "gemma4" => thinking != Some(true) && tool.is_none(),
                             // Spark's template has no reasoning-off mode; keep parsing
