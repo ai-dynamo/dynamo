@@ -2397,25 +2397,23 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-                let push_router = rs::pipeline::PushRouter::<
-                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                    rs::protocols::annotated::Annotated<
-                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                    >,
-                >::from_client(
+                let kv_router = managed_router.router().clone();
+                let affinity = session_affinity_ttl_secs
+                    .map(|ttl| {
+                        kv_router
+                            .affinity_coordinator(Duration::from_secs(ttl), session_affinity_mode)
+                    })
+                    .transpose()
+                    .map_err(to_pyerr)?;
+                let routing_host = RsRoutingHost::builder(
                     managed_router.load_context().client().clone(),
                     rs::pipeline::network::egress::push_router::RouterMode::KV,
                 )
+                .kv_router(kv_router)
+                .load_context(managed_router.load_context().clone())
+                .affinity_coordinator(affinity)
+                .build()
                 .await
-                .map_err(to_pyerr)?;
-
-                let routing_host = RsRoutingHost::new_with_load_context(
-                    push_router,
-                    managed_router.router().clone(),
-                    managed_router.load_context().clone(),
-                    session_affinity_ttl_secs.map(Duration::from_secs),
-                    session_affinity_mode,
-                )
                 .map_err(to_pyerr)?;
 
                 Ok(Self {
