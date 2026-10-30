@@ -309,7 +309,7 @@ jobs:
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
           fi
       - name: Initialize Dynamo Builder
-        uses: $/.github/actions/init-dynamo-builder
+        uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@e8cb76eeca91bbac2ab5c2702bd8bd629b20dd3a  # ai-dynamo/.github#9
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
