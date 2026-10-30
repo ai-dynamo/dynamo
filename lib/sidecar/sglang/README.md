@@ -87,27 +87,6 @@ devices, `IPC_LOCK`, and shared memory. Tune UCX for the deployment fabric.
 Keep the model, served model name, and tensor parallelism consistent across
 prefill and decode; KV routing also requires a consistent page size.
 
-## Policy-version routing
-
-Enable `--policy-version-taints` (or `DYN_SGLANG_POLICY_VERSION_TAINTS=true`)
-to publish the engine's observed `weight_version` as
-`dynamo.policy/version=<namespace>:<version>`. Both values are URL-encoded.
-For example, namespace `training` and version `17` produce
-`dynamo.policy/version=training:17`; requests can require it with
-`nvext.routing_constraints.required_taints` using a router that supports those
-constraints. The flag does not add request constraints automatically.
-
-The sidecar requires `WatchEngineState` when enabled. It clears its version taint
-on pause, unhealthy/missing version, or stream loss, and refreshes it after
-reconnection. Engine replacement requires a sidecar restart. Only the serving
-leader publishes model taints; headless followers do not. Manual full-set taint
-replacement is disabled in this mode; initial unrelated and topology taints
-are preserved. The default path is unchanged.
-
-This is discovery metadata, not admission control, request draining, or an
-execution-time version fence. Updates propagate asynchronously, and the engine
-must emit a new state snapshot after changing its weight version.
-
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
