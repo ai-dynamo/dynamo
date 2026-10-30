@@ -686,6 +686,8 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
+	# The output is gitignored, so a clean checkout has no directory for it.
+	mkdir -p ../../docs/fern/pages/reference/kubernetes-api/additional-resources
 	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"

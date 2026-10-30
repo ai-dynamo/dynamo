@@ -78,22 +78,32 @@ PATH_RE = re.compile(r"^\s*path:\s*(\S+)\s*$", re.M)
 # repository gates in direct contradiction -- whichever you satisfied, the other failed.
 NON_PAGE_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
 
-# Generated at publish time by docs/fern/scripts/gen_python_api.py and its Rust
-# counterpart. #13556 stopped committing them and gitignored both trees, so they
-# are absent from a clean checkout and present in the published site. A nav entry
-# or link that targets them is correct even though the file is not on disk, so
-# resolution checks treat these prefixes as satisfied. Keep in sync with the
-# ignore entries in docs/fern/.gitignore.
-GENERATED_PAGE_DIRS = (
+# Generated at publish time by docs/fern/scripts/gen_python_api.py, its Rust
+# counterpart, and `make -C deploy/operator generate-api-docs` for Kubernetes.
+# #13556 stopped committing the Python/Rust trees and the Kubernetes pages
+# followed, so they are absent from a clean checkout and present in the
+# published site. A nav entry or link that targets them is correct even though
+# the file is not on disk, so resolution checks treat these paths as satisfied.
+# Keep in sync with the ignore entries in docs/fern/.gitignore.
+GENERATED_PAGE_PATHS = (
     os.path.join("pages", "reference", "api", "python"),
     os.path.join("pages", "reference", "api", "rust"),
+    os.path.join("pages", "reference", "kubernetes-api", "full-api-reference.mdx"),
+    os.path.join(
+        "pages",
+        "reference",
+        "kubernetes-api",
+        "additional-resources",
+        "api-reference-k8s.md",
+    ),
 )
 
 
 def is_generated(fern_rel: str) -> bool:
-    """True for a docs/fern-relative path inside a publish-time generated tree."""
+    """True for a docs/fern-relative path that is, or sits under, a publish-time
+    generated page path."""
     norm = os.path.normpath(fern_rel)
-    return any(norm == d or norm.startswith(d + os.sep) for d in GENERATED_PAGE_DIRS)
+    return any(norm == p or norm.startswith(p + os.sep) for p in GENERATED_PAGE_PATHS)
 
 
 # Docs on how to fix each rule, surfaced in the CI failure output.

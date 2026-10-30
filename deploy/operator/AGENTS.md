@@ -15,8 +15,9 @@ SPDX-License-Identifier: Apache-2.0
   `docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`
   (relative to the repository root) from Go API types and comments, then runs
   `docs/fern/scripts/gen_kubernetes_api.py` to render `full-api-reference.mdx`.
-  `make check` depends on this target and checks for uncommitted changes. Regenerate
-  and commit both generated files when their source changes; do not edit them by hand.
+  Both files are gitignored: CI generates them when it checks and publishes the
+  docs, so there is nothing to commit. Change the Go types, `docs/header.md`, or
+  `docs/footer.md` instead.
 - The sibling `dynamo-graph-deployment.mdx`,
   `dynamo-graph-deployment-request.mdx`, and `dynamo-component-deployment.mdx`
   pages are **manually maintained**. Neither generation command updates them,

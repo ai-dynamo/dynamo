@@ -76,8 +76,10 @@ The renderer parses `api-reference-k8s.md` and writes
 `docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx`. It converts packages and types to
 Fern cards, accordions, parameter fields, badges, and links while preserving validation details.
 
-Do not edit either generated file by hand. Change the Go types, generator configuration, header,
-footer, anchor fixer, parser, or renderer that owns the output.
+Both generated files are gitignored. CI generates them when it checks and publishes the docs, so
+there is nothing to commit and nothing to edit by hand. Change the Go types, generator
+configuration, header, footer, anchor fixer, parser, or renderer that owns the output. Generating
+locally needs Go.
 
 ## Update a Curated Resource Page
 

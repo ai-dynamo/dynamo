@@ -136,42 +136,24 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Setup Go for Kubernetes API reference generation
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: source-checkout/deploy/operator/go.mod
+          cache-dependency-path: source-checkout/deploy/operator/go.sum
+
       - name: Generate API references
-        id: api_refs
-        # Python/Rust references are publish-time artifacts: generated here
-        # against the ref being published, never committed. Generation must
-        # precede the pages-dev sync below, which rsyncs docs/fern/pages/.
-        #
-        # The Kubernetes reference stays committed, but this path REGENERATES
-        # it rather than gating on it. As `--check` the step failed, which
-        # skipped the sync and publish steps entirely, so a main left stale by
-        # merge skew silently froze the live site. Drift is still fatal, just
-        # after the site is current: the probe records it and the gate at the
-        # end of this job fails the run.
+        # Python/Rust/Kubernetes references are publish-time artifacts:
+        # generated here against the ref being published, never committed.
+        # Generation must precede the pages-dev sync below, which rsyncs
+        # docs/fern/pages/. `make generate-api-docs` runs crd-ref-docs over the
+        # operator Go types, then gen_kubernetes_api.py over its output.
         run: |
           set -euo pipefail
           python3 -m pip install 'griffe==2.1.0'
           python3 source-checkout/docs/fern/scripts/gen_python_api.py
           python3 source-checkout/docs/fern/scripts/gen_rust_api.py
-          if python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check >/dev/null 2>&1; then
-            echo "kubernetes_drift=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "kubernetes_drift=true" >> "$GITHUB_OUTPUT"
-          fi
-          k8s_page=source-checkout/docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx
-          committed_bytes=$(wc -c < "$k8s_page")
-          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py
-          regenerated_bytes=$(wc -c < "$k8s_page")
-          # Publishing through drift is the point of this step, but the
-          # regenerated page is what the sync below rsyncs, so a generator that
-          # exits 0 while emitting a gutted reference would reach the live site
-          # and only be reported afterwards. Ordinary skew moves this page by a
-          # few hundred bytes; losing a fifth of it means generation itself is
-          # what is wrong, so stop before anything is synced or published.
-          if [ "$regenerated_bytes" -lt "$(( committed_bytes * 4 / 5 ))" ]; then
-            echo "::error file=docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx::Regenerated Kubernetes API reference is $regenerated_bytes bytes against $committed_bytes committed, a loss of more than a fifth. Refusing to sync or publish. Check gen_kubernetes_api.py and its source, docs/fern/pages/reference/kubernetes-api/api-reference-k8s.md."
-            exit 1
-          fi
+          make -C source-checkout/deploy/operator generate-api-docs
 
       - name: Generate install-selector nightly data
         # Writes components/nightly-selector-data.generated.ts, which the
@@ -717,25 +699,6 @@ jobs:
         if: steps.ctx.outputs.is_main == 'true'
         run: python3 source-checkout/docs/fern/scripts/check_published_styles.py
 
-      - name: Fail if the committed Kubernetes API reference was stale
-        # Deliberately last, and deliberately not gated on is_main: the preview
-        # path should report drift too. Whether the site actually published is
-        # a separate question - Publish Docs needs both is_main and has_changes
-        # - so the message reports which of the two happened rather than
-        # asserting a publish. `!cancelled()` keeps the drift annotation on runs
-        # where an earlier step already failed; a bare `if:` carries an implicit
-        # success() and would drop the report on exactly those runs.
-        if: ${{ !cancelled() && steps.api_refs.outputs.kubernetes_drift == 'true' }}
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ] && [ "${{ steps.changes.outputs.has_changes }}" = "true" ]; then
-            outcome="The site published the regenerated output, so docs are current, but the committed page differs from the reviewed bytes."
-          else
-            outcome="Nothing was published on this run, so the live site is unchanged."
-          fi
-          echo "::error file=docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx::Committed Kubernetes API reference does not match its source. $outcome Fix with: python3 docs/fern/scripts/gen_kubernetes_api.py"
-          exit 1
-
   #############################################################################
   # VERSION RELEASE - Run on new version tags (vX.Y.Z)
   #############################################################################
@@ -832,33 +795,43 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Setup Go for Kubernetes API reference generation
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: source-checkout/deploy/operator/go.mod
+          cache-dependency-path: source-checkout/deploy/operator/go.sum
+
       - name: Generate API references at the tag
-        # Tags cut after the Python/Rust references became publish-time
-        # artifacts carry no committed pages, so the snapshot below must
-        # generate them from the tagged source. Two classes of older tag are
-        # left untouched: tags that predate the generators, and tags that
-        # still COMMIT their pages -- a tag freezes its docs, and write-mode
-        # regeneration would overwrite (or via orphan removal, delete) pages
-        # the tag shipped with, while turning a generator error at the old
-        # ref into a hard release failure. Tracked pages are the signal:
-        # generation runs only when the tagged tree commits none.
+        # Tags cut after the Python/Rust and Kubernetes references became
+        # publish-time artifacts carry no committed pages, so the snapshot
+        # below must generate them from the tagged source. Two classes of
+        # older tag are left untouched: tags that predate the generators, and
+        # tags that still COMMIT their pages -- a tag freezes its docs, and
+        # write-mode regeneration would overwrite (or via orphan removal,
+        # delete) pages the tag shipped with, while turning a generator error
+        # at the old ref into a hard release failure. Tracked pages are the
+        # signal, checked per reference: Python/Rust stopped being committed
+        # before Kubernetes did, so a tag can commit one and not the other.
         run: |
           set -euo pipefail
           gen_py="source-checkout/docs/fern/scripts/gen_python_api.py"
           gen_rs="source-checkout/docs/fern/scripts/gen_rust_api.py"
           if [ ! -f "$gen_py" ] || [ ! -f "$gen_rs" ]; then
-            echo "::notice::Tagged tree lacks the API reference generators; snapshotting committed pages as-is"
-            exit 0
+            echo "::notice::Tagged tree lacks the Python/Rust API reference generators; snapshotting committed pages as-is"
+          elif [ -n "$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)" ]; then
+            echo "::notice::Tagged tree commits its Python/Rust API reference pages; snapshotting them as-is"
+          else
+            python3 -m pip install 'griffe==2.1.0'
+            python3 "$gen_py"
+            python3 "$gen_rs"
           fi
-          tracked="$(git -C source-checkout ls-files -- \
-            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)"
-          if [ -n "$tracked" ]; then
-            echo "::notice::Tagged tree commits its API reference pages; snapshotting them as-is"
-            exit 0
+          if [ -n "$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx)" ]; then
+            echo "::notice::Tagged tree commits its Kubernetes API reference pages; snapshotting them as-is"
+          else
+            make -C source-checkout/deploy/operator generate-api-docs
           fi
-          python3 -m pip install 'griffe==2.1.0'
-          python3 "$gen_py"
-          python3 "$gen_rs"
 
       - name: Build versioned pages from tagged commit
         run: |

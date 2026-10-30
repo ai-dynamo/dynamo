@@ -13,3 +13,11 @@
 # cannot swallow the published snapshots.
 /pages/reference/api/python/
 /pages/reference/api/rust/
+
+# Generated Kubernetes API reference: `make -C deploy/operator generate-api-docs`
+# runs crd-ref-docs over the operator Go types to write api-reference-k8s.md,
+# then gen_kubernetes_api.py renders full-api-reference.mdx from it. Produced
+# at the same points as the Python/Rust pages above and never committed. The
+# curated DGD, DGDR, and DCD pages beside them stay committed.
+/pages/reference/kubernetes-api/full-api-reference.mdx
+/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
