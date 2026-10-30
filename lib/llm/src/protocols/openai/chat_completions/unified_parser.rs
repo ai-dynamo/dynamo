@@ -71,6 +71,7 @@ pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
+pub(crate) const MINIMAX_M3_UNIFIED_FAMILY: &str = "minimax_m3";
 /// The empty thought channel Gemma 4 opens with thinking off.
 pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
@@ -163,15 +164,19 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
-    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; both
-    // keep the legacy path unless V2 is selected explicitly.
+    // Keep families on the legacy path in Auto until their unified route preserves the
+    // existing request semantics. The 0.9 registry adds MiniMax M3, whose unified route
+    // currently puts explicit guided output in reasoning_content. Qwen3 thinking models
+    // also use this reasoning name with Hermes tool syntax, and a reasoning-only Nemotron
+    // 3 card does not say which tool grammar it serves; those cases also require V2.
     let selected = if tool_call_parser.is_none()
         && matches!(
             reasoning_parser,
             Some("qwen3" | "nemotron_v3" | "nemotron3")
         )
         && selection == dynamo_runtime::config::ParserVersion::Auto
+        || configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
+            && selection == dynamo_runtime::config::ParserVersion::Auto
     {
         None
     } else {
@@ -12974,8 +12979,11 @@ pub(crate) mod tests {
             ] {
                 let reasoning_only_shared_grammar = tool.is_none()
                     && matches!(reasoning, Some("qwen3" | "nemotron_v3" | "nemotron3"));
+                let minimax_m3_requires_explicit_v2 =
+                    family == MINIMAX_M3_UNIFIED_FAMILY && selection != "1" && selection != "2";
                 let expected = (selection != "1"
-                    && (selection == "2" || !reasoning_only_shared_grammar))
+                    && (selection == "2" || !reasoning_only_shared_grammar)
+                    && !minimax_m3_requires_explicit_v2)
                     .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
