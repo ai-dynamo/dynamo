@@ -9,7 +9,8 @@ network container. pre_merge is the dedicated serial/own-container CI
 selector together with runtime_epp, not generic runtime-image coverage.
 
 Inventory and completeness guards are fail-closed and knowingly incomplete
-for this increment. They are ordinary failures, not skip/xfail.
+for this increment. They are ordinary failures, not skip/xfail. Gap
+attempts share the same runner and stay ordinary tests.
 """
 
 import pytest
@@ -61,7 +62,11 @@ def test_manifest_bindings_match_collected_tests(request):
 def test_effective_config_profile(
     request, predownload_tokenizers, tmp_path, monkeypatch, profile_name
 ):
-    """Compare native FE to_json with the owned EPP post-parse init event."""
+    """Compare native FE to_json with the owned EPP post-parse init event.
+
+    Gap attempts are ordinary profiles. Setup, parse, warning, and FE
+    sentinel failures stay hard AssertionError.
+    """
     from tests.router.epp_parity import EppFrontendParityStack
 
     _ = predownload_tokenizers

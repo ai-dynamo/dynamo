@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""First-increment FE/EPP effective-config contract for issue #16592.
+"""FE/EPP effective-config contract for issue #16592.
 
-Inventory is fail-closed and knowingly incomplete: only the three live
-profiles have explicit decisions. Discovered CLI/env/schema names without a
-row fail the completeness guard. Do not treat that failure as full-issue
-completion.
+Inventory is fail-closed and knowingly incomplete. Discovered CLI/env/schema
+names without a row, and explicit PENDING rows, fail the completeness guard.
+Do not treat that failure as full-issue completion.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
 (``skip_initial_worker_wait=true``,
-``prefill_config.router_track_active_blocks=false``). The nine scalar
-profile fields are not those overrides.
+``prefill_config.router_track_active_blocks=false``).
+``active_cache`` observes ``router_track_active_blocks`` only on the decode /
+post-parse config. Runtime EPP later disables that flag in its prefill copy.
 """
 
 from __future__ import annotations
@@ -56,7 +56,15 @@ ENV_LITERAL_RE = re.compile(
 )
 WRAPPER_CLI = ("--router-mode", "kv", "--kv-cache-block-size", "16")
 WRAPPER_MIN_WORKERS = "1"
-PROFILE_NAMES = ("scalar_kv", "legacy_precedence", "policy_yaml_over_env")
+PROFILE_NAMES = (
+    "scalar_kv",
+    "legacy_precedence",
+    "policy_yaml_over_env",
+    "tracking_queue",
+    "active_cache",
+    "load_aware_preset",
+    "conditional_json",
+)
 IMPLEMENTED_OBSERVER = "fe_native_to_json+epp_init_event"
 _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "overlap_score_credit",
@@ -66,6 +74,59 @@ _POLICY_PARAMETER_ENVS = {
     "DYN_ROUTER_TEMPERATURE": "router_temperature",
     "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT": "prefill_load_scale",
 }
+# Replacement and remove_in copied from kv_router_args.py Deprecated(...).
+_DIRECT_DEPRECATED_ENVS = {
+    "DYN_ROUTER_QUEUE_THRESHOLD": (
+        "policy_classes[].prefill_busy_threshold_frac in --router-policy-config",
+        "v1.7",
+    ),
+    "DYN_ROUTER_QUEUE_POLICY": (
+        "policy_classes[].queue_policy in --router-policy-config",
+        "v1.7",
+    ),
+    "DYN_ROUTER_LOAD_AWARE": (
+        "the load-only policy and router tracking settings in --router-policy-config",
+        "v1.7",
+    ),
+}
+_ENUM_EVENT_VALUES = {
+    "fcfs": "fcfs",
+    "Fcfs": "fcfs",
+    "lcfs": "lcfs",
+    "Lcfs": "lcfs",
+    "wspt": "wspt",
+    "Wspt": "wspt",
+    "isl_bounding": "isl_bounding",
+    "IslBounding": "isl_bounding",
+    "prefill_load": "prefill_load",
+    "PrefillLoad": "prefill_load",
+    "isl_or_load": "isl_or_load",
+    "IslOrLoad": "isl_or_load",
+}
+_SOME_RE = re.compile(r"^Some\((.+)\)$")
+OMITTABLE_DEFAULT_NATIVE_FIELDS = frozenset(
+    {
+        "conditional_disagg_enabled",
+        "conditional_disagg_policy",
+        "conditional_disagg_eff_isl_threshold",
+        "conditional_disagg_eff_isl_ratio_threshold",
+        "conditional_disagg_prefill_busy_threshold",
+        "conditional_disagg_decode_busy_threshold",
+    }
+)
+OPTION_EVENT_FIELDS = frozenset(
+    {
+        "router_queue_threshold",
+        "router_predicted_ttl_secs",
+        "conditional_disagg_prefill_busy_threshold",
+        "conditional_disagg_decode_busy_threshold",
+    }
+)
+_CONDITIONAL_JSON = (
+    '{"policy":"isl_or_load","eff_isl_threshold":1024,'
+    '"eff_isl_ratio_threshold":0.25,"prefill_busy_threshold":0.8,'
+    '"decode_busy_threshold":0.7}'
+)
 PROFILE_ASSERTED_FIELDS = {
     "scalar_kv": (
         "overlap_score_credit",
@@ -88,6 +149,30 @@ PROFILE_ASSERTED_FIELDS = {
         "router_event_threads",
         "router_ttl_secs",
     ),
+    "tracking_queue": (
+        "router_replica_sync",
+        "router_track_output_blocks",
+        "router_assume_kv_reuse",
+        "router_track_prefill_tokens",
+        "router_queue_threshold",
+        "router_queue_policy",
+    ),
+    "active_cache": (
+        "router_track_active_blocks",
+        "router_predicted_ttl_secs",
+    ),
+    "load_aware_preset": (
+        "overlap_score_credit",
+        "use_kv_events",
+    ),
+    "conditional_json": (
+        "conditional_disagg_enabled",
+        "conditional_disagg_policy",
+        "conditional_disagg_eff_isl_threshold",
+        "conditional_disagg_eff_isl_ratio_threshold",
+        "conditional_disagg_prefill_busy_threshold",
+        "conditional_disagg_decode_busy_threshold",
+    ),
 }
 PROFILE_DEPRECATED_ENVS = {
     "scalar_kv": (
@@ -103,11 +188,31 @@ PROFILE_DEPRECATED_ENVS = {
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
     ),
     "policy_yaml_over_env": (),
+    "tracking_queue": (
+        "DYN_ROUTER_QUEUE_THRESHOLD",
+        "DYN_ROUTER_QUEUE_POLICY",
+    ),
+    "active_cache": (),
+    "load_aware_preset": ("DYN_ROUTER_LOAD_AWARE",),
+    "conditional_json": (),
 }
 
 STATUS_PENDING = "pending"
 STATUS_SUPPORTED = "supported_candidate"
 STATUS_ALIAS = "alias"
+KNOWN_STATUSES = frozenset({STATUS_PENDING, STATUS_SUPPORTED, STATUS_ALIAS})
+
+
+class FrontendEppConfigMismatch(AssertionError):
+    """FE and EPP both produced a value, and those values differ."""
+
+
+@dataclass(frozen=True)
+class OmittedDefaultNativeField:
+    """Recorded skip_serializing_if absence from default native JSON."""
+
+    field: str
+    source: str = "lib/kv-router/src/scheduling/config.rs"
 
 
 @dataclass(frozen=True)
@@ -240,7 +345,12 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
     ),
     SettingDecision(
         "use_kv_events",
-        ("--router-kv-events", "--no-router-kv-events", "--kv-events", "--no-kv-events"),
+        (
+            "--router-kv-events",
+            "--no-router-kv-events",
+            "--kv-events",
+            "--no-kv-events",
+        ),
         ("DYN_ROUTER_USE_KV_EVENTS",),
         ("use_kv_events",),
         STATUS_SUPPORTED,
@@ -275,6 +385,214 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "The file path is a fixture artifact, not an asserted key.",
     ),
     SettingDecision(
+        "router_replica_sync",
+        ("--router-replica-sync", "--no-router-replica-sync"),
+        ("DYN_ROUTER_REPLICA_SYNC",),
+        ("router_replica_sync",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_replica_sync",),
+        "Candidate for FE to_json and the EPP init event on tracking_queue.",
+    ),
+    SettingDecision(
+        "router_track_output_blocks",
+        (
+            "--router-track-output-blocks",
+            "--no-router-track-output-blocks",
+            "--track-output-blocks",
+            "--no-track-output-blocks",
+        ),
+        ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS",),
+        ("router_track_output_blocks",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_track_output_blocks",),
+        "Candidate for FE to_json and the EPP init event on tracking_queue.",
+    ),
+    SettingDecision(
+        "router_assume_kv_reuse",
+        (
+            "--router-assume-kv-reuse",
+            "--no-router-assume-kv-reuse",
+            "--assume-kv-reuse",
+            "--no-assume-kv-reuse",
+        ),
+        ("DYN_ROUTER_ASSUME_KV_REUSE",),
+        ("router_assume_kv_reuse",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_assume_kv_reuse",),
+        "Candidate for FE to_json and the EPP init event on tracking_queue.",
+    ),
+    SettingDecision(
+        "router_track_prefill_tokens",
+        ("--router-track-prefill-tokens", "--no-router-track-prefill-tokens"),
+        ("DYN_ROUTER_TRACK_PREFILL_TOKENS",),
+        ("router_track_prefill_tokens",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_track_prefill_tokens",),
+        "Candidate for FE to_json and the EPP init event on tracking_queue.",
+    ),
+    SettingDecision(
+        "router_queue_threshold",
+        ("--router-queue-threshold",),
+        ("DYN_ROUTER_QUEUE_THRESHOLD",),
+        ("router_queue_threshold",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_queue_threshold",),
+        "Candidate Option value for FE to_json and the EPP Some(...) init event.",
+    ),
+    SettingDecision(
+        "router_queue_policy",
+        ("--router-queue-policy",),
+        ("DYN_ROUTER_QUEUE_POLICY",),
+        ("router_queue_policy",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("tracking_queue",),
+        ("router_queue_policy",),
+        "Candidate enum for FE serde and the EPP Display init event.",
+    ),
+    SettingDecision(
+        "router_track_active_blocks",
+        (
+            "--router-track-active-blocks",
+            "--no-router-track-active-blocks",
+            "--track-active-blocks",
+            "--no-track-active-blocks",
+        ),
+        ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS",),
+        ("router_track_active_blocks",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("active_cache",),
+        ("router_track_active_blocks",),
+        "Candidate non-default false on active_cache. Default true is a "
+        "tracking_queue prerequisite, not sentinel coverage. Runtime EPP later "
+        "forces prefill_config.router_track_active_blocks=false after this event.",
+    ),
+    SettingDecision(
+        "router_predicted_ttl_secs",
+        ("--router-predicted-ttl-secs",),
+        ("DYN_ROUTER_PREDICTED_TTL_SECS",),
+        ("router_predicted_ttl_secs",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("active_cache",),
+        ("router_predicted_ttl_secs",),
+        "Candidate Option value. KV events stay the default true prerequisite.",
+    ),
+    SettingDecision(
+        "load_aware",
+        ("--load-aware", "--no-load-aware"),
+        ("DYN_ROUTER_LOAD_AWARE",),
+        ("load_aware",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("load_aware_preset",),
+        ("overlap_score_credit", "use_kv_events"),
+        "FE applies the load-aware preset from this env. EPP has no matching "
+        "parse. Same env on both paths; do not expand the FE preset into EPP env.",
+    ),
+    SettingDecision(
+        "conditional_disagg_enabled",
+        ("--router-conditional-disagg", "--no-router-conditional-disagg"),
+        ("DYN_ROUTER_CONDITIONAL_DISAGG",),
+        ("conditional_disagg_enabled",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_enabled",),
+        "Shared enable flag. Nested parameter values come from the JSON object.",
+    ),
+    SettingDecision(
+        "conditional_disagg_json",
+        ("--router-conditional-disagg-config",),
+        ("DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG",),
+        (
+            "conditional_disagg_config",
+            "conditional_disagg_config.policy",
+            "conditional_disagg_config.eff_isl_threshold",
+            "conditional_disagg_config.eff_isl_ratio_threshold",
+            "conditional_disagg_config.prefill_busy_threshold",
+            "conditional_disagg_config.decode_busy_threshold",
+        ),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        (
+            "conditional_disagg_policy",
+            "conditional_disagg_eff_isl_threshold",
+            "conditional_disagg_eff_isl_ratio_threshold",
+            "conditional_disagg_prefill_busy_threshold",
+            "conditional_disagg_decode_busy_threshold",
+        ),
+        "FE nested JSON keys. Not EPP scalar env names. Same JSON env on both "
+        "paths; no scalar shadow input.",
+    ),
+    SettingDecision(
+        "conditional_disagg_policy",
+        (),
+        (),
+        ("conditional_disagg_policy",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_policy",),
+        "FE flattened field filled from the nested JSON key policy.",
+    ),
+    SettingDecision(
+        "conditional_disagg_eff_isl_threshold",
+        (),
+        (),
+        ("conditional_disagg_eff_isl_threshold",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_eff_isl_threshold",),
+        "FE flattened field filled from the nested JSON key eff_isl_threshold.",
+    ),
+    SettingDecision(
+        "conditional_disagg_eff_isl_ratio_threshold",
+        (),
+        (),
+        ("conditional_disagg_eff_isl_ratio_threshold",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_eff_isl_ratio_threshold",),
+        "FE flattened field filled from nested JSON key eff_isl_ratio_threshold.",
+    ),
+    SettingDecision(
+        "conditional_disagg_prefill_busy_threshold",
+        (),
+        (),
+        ("conditional_disagg_prefill_busy_threshold",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_prefill_busy_threshold",),
+        "FE flattened field filled from nested JSON key prefill_busy_threshold.",
+    ),
+    SettingDecision(
+        "conditional_disagg_decode_busy_threshold",
+        (),
+        (),
+        ("conditional_disagg_decode_busy_threshold",),
+        STATUS_SUPPORTED,
+        IMPLEMENTED_OBSERVER,
+        ("conditional_json",),
+        ("conditional_disagg_decode_busy_threshold",),
+        "FE flattened field filled from nested JSON key decode_busy_threshold.",
+    ),
+    SettingDecision(
         "serve_indexer",
         ("--serve-indexer", "--no-serve-indexer"),
         ("DYN_SERVE_INDEXER",),
@@ -297,6 +615,348 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         (),
         "Frontend wrapper CLI sets this for KV mode. It is not a KvRouterConfig "
         "to_json/init-event field. Do not treat an env translation as EPP honor.",
+    ),
+    SettingDecision(
+        "conditional_disagg_epp_scalar_envs",
+        (),
+        (
+            "DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
+            "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
+            "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
+            "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
+            "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
+        ),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "EPP-only scalar env names. FE accepts nested JSON keys, not these "
+        "envs. This increment does not feed them on either path.",
+    ),
+    SettingDecision(
+        "active_decode_blocks_threshold",
+        ("--active-decode-blocks-threshold",),
+        ("DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",),
+        ("active_decode_blocks_threshold",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "RouterConfig admission field. Not in KvRouterConfig to_json or the "
+        "EPP init event. No live observer in this increment.",
+    ),
+    SettingDecision(
+        "active_prefill_tokens_threshold",
+        ("--active-prefill-tokens-threshold",),
+        ("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",),
+        ("active_prefill_tokens_threshold",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Deprecated RouterConfig admission field. Not in the EPP init event. "
+        "No live observer in this increment.",
+    ),
+    SettingDecision(
+        "active_prefill_tokens_threshold_frac",
+        ("--active-prefill-tokens-threshold-frac",),
+        ("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",),
+        ("active_prefill_tokens_threshold_frac",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "RouterConfig admission field. Not in the EPP init event. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "admission_control",
+        ("--admission-control",),
+        ("DYN_ADMISSION_CONTROL",),
+        ("admission_control",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Removed FE flag/env; accepted and ignored. Not a KvRouterConfig "
+        "field. No live observer in this increment.",
+    ),
+    SettingDecision(
+        "enforce_disagg",
+        ("--enforce-disagg", "--no-enforce-disagg"),
+        ("DYN_ENFORCE_DISAGG",),
+        ("enforce_disagg",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Deprecated ignored FE topology flag. Not a KvRouterConfig field. No "
+        "live observer in this increment.",
+    ),
+    SettingDecision(
+        "enable_session_prefix_index",
+        ("--enable-session-prefix-index", "--no-enable-session-prefix-index"),
+        ("DYN_ENABLE_SESSION_PREFIX_INDEX",),
+        ("enable_session_prefix_index",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP field exists. No profile exercises it. No live observer in "
+        "this increment.",
+    ),
+    SettingDecision(
+        "min_initial_workers",
+        ("--router-min-initial-workers",),
+        ("DYN_ROUTER_MIN_INITIAL_WORKERS",),
+        ("min_initial_workers",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Wrapper startup gate only. Not a KvRouterConfig to_json/init-event "
+        "field. Do not claim the wrapper value as sentinel coverage.",
+    ),
+    SettingDecision(
+        "router_mode",
+        ("--router-mode",),
+        ("DYN_ROUTER_MODE",),
+        ("router_mode",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Wrapper --router-mode kv selects KV construction. Not a "
+        "KvRouterConfig to_json/init-event field.",
+    ),
+    SettingDecision(
+        "router_approximate_cache_policy",
+        ("--router-approximate-cache-policy",),
+        ("DYN_ROUTER_APPROXIMATE_CACHE_POLICY",),
+        ("router_approximate_cache_policy",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Process-local; skipped from to_json. No live observer in this "
+        "increment.",
+    ),
+    SettingDecision(
+        "router_prefill_policy",
+        ("--router-prefill-policy",),
+        ("DYN_ROUTER_PREFILL_POLICY",),
+        ("router_prefill_policy",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Process-local; skipped from to_json. No live observer in this "
+        "increment.",
+    ),
+    SettingDecision(
+        "router_decode_policy",
+        ("--router-decode-policy",),
+        ("DYN_ROUTER_DECODE_POLICY",),
+        ("router_decode_policy",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Process-local; skipped from to_json. No live observer in this "
+        "increment.",
+    ),
+    SettingDecision(
+        "router_prefill_load_model",
+        ("--router-prefill-load-model",),
+        ("DYN_ROUTER_PREFILL_LOAD_MODEL",),
+        ("router_prefill_load_model",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP field exists. No profile exercises it. No live observer in "
+        "this increment.",
+    ),
+    SettingDecision(
+        "session_affinity_ttl_secs",
+        ("--router-session-affinity-ttl-secs",),
+        ("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",),
+        ("session_affinity_ttl_secs",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "RouterConfig session field. Not in KvRouterConfig to_json or the EPP "
+        "init event. No live observer in this increment.",
+    ),
+    SettingDecision(
+        "session_affinity_mode",
+        ("--router-session-affinity-mode",),
+        ("DYN_ROUTER_SESSION_AFFINITY_MODE",),
+        ("session_affinity_mode",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "RouterConfig session field. Not in KvRouterConfig to_json or the EPP "
+        "init event. No live observer in this increment.",
+    ),
+    SettingDecision(
+        "router_tracking_hash",
+        ("--router-tracking-hash",),
+        ("DYN_ROUTER_TRACKING_HASH",),
+        ("router_tracking_hash",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP field exists. No profile exercises it. No live observer in "
+        "this increment.",
+    ),
+    SettingDecision(
+        "router_tracking_key_file",
+        ("--router-tracking-key-file",),
+        ("DYN_ROUTER_TRACKING_KEY_FILE",),
+        ("router_tracking_key_file",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP Option field exists. No profile exercises it. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "router_tracking_key_id",
+        ("--router-tracking-key-id",),
+        ("DYN_ROUTER_TRACKING_KEY_ID",),
+        ("router_tracking_key_id",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP Option field exists. No profile exercises it. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "shared_cache_multiplier",
+        ("--shared-cache-multiplier",),
+        ("DYN_SHARED_CACHE_MULTIPLIER",),
+        ("shared_cache_multiplier",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Deprecated policy parameter. No profile exercises it. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "shared_cache_type",
+        ("--shared-cache-type",),
+        ("DYN_SHARED_CACHE_TYPE",),
+        ("shared_cache_type",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP field exists. No profile exercises it. No live observer in "
+        "this increment.",
+    ),
+    SettingDecision(
+        "use_remote_indexer",
+        ("--use-remote-indexer", "--no-use-remote-indexer"),
+        ("DYN_USE_REMOTE_INDEXER",),
+        ("use_remote_indexer",),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "FE/EPP field exists. No profile exercises it. No live observer in "
+        "this increment.",
+    ),
+    SettingDecision(
+        "active_request_expiry_secs",
+        (),
+        ("DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by sequence expiry. No FE CLI dest. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "active_sequence_direct_zmq",
+        (),
+        ("DYN_ROUTER_ACTIVE_SEQUENCE_DIRECT_ZMQ",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by active-sequence transport. No FE CLI dest. No "
+        "live observer in this increment.",
+    ),
+    SettingDecision(
+        "active_sequence_zmq_rcvhwm",
+        (),
+        ("DYN_ROUTER_ACTIVE_SEQUENCE_ZMQ_RCVHWM",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by active-sequence HWM. No FE CLI dest. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "overlap_refresh_after_secs",
+        (),
+        ("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by overlap refresh. No FE CLI dest. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "positional_search_mode",
+        (),
+        ("DYN_ROUTER_POSITIONAL_SEARCH_MODE",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by positional search. No FE CLI dest. No live "
+        "observer in this increment.",
+    ),
+    SettingDecision(
+        "worker_selection_policy",
+        (),
+        ("DYN_ROUTER_WORKER_SELECTION_POLICY",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by worker-selection instance choice. No FE CLI "
+        "dest. No live observer in this increment.",
+    ),
+    SettingDecision(
+        "zmq_endpoints_per_sub",
+        (),
+        ("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB",),
+        (),
+        STATUS_PENDING,
+        None,
+        (),
+        (),
+        "Rust env consumed by subscriber pool sizing. No FE CLI dest. No live "
+        "observer in this increment.",
     ),
 )
 
@@ -415,7 +1075,9 @@ def _drop_cfg_test_modules(text: str) -> str:
 
 
 def _rust_env_literals(path: Path) -> set[str]:
-    text = _drop_cfg_test_modules(_strip_rust_comments(path.read_text(encoding="utf-8")))
+    text = _drop_cfg_test_modules(
+        _strip_rust_comments(path.read_text(encoding="utf-8"))
+    )
     return set(ENV_LITERAL_RE.findall(text))
 
 
@@ -470,7 +1132,9 @@ def discovered_identifier_sets() -> tuple[set[str], set[str], set[str]]:
     schema.update(_KV_ROUTER_FIELDS)
     schema.update(_ROUTER_SETTINGS)
     schema.update(_ROUTER_FIELDS)
-    schema.update(_CONDITIONAL_DISAGG_CONFIG_FIELDS)
+    schema.update(
+        f"conditional_disagg_config.{key}" for key in _CONDITIONAL_DISAGG_CONFIG_FIELDS
+    )
     schema.update(_CONDITIONAL_DISAGG_CONFIG_FIELDS.values())
     return flags, discover_env_names(), schema
 
@@ -505,13 +1169,50 @@ def pending_decision_names() -> tuple[str, ...]:
     return tuple(row.name for row in SETTING_DECISIONS if row.status == STATUS_PENDING)
 
 
+def assert_decision_identifier_ownership() -> None:
+    """Reject unknown statuses and duplicate name/flag/env/schema owners."""
+    names: set[str] = set()
+    flags: dict[str, str] = {}
+    envs: dict[str, str] = {}
+    schema: dict[str, str] = {}
+    for row in SETTING_DECISIONS:
+        if row.status not in KNOWN_STATUSES:
+            raise AssertionError(
+                f"{row.name} has unknown status {row.status!r}; "
+                f"expected one of {sorted(KNOWN_STATUSES)}"
+            )
+        if row.name in names:
+            raise AssertionError(f"duplicate decision name {row.name!r}")
+        names.add(row.name)
+        for flag in row.flags:
+            owner = flags.get(flag)
+            if owner is not None:
+                raise AssertionError(
+                    f"flag {flag!r} owned by {owner!r} and {row.name!r}"
+                )
+            flags[flag] = row.name
+        for env in row.env:
+            owner = envs.get(env)
+            if owner is not None:
+                raise AssertionError(
+                    f"env {env!r} owned by {owner!r} and {row.name!r}"
+                )
+            envs[env] = row.name
+        for field in row.schema_fields:
+            owner = schema.get(field)
+            if owner is not None:
+                raise AssertionError(
+                    f"schema {field!r} owned by {owner!r} and {row.name!r}"
+                )
+            schema[field] = row.name
+
+
 def assert_inventory_matches_manifest() -> None:
     assert_required_sources_exist()
+    assert_decision_identifier_ownership()
     diffs = inventory_differences()
     if diffs:
-        parts = [
-            f"{label}={sorted(values)}" for label, values in sorted(diffs.items())
-        ]
+        parts = [f"{label}={sorted(values)}" for label, values in sorted(diffs.items())]
         raise AssertionError(
             "discovered identifiers lack explicit decisions or are stale: "
             + "; ".join(parts)
@@ -524,8 +1225,7 @@ def assert_coverage_complete() -> None:
     pending = pending_decision_names()
     if pending:
         raise AssertionError(
-            "pending coverage remains; not full-issue completion: "
-            + ", ".join(pending)
+            "pending coverage remains; not full-issue completion: " + ", ".join(pending)
         )
 
 
@@ -545,8 +1245,7 @@ def assert_manifest_bindings_match_collected_tests(nodeids: Iterable[str]) -> No
     missing_profiles = [name for name in PROFILE_NAMES if name not in collected]
     if missing_profiles:
         raise AssertionError(
-            "profile names are not collected as tests: "
-            + ", ".join(missing_profiles)
+            "profile names are not collected as tests: " + ", ".join(missing_profiles)
         )
     if set(PROFILE_ASSERTED_FIELDS) != set(PROFILE_NAMES):
         raise AssertionError(
@@ -559,10 +1258,15 @@ def assert_manifest_bindings_match_collected_tests(nodeids: Iterable[str]) -> No
             f"{sorted(PROFILE_DEPRECATED_ENVS)} vs {list(PROFILE_NAMES)}"
         )
     for name, envs in PROFILE_DEPRECATED_ENVS.items():
-        unknown = [env for env in envs if env not in _POLICY_PARAMETER_ENVS]
+        unknown = [
+            env
+            for env in envs
+            if env not in _POLICY_PARAMETER_ENVS
+            and env not in _DIRECT_DEPRECATED_ENVS
+        ]
         if unknown:
             raise AssertionError(
-                f"{name} deprecated envs are not policy-parameter aliases: "
+                f"{name} deprecated envs have no source Deprecated builder: "
                 + ", ".join(unknown)
             )
     for row in SETTING_DECISIONS:
@@ -623,31 +1327,84 @@ def native_default_projection(fields: Iterable[str]) -> dict[str, Any]:
     config = KvRouterConfig()
     payload = json.loads(config.to_json())
     payload.update(config.policy_parameters("aggregated"))
-    missing = [name for name in fields if name not in payload]
-    if missing:
+    present: dict[str, Any] = {}
+    omitted: list[OmittedDefaultNativeField] = []
+    unexpected: list[str] = []
+    for name in fields:
+        if name in payload:
+            present[name] = payload[name]
+            continue
+        if name in OMITTABLE_DEFAULT_NATIVE_FIELDS:
+            evidence = OmittedDefaultNativeField(name)
+            omitted.append(evidence)
+            present[name] = evidence
+            continue
+        unexpected.append(name)
+    if unexpected:
         raise AssertionError(
             "native default KvRouterConfig omitted sentinel fields "
-            f"{missing}; do not invent Rust defaults"
+            f"{unexpected}; allowed skip_serializing_if absences are "
+            f"{sorted(OMITTABLE_DEFAULT_NATIVE_FIELDS)}; "
+            f"recorded omitted={tuple(omitted)}; do not invent Rust defaults"
         )
-    return {name: payload[name] for name in fields}
+    if omitted:
+        present["_omitted_default_native_fields"] = tuple(omitted)
+    return present
+
+
+def _unwrap_option_event_raw(name: str, raw: str) -> str | None:
+    if name not in OPTION_EVENT_FIELDS:
+        if raw == "None" or raw.startswith("Some"):
+            raise AssertionError(
+                f"{name}={raw!r} uses a None/Some wrapper on a non-Option field"
+            )
+        return raw
+    if raw == "None":
+        return None
+    match = _SOME_RE.fullmatch(raw)
+    if match:
+        inner = match.group(1)
+        if inner == "" or inner.startswith("Some"):
+            raise AssertionError(
+                f"{name}={raw!r} is a nested or empty Some(...) tracing form"
+            )
+        if inner.startswith("(") or (inner.endswith(")") and "(" not in inner):
+            raise AssertionError(f"{name}={raw!r} is an ambiguous Some(...) form")
+        return inner
+    if raw.startswith("Some"):
+        raise AssertionError(f"{name}={raw!r} is a malformed Some(...) tracing form")
+    return raw
 
 
 def _decode_event_value(name: str, raw: str, expected: Any) -> Any:
-    if raw in {"true", "false"}:
-        value: Any = raw == "true"
-    else:
-        try:
-            if isinstance(expected, bool):
-                raise AssertionError(f"{name}={raw!r} is not a bool")
-            if isinstance(expected, int) and not isinstance(expected, bool):
-                if any(token in raw for token in (".", "e", "E")):
-                    value = float(raw)
-                else:
-                    value = int(raw)
-            else:
-                value = float(raw)
-        except (TypeError, ValueError) as exc:
-            raise AssertionError(f"{name}={raw!r} failed typed decode") from exc
+    payload = _unwrap_option_event_raw(name, raw)
+    if payload is None:
+        return None
+    if isinstance(expected, str):
+        mapped = _ENUM_EVENT_VALUES.get(payload)
+        if mapped is None:
+            raise AssertionError(
+                f"{name}={raw!r} is not a known enum display/serde tracing form"
+            )
+        return mapped
+    if payload in {"true", "false"}:
+        value: Any = payload == "true"
+        if isinstance(expected, bool):
+            return value
+        raise AssertionError(f"{name}={raw!r} decoded bool, expected {expected!r}")
+    try:
+        if isinstance(expected, bool):
+            raise AssertionError(f"{name}={raw!r} is not a bool")
+        if isinstance(expected, int) and not isinstance(expected, bool):
+            if any(token in payload for token in (".", "e", "E")):
+                raise AssertionError(
+                    f"{name}={raw!r} is not integer syntax for an integer field"
+                )
+            value = int(payload)
+        else:
+            value = float(payload)
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(f"{name}={raw!r} failed typed decode") from exc
     return value
 
 
@@ -680,9 +1437,7 @@ def observe_epp_init_event(
         raise AssertionError("owned EPP process has no log_path")
     log = Path(log_path)
     if node_name not in log.as_posix():
-        raise AssertionError(
-            f"EPP log_path {log} is not this profile node {node_name}"
-        )
+        raise AssertionError(f"EPP log_path {log} is not this profile node {node_name}")
     if not log.is_file():
         raise AssertionError(f"EPP log is missing: {log}")
     lines = [
@@ -706,6 +1461,31 @@ def _values_equal(left: Any, right: Any) -> bool:
     return left == right
 
 
+def assert_frontend_expected_fields(
+    *,
+    profile: str,
+    frontend: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    defaults: Mapping[str, Any],
+) -> None:
+    for name, wanted in expected.items():
+        if name not in frontend:
+            raise AssertionError(f"{profile} FE projection missing {name}")
+        if not _values_equal(frontend[name], wanted):
+            raise AssertionError(
+                f"{profile} {name}: FE {frontend[name]!r} != {wanted!r}"
+            )
+        if name not in defaults:
+            continue
+        recorded = defaults[name]
+        if isinstance(recorded, OmittedDefaultNativeField):
+            continue
+        if _values_equal(frontend[name], recorded):
+            raise AssertionError(
+                f"{profile} {name}={frontend[name]!r} equals the native default"
+            )
+
+
 def compare_effective_fields(
     *,
     profile: str,
@@ -714,39 +1494,41 @@ def compare_effective_fields(
     expected: Mapping[str, Any],
     defaults: Mapping[str, Any],
 ) -> None:
-    for name, wanted in expected.items():
-        if name not in frontend:
-            raise AssertionError(f"{profile} FE projection missing {name}")
+    assert_frontend_expected_fields(
+        profile=profile,
+        frontend=frontend,
+        expected=expected,
+        defaults=defaults,
+    )
+    for name in expected:
         if name not in epp:
             raise AssertionError(f"{profile} EPP event missing {name}")
         if not _values_equal(frontend[name], epp[name]):
-            raise AssertionError(
+            raise FrontendEppConfigMismatch(
                 f"{profile} {name}: FE={frontend[name]!r} EPP={epp[name]!r}"
-            )
-        if not _values_equal(frontend[name], wanted):
-            raise AssertionError(
-                f"{profile} {name}: observed {frontend[name]!r} != {wanted!r}"
-            )
-        if name in defaults and _values_equal(frontend[name], defaults[name]):
-            raise AssertionError(
-                f"{profile} {name}={frontend[name]!r} equals the native default"
             )
 
 
 def _expected_deprecation_messages(envs: Iterable[str]) -> tuple[str, ...]:
     from dynamo.common.configuration.groups.kv_router_args import _policy_parameter
+    from dynamo.common.configuration.utils import Deprecated
 
     messages: list[str] = []
     unknown: list[str] = []
     for name in envs:
         parameter = _POLICY_PARAMETER_ENVS.get(name)
-        if parameter is None:
+        if parameter is not None:
+            messages.append(_policy_parameter(parameter).message(name))
+            continue
+        spec = _DIRECT_DEPRECATED_ENVS.get(name)
+        if spec is None:
             unknown.append(name)
             continue
-        messages.append(_policy_parameter(parameter).message(name))
+        replacement, remove_in = spec
+        messages.append(Deprecated(replacement, remove_in=remove_in).message(name))
     if unknown:
         raise AssertionError(
-            "deprecated envs have no authoritative policy-parameter message: "
+            "deprecated envs have no authoritative Deprecated builder: "
             + ", ".join(unknown)
         )
     return tuple(messages)
@@ -856,6 +1638,75 @@ def build_profile(name: str, tmp_path: Path) -> ConfigProfile:
             expected,
             PROFILE_DEPRECATED_ENVS[name],
         )
+    if name == "tracking_queue":
+        expected = {
+            "router_replica_sync": True,
+            "router_track_output_blocks": True,
+            "router_assume_kv_reuse": False,
+            "router_track_prefill_tokens": False,
+            "router_queue_threshold": 0.85,
+            "router_queue_policy": "wspt",
+        }
+        return ConfigProfile(
+            name,
+            {
+                "DYN_ROUTER_REPLICA_SYNC": "true",
+                "DYN_ROUTER_TRACK_OUTPUT_BLOCKS": "true",
+                "DYN_ROUTER_ASSUME_KV_REUSE": "false",
+                "DYN_ROUTER_TRACK_PREFILL_TOKENS": "false",
+                "DYN_ROUTER_QUEUE_THRESHOLD": "0.85",
+                "DYN_ROUTER_QUEUE_POLICY": "wspt",
+            },
+            PROFILE_ASSERTED_FIELDS[name],
+            expected,
+            PROFILE_DEPRECATED_ENVS[name],
+        )
+    if name == "active_cache":
+        expected = {
+            "router_track_active_blocks": False,
+            "router_predicted_ttl_secs": 45.0,
+        }
+        return ConfigProfile(
+            name,
+            {
+                "DYN_ROUTER_TRACK_ACTIVE_BLOCKS": "false",
+                "DYN_ROUTER_PREDICTED_TTL_SECS": "45",
+            },
+            PROFILE_ASSERTED_FIELDS[name],
+            expected,
+            PROFILE_DEPRECATED_ENVS[name],
+        )
+    if name == "load_aware_preset":
+        expected = {
+            "overlap_score_credit": 0.0,
+            "use_kv_events": False,
+        }
+        return ConfigProfile(
+            name,
+            {"DYN_ROUTER_LOAD_AWARE": "true"},
+            PROFILE_ASSERTED_FIELDS[name],
+            expected,
+            PROFILE_DEPRECATED_ENVS[name],
+        )
+    if name == "conditional_json":
+        expected = {
+            "conditional_disagg_enabled": True,
+            "conditional_disagg_policy": "isl_or_load",
+            "conditional_disagg_eff_isl_threshold": 1024,
+            "conditional_disagg_eff_isl_ratio_threshold": 0.25,
+            "conditional_disagg_prefill_busy_threshold": 0.8,
+            "conditional_disagg_decode_busy_threshold": 0.7,
+        }
+        return ConfigProfile(
+            name,
+            {
+                "DYN_ROUTER_CONDITIONAL_DISAGG": "true",
+                "DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG": _CONDITIONAL_JSON,
+            },
+            PROFILE_ASSERTED_FIELDS[name],
+            expected,
+            PROFILE_DEPRECATED_ENVS[name],
+        )
     raise AssertionError(f"unknown config profile {name!r}")
 
 
@@ -886,6 +1737,12 @@ def run_effective_config_profile(
     apply_profile_env(monkeypatch, profile.env)
     frontend = frontend_projection_with_expected_deprecations(profile)
     defaults = native_default_projection(profile.fields)
+    assert_frontend_expected_fields(
+        profile=profile.name,
+        frontend=frontend,
+        expected=profile.expected,
+        defaults=defaults,
+    )
     with stack_cls(request, tmp_path, model_name) as stack:
         epp = observe_epp_init_event(
             stack.epp_process,
