@@ -233,20 +233,16 @@ jobs:
           python3 source-checkout/docs/fern/scripts/rewrite_snapshot_paths.py \
             docs-checkout/fern/pages-dev
 
-          # Backend deploy manifests are embedded into templates/{vllm,sglang,
-          # trtllm}.mdx and DGDR manifests into recipes/kubernetes-templates/dgdr.mdx via build-time
+          # Pages embed example files (deploy manifests, launch scripts, and
+          # other runnable examples) via build-time
           # <Code src="../../../examples/..."> file reads. Those resolve to the
           # repo-root examples/ tree in the source layout, which does not exist
-          # on docs-website — sync just the referenced subtrees to the branch
-          # root so both ../../../examples (from pages-dev) and the versioned
-          # snapshots resolve.
-          echo "Syncing examples/backends/*/deploy/ and examples/deployments/dgdr/ to branch root..."
+          # on docs-website — sync the examples/ tree to the branch root so
+          # both ../../../examples (from pages-dev) and the versioned snapshots
+          # resolve.
+          echo "Syncing examples/ to branch root..."
           rsync -a \
-            --include='*/' \
-            --include='backends/*/deploy/**' \
-            --include='deployments/dgdr/**' \
-            --exclude='*' \
-            --prune-empty-dirs \
+            --exclude='__pycache__/' \
             source-checkout/examples/ docs-checkout/examples/
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
