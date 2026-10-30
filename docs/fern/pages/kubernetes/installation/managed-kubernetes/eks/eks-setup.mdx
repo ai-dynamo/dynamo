@@ -94,7 +94,7 @@ kubectl apply -f automode-np-gpu.yaml
 
 </Step>
 <Step title="Create a default StorageClass" id="create-a-default-storageclass">
-Create a default StorageClass to use the storage capability of EKS Auto Mode, this will make the default StorageClass to use EBS volumes for Stateful workloads needed by NATS that is used with Dynamo.
+Create a default StorageClass to use the storage capability of EKS Auto Mode, this will make the default StorageClass to use EBS volumes for stateful workloads, such as NATS JetStream if you install NATS with `--set global.nats.install=true`.
 
 ```bash
 kubectl apply -f - << EOF
@@ -147,8 +147,9 @@ Validate that the Dynamo platform pods are running, you should see an output sim
 kubectl get pods -n ${DYNAMO_NAMESPACE}
 NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Running   0          106s
-dynamo-platform-nats-0                                            2/2     Running   0          106s
 ```
+
+The platform chart does not install NATS or etcd by default (`global.nats.install` and `global.etcd.install` are `false`), so only the operator pod is expected. If you installed them, `dynamo-platform-nats-0` and `dynamo-platform-etcd-0` are listed as well.
 
 Validate that the Dynamo CRDs were installed
 
@@ -288,7 +289,6 @@ Verify that all pods reach `Running` status:
 kubectl -n ${DYNAMO_NAMESPACE} get pods
 NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Running   0          39m
-dynamo-platform-nats-0                                            2/2     Running   0          39m
 vllm-disagg-frontend-85f8476887-wwtwk                             1/1     Running   0          2m13s
 vllm-disagg-decode-510a1741-7666987b-tp58w              1/1     Running   0          2m13s
 vllm-disagg-prefill-510a1741-54f76d7954-tjgn8           1/1     Running   0          2m13s
@@ -343,7 +343,6 @@ Your pods should be running like below output, making sure they are in status "R
 kubectl -n ${DYNAMO_NAMESPACE} get pods
 NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Running   0          12m
-dynamo-platform-nats-0                                            2/2     Running   0          12m
 vllm-agg-frontend-ff8457bcf-tq9jh                                 1/1     Running   0          4m46s
 vllm-agg-decode-d0a70291-759df94478-8lc74               1/1     Running   0          4m46s
 ```
@@ -542,7 +541,7 @@ Uninstall Dynamo platform
 helm uninstall -n ${DYNAMO_NAMESPACE} dynamo-platform
 ```
 
-Clean leftover PVCs related to NATS
+If you installed NATS with `--set global.nats.install=true`, clean leftover PVCs related to NATS
 ```bash
 kubectl -n ${DYNAMO_NAMESPACE} get pvc
 NAME                                             STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
