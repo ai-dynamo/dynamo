@@ -114,9 +114,27 @@ impl GlobalDiscoveryClient {
         Err(DiscoveryClientError::Status {
             url: url.clone(),
             status,
-            body: response.text().await.unwrap_or_default(),
+            body: bounded_body(response).await,
         })
     }
+}
+
+const ERROR_BODY_BYTES: usize = 1024;
+
+/// At most [`ERROR_BODY_BYTES`] of `response`'s body, read no further, as
+/// lossy UTF-8; an endpoint cannot make an error allocate its whole body.
+async fn bounded_body(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while body.len() < ERROR_BODY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = ERROR_BODY_BYTES - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// A body cut off mid-transfer is a `Request` error. Only JSON that does not

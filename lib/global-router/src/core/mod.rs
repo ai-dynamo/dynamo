@@ -233,13 +233,12 @@ impl CoreSelector {
                     replica_sync::peer_url(peer.as_str())?;
                     hub.add_peer(peer);
                 }
-                // Local bookings keep living as long as their reservations.
-                // A peer's booking whose free is lost stays until the next
-                // step reconciles mirrored bookings (#17670).
+                // The hub holds the leases for what peers mirror here: it
+                // frees them when the peer leaves or their free never comes.
                 builder = builder.host(SelectionHost {
                     replication: HostReplication {
                         channels: Some(hub.factory()),
-                        request_leases: Some(Arc::new(ReservationLeases)),
+                        request_leases: Some(hub.clone()),
                         ..HostReplication::default()
                     },
                     ..SelectionHost::default()
@@ -359,6 +358,27 @@ impl CoreSelector {
         if let Some(grpc) = &self.grpc {
             grpc.cancel.cancel();
         }
+    }
+
+    /// The peers the gRPC transport follows right now, when this replica
+    /// replicates over gRPC.
+    pub fn replica_peers(&self) -> Option<Vec<Url>> {
+        self.grpc.as_ref().map(|grpc| grpc.hub.peers())
+    }
+
+    /// Keeps the gRPC transport's peers matching each set `peers`
+    /// publishes, such as the replicas Global Discovery lists, until
+    /// `cancel` fires or the sender drops. Peers given at build time stay
+    /// however the set changes. `None` unless this replica replicates over
+    /// gRPC. Run it as a task.
+    pub fn follow_peers(
+        &self,
+        peers: watch::Receiver<Vec<Url>>,
+        cancel: CancellationToken,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        self.grpc
+            .as_ref()
+            .map(|grpc| replica_sync::follow_peer_set(grpc.hub.clone(), peers, cancel))
     }
 
     /// Subscribes to another replica's events, `endpoint` as the transport
@@ -1465,6 +1485,95 @@ mod tests {
         b.stop_replication();
         connected(&a, 0).await;
         connected(&b, 0).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_a_frame_from_an_earlier_following_of_a_peer_is_not_applied() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let grpc = Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (a, _catalog) =
+            synced_selector(CorePolicy::LeastRequests, std::slice::from_ref(&blue), grpc).await;
+        let hub = a.grpc.as_ref().unwrap().hub.clone();
+        let peer: Url = "http://peer:8000".parse().unwrap();
+        assert!(hub.add_peer(peer.clone()));
+        let old = hub.follows()[0].1.generation;
+        assert!(hub.remove_peer(&peer));
+        assert!(hub.add_peer(peer.clone()));
+        let current = hub.follows()[0].1.generation;
+        assert_ne!(old, current);
+
+        let frame = |request: &str| replica_sync::proto::ReplicaFrame {
+            frame: Some(replica_sync::proto::replica_frame::Frame::Events(
+                replica_sync::proto::ReplicaEventBatch {
+                    events: vec![replica_sync::wire::to_wire_event(
+                        &dynamo_kv_router::identity::RoutingPartitionId::new("qwen", ROUTING_GROUP),
+                        &dynamo_kv_router::protocols::ActiveSequenceEvent {
+                            request_id: request.to_owned(),
+                            worker: dynamo_kv_router::protocols::WorkerWithDpRank::new(
+                                worker_id(&blue.id),
+                                0,
+                            ),
+                            data:
+                                dynamo_kv_router::protocols::ActiveSequenceEventData::AddRequest {
+                                    token_sequence: None,
+                                    track_prefill_tokens: false,
+                                    expected_output_tokens: None,
+                                    prefill_load_hint: None,
+                                },
+                            router_id: 99,
+                            lora_name: None,
+                        },
+                    )],
+                    bindings: Vec::new(),
+                },
+            )),
+        };
+        hub.apply_from(&peer, old, frame("stale"), &a.service);
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 0);
+        hub.apply_from(&peer, current, frame("live"), &a.service);
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 1);
+        booked_settles(&a, &blue, 1).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_mirrored_bookings_are_held_by_the_hub_until_freed() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        let held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 2);
+
+        drop(held);
+        booked_settles(&a, &blue, 0).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while a.replica_sync_stats().unwrap().bookings_tracked != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the frees reach the hub through the core");
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_released, 0);
+    }
+
+    #[tokio::test]
+    async fn grpc_a_peer_that_leaves_takes_its_bookings_with_it() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+        let _held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+
+        // Discovery drops B: A frees what B had booked rather than count
+        // it until the core's stale-request expiry.
+        let hub = &a.grpc.as_ref().unwrap().hub;
+        assert!(hub.remove_peer(&replica_sync::peer_url(&served_b.url()).unwrap()));
+        booked_settles(&a, &blue, 0).await;
+        assert_eq!(a.replica_sync_stats().unwrap().bookings_released, 2);
     }
 
     #[tokio::test]

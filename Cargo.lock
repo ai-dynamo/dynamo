@@ -2528,6 +2528,7 @@ dependencies = [
  "axum 0.8.4",
  "clap",
  "dynamo-global-common",
+ "dynamo-global-discovery-client",
  "dynamo-global-router",
  "dynamo-llm",
  "dynamo-runtime",

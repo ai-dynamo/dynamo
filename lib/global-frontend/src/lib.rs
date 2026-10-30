@@ -9,16 +9,21 @@
 //! handles a forwarded request exactly as it would one sent to it directly.
 //! Selectors that weigh pool load read it from `PoolSignals`, which
 //! [`follow_relays`] fills from each pool's PoolRelay and
-//! [`measure_round_trips`] from the round trip to each region.
+//! [`measure_round_trips`] from the round trip to each region. With
+//! `--selection core`, [`poll_replica_peers`] lists the other Global
+//! Frontends from Global Discovery, so the core's replica sync finds its
+//! peers without static addresses.
 
 mod catalog;
 mod metrics;
+mod peers;
 mod proxy;
 mod relay;
 mod round_trip;
 
 pub use catalog::PoolSnapshot;
 pub use metrics::Metrics;
+pub use peers::poll_replica_peers;
 pub use proxy::{app, serve};
 pub use relay::follow_relays;
 pub use round_trip::measure_round_trips;
