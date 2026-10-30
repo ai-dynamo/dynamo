@@ -10,6 +10,7 @@ use super::{
     TieredMatchDetails, WorkerTask,
 };
 use crate::protocols::*;
+use crate::session_prefix_index::SessionPrefixIndexer;
 
 /// Trait for querying an external shared KV cache pool.
 ///
@@ -28,6 +29,10 @@ pub trait SharedKvCache: Send + Sync {
         block_size: u32,
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
+
+    /// Hands the router's session prefix index to the cache so residency events that name
+    /// a session can update it. The default ignores the index.
+    fn attach_session_prefix_index(&self, _index: Arc<SessionPrefixIndexer>) {}
 }
 
 #[async_trait]
