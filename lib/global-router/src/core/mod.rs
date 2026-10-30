@@ -619,7 +619,6 @@ mod tests {
             .collect()
     }
 
-    /// A port nothing listens on right now.
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

@@ -144,7 +144,6 @@ fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
     Ok((parse_key(key)?, relay))
 }
 
-/// A replica peer, as the core's mesh dials it.
 fn parse_peer(value: &str) -> Result<String, String> {
     let Some(address) = value.strip_prefix("tcp://") else {
         return Err(format!("expected tcp://host:port, got {value}"));
@@ -196,7 +195,6 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
     Ok(Pool::new(&key, model, key.cluster_id(), frontends))
 }
 
-/// The replica mesh `args` asks for, if any.
 fn replica_sync(args: &Args) -> Option<ReplicaSync> {
     args.replica_sync_port.map(|port| ReplicaSync {
         port,
