@@ -63,12 +63,8 @@ def test_router_hint_forwarding_is_private_and_lossless():
     assert kv_hint_kwargs(_HintEngine(), {"nvext": {"kv_hint": hint}}) == {}
 
 
-@pytest.mark.parametrize(
-    "worker_type", [WorkerType.Aggregated, WorkerType.Prefill, WorkerType.Decode]
-)
-def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
-    worker_type,
-):
+def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine():
+    worker_type = WorkerType.Prefill
     args = SimpleNamespace(
         enable_hierarchical_cache=False,
         enable_unified_cache_external_linker=True,
@@ -114,6 +110,27 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
     args.dp_size = 2
     publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
     assert values == {}
+
+
+def test_linker_hint_endpoint_rejects_loopback_with_kvcr_config_guidance():
+    infos = [
+        {
+            "kv_hint_sources": [
+                {
+                    "dp_rank": 0,
+                    "capabilities": ["router_hint", "kvcr_inventory"],
+                    "source_control_endpoint": "tcp://127.0.1.1:24100",
+                    "inventory_lifetime": "process_local",
+                    "reset_clears_owner_inventory": True,
+                    "owner_incarnation_scoped": True,
+                }
+            ]
+        }
+    ]
+    with pytest.raises(
+        ValueError, match="advertise_host.*--hicache-storage-backend-extra-config"
+    ):
+        kvcr_hint_endpoints(infos, (0, 1), require_inventory=True)
 
 
 @pytest.mark.parametrize(

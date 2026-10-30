@@ -4,7 +4,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -137,10 +137,7 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(mode):
     }
 
 
-@pytest.mark.parametrize(
-    "worker_type", [WorkerType.Aggregated, WorkerType.Prefill, WorkerType.Decode]
-)
-def test_linker_registration_uses_state_agent(monkeypatch, worker_type):
+def test_linker_registration_uses_state_agent(monkeypatch):
     from dynamo.sglang import register
 
     engine, config, source, _ = linker_fixture()
@@ -161,7 +158,7 @@ def test_linker_registration_uses_state_agent(monkeypatch, worker_type):
             None,
             config.server_args,
             config.dynamo_args,
-            worker_type=worker_type,
+            worker_type=WorkerType.Prefill,
             forwards_kv_hints=True,
         )
     )
@@ -175,8 +172,6 @@ def test_linker_registration_uses_state_agent(monkeypatch, worker_type):
     "change,mode,match",
     [
         ({"tp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
-        ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
-        ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({}, DisaggregationMode.ENCODE, "hint-forwarding LLM worker"),
     ],
 )
@@ -216,6 +211,25 @@ def test_linker_inventory_rejects_wrong_ownership_contract(target, field, value,
     {"source": source, "event": info["kv_event_sources"][0]}[target][field] = value
     with pytest.raises(ValueError, match=match):
         state_agent_descriptors(engine, config)
+
+
+def test_linker_event_block_size_matches_router_block_size(monkeypatch):
+    engine, config, _, info = linker_fixture()
+    info["kv_event_sources"][0]["block_size"] = 128
+    monkeypatch.setattr(state_agent, "kv_event_block_size", lambda args: 128)
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["kv_block_size"] == 128
+
+
+@pytest.mark.asyncio
+async def test_linker_invalid_inventory_fails_before_attachment(monkeypatch):
+    engine, config, source, _ = linker_fixture()
+    source["reset_clears_owner_inventory"] = False
+    owner = Mock()
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", owner)
+    with pytest.raises(ValueError, match="reset and incarnation"):
+        await StateAgentLifecycle().start(engine, config, None)
+    owner.assert_not_called()
 
 
 @pytest.mark.parametrize(

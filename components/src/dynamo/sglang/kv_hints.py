@@ -31,27 +31,23 @@ def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     return filter_supported_async_generate_kwargs(engine, {"kv_hints": dict(hint)})
 
 
-def is_kvcr_linker(server_args) -> bool:
+def is_supported_kvcr_linker_topology(server_args) -> bool:
     return (
         getattr(server_args, "enable_unified_cache_external_linker", False)
         and getattr(server_args, "unified_cache_external_linker_backend", None)
         == "kvcr"
-        and not getattr(server_args, "enable_hierarchical_cache", False)
-    )
-
-
-def is_supported_kvcr_linker_topology(server_args) -> bool:
-    return is_kvcr_linker(server_args) and all(
-        getattr(server_args, name, 1) in (None, 1)
-        for name in (
-            "nnodes",
-            "tp_size",
-            "dp_size",
-            "attn_dp_size",
-            "attn_cp_size",
-            "dcp_size",
-            "pp_size",
-            "tokenizer_worker_num",
+        and all(
+            getattr(server_args, name, 1) in (None, 1)
+            for name in (
+                "nnodes",
+                "tp_size",
+                "dp_size",
+                "attn_dp_size",
+                "attn_cp_size",
+                "dcp_size",
+                "pp_size",
+                "tokenizer_worker_num",
+            )
         )
     )
 
@@ -74,12 +70,7 @@ def kvcr_hint_endpoints(
                 raise ValueError("SGLang KV hint capabilities must be a list")
             if "router_hint" not in capabilities:
                 continue
-            if require_inventory and (
-                "kvcr_inventory" not in capabilities
-                or source.get("inventory_lifetime") != "process_local"
-                or source.get("reset_clears_owner_inventory") is not True
-                or source.get("owner_incarnation_scoped") is not True
-            ):
+            if require_inventory and "kvcr_inventory" not in capabilities:
                 continue
             rank = source.get("dp_rank")
             endpoint = source.get("source_control_endpoint")
@@ -115,7 +106,13 @@ def kvcr_hint_endpoints(
                     )
             if require_inventory:
                 host = parsed.hostname
-                validate_advertise_host(f"[{host}]" if ":" in host else host)
+                try:
+                    validate_advertise_host(f"[{host}]" if ":" in host else host)
+                except ValueError as exc:
+                    raise ValueError(
+                        "KVCR advertise_host in --hicache-storage-backend-extra-config "
+                        "must be a non-loopback connectable host"
+                    ) from exc
             key = str(rank)
             if key in endpoints and endpoints[key] != endpoint:
                 raise ValueError(

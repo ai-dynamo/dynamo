@@ -21,7 +21,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     resolved_server_args,
 )
-from dynamo.sglang.capacity import model_card_dp_rank_bounds
+from dynamo.sglang.capacity import kv_event_block_size, model_card_dp_rank_bounds
 from dynamo.sglang.kv_hints import (
     is_supported_kvcr_linker_topology,
     kvcr_hint_endpoints,
@@ -152,8 +152,8 @@ def state_agent_descriptors(engine, config) -> list[dict]:
         block_size = raw.get("block_size")
         if type(block_size) is not int or block_size <= 0:
             raise ValueError("KVCR raw event source requires a positive block size")
-        if linker and block_size != getattr(server_args, "page_size", None):
-            raise ValueError("KVCR linker event block size must match its page size")
+        if linker and block_size != kv_event_block_size(server_args):
+            raise ValueError("KVCR linker event block size must match the model card")
         topic = raw.get("topic", "")
         if not isinstance(topic, str) or not topic.strip():
             raise ValueError(
