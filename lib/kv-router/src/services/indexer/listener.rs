@@ -153,6 +153,7 @@ struct ListenerLoop {
     /// source for its whole life, while replays only happen at startup and on gaps.
     replay_endpoint: Option<String>,
     watermark: Arc<AtomicU64>,
+    snapshot_bootstrap_first_batch: Arc<std::sync::atomic::AtomicBool>,
     normalizer: ZmqEventNormalizer,
     messages_processed: u64,
 }
@@ -168,6 +169,7 @@ impl ListenerLoop {
         live_socket: ZmqSocket,
         replay_endpoint: Option<String>,
         watermark: Arc<AtomicU64>,
+        snapshot_bootstrap_first_batch: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             worker_id,
@@ -177,6 +179,7 @@ impl ListenerLoop {
             live_socket,
             replay_endpoint,
             watermark,
+            snapshot_bootstrap_first_batch,
             normalizer: ZmqEventNormalizer::new(block_size),
             messages_processed: 0,
         }
@@ -314,7 +317,22 @@ impl ListenerLoop {
     }
 
     async fn handle_gap(&mut self, seq: u64) -> Result<(), String> {
-        match self.cursor().observe(seq) {
+        let observation = self.cursor().observe(seq);
+        if matches!(observation, CursorObservation::Initial { .. })
+            && self
+                .snapshot_bootstrap_first_batch
+                .swap(false, Ordering::AcqRel)
+        {
+            tracing::debug!(
+                self.worker_id,
+                self.dp_rank,
+                seq,
+                "Establishing live cursor from first batch after peer snapshot"
+            );
+            return Ok(());
+        }
+
+        match observation {
             CursorObservation::Initial { got } if got > 0 => {
                 tracing::warn!(
                     self.worker_id,
@@ -417,6 +435,17 @@ impl ListenerLoop {
         self.apply_live_batch(seq, payload).await
     }
 
+    async fn drain_buffered(&mut self) -> Result<(), String> {
+        while let Some(message) = self
+            .live_socket
+            .try_recv_multipart()
+            .map_err(|error| format!("ZMQ buffered recv failed: {error}"))?
+        {
+            self.handle_message(message).await?;
+        }
+        Ok(())
+    }
+
     async fn run(mut self) -> Result<(), String> {
         loop {
             let msg = tokio::select! {
@@ -489,6 +518,7 @@ async fn run_listener(
     let block_size = record.block_size();
     let indexer = record.indexer();
     let watermark = record.watermark();
+    let snapshot_bootstrap_first_batch = record.snapshot_bootstrap_first_batch();
 
     tracing::info!(worker_id, dp_rank, endpoint, "ZMQ listener starting");
 
@@ -496,8 +526,14 @@ async fn run_listener(
         return Ok(());
     }
 
+    // TODO: Size and monitor the ZMQ receive high-water mark for peer recovery.
+    // A slow dump can overflow this socket-only buffer and lose post-snapshot events.
     let socket = connect_sub_socket(&endpoint)
         .map_err(|e| format!("failed to connect ZMQ SUB socket to {endpoint}: {e}"))?;
+
+    if !record.try_mark_buffering(generation) {
+        return Ok(());
+    }
 
     tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
@@ -506,22 +542,20 @@ async fn run_listener(
         }
     }
 
-    if !record.try_mark_active(generation) {
-        tracing::debug!(
-            worker_id,
-            dp_rank,
-            "Listener attempt is stale after readiness gate; exiting"
-        );
-        return Ok(());
-    }
-
-    tracing::info!(worker_id, dp_rank, "ZMQ listener ready, starting recv loop");
-
     if cancel.is_cancelled() || !record.is_current_attempt(generation) {
         return Ok(());
     }
 
-    ListenerLoop::new(
+    if !record.try_mark_catching_up(generation) {
+        tracing::debug!(
+            worker_id,
+            dp_rank,
+            "Listener attempt is stale before catch-up; exiting"
+        );
+        return Ok(());
+    }
+
+    let mut listener = ListenerLoop::new(
         worker_id,
         dp_rank,
         block_size,
@@ -530,9 +564,20 @@ async fn run_listener(
         socket,
         replay_endpoint,
         watermark,
-    )
-    .run()
-    .await
+        snapshot_bootstrap_first_batch,
+    );
+    listener.drain_buffered().await?;
+    listener
+        .indexer
+        .flush_pending()
+        .await
+        .map_err(|error| format!("failed to flush buffered indexer events: {error}"))?;
+    if !record.try_mark_active(generation) {
+        return Ok(());
+    }
+
+    tracing::info!(worker_id, dp_rank, "ZMQ listener ready, starting recv loop");
+    listener.run().await
 }
 
 #[cfg(test)]
@@ -600,6 +645,7 @@ mod tests {
             live_socket,
             Some(endpoint),
             watermark.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 2))
             .await
