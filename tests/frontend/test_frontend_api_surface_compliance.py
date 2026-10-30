@@ -1093,22 +1093,17 @@ def test_codex_listing_failure_requires_command_output_and_answer() -> None:
         "exit_code": 0,
         "status": "completed",
     }
-    # Observed locally: `ls` ran, but the answer dropped one hex digit.
     miscopied = {
         "type": "agent_message",
         "text": "The only file present is `marker_631ba9e66d8.txt`.",
     }
     assert _codex_listing_failure(events(listing, miscopied), marker) is None
 
-    # The model never called the tool and guessed an answer.
     assert _codex_listing_failure(events(miscopied), marker)
-    # Codex refused the call, so no command ran successfully.
     refused = {**listing, "exit_code": 1, "aggregated_output": "rejected"}
     assert _codex_listing_failure(events(refused, miscopied), marker)
-    # The tool ran, but the answer shows no sign of its output.
     unrelated = {"type": "agent_message", "text": "The directory is empty."}
     assert _codex_listing_failure(events(listing, unrelated), marker)
-    # Mentioning the prefix without naming a file is not an answer.
     no_name = {"type": "agent_message", "text": "I could not identify a marker_ file."}
     assert _codex_listing_failure(events(listing, no_name), marker)
     assert _codex_listing_failure(events(listing), marker)
