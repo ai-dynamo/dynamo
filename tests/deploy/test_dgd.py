@@ -375,18 +375,45 @@ async def test_deployment(
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.timeout(900)
+@pytest.mark.parametrize(
+    "backend,manifest,workers",
+    [
+        pytest.param(
+            "vllm",
+            "examples/backends/vllm/deploy/gaie/disagg.yaml",
+            ("prefill", "decode"),
+            id="vllm-disagg",
+        ),
+        pytest.param(
+            "sglang", "tests/deploy/gaie/sglang-agg.yaml", ("worker",), id="sglang-agg"
+        ),
+        pytest.param(
+            "trtllm", "tests/deploy/gaie/trtllm-agg.yaml", ("worker",), id="trtllm-agg"
+        ),
+    ],
+)
 async def test_gaie_deployment(
+    backend: str,
+    manifest: str,
+    workers: tuple[str, ...],
     image: str,
     namespace: str,
     skip_service_restart: bool,
     request,
 ) -> None:
-    """Test GAIE disaggregated deployment with vLLM workers.
+    """Test a GAIE deployment: an EPP plus workers with frontend sidecars.
 
-    Applies the GAIE DynamoGraphDeployment (with CI-built images) and the
-    companion HTTPRoute, then verifies inference works end-to-end through
-    the full Gateway path.
+    Applies the GAIE DynamoGraphDeployment (with CI-built images) and an
+    HTTPRoute to its InferencePool, then verifies inference works end-to-end
+    through the full Gateway path. ``--image`` holds one backend's runtime, so
+    ``--framework`` selects the case that can run it.
     """
+    selected_framework = request.config.getoption("--framework")
+    if not selected_framework:
+        pytest.fail("--framework is required: it selects the case --image can run")
+    if selected_framework != backend:
+        pytest.skip(f"--framework={selected_framework} does not select {backend}")
+
     frontend_image = request.config.getoption("--frontend-image")
     worker_image = image
 
@@ -395,32 +422,40 @@ async def test_gaie_deployment(
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
-    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
-    disagg_path = os.path.join(gaie_dir, "disagg.yaml")
-    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
+    manifest_path = os.path.join(workspace, manifest)
+    # The route has nothing backend-specific, so every case uses the vLLM one.
+    httproute_path = os.path.join(
+        workspace, "examples", "backends", "vllm", "deploy", "gaie", "http-route.yaml"
+    )
 
-    assert os.path.exists(disagg_path), f"disagg.yaml not found: {disagg_path}"
+    assert os.path.exists(manifest_path), f"GAIE manifest not found: {manifest_path}"
     assert os.path.exists(
         httproute_path
     ), f"http-route.yaml not found: {httproute_path}"
 
-    deployment_spec = DeploymentSpec(disagg_path)
+    deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
 
     logger.info(f"Frontend image: {frontend_image}")
     logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    for worker in ("prefill", "decode"):
+    for worker in workers:
         deployment_spec.set_image(worker_image, service_name=worker)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 
-    route_hostname = f"{namespace}.example.com"
+    # Name the route and its host after the DGD, so a route another case left
+    # on the Gateway never takes this case's requests.
+    route_hostname = f"{deployment_spec.name}.{namespace}.example.com"
     logger.info(f"HTTPRoute hostname: {route_hostname}")
 
     with open(httproute_path) as f:
         httproute_spec = yaml.safe_load(f)
+    httproute_spec["metadata"]["name"] = f"{deployment_spec.name}-route"
     httproute_spec["spec"]["hostnames"] = [route_hostname]
+    # The operator names the InferencePool <DGD name>-pool.
+    pool_ref = httproute_spec["spec"]["rules"][0]["backendRefs"][0]
+    pool_ref["name"] = f"{deployment_spec.name}-pool"
     httproute_yaml = yaml.safe_dump(httproute_spec)
 
     logger.info("Applying GAIE HTTPRoute...")

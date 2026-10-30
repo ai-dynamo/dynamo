@@ -1500,7 +1500,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie, deploy-test-gaie-sglang, deploy-test-gaie-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1610,11 +1610,149 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          framework: vllm
           test_name: gaie
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+
+  # Every GAIE job installs the Gateway into the same vCluster, and concurrent
+  # helm upgrades of one release fail, so the GAIE jobs run one after another,
+  # whatever the result of the job before.
+  deploy-test-gaie-sglang:
+    name: SGLang GAIE Deploy Test
+    runs-on: prod-deploy-tester-v1
+    needs: [deploy-operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-gaie]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: sglang
+          test_name: gaie_sglang
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+
+  deploy-test-gaie-trtllm:
+    name: TRTLLM GAIE Deploy Test
+    runs-on: prod-deploy-tester-v1
+    needs: [deploy-operator, frontend-copy-to-acr, trtllm-copy-to-acr, deploy-test-gaie-sglang]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: trtllm
+          test_name: gaie_trtllm
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
 
   deploy-status-check:
     runs-on: ubuntu-24.04
@@ -1636,6 +1774,8 @@ jobs:
       - deploy-test-checkpoint-sglang
       - deploy-test-checkpoint-trtllm
       - deploy-test-gaie
+      - deploy-test-gaie-sglang
+      - deploy-test-gaie-trtllm
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
