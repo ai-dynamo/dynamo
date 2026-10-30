@@ -1946,7 +1946,7 @@ impl<
                     prepared,
                     trace,
                 )
-                .map(|(mut selection, selection_trace)| {
+                .map(|(selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
                     {
@@ -1963,9 +1963,6 @@ impl<
                     let config = workers
                         .get(&selection.worker.worker_id)
                         .expect("selected worker config must exist");
-                    if let Some(log_fields) = &mut selection.log_fields {
-                        log_fields.total_kv_blocks = config.total_kv_blocks();
-                    }
                     let selected_worker_tiers = request
                         .overlap
                         .selected_worker_tiers(selection.worker, config);

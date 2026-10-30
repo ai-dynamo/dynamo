@@ -1128,7 +1128,7 @@ pub struct WorkerSelectionResult {
 /// The selection facts the "Selected worker" log line reports beyond the
 /// scheduling response's own fields. The scheduler actor copies them so the
 /// routing task can format the line after the scheduler replies.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct SelectionLogFields {
     /// The policy's worker label, e.g. `"decode"` or `"prefill"`.
     pub worker_type: &'static str,
@@ -1140,8 +1140,7 @@ pub struct SelectionLogFields {
     pub host_pinned_blocks: usize,
     /// Disk overlap reported for the selected rank, in blocks.
     pub disk_blocks: usize,
-    /// The selected worker's KV capacity as its configuration reports it,
-    /// filled in by the scheduler.
+    /// The selected worker's KV capacity as its configuration reports it.
     pub total_kv_blocks: Option<u64>,
 }
 

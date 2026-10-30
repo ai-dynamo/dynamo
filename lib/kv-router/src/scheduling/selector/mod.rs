@@ -573,7 +573,7 @@ fn log_scored_candidates(
 pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingResponse) {
     let Some(SelectionLogFields {
         worker_type,
-        logit: cost,
+        logit,
         pinned,
         host_pinned_blocks,
         disk_blocks,
@@ -593,7 +593,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
             worker_type,
             worker.worker_id,
             worker.dp_rank,
-            cost,
+            logit,
             effective_overlap_blocks,
         );
     } else if worker_type == "decode" {
@@ -603,7 +603,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = cost,
+            logit,
             host_pinned_blocks,
             disk_blocks,
             "Selected worker"
@@ -615,7 +615,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = cost,
+            logit,
             effective_cached_blocks = effective_overlap_blocks,
             host_pinned_blocks,
             disk_blocks,
@@ -741,7 +741,6 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         return Err(KvSchedulerError::NoEndpoints);
     };
     let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
-    // Copy only what the routing task's log line needs; it formats the line there.
     let tiers = &request.overlap.tier_overlap_blocks;
     let log_fields = SelectionLogFields {
         worker_type,
@@ -749,7 +748,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         pinned: request.pinned_worker == Some(worker),
         host_pinned_blocks: tiers.host_pinned.get(&worker).copied().unwrap_or(0),
         disk_blocks: tiers.disk.get(&worker).copied().unwrap_or(0),
-        total_kv_blocks: None,
+        total_kv_blocks: workers
+            .get(&worker.worker_id)
+            .and_then(WorkerConfigLike::total_kv_blocks),
     };
     let result = WorkerSelectionResult {
         log_fields: Some(log_fields),
