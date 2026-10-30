@@ -164,11 +164,11 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Keep families on the legacy path in Auto until their unified route preserves the
-    // existing request semantics. The 0.9 registry adds MiniMax M3, whose unified route
-    // currently puts explicit guided output in reasoning_content. Qwen3 thinking models
-    // also use this reasoning name with Hermes tool syntax, and a reasoning-only Nemotron
-    // 3 card does not say which tool grammar it serves; those cases also require V2.
+    // Keep MiniMax M3 on the legacy Auto route until explicit guided output from its
+    // unified parser is emitted in content instead of reasoning_content.
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
+    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; those
+    // cases also require V2.
     let selected = if tool_call_parser.is_none()
         && matches!(
             reasoning_parser,
