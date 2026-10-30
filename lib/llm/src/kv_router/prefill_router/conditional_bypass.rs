@@ -6,13 +6,13 @@ use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_runtime::pipeline::SingleIn;
 
 use super::PrefillRouter;
-use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
+use crate::kv_router::routing_host::{KvRoutePlan, RoutePlanSignals, is_cancelled};
 use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
 /// An admitted decode route selected by `RoutingHost` together with the
 /// conditional-disagg policy's diagnostic signals.
 pub(crate) struct ConditionalDisaggDecodeDecision {
-    pub plan: RoutePlan,
+    pub plan: KvRoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
 }

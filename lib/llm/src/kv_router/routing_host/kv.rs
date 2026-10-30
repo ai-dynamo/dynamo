@@ -243,14 +243,14 @@ impl RoutingHost {
     /// worker check already ran for that preview, so it runs here only for a
     /// route without one. The returned plan owns the booking until
     /// [`Self::dispatch_kv_plan`] moves it into the request guard, or
-    /// [`RoutePlan::abort`] releases it.
+    /// [`KvRoutePlan::abort`] releases it.
     pub(super) async fn plan_kv_route(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         planned_worker: Option<WorkerWithDpRank>,
         budget: CleanupBudget,
-    ) -> Result<RoutePlan, Error> {
+    ) -> Result<KvRoutePlan, Error> {
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
@@ -282,7 +282,7 @@ impl RoutingHost {
             .select_with_request_lifecycle(request, phase, select)
             .await?;
         drop(route_guard);
-        Ok(RoutePlan {
+        Ok(KvRoutePlan {
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
@@ -296,14 +296,13 @@ impl RoutingHost {
         })
     }
 
-    /// Plan a KV route that no preview opened, for a stage router that books
-    /// before it dispatches. This is the route's first stage, so it starts the
-    /// cleanup budget.
-    pub(crate) async fn plan_kv_route_without_preview(
+    /// Plan a KV route that no preview opened, for [`Self::plan_route`]. This
+    /// is the route's first stage, so it starts the cleanup budget.
+    pub(super) async fn plan_kv_route_without_preview(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
-    ) -> Result<RoutePlan, Error> {
+    ) -> Result<KvRoutePlan, Error> {
         self.plan_kv_route(request, phase, None, CleanupBudget::default())
             .await
     }
@@ -312,7 +311,7 @@ impl RoutingHost {
         &self,
         request: &SingleIn<PreprocessedRequest>,
         preview: RoutePreview,
-    ) -> Result<RoutePlan, Error> {
+    ) -> Result<KvRoutePlan, Error> {
         if request.context().id() != preview.request_id {
             return Err(anyhow::anyhow!(
                 "KV route preview belongs to request {}, not {}",
@@ -334,9 +333,9 @@ impl RoutingHost {
     pub(crate) async fn dispatch_kv_plan(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        plan: RoutePlan,
+        plan: KvRoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let RoutePlan {
+        let KvRoutePlan {
             phase,
             mut selection,
             cleanup,
@@ -649,39 +648,5 @@ impl RoutingHost {
             dp_rank = selection.worker.dp_rank,
             "request has output token replay annotation but selected worker has not declared replay-token consumption"
         );
-    }
-
-    /// The prefill leg: book a prefill worker, let `prepare` rewrite the request
-    /// for it, then send. A failed `prepare` gives the booking back.
-    pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
-        &self,
-        mut request: SingleIn<PreprocessedRequest>,
-        prepare: F,
-    ) -> Result<PrefillDispatch<M>, Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
-        let plan = self
-            .plan_kv_route(
-                &request,
-                RequestPhase::Prefill,
-                None,
-                CleanupBudget::default(),
-            )
-            .await?;
-        let metadata = match prepare(&mut request, route_target(plan.worker())) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                plan.abort(Some(&error)).await;
-                return Err(error);
-            }
-        };
-        let booking = plan.attempt_release();
-        let stream = self.dispatch_kv_plan(request, plan).await?;
-        Ok(PrefillDispatch {
-            metadata,
-            stream,
-            booking,
-        })
     }
 }

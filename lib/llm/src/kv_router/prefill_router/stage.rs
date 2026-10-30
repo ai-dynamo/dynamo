@@ -26,22 +26,17 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use super::{
     ActivationSnapshot, BYPASS_REMOTE_PREFILL_ANNOTATION, PrefillBinding, PrefillCompletion,
-    PrefillLifecycleState, PrefillOutcome, PrefillRouter, PreparedPrefill, apply_prefill_dispatch,
+    PrefillLifecycleState, PrefillOutcome, PrefillRouter, PreparedPrefill,
     conditional_bypass::ConditionalDisaggDecodeDecision, extract_bootstrap_info,
     independent_prefill_context, prefill_activation_pending_error,
 };
 use crate::{
-    kv_router::{
-        RequestAttemptRelease,
-        routing_host::{PrefillDispatch, RoutePlan},
-        stage_router::StageRouter,
-    },
+    kv_router::{RequestAttemptRelease, routing_host::RoutePlan, stage_router::StageRouter},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::AffinityTarget,
 };
 
 use super::handoff::PrefillTask;
@@ -52,15 +47,12 @@ use super::handoff::PrefillTask;
 pub(crate) enum PrefillPlan {
     /// No prefill target: the request goes to decode without a prefill hop.
     Untargeted,
-    /// A KV-routed prefill worker, admitted and booked.
+    /// A selected prefill worker and what holds it: a KV booking, or a
+    /// built-in mode's reservations.
     Booked {
         binding: Arc<PrefillBinding>,
         route: RoutePlan,
-        prepared: PreparedPrefill,
     },
-    /// A prefill binding whose router mode selects and sends in one step, so
-    /// the worker is chosen at dispatch.
-    SelectAtDispatch { binding: Arc<PrefillBinding> },
 }
 
 /// What the decode stage looks like for one request.
@@ -150,36 +142,19 @@ impl StageRouter for PrefillRouter {
     /// Send the prefill request to its worker.
     async fn dispatch(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
         plan: PrefillPlan,
     ) -> Result<PrefillDispatched> {
         match plan {
             PrefillPlan::Untargeted => Err(anyhow::anyhow!(
                 "an untargeted prefill plan has no prefill worker to dispatch to"
             )),
-            PrefillPlan::Booked {
-                binding,
-                route,
-                prepared,
-            } => {
-                apply_prefill_dispatch(&mut request, &prepared);
+            PrefillPlan::Booked { binding, route } => {
                 let booking = route.attempt_release();
-                let stream = binding.router.dispatch_kv_plan(request, route).await?;
-                Ok(PrefillDispatched {
-                    prepared,
-                    stream,
-                    booking,
-                })
-            }
-            PrefillPlan::SelectAtDispatch { binding } => {
                 let endpoint_id = &binding.endpoint_id;
-                let PrefillDispatch {
-                    metadata: prepared,
-                    stream,
-                    booking,
-                } = binding
+                let (prepared, stream) = binding
                     .router
-                    .select_and_dispatch_prefill(request, |request, target| {
+                    .dispatch_route(request, route, |request, target| {
                         self.prepare_prefill_dispatch(request, target, endpoint_id)
                     })
                     .await?;
@@ -244,36 +219,20 @@ impl PrefillRouter {
         }
     }
 
-    /// Choose the prefill worker for `binding` without sending to it.
-    ///
-    /// KV routing books the worker now; [`StageRouter::dispatch`] sends to it.
-    /// Built-in modes choose at dispatch instead, because their send can move
-    /// to another worker and prepare the request for that one.
+    /// Choose the prefill worker for `binding` without sending to it. KV
+    /// routing books the worker; built-in modes take their reservations.
+    /// [`StageRouter::dispatch`] prepares the request for the worker it is
+    /// sent to and sends it.
     pub(super) async fn select_prefill_worker(
         &self,
         binding: Arc<PrefillBinding>,
         request: &SingleIn<PreprocessedRequest>,
     ) -> Result<PrefillPlan> {
-        if binding.router.kv_router_if_enabled().is_none() {
-            return Ok(PrefillPlan::SelectAtDispatch { binding });
-        }
         let route = binding
             .router
-            .plan_kv_route_without_preview(request, RequestPhase::Prefill)
+            .plan_route(request, RequestPhase::Prefill)
             .await?;
-        let worker = route.worker();
-        let target = AffinityTarget::new(worker.worker_id, Some(worker.dp_rank));
-        match self.plan_prefill_dispatch(target, &binding.endpoint_id) {
-            Ok(prepared) => Ok(PrefillPlan::Booked {
-                binding,
-                route,
-                prepared,
-            }),
-            Err(error) => {
-                route.abort(Some(&error)).await;
-                Err(error)
-            }
-        }
+        Ok(PrefillPlan::Booked { binding, route })
     }
 
     /// Send a request that conditional disaggregation kept local to its

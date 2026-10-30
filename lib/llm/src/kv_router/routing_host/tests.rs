@@ -250,6 +250,120 @@ async fn builder_rejects_inputs_that_do_not_match_the_mode() {
     runtime.shutdown();
 }
 
+/// A built-in plan holds its occupancy reservation between selection and
+/// dispatch, and aborting it gives the reservation back.
+#[tokio::test]
+async fn builtin_route_plan_holds_its_reservation_until_aborted() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-route-plan-abort".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    client.override_discovered_instances(vec![1, 2]);
+    client.override_instance_avail(vec![1, 2]);
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .build()
+        .await
+        .unwrap();
+
+    let request = Context::new(request());
+    let plan = host
+        .plan_route(&request, RequestPhase::Aggregated)
+        .await
+        .unwrap();
+    assert!(matches!(plan, RoutePlan::Builtin(_)));
+    assert!(plan.attempt_release().is_none());
+    let worker_id = plan.target().worker_id;
+    assert_eq!(
+        host.inner.occupancy_for_test(worker_id),
+        1,
+        "the plan holds its occupancy reservation until dispatch"
+    );
+
+    plan.abort(None).await;
+    assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+
+    drop(host);
+    runtime.shutdown();
+}
+
+/// The selected worker can leave between a built-in plan and its dispatch. The
+/// send moves to another instance, and `prepare` sees the worker the request is
+/// actually sent to.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_route_plan_prepares_for_the_worker_it_is_sent_to() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-route-plan-fallback".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let mut client = endpoint.client().await.unwrap();
+    tokio::task::yield_now().await;
+    let id = endpoint.id();
+    let instances: Vec<_> = [101, 202]
+        .into_iter()
+        .map(|instance_id| Instance {
+            namespace: id.namespace.clone(),
+            component: id.component.clone(),
+            endpoint: id.name.clone(),
+            instance_id,
+            transport: dynamo_runtime::component::TransportType::Nats(format!(
+                "route-plan-fallback.{instance_id}"
+            )),
+            device_type: None,
+            request_plane_codec: None,
+        })
+        .collect();
+    let (source_tx, source_rx) = watch::channel(instances.clone());
+    client.instance_source = Arc::new(source_rx);
+    client.override_discovered_instances(vec![101, 202]);
+    client.override_instance_avail(vec![101, 202]);
+    let load_context = test_load_context(&client).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
+
+    let request = Context::new(request());
+    let plan = host
+        .plan_route(&request, RequestPhase::Aggregated)
+        .await
+        .unwrap();
+    assert_eq!(plan.target().worker_id, 101);
+
+    // The selection view still contains 101, but dispatch can only reach 202.
+    source_tx.send(instances[1..].to_vec()).unwrap();
+    assert!(!client.is_instance_live(101));
+    let (prepared_for, mut stream) = host
+        .dispatch_route(request, plan, |_, target| Ok(target.worker_id))
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(prepared_for, 202);
+    assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[202]);
+
+    drop(host);
+    runtime.shutdown();
+}
+
 #[tokio::test]
 async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     let runtime = Runtime::from_current().unwrap();
@@ -2697,7 +2811,7 @@ fn active_requests_for(
 async fn plan_decode_route(
     router: &RoutingHost,
     request: &Context<PreprocessedRequest>,
-) -> RoutePlan {
+) -> KvRoutePlan {
     let preview = router
         .preview_kv_route(request, RequestPhase::Decode)
         .await
@@ -4921,13 +5035,19 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts() {
     let (router, runtime) = router(None).await;
     let started_before = router.request_metrics.requests_started_total.get();
-    let error = router
-        .select_and_dispatch_prefill(Context::new(request()), |_, _| -> Result<(), Error> {
+    let request = Context::new(request());
+    let plan = router
+        .plan_route(&request, RequestPhase::Prefill)
+        .await
+        .unwrap();
+    let result = router
+        .dispatch_route(request, plan, |_, _| -> Result<(), Error> {
             Err(anyhow::anyhow!("prepare failed"))
         })
-        .await
-        .err()
-        .expect("a failed prepare must fail the request");
+        .await;
+    let Err(error) = result else {
+        panic!("a failed prepare must fail the request");
+    };
     assert!(format!("{error:#}").contains("prepare failed"));
     assert_eq!(
         router.request_metrics.requests_started_total.get(),
