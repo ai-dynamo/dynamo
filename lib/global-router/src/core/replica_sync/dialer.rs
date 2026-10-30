@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::services::selection::SelectionService;
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Endpoint};
 use url::Url;
@@ -29,35 +29,45 @@ const LAST_RETRY: Duration = Duration::from_secs(30);
 const HEALTHY_STREAM: Duration = Duration::from_secs(30);
 
 /// Follows every peer in `hub`, those present now and those added later,
-/// until `cancel` fires. Removing a peer ends its subscription.
+/// until `cancel` fires. Removing a peer ends its subscription; a peer
+/// removed and added again is followed afresh once its old subscription
+/// has ended.
 pub async fn run_peers(
     hub: Arc<ReplicaHub>,
     service: Arc<SelectionService>,
     cancel: CancellationToken,
 ) {
-    let mut following = HashMap::<Url, JoinHandle<()>>::new();
+    let mut tasks = JoinSet::new();
+    // The peer each running task follows. A task ends when its peer is
+    // removed (or its token fires), so a peer still here is not started
+    // again until then.
+    let mut following = HashMap::<Id, Url>::new();
     loop {
-        following.retain(|_, task| !task.is_finished());
         for (peer, follow) in hub.peer_tokens() {
-            if following.contains_key(&peer) {
+            if following.values().any(|followed| *followed == peer) {
                 continue;
             }
-            let task = tokio::spawn(follow_peer(
+            let task = tasks.spawn(follow_peer(
                 peer.clone(),
                 hub.clone(),
                 service.clone(),
                 follow,
             ));
-            following.insert(peer, task);
+            following.insert(task.id(), peer);
         }
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = hub.peers_changed() => {}
+            Some(ended) = tasks.join_next_with_id() => {
+                let id = match ended {
+                    Ok((id, ())) => id,
+                    Err(error) => error.id(),
+                };
+                following.remove(&id);
+            }
         }
     }
-    for task in following.values() {
-        task.abort();
-    }
+    tasks.abort_all();
 }
 
 /// Streams one peer, reconnecting with a growing delay, until `cancel`

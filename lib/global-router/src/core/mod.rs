@@ -195,8 +195,10 @@ impl CoreSelector {
 
     /// Builds a core with `policy`, replicating with peers over `transport`
     /// when one is given. Nothing is selectable until [`Self::follow`] has
-    /// applied the first pool snapshot. The gRPC transport's tasks run on
-    /// the current runtime and stop when the selector drops.
+    /// applied the first pool snapshot, and gRPC peers are followed only
+    /// from then on, so their events find the partitions they name. The
+    /// gRPC transport's tasks run on the current runtime and stop at
+    /// [`Self::stop_replication`] or when the selector drops.
     pub async fn with_transport(
         policy: CorePolicy,
         transport: Option<ReplicaTransport>,
@@ -251,18 +253,13 @@ impl CoreSelector {
             None => {}
         }
         let service = Arc::new(builder.build().await.context("build the router core")?);
-        if let Some(GrpcTransport { hub, cancel }) = &grpc {
+        if let Some(GrpcTransport { hub, .. }) = &grpc {
             if affinity {
                 let updates = service
                     .session_binding_updates()
                     .context("take the core's session binding updates")?;
                 tokio::spawn(hub.clone().publish_bindings(updates));
             }
-            tokio::spawn(replica_sync::dialer::run_peers(
-                hub.clone(),
-                service.clone(),
-                cancel.clone(),
-            ));
             tracing::info!(
                 process_id = hub.process_id(),
                 peers = ?hub.peers().iter().map(Url::as_str).collect::<Vec<_>>(),
@@ -303,6 +300,10 @@ impl CoreSelector {
     /// future as a task; the receiver resolves once the core has taken the
     /// first snapshot, so the caller can wait for the configured pools to be
     /// selectable before serving. It fails if the task ends first.
+    ///
+    /// With the gRPC transport the future also follows the peers, starting
+    /// once that first snapshot is in: an event that arrived before the
+    /// core had the partition it names would be dropped for good.
     pub fn follow<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
@@ -315,9 +316,42 @@ impl CoreSelector {
         S: AsRef<[Pool]> + Send + Sync + 'static,
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
-        let (source, ready) = PoolCatalogSource::with_ready(pools);
+        let (source, first_taken) = PoolCatalogSource::with_ready(pools);
         let source = source.with_directory(self.directory.clone());
-        (ready, reconciler.run(source, cancel))
+        let (ready, is_ready) = oneshot::channel();
+        let dialer = self
+            .grpc
+            .as_ref()
+            .map(|grpc| (grpc.hub.clone(), grpc.cancel.clone()));
+        let service = self.service.clone();
+        let stop = cancel.clone();
+        let follower = async move {
+            let peers = async move {
+                if first_taken.await.is_err() {
+                    return;
+                }
+                let _ = ready.send(());
+                if let Some((hub, transport)) = dialer {
+                    tokio::select! {
+                        _ = stop.cancelled() => {}
+                        _ = replica_sync::dialer::run_peers(hub, service, transport) => {}
+                    }
+                }
+            };
+            tokio::join!(reconciler.run(source, cancel), peers);
+        };
+        (is_ready, follower)
+    }
+
+    /// Ends the gRPC transport now: open `ReplicaSync` streams close and
+    /// peers are no longer followed. The Global Frontend calls it when
+    /// shutdown begins, so the long-lived streams do not hold the graceful
+    /// drain open until its grace runs out. Dropping the selector does the
+    /// same.
+    pub fn stop_replication(&self) {
+        if let Some(grpc) = &self.grpc {
+            grpc.cancel.cancel();
+        }
     }
 
     /// Subscribes to another replica's events, `endpoint` as the transport
@@ -1367,6 +1401,69 @@ mod tests {
         connected(&b, 1).await;
         assert_replicas_see_each_other_s_bookings(&a, &b, &blue, &green).await;
         drop(served_b);
+    }
+
+    #[tokio::test]
+    async fn grpc_peers_are_followed_only_once_the_first_snapshot_is_in() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let pools = [blue.clone()];
+        let grpc = || Some(ReplicaTransport::Grpc(GrpcReplicaSync::default()));
+        let (b, _catalog_b) = synced_selector(CorePolicy::LeastRequests, &pools, grpc()).await;
+        let served_b = Served::new(&b, 0).await;
+
+        // A knows B before it follows any catalog: nothing is dialed yet.
+        let a = CoreSelector::with_transport(
+            CorePolicy::LeastRequests,
+            Some(ReplicaTransport::Grpc(GrpcReplicaSync {
+                peers: vec![replica_sync::peer_url(&served_b.url()).unwrap()],
+            })),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(a.replica_sync_stats().unwrap().connected_peers, 0);
+
+        // Following the catalog takes the first snapshot, then dials.
+        let (_catalog_a, subscription) = watch::channel(Arc::new(pools.to_vec()));
+        let (ready, follower) = a.follow(subscription, CancellationToken::new());
+        tokio::spawn(follower);
+        ready.await.unwrap();
+        connected(&a, 1).await;
+        drop(served_b);
+    }
+
+    #[tokio::test]
+    async fn grpc_a_peer_removed_and_added_back_at_once_is_followed_again() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+
+        // The old subscription is still winding down when the peer is
+        // back; the dialer must start a new one once it has ended.
+        let hub = &a.grpc.as_ref().unwrap().hub;
+        let peer_b = replica_sync::peer_url(&served_b.url()).unwrap();
+        assert!(hub.remove_peer(&peer_b));
+        assert!(hub.add_peer(peer_b));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let _held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
+        booked_settles(&a, &blue, 2).await;
+    }
+
+    #[tokio::test]
+    async fn grpc_stop_replication_ends_the_open_streams() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let pools = [blue.clone(), green.clone()];
+        let (a, b, _catalog_a, _catalog_b, _served_a, _served_b) =
+            grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
+
+        // B stops: A's stream from B closes, and B follows nobody.
+        b.stop_replication();
+        connected(&a, 0).await;
+        connected(&b, 0).await;
     }
 
     #[tokio::test]

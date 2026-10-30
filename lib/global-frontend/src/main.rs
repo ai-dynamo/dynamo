@@ -351,6 +351,14 @@ async fn main() -> Result<()> {
                 .await
                 .context("the router core stopped before taking the first pool snapshot")?;
             replica_sync_routes = core.replica_sync_routes();
+            // The replica streams are long-lived; ending them as shutdown
+            // begins lets the graceful drain finish with the requests.
+            let replication = core.clone();
+            let stopping = shutdown.clone();
+            tokio::spawn(async move {
+                stopping.cancelled().await;
+                replication.stop_replication();
+            });
             core
         }
         (SelectionPath::Current, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
