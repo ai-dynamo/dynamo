@@ -150,7 +150,7 @@ User-provided constraints still apply. A decode worker must satisfy all required
 
 ## KV Fetch Hints
 
-When workers advertise router-hint support, as vLLM workers with KVCR do, the router can attach a `kv.fetch` hint to the selected worker. The hint names a peer that holds a longer prefix of the request, so the worker can fetch that KV instead of computing it. A fetch over a slow link, such as TCP between hosts without RDMA, is usually slower than recomputing, so with topology enabled the fetch source must be in the target worker's island: its value for the target's `kv_transfer_domain` must equal the target's value.
+When workers advertise router-hint support, as vLLM workers with KVCR do, the router can attach a `kv.fetch` hint to the selected worker. The hint names a peer that can supply missing KV beyond the worker's local prefix, so the worker can fetch that KV instead of computing it. A fetch over a slow link, such as TCP between hosts without RDMA, is usually slower than recomputing, so with topology enabled the fetch source must be in the target worker's island: its value for the target's `kv_transfer_domain` must equal the target's value.
 
 - The target worker's `kv_transfer_domain` and `kv_transfer_enforcement` apply. This is the reverse of prefill-to-decode routing, where the prefill worker's policy applies.
 - A source with no value for that domain is in no island.
