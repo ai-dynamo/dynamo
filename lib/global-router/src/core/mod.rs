@@ -91,8 +91,9 @@ pub struct CoreSelector {
     service: Arc<SelectionService>,
     directory: Arc<PoolDirectory>,
     frontends: Cursors<PoolId>,
-    /// Whether the policy reads the core's bookings. Only least-requests
-    /// does; the others pick with advisory selections that book nothing.
+    /// Whether the policy's picker reads the core's bookings, as it declares
+    /// ([`policies::reads_bookings`]). A picker that does not gets advisory
+    /// selections, booked only where the session table needs it.
     books: bool,
     /// Whether requests carry their session to the core, which only keeps
     /// sessions under [`CorePolicy::Affinity`].
@@ -166,11 +167,12 @@ impl CoreSelector {
                 .session_affinity_mode(SessionAffinityMode::Soft);
         }
         let service = builder.build().await.context("build the router core")?;
+        let books = policies::reads_bookings(&policy, &directory);
         Ok(Self {
             service: Arc::new(service),
             directory,
             frontends: Cursors::default(),
-            books: policies::reads_bookings(&policy, &directory),
+            books,
             sessions: matches!(policy, CorePolicy::Affinity(_)),
             pins: match &policy {
                 CorePolicy::Affinity(affinity) => Some(PinRefresh::new(affinity.idle)),
@@ -607,8 +609,17 @@ mod tests {
 
     #[test]
     fn a_policy_books_only_if_its_picker_reads_load() {
-        assert!(!policies::reads_bookings(CorePolicy::RoundRobin));
-        assert!(policies::reads_bookings(CorePolicy::LeastRequests));
+        let directory = Arc::new(PoolDirectory::new());
+        let (_, signals) = fleet();
+        assert!(!policies::reads_bookings(
+            &CorePolicy::RoundRobin,
+            &directory
+        ));
+        assert!(policies::reads_bookings(
+            &CorePolicy::LeastRequests,
+            &directory
+        ));
+        assert!(!policies::reads_bookings(&affinity(&signals), &directory));
     }
 
     #[tokio::test]
