@@ -6,6 +6,14 @@
 This suite applies the shared deployment API checks to four SGLang component
 pairs: candidate frontend with N-1/N-2 workers, and N-1/N-2 frontends with a
 candidate worker. Each pair runs chat and embedding, for eight deployments.
+The workflow also compares one unchanged strict-schema Chat Completions request
+from each historical SGLang runtime to the candidate, using both the native
+Rust and Python SGLang processors. These four comparisons add twelve serial
+whole-runtime deployments. Each upgrade comparison checks the historical
+runtime, the candidate with compatibility disabled, and the candidate with it
+enabled. A default-mode HTTP 200 to HTTP 400 change fails CI even if enabling
+compatibility restores success. See the
+[strict-schema upgrade acceptance guide](../../frontend/strict_schema_upgrade.md).
 `releases.json` names the latest selected patch release in each historical minor
 line. Update it when the candidate advances to a new minor; an absent release
 fails setup instead of silently shrinking coverage.
@@ -49,6 +57,7 @@ using a candidate SGLang image, then run:
 
 ```bash
 python -m pytest tests/deploy/test_n2_compatibility.py \
+  tests/frontend/test_strict_schema_upgrade.py --run-strict-schema-upgrade \
   --namespace default --image "$WORKER_IMAGE" --frontend-image "$FRONTEND_IMAGE" \
   --model-cache-pvc model-cache --model-cache-mount /models -m k8s -n 0
 ```
@@ -70,6 +79,11 @@ major-version boundary requires explicit release ordering. Image tags supply
 `runtimeVersionOverride` separately for each component, keeping operator health
 defaults appropriate for historical runtimes. Kubernetes discovery and TCP
 requests are used across the supported window.
+
+Omit the frontend test and its opt-in switch to run only the mixed-component
+checks. Explicit baseline/target options select a single image pair with both
+processors; the workflow uses the release catalog and candidate `--image`
+instead.
 
 CI schedules cases serially to bound GPU use. Each case has its own deployment
 name and fixture; there is no cross-test baseline state. Compatibility failures

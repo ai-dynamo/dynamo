@@ -57,6 +57,10 @@ inputs:
     description: 'Pytest file to run.'
     required: false
     default: 'tests/deploy/test_dgd.py'
+  additional_test_file:
+    description: 'Optional second pytest file, collected before deployment options.'
+    required: false
+    default: ''
   model_cache_pvc:
     description: 'Name of a pre-existing PVC to mount as a shared model cache on worker pods (sets HF_HOME). Empty downloads from HuggingFace.'
     required: false
@@ -121,6 +125,7 @@ runs:
         DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
         TEST_NAME: ${{ inputs.test_name }}
         TEST_FILE: ${{ inputs.test_file }}
+        ADDITIONAL_TEST_FILE: ${{ inputs.additional_test_file }}
         EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
         MODEL_CACHE_PVC: ${{ inputs.model_cache_pvc }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
@@ -193,7 +198,12 @@ runs:
           echo "DD_API_KEY unset - deploy test runs unreported to Datadog."
         fi
 
-        python -m pytest "${TEST_FILE}" \
+        TEST_FILES=("${TEST_FILE}")
+        if [ -n "${ADDITIONAL_TEST_FILE}" ]; then
+          TEST_FILES+=("${ADDITIONAL_TEST_FILE}")
+        fi
+
+        python -m pytest "${TEST_FILES[@]}" \
           --namespace="${NAMESPACE}" \
           ${DD_ARGS} \
           ${PYTEST_ARGS} \

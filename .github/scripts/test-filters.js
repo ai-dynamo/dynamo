@@ -61,6 +61,16 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'tests/frontend/test_strict_schema_upgrade.py',
+    expect: { core: true, deploy: true, dgdr: false, operator: false },
+    desc: 'upgrade acceptance changes run the N-2 deployment suite'
+  },
+  {
+    file: 'tests/frontend/conftest.py',
+    expect: { core: true, deploy: true, dgdr: false, operator: false },
+    desc: 'upgrade acceptance options keep N-2 deployment coverage'
+  },
+  {
     file: 'scripts/protocol_compatibility/composition/openai.py',
     expect: { ignore: true, rust: false, core: false, frontend: false },
     desc: 'protocol tooling is covered without unrelated runtime builds'
