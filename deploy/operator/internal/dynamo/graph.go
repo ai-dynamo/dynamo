@@ -2912,6 +2912,9 @@ func GenerateGrovePodCliqueSet(
 			return nil, fmt.Errorf("compute Grove worker hash suffix: %w", err)
 		}
 	}
+	engineGroups := groveEngineGroupRenderer{
+		operatorConfig: operatorConfig, runtimeConfig: runtimeConfig, secretsRetriever: secretsRetriever, reader: reader,
+	}
 
 	for i := range dynamoDeployment.Spec.Components {
 		sourceComponent := &dynamoDeployment.Spec.Components[i]
@@ -2921,6 +2924,26 @@ func GenerateGrovePodCliqueSet(
 		component := sourceComponent.DeepCopy()
 		prepareGroveComponentForRendering(component, existingPodCliqueSet, workerHash)
 		componentName := component.ComponentName
+
+		// Engine Groups render their own launch layout; graph assembly only combines Grove resources.
+		if component.EngineGroup != nil {
+			if dynamoDeployment.Spec.ProviderOverride != nil || len(checkpointInfoByComponent) != 0 {
+				return nil, fmt.Errorf("Engine Group workloads do not support provider overrides or checkpoint startup")
+			}
+			if gangSet.Spec.UpdateStrategy != nil && gangSet.Spec.UpdateStrategy.Type != grovev1alpha1.OnDeleteStrategy {
+				return nil, fmt.Errorf("Engine Group workloads require Grove OnDelete update strategy")
+			}
+			clique, world, err := engineGroups.Render(ctx, dynamoDeployment, component, validatedQueueName,
+				groveClusterTopologyDomains, restartState, existingRestartAnnotations)
+			if err != nil {
+				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			}
+			gangSet.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.OnDeleteStrategy}
+			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
+			scalingGroups = append(scalingGroups, world)
+			continue
+		}
+
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
