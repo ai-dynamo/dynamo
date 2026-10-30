@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Baseline run against PR #17615
 
+For the subsequent API fixes, see the [post-fix comparison](17681-api-fixes.md):
+all 15 required checks pass and the overall result improves to 19 passed,
+9 failed, and none skipped. The original baseline below is preserved.
+
 The complete, unmodified upstream MCS conformance suite ran on 2026-10-30
 against the registry/controller implementation from
 [`0fd4c96b4ebc5321e0ecd2adc9627cee48b1e3ba`](https://github.com/ai-dynamo/dynamo/commit/0fd4c96b4ebc5321e0ecd2adc9627cee48b1e3ba),

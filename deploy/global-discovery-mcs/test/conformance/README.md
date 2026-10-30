@@ -98,6 +98,12 @@ Distinct subnet overrides supported by the e2e helpers can be supplied when
 running alongside another routed e2e deployment. Merely changing the cluster
 prefix does not change its subnet assignments.
 
+## Results after API fixes
+
+The [post-fix run](results/17681-api-fixes.md) passes all 15 required checks.
+Overall, 19 of 28 specifications pass; nine optional DNS-dependent cases
+fail, with none skipped. The original baseline remains below for comparison.
+
 ## Recorded baseline
 
 See the [complete #17615 baseline results](results/README.md) and upstream YAML
