@@ -324,7 +324,7 @@ impl FrontendReports {
     pub(super) fn model_loads(
         &self,
         catalog: &PoolCatalogSnapshot,
-        capacities: &HashMap<(String, String), PoolDeployment>,
+        capacities: &HashMap<(String, String), Option<PoolDeployment>>,
         relay_namespace: &str,
         registered: &HashMap<String, HashSet<u64>>,
         now: Instant,
@@ -398,7 +398,7 @@ impl FrontendReports {
                     observed_frontends: model_coverage.observed,
                     ready_frontends: aggregate.ready_frontends,
                     serving_pools: aggregate.serving_pools.into_iter().collect(),
-                    deployment: capacities.get(&(namespace, model)).copied(),
+                    deployment: capacities.get(&(namespace, model)).copied().flatten(),
                 }
             })
             .collect()
@@ -899,10 +899,10 @@ mod tests {
         let reports = FrontendReports::default();
         let capacities = HashMap::from([(
             (NS.to_string(), "a".to_string()),
-            PoolDeployment {
+            Some(PoolDeployment {
                 live_workers: 2,
                 max_concurrency: Some(16),
-            },
+            }),
         )]);
 
         let models = reports.model_loads(
@@ -937,10 +937,10 @@ mod tests {
         );
         let capacities = HashMap::from([(
             (NS.to_string(), "a".to_string()),
-            PoolDeployment {
+            Some(PoolDeployment {
                 live_workers: 1,
                 max_concurrency: Some(8),
-            },
+            }),
         )]);
         let registered = HashMap::from([
             (NS.to_string(), HashSet::new()),
@@ -959,6 +959,38 @@ mod tests {
         assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
         assert_eq!(awaiting(model), Some(2));
         assert_eq!(model.deployment.map(|d| d.max_concurrency), Some(Some(8)));
+    }
+
+    /// A model the topology lists with an unknown capacity is still a model:
+    /// its relay-namespace frontends are homed under its namespace, and its
+    /// `deployment` is `None`.
+    #[test]
+    fn a_model_with_unknown_capacity_is_listed_without_a_deployment() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            RELAY_NS.to_string(),
+            event(PUBLISHER, frame(1, 1, vec![model_load("a", 2, 5)])),
+        );
+        let capacities = HashMap::from([((NS.to_string(), "a".to_string()), None)]);
+        let registered = HashMap::from([
+            (NS.to_string(), HashSet::new()),
+            (RELAY_NS.to_string(), HashSet::from([PUBLISHER])),
+        ]);
+
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &capacities,
+            RELAY_NS,
+            &registered,
+            Instant::now(),
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            (models[0].namespace.as_str(), models[0].model.as_str()),
+            (NS, "a")
+        );
+        assert_eq!(models[0].observed_frontends, 1);
+        assert_eq!(models[0].deployment, None);
     }
 
     /// A frontend without an exact namespace publishes in the Relay's

@@ -104,6 +104,8 @@ struct TopologyProjectionInputs {
     availability: HashMap<EndpointId, Option<HashSet<WorkerId>>>,
     availability_owners: HashMap<EndpointId, u64>,
     pools: HashMap<(EndpointId, CanonicalModelId), PoolLink>,
+    /// [`model_capacities`] of `membership`, computed when it changes.
+    capacities: HashMap<(String, String), Option<PoolDeployment>>,
     revision: u64,
 }
 
@@ -125,12 +127,14 @@ impl TopologyPublisher {
     pub(crate) fn new(membership: DcMembershipView, catalog: &PoolCatalogSnapshot) -> Self {
         let pools = pool_links(catalog);
         let entries = derive_topology(&membership, &HashMap::new(), &pools);
+        let capacities = model_capacities(&membership);
         let revision = 1;
         let (sender, _) = watch::channel(Arc::new(TopologySnapshot { revision, entries }));
         Self {
             state: Mutex::new(TopologyProjectionInputs {
                 membership,
                 pools,
+                capacities,
                 revision,
                 ..TopologyProjectionInputs::default()
             }),
@@ -151,9 +155,10 @@ impl TopologyPublisher {
     /// decides it: a member that has not materialized a pool, because no
     /// worker publishes KV events yet, still counts. The catalog stays free
     /// of phantom pools while the serving-load stream can still say how
-    /// many requests the model's workers run at once.
-    pub(crate) fn model_capacities(&self) -> HashMap<(String, String), PoolDeployment> {
-        model_capacities(&self.state.lock().membership)
+    /// many requests the model's workers run at once. `None` is a model
+    /// whose capacity is unknown because a member's config is invalid.
+    pub(crate) fn model_capacities(&self) -> HashMap<(String, String), Option<PoolDeployment>> {
+        self.state.lock().capacities.clone()
     }
 
     pub(crate) fn replace_membership(&self, membership: DcMembershipView) {
@@ -168,6 +173,7 @@ impl TopologyPublisher {
             .availability_owners
             .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
         state.membership = membership;
+        state.capacities = model_capacities(&state.membership);
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -373,9 +379,12 @@ fn derive_topology(
 }
 
 /// `max_concurrency` is `None` as soon as one member worker does not declare
-/// its limit, and a model is absent as soon as one member's configs fail the
-/// pool view's validation: unknown rather than wrong.
-fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), PoolDeployment> {
+/// its limit, and the whole capacity is `None` as soon as one member's configs
+/// fail the pool view's validation: unknown rather than wrong, with the model
+/// still listed.
+fn model_capacities(
+    membership: &DcMembershipView,
+) -> HashMap<(String, String), Option<PoolDeployment>> {
     let mut capacities = HashMap::<(String, String), PoolDeployment>::new();
     let mut invalid = HashSet::new();
     for endpoint_membership in membership.endpoints.values() {
@@ -421,7 +430,13 @@ fn model_capacities(membership: &DcMembershipView) -> HashMap<(String, String), 
             }
         }
     }
-    capacities.retain(|key, _| !invalid.contains(key));
+    let mut capacities = capacities
+        .into_iter()
+        .map(|(key, deployment)| (key, Some(deployment)))
+        .collect::<HashMap<_, _>>();
+    for key in invalid {
+        capacities.insert(key, None);
+    }
     capacities
 }
 
@@ -1724,25 +1739,26 @@ mod tests {
         let capacities = publisher.model_capacities();
         assert_eq!(
             capacities.get(&("ns".to_string(), "llama".to_string())),
-            Some(&PoolDeployment {
+            Some(&Some(PoolDeployment {
                 live_workers: 3,
                 max_concurrency: Some(36),
-            })
+            }))
         );
         assert_eq!(
             capacities.get(&("other".to_string(), "llama".to_string())),
-            Some(&PoolDeployment {
+            Some(&Some(PoolDeployment {
                 live_workers: 1,
                 max_concurrency: None,
-            })
+            }))
         );
         assert_eq!(capacities.len(), 2);
     }
 
     /// A config the pool view rejects (here a zero data-parallel size) makes
-    /// its model's capacity unknown instead of a wrong number.
+    /// its model's capacity unknown instead of a wrong number; the model
+    /// stays listed.
     #[test]
-    fn model_capacities_omit_a_model_with_an_invalid_member_config() {
+    fn model_capacities_leave_a_model_with_an_invalid_member_config_unknown() {
         let config = |max_num_seqs: u64, ranks: u32| ModelRuntimeConfig {
             max_num_seqs: Some(max_num_seqs),
             data_parallel_size: ranks,
@@ -1769,12 +1785,16 @@ mod tests {
 
         let capacities = publisher.model_capacities();
         assert_eq!(
+            capacities.get(&("ns".to_string(), "llama".to_string())),
+            Some(&None)
+        );
+        assert_eq!(
             capacities.get(&("other".to_string(), "llama".to_string())),
-            Some(&PoolDeployment {
+            Some(&Some(PoolDeployment {
                 live_workers: 1,
                 max_concurrency: Some(16),
-            })
+            }))
         );
-        assert_eq!(capacities.len(), 1);
+        assert_eq!(capacities.len(), 2);
     }
 }
