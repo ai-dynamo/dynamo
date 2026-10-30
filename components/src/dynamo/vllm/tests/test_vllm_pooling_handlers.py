@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
+from vllm.renderers import TokenizeParams
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
@@ -182,8 +183,6 @@ class TestClassifyWorkerHandler:
     async def test_pretokenized_input_uses_vllm_truncation(
         self, input_field, is_pooling, expected_token_ids
     ):
-        from vllm.renderers import TokenizeParams
-
         handler = _make_handler()
         handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
             max_total_tokens=8
@@ -219,8 +218,6 @@ class TestClassifyWorkerHandler:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_pretokenized_input_reaches_vllm_rendered(self):
-        from vllm.renderers import TokenizeParams
-
         handler = _make_handler()
         handler.engine_client.model_config = SimpleNamespace(is_encoder_decoder=False)
         handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
@@ -249,8 +246,6 @@ class TestClassifyWorkerHandler:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_explicit_right_truncation_keeps_first_tokens(self):
-        from vllm.renderers import TokenizeParams
-
         handler = _make_handler()
         handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
             max_total_tokens=8

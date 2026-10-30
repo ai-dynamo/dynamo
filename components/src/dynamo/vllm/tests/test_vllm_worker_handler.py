@@ -3698,10 +3698,6 @@ class TestRLAdminRouteHardening:
         assert isinstance(escalated[0], EngineDeadError)
 
 
-# render_tokens_prompt must call vLLM's renderer the way InputProcessor.process_inputs
-# does for a raw prompt, and leave every other prompt to vLLM.
-
-
 @pytest.mark.parametrize(
     ("tokenization_kwargs", "expected_tok_params"),
     [
