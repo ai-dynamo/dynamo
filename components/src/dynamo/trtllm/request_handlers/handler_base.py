@@ -1477,7 +1477,7 @@ class HandlerBase(BaseGenerativeHandler):
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
 
-                            num_input_tokens = len(request.get("token_ids", []))
+                            num_input_tokens = len(res.prompt_token_ids)
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
