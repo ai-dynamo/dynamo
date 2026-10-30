@@ -113,8 +113,6 @@ pub enum ReplicaTransport {
     Grpc(GrpcReplicaSync),
 }
 
-/// The gRPC transport's state: the hub the stream runs through and the
-/// token that stops its tasks.
 struct GrpcTransport {
     hub: Arc<ReplicaHub>,
     cancel: CancellationToken,
@@ -324,6 +322,9 @@ impl CoreSelector {
             .map(|grpc| (grpc.hub.clone(), grpc.cancel.clone()));
         let service = self.service.clone();
         let stop = cancel.clone();
+        // Ends the peers when the catalog closes, as the reconciler does.
+        let catalog_closed = CancellationToken::new();
+        let closed = catalog_closed.clone();
         let follower = async move {
             let peers = async move {
                 if first_taken.await.is_err() {
@@ -333,11 +334,16 @@ impl CoreSelector {
                 if let Some((hub, transport)) = dialer {
                     tokio::select! {
                         _ = stop.cancelled() => {}
+                        _ = closed.cancelled() => {}
                         _ = replica_sync::dialer::run_peers(hub, service, transport) => {}
                     }
                 }
             };
-            tokio::join!(reconciler.run(source, cancel), peers);
+            let reconcile = async {
+                reconciler.run(source, cancel).await;
+                catalog_closed.cancel();
+            };
+            tokio::join!(reconcile, peers);
         };
         (is_ready, follower)
     }
@@ -1163,7 +1169,6 @@ mod tests {
         }
     }
 
-    /// Waits until `selector` has `peers` streams open.
     async fn connected(selector: &CoreSelector, peers: u64) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while selector.replica_sync_stats().unwrap().connected_peers != peers {
