@@ -325,3 +325,17 @@ When a registry with the memory store restarts, importers receive an empty
 snapshot and garbage-collect every import at SNAPSHOT_END until the
 controllers re-register (up to TTL/3 later); deferring the garbage
 collection of an empty snapshot from a new view epoch would avoid the gap.
+
+## Upstream MCS conformance
+
+Run the unmodified upstream required and optional suite, including DNS and
+connectivity, on two isolated kind clusters:
+
+```bash
+make conformance
+```
+
+See [the conformance runner](test/conformance/README.md) for prerequisites,
+reports, retained-cluster iteration and cleanup. This is separate from the
+Dynamo-specific `make e2e` scenarios. Test failures are preserved and do not
+constitute a passing conformance claim.

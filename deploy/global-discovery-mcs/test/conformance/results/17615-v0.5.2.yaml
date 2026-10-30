@@ -1,0 +1,278 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+groups:
+    - name: Required
+      tests:
+        - desc: A ServiceImport should only exist as long as there's at least one exporting cluster
+          ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/1645-multi-cluster-services-api/README.md#importing-services
+          labels: []
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: A ServiceImport should publish whether EndpointSlice objects are present
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#using-endpointslice-objects-to-track-endpoints
+          labels: []
+          passed: false
+          failed: false
+          skipped: false
+          conformant: false
+          message: ' - ServiceImport on cluster "kind-mcs-conformance-hub" must set status.endpointSliceObjects'
+        - desc: A service exported on two clusters with conflicting headlessness should apply the conflict resolution policy and report a Conflict condition on the ServiceExport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#headlessness
+          labels: []
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: Connectivity to a service that is not exported should be inaccessible
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#exporting-services
+          labels: []
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: A ClusterIP service exported on two clusters should expose the union of the constituent service ports and raise a conflict
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: A ClusterIP service exported on two clusters with conflicting ports should apply the conflict resolution policy and report a Conflict condition on each ServiceExport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: An IP should be allocated for a ClusterSetIP ServiceImport for each IP family
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#clustersetip
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: Exporting a ClusterIP service should create a ServiceImport of type ClusterSetIP in the service's namespace in each cluster. Unexporting should delete the ServiceImport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#importing-services
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: The InternalTrafficPolicy for a ClusterSetIP ServiceImport should match the exported service's InternalTrafficPolicy
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#internal-traffic-policy
+          labels:
+            - ClusterIP
+          passed: false
+          failed: false
+          skipped: false
+          conformant: false
+          message: ' - The InternalTrafficPolicy of the ServiceImport does not match the exported Service''s InternalTrafficPolicy'
+        - desc: The SessionAffinity for a ClusterSetIP ServiceImport should match the exported service's SessionAffinity
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#session-affinity
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: The TrafficDistribution for a ClusterSetIP ServiceImport should match the exported service's TrafficDistribution
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#traffic-distribution
+          labels:
+            - ClusterIP
+          passed: false
+          failed: false
+          skipped: false
+          conformant: false
+          message: ' - The TrafficDistribution of the ServiceImport does not match the exported Service''s TrafficDistribution'
+        - desc: The ports for a ClusterSetIP ServiceImport should match those of the exported service
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ClusterIP
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: Exporting an ExternalName service should set ServiceExport Valid condition to False
+          ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/1645-multi-cluster-services-api/README.md#service-types
+          labels:
+            - ExternalName
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: Exporting a headless service should create a ServiceImport of type Headless in the service's namespace in each cluster. Unexporting should delete the ServiceImport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-types
+          labels:
+            - Headless
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: No clusterset IP should be allocated for a Headless ServiceImport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#clustersetip
+          labels:
+            - Headless
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+    - name: Optional
+      tests:
+        - desc: Connectivity to a ClusterIP service existing in two clusters but exported from one should only access the exporting cluster
+          ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/1645-multi-cluster-services-api/README.md#exporting-services
+          labels:
+            - ClusterIP
+            - Connectivity
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 200.001s: Command output'
+        - desc: Connectivity to an exported ClusterIP service should be accessible through DNS
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - ClusterIP
+            - Connectivity
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 20.000s: Command output'
+        - desc: Connectivity to exported services with different port name on each cluster should route traffic to each port only to the cluster that exposes it
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ClusterIP
+            - Connectivity
+            - StrictPortConflict
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 200.002s: Command output'
+        - desc: Connectivity to exported services with same port name but different port numbers on each cluster should only route traffic to the cluster that exposes the port
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ClusterIP
+            - Connectivity
+            - StrictPortConflict
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 200.001s: Command output'
+        - desc: A DNS SRV query of the <service>.<ns>.svc.clusterset.local domain for a ClusterIP service should return valid SRV records
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - ClusterIP
+            - DNS
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 20.002s: Expected 1 SRV records but got 0: []'
+        - desc: A DNS lookup of the <service>.<ns>.svc.clusterset.local domain for a ClusterIP service should resolve to the clusterset IP
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - ClusterIP
+            - DNS
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 20.002s: Command output'
+        - desc: DNS lookups of the <service>.<ns>.svc.cluster.local domain for a ClusterIP service should only resolve local services
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - ClusterIP
+            - DNS
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: A DNS query of the <hostname>.<clusterid>.<service>.<ns>.svc.clusterset.local domain for a headless StatefulSet service should return the requested pod's endpoint address
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - DNS
+            - EndpointSlice
+            - Headless
+          passed: false
+          failed: false
+          skipped: false
+          conformant: false
+          message: ' - ServiceImport on cluster "kind-mcs-conformance-hub" must set status.endpointSliceObjects to "Present"'
+        - desc: A DNS SRV query of the <service>.<ns>.svc.clusterset.local domain for a headless service should return valid SRV records
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - DNS
+            - Headless
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 20.001s: Expected 2 SRV records but got 0: []'
+        - desc: A DNS query of the <service>.<ns>.svc.clusterset.local domain for a headless service should return the ready endpoint addresses of all the backing pods
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#dns
+          labels:
+            - DNS
+            - Headless
+          passed: false
+          failed: true
+          skipped: false
+          conformant: true
+          message: ' - Timed out after 20.001s: Command output'
+        - desc: Exporting a service should create an MCS EndpointSlice in the service's namespace in each cluster with the required MCS labels. Unexporting should delete the EndpointSlice.
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#using-endpointslice-objects-to-track-endpoints
+          labels:
+            - EndpointSlice
+          passed: false
+          failed: false
+          skipped: false
+          conformant: false
+          message: ' - ServiceImport on cluster "kind-mcs-conformance-hub" must set status.endpointSliceObjects to "Present"'
+        - desc: A service exported on two clusters with conflicting annotations and labels should apply the conflict resolution policy and report a Conflict condition on each ServiceExport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#service-port
+          labels:
+            - ExportedLabels
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+        - desc: Only labels and annotations specified as exported in the ServiceExport should be propagated to the ServiceImport
+          ref: https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/1645-multi-cluster-services-api#labels-and-annotations
+          labels:
+            - ExportedLabels
+          passed: true
+          failed: false
+          skipped: false
+          conformant: true
+          message: ""
+suitefailure: ""
+dnsdomain: clusterset.local
+passed: 15
+total: 28
+implementation:
+    organization: NVIDIA
+    project: Dynamo-MCS
+    version: 0fd4c96b4ebc5321e0ecd2adc9627cee48b1e3ba
+    url: https://github.com/ai-dynamo/dynamo/tree/estroz/mcs-port-module/deploy/global-discovery-mcs

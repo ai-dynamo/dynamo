@@ -171,6 +171,7 @@ func TestApplyCreatesImportDerivedServiceAndSlices(t *testing.T) {
 	assert.Equal(t, api.DerivedServiceName(testNS, "frontend"), si.Annotations[api.AnnotationMCSDerivedService])
 	assert.Equal(t, mcsv1beta1.ClusterSetIP, si.Spec.Type)
 	assert.Equal(t, []mcsv1beta1.ClusterStatus{{Cluster: "a"}, {Cluster: "b"}}, si.Status.Clusters)
+	assert.Equal(t, mcsv1beta1.EndpointSliceObjectsPresent, si.Status.EndpointSliceObjects)
 	require.NotEmpty(t, si.Status.Conditions)
 	assert.Equal(t, metav1.ConditionTrue, si.Status.Conditions[0].Status)
 
