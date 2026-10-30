@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn replica_sync_is_off_unless_asked_for() {
         let args = Args::try_parse_from(["global-frontend", POOL]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Legacy);
+        assert_eq!(args.selection, SelectionPath::Current);
         assert_eq!(args.replica_sync, None);
         assert_eq!(replica_transport(&args).unwrap(), None);
         assert_eq!(transport(&CORE).unwrap(), None);
