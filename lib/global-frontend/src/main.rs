@@ -180,7 +180,6 @@ fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
     Ok((parse_key(key)?, relay))
 }
 
-/// A replica's API address as the gRPC dialer accepts it: `http://host:port`.
 fn parse_peer(value: &str) -> Result<Url, String> {
     dynamo_global_router::replica_sync::peer_url(value).map_err(|error| error.to_string())
 }

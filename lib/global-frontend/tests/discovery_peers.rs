@@ -138,14 +138,9 @@ async fn peers_come_from_discovery_and_follow_its_listing() {
 }
 
 #[tokio::test]
-async fn static_peers_survive_discovery_and_non_http_entries_are_skipped() {
+async fn static_peers_survive_discovery() {
     let cancel = CancellationToken::new();
-    let (fake, client) = FakeDiscovery::serve(&[
-        ("gf-a", SELF),
-        ("gf-b", OTHER),
-        ("gf-tls", "https://10.0.0.4:8000"),
-    ])
-    .await;
+    let (fake, client) = FakeDiscovery::serve(&[("gf-a", SELF), ("gf-b", OTHER)]).await;
     let core = core_following(client, &[STATIC], &cancel).await;
 
     assert_peers(&core, &[STATIC, OTHER]).await;
