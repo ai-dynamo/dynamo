@@ -1272,8 +1272,9 @@ navigation:
             path: pages/reference/components/dynosim-sweep-reference.mdx
           - page: Global Router Configuration
             path: pages/reference/components/global-router-configuration.mdx
-          - page: Gateway API Routing
+          - page: GAIE Routing
             path: pages/reference/components/gateway-api-routing.mdx
+            slug: gateway-api-routing
           - page: ThunderAgent Scheduler
             path: pages/reference/components/thunderagent-scheduler.mdx
 

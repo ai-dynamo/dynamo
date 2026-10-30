@@ -246,7 +246,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="eppConfig" type="EPPConfig" deprecated={true}>
   Deprecated: omit `eppConfig` and use the native Rust EPP, which is configured through environment variables and takes no config file. Presence of this field selects the legacy Go EPP pod contract, so existing deployments keep running across an operator upgrade until you clear it.
 
-  Only valid when `type` is `epp`, and its use is decided by the component's resolved runtime version: required below 1.5.0 (legacy Go EPP image), forbidden at 1.5.0 and later (native Rust EPP image). Migrate by clearing `eppConfig` and moving to a 1.5.0+ image in the same update. Exactly one of `configMapRef` or `config` must be set. See the [Gateway API Routing Reference](../components/gateway-api-routing.mdx).
+  Only valid when `type` is `epp`, and its use is decided by the component's resolved runtime version: required below 1.5.0 (legacy Go EPP image), forbidden at 1.5.0 and later (native Rust EPP image). Migrate by clearing `eppConfig` and moving to a 1.5.0+ image in the same update. Exactly one of `configMapRef` or `config` must be set. See the [GAIE Routing Reference](../components/gateway-api-routing.mdx).
 </ParamField>
 
 <Indent>

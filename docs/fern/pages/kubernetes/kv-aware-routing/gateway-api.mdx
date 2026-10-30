@@ -6,12 +6,20 @@ sidebar-title: Using GAIE with Dynamo
 subtitle: Add a Dynamo Endpoint Picker Plugin and HTTPRoute to an existing DynamoGraphDeployment.
 ---
 
-This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDeployment` (DGD). The
-Gateway API Inference Extension (GAIE) calls the Dynamo Endpoint Picker Plugin (EPP), and the Gateway
-forwards each request to the worker selected by the EPP.
+This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDeployment` (DGD).
+Through the Gateway API Inference Extension (GAIE), the Gateway calls the Dynamo Endpoint Picker
+Plugin (EPP) and forwards each request to the worker selected by the EPP.
 
-Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
-For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
+Use this topology when the Gateway must pick the worker for each request through the Dynamo EPP. If
+the Gateway only needs to own traffic entry, policy, and gateway-level observability, use
+[the Dynamo Frontend](dynamo-frontend.md) behind the Gateway instead, as shown in
+[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service).
+
+<Warning>
+The Dynamo EPP does not have full feature parity with Dynamo Frontend routing. Before you
+continue, review
+[Features Not Supported by the Dynamo EPP](overview.md#features-not-supported-by-the-dynamo-epp).
+</Warning>
 
 ## Before You Begin
 
@@ -589,4 +597,4 @@ kubectl get pods -n "$NAMESPACE" -l nvidia.com/dynamo-component-type=epp
   `DYN_KV_CACHE_BLOCK_SIZE` matches the backend block size.
 
 For resource fields, runtime settings, request headers, and service-mesh behavior, see the
-[Gateway API Routing Reference](../../reference/components/gateway-api-routing.mdx).
+[GAIE Routing Reference](../../reference/components/gateway-api-routing.mdx).
