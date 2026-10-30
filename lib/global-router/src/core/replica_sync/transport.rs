@@ -120,6 +120,13 @@ struct OpenBooking {
     admitted: bool,
     /// The core saw progress on it since `opened_at`.
     progressed: bool,
+    /// A free for this id has been handed to the core and its completion
+    /// is still due.
+    freeing: bool,
+    /// Completions still due for earlier bookings under the same id, which
+    /// must not end this one: a peer may free an id and reuse it before the
+    /// core has applied the free.
+    earlier_completions: u32,
 }
 
 impl OpenBooking {
@@ -436,7 +443,6 @@ impl ReplicaHub {
         self.peers.iter().map(|peer| peer.key().clone()).collect()
     }
 
-    /// Each peer with its current following.
     pub(crate) fn follows(&self) -> Vec<(Url, Follow)> {
         self.peers
             .iter()
@@ -537,6 +543,9 @@ impl ReplicaHub {
             // partition is slow to take is still remembered.
             let added = matches!(event.data, ActiveSequenceEventData::AddRequest { .. });
             if added {
+                let earlier_completions = self.open.get(&request_id).map_or(0, |earlier| {
+                    earlier.earlier_completions + u32::from(earlier.freeing)
+                });
                 self.open.insert(
                     request_id.clone(),
                     OpenBooking {
@@ -548,8 +557,14 @@ impl ReplicaHub {
                         opened_at: Instant::now(),
                         admitted: false,
                         progressed: false,
+                        freeing: false,
+                        earlier_completions,
                     },
                 );
+            } else if matches!(event.data, ActiveSequenceEventData::Free)
+                && let Some(mut open) = self.open.get_mut(&request_id)
+            {
+                open.freeing = true;
             }
             if !self.deliver(&partition, event, false) && added {
                 self.open.remove(&request_id);
@@ -687,7 +702,16 @@ impl ReplicaHub {
     }
 
     fn booking_completed(&self, request_id: &str) {
-        self.open.remove(request_id);
+        let ended_earlier = self.open.get_mut(request_id).is_some_and(|mut open| {
+            let earlier = open.earlier_completions > 0;
+            if earlier {
+                open.earlier_completions -= 1;
+            }
+            earlier
+        });
+        if !ended_earlier {
+            self.open.remove(request_id);
+        }
     }
 
     #[cfg(test)]
@@ -761,6 +785,8 @@ mod tests {
             opened_at: start,
             admitted,
             progressed: false,
+            freeing: false,
+            earlier_completions: 0,
         };
         hub.open.insert("taken".to_owned(), booking(false));
         hub.open.insert("dropped".to_owned(), booking(false));
@@ -795,6 +821,20 @@ mod tests {
 
         hub.open.insert("done".to_owned(), booking(true));
         hub.booking_completed("done");
+        assert_eq!(hub.stats().bookings_tracked, 0);
+
+        // An id freed and reused before the core applies the free: the old
+        // booking's completion does not end the new one.
+        hub.open.insert(
+            "reused".to_owned(),
+            OpenBooking {
+                earlier_completions: 1,
+                ..booking(true)
+            },
+        );
+        hub.booking_completed("reused");
+        assert_eq!(hub.stats().bookings_tracked, 1);
+        hub.booking_completed("reused");
         assert_eq!(hub.stats().bookings_tracked, 0);
     }
 
