@@ -702,7 +702,9 @@ async fn replica_sync_is_served_on_the_api_port() {
     );
     let routes = core.replica_sync_routes().expect("gRPC routes");
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
-    tokio::spawn(core.follow(receiver.clone(), CancellationToken::new()));
+    let (ready, follower) = core.follow(receiver.clone(), CancellationToken::new());
+    tokio::spawn(follower);
+    ready.await.expect("the core took the first snapshot");
     let (listener, url) = bind().await;
     let cancel = CancellationToken::new();
     let in_flight = Arc::new(InFlightTracker::new());

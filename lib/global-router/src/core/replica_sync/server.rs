@@ -52,26 +52,72 @@ impl ReplicaSync for ReplicaSyncService {
         let snapshot = ReplicaFrame {
             frame: Some(Frame::Snapshot(Snapshot::default())),
         };
+        let group = request.routing_group;
         let hub = self.hub.clone();
-        let live = stream::unfold((hub, frames), |(hub, mut frames)| async move {
-            loop {
-                let received = tokio::select! {
-                    _ = hub.cancelled() => return None,
-                    received = frames.recv() => received,
-                };
-                match received {
-                    Ok(frame) => return Some((Ok(frame), (hub, frames))),
-                    Err(RecvError::Lagged(missed)) => {
-                        hub.subscriber_lagged(missed);
-                        tracing::warn!(missed, "a replica subscriber fell behind and lost frames");
+        let live = stream::unfold(
+            (hub, frames, group),
+            |(hub, mut frames, group)| async move {
+                loop {
+                    let received = tokio::select! {
+                        _ = hub.cancelled() => return None,
+                        received = frames.recv() => received,
+                    };
+                    match received {
+                        Ok(frame) => {
+                            // A frame with nothing of the subscriber's
+                            // group is not worth a write.
+                            if let Some(frame) = in_group(frame, &group) {
+                                return Some((Ok(frame), (hub, frames, group)));
+                            }
+                        }
+                        Err(RecvError::Lagged(missed)) => {
+                            hub.subscriber_lagged(missed);
+                            tracing::warn!(
+                                missed,
+                                "a replica subscriber fell behind and lost frames"
+                            );
+                        }
+                        Err(RecvError::Closed) => return None,
                     }
-                    Err(RecvError::Closed) => return None,
                 }
-            }
-        });
+            },
+        );
         Ok(Response::new(Box::pin(
             stream::once(async { Ok(snapshot) }).chain(live),
         )))
+    }
+}
+
+/// `frame` with only the events and bindings of routing group `group`, or
+/// all of them when `group` is empty, the wildcard `SubscribeRequest`
+/// documents. `None` for an event frame left with nothing; a snapshot is
+/// always kept, since the subscriber waits for it first.
+fn in_group(frame: ReplicaFrame, group: &str) -> Option<ReplicaFrame> {
+    if group.is_empty() {
+        return Some(frame);
+    }
+    match frame.frame {
+        Some(Frame::Snapshot(mut snapshot)) => {
+            snapshot
+                .bindings
+                .retain(|binding| binding.routing_group == group);
+            snapshot
+                .open_bookings
+                .retain(|event| event.routing_group == group);
+            Some(ReplicaFrame {
+                frame: Some(Frame::Snapshot(snapshot)),
+            })
+        }
+        Some(Frame::Events(mut batch)) => {
+            batch.events.retain(|event| event.routing_group == group);
+            batch
+                .bindings
+                .retain(|binding| binding.routing_group == group);
+            (!batch.events.is_empty() || !batch.bindings.is_empty()).then_some(ReplicaFrame {
+                frame: Some(Frame::Events(batch)),
+            })
+        }
+        None => None,
     }
 }
 
@@ -91,4 +137,82 @@ pub fn routes(hub: Arc<ReplicaHub>) -> axum::Router {
         ),
         service,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::proto::{ActiveSequenceEvent, AffinityBinding, ReplicaEventBatch};
+    use super::*;
+
+    fn event(group: &str) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            routing_group: group.to_owned(),
+            ..ActiveSequenceEvent::default()
+        }
+    }
+
+    fn binding(group: &str) -> AffinityBinding {
+        AffinityBinding {
+            routing_group: group.to_owned(),
+            ..AffinityBinding::default()
+        }
+    }
+
+    fn events(groups: &[&str], binding_groups: &[&str]) -> ReplicaFrame {
+        ReplicaFrame {
+            frame: Some(Frame::Events(ReplicaEventBatch {
+                events: groups.iter().map(|group| event(group)).collect(),
+                bindings: binding_groups.iter().map(|group| binding(group)).collect(),
+            })),
+        }
+    }
+
+    #[test]
+    fn a_subscriber_sees_only_its_routing_group() {
+        let Some(ReplicaFrame {
+            frame: Some(Frame::Events(batch)),
+        }) = in_group(
+            events(&["global", "other", "global"], &["other", "global"]),
+            "global",
+        )
+        else {
+            panic!("an events frame")
+        };
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.bindings.len(), 1);
+        assert!(
+            batch
+                .events
+                .iter()
+                .all(|event| event.routing_group == "global")
+        );
+    }
+
+    #[test]
+    fn an_event_frame_with_nothing_of_the_group_is_skipped() {
+        assert!(in_group(events(&["other"], &["other"]), "global").is_none());
+    }
+
+    #[test]
+    fn an_empty_group_is_the_wildcard() {
+        let frame = events(&["a", "b"], &["c"]);
+        assert_eq!(in_group(frame.clone(), ""), Some(frame));
+    }
+
+    #[test]
+    fn a_snapshot_is_kept_even_when_filtered_empty() {
+        let snapshot = ReplicaFrame {
+            frame: Some(Frame::Snapshot(Snapshot {
+                bindings: vec![binding("other")],
+                open_bookings: vec![event("other")],
+            })),
+        };
+        let Some(ReplicaFrame {
+            frame: Some(Frame::Snapshot(filtered)),
+        }) = in_group(snapshot, "global")
+        else {
+            panic!("a snapshot frame")
+        };
+        assert!(filtered.bindings.is_empty() && filtered.open_bookings.is_empty());
+    }
 }
