@@ -903,6 +903,10 @@ def test_plugin_discovery_validation_and_optional_live_subscription(
                 "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest",
             }
         )
+    pareto_config = {**with_dir, "is_pareto": True}
+    callbacks = plugin.subscribe(pareto_config, context=SimpleNamespace(workload="w"))
+    assert callbacks is not None, "Pareto subscribe with workload must return callbacks"
+    callbacks.on_failure(RuntimeError("stop"))
 
 
 def test_plugin_write_keeps_sweepers_selection_order(

@@ -163,7 +163,11 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
-			b.set(TargetPareto, optimizationTarget)
+			if err := validateParetoMetrics(objective.Metrics); err != nil {
+				b.err = err
+			} else {
+				b.set(TargetPareto, optimizationTarget)
+			}
 		} else if objective.Metric != nil {
 			target, err := publicMetric(*objective.Metric)
 			if err != nil {
@@ -215,6 +219,29 @@ func (b *builder) setStrings(values []string, path []string) {
 	if err := unstructured.SetNestedStringSlice(b.root, values, path...); err != nil {
 		b.err = fmt.Errorf("set %s: %w", strings.Join(path, "."), err)
 	}
+}
+
+// defaultParetoMetrics is the only pair that maps to the AISimulate "pareto" target.
+// Any other non-empty Metrics slice names objectives the public input does not expose.
+var defaultParetoMetrics = map[v1beta2.ObjectiveMetric]struct{}{
+	v1beta2.ObjectiveMetric("ThroughputPerGPU"):  {},
+	v1beta2.ObjectiveMetric("ThroughputPerUser"): {},
+}
+
+// validateParetoMetrics returns an error when metrics names a pair that cannot be
+// lowered to the AISimulate "pareto" target. An empty slice uses the default pair.
+func validateParetoMetrics(metrics []v1beta2.ObjectiveMetric) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+	if len(metrics) == 2 {
+		_, ok0 := defaultParetoMetrics[metrics[0]]
+		_, ok1 := defaultParetoMetrics[metrics[1]]
+		if ok0 && ok1 && metrics[0] != metrics[1] {
+			return nil
+		}
+	}
+	return fmt.Errorf("spec.objective.metrics: unsupported Pareto metrics pair; omit to use the default [ThroughputPerGPU, ThroughputPerUser]")
 }
 
 // publicMetric maps each public API metric to its explicit AISimulate optimization target.

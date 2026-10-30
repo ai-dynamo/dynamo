@@ -216,9 +216,10 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics selects the two objectives for a Pareto search.
-	// Required when mode is Pareto; ignored otherwise.
-	// When omitted in Pareto mode, AISimulate uses its default Pareto objectives.
+	// Metrics selects the two objectives for a Pareto search. Ignored when mode is not Pareto.
+	// When omitted in Pareto mode, AISimulate uses its default objectives
+	// [ThroughputPerGPU, ThroughputPerUser]. When set, the pair must be exactly
+	// [ThroughputPerGPU, ThroughputPerUser]; other pairs are unsupported.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=2

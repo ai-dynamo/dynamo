@@ -233,6 +233,9 @@ class DGDRRunOutputConfig(BaseModel):
     # no default of its own: a missing value must fail, not silently change the cardinality.
     max_candidates: int = Field(ge=1, le=100)
     snapshot_interval_seconds: float = Field(default=5.0, ge=0)
+    # Written by the operator when spec.objective.mode is Pareto; standalone callers
+    # may set it when running aisimulate recommend with a Pareto optimization target.
+    is_pareto: bool = False
 
     def resolved_num_gpus_per_node(
         self, candidate_parameters: Mapping[str, Any] | None = None
@@ -348,9 +351,11 @@ class DGDRRunOutputAdapter:
         *,
         snapshot_dir: Path | None = None,
         is_pareto: bool = False,
+        pareto_front_size: int = 0,
         keep_arrival_order: bool = False,
     ) -> None:
         self._is_pareto = is_pareto
+        self._pareto_front_size = pareto_front_size
         directory = snapshot_dir if snapshot_dir is not None else config.snapshot_dir
         if directory is None:
             raise ValueError("a snapshot directory is required")
@@ -674,7 +679,7 @@ class DGDRRunOutputAdapter:
                     phase=terminal.phase if terminal else RunPhase.RUNNING,
                     round_no=round_no,
                     evaluated=evaluated,
-                    pareto_front=len(ordered) if self._is_pareto else 0,
+                    pareto_front=(self._pareto_front_size or len(ordered)) if self._is_pareto else 0,
                     candidates=candidates,
                     message=terminal.message if terminal else "",
                     error=terminal.error if terminal else "",
@@ -760,8 +765,7 @@ class DGDRRunOutputPlugin:
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
-        is_pareto = (config.get("optimization") or {}).get("target") == "pareto"
-        adapter = DGDRRunOutputAdapter(resolved, workload, is_pareto=is_pareto)
+        adapter = DGDRRunOutputAdapter(resolved, workload, is_pareto=resolved.is_pareto)
         adapter.start()
         return RecommendationOutputCallbacks(
             on_candidate=adapter.on_candidate,
@@ -793,10 +797,12 @@ class DGDRRunOutputPlugin:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
         directory = Path(resolved.snapshot_dir or output_dir)
-        is_pareto = bool(getattr(result.views, "pareto_front", None))
+        pareto_front = getattr(result.views, "pareto_front", None)
+        is_pareto = bool(pareto_front)
+        pareto_front_size = len(pareto_front) if pareto_front else 0
         adapter = DGDRRunOutputAdapter(
             resolved, workload, snapshot_dir=directory, keep_arrival_order=True,
-            is_pareto=is_pareto,
+            is_pareto=is_pareto, pareto_front_size=pareto_front_size,
         )
         for candidate in selected:
             adapter.on_candidate(_as_feasible(candidate))
