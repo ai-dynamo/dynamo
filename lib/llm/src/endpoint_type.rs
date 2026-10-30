@@ -34,6 +34,8 @@ pub enum EndpointType {
     AnthropicMessages,
     /// Generate API (token-in/token-out)
     Generate,
+    /// System One typed-decisions API
+    SystemOne,
     /// Batch API
     Batch,
 }
@@ -55,6 +57,7 @@ impl EndpointType {
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Generate => "generate",
+            Self::SystemOne => "systemone",
             Self::Batch => "batch",
         }
     }
@@ -75,6 +78,7 @@ impl EndpointType {
             Self::Responses,
             Self::AnthropicMessages,
             Self::Generate,
+            Self::SystemOne,
             Self::Batch,
         ]
     }
@@ -118,5 +122,11 @@ mod tests {
     #[test]
     fn batch_in_all() {
         assert!(EndpointType::all().contains(&EndpointType::Batch));
+    }
+
+    #[test]
+    fn systemone_is_registered() {
+        assert_eq!(EndpointType::SystemOne.as_str(), "systemone");
+        assert!(EndpointType::all().contains(&EndpointType::SystemOne));
     }
 }

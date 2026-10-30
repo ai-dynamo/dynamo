@@ -24,12 +24,16 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod generate;
 pub mod images;
+#[cfg(test)]
+mod media_fixtures;
+#[cfg(test)]
+mod media_schemas;
 pub mod models;
 pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
-mod strict_schema;
+pub(crate) mod strict_schema;
 pub mod tools;
 pub mod transcriptions;
 pub mod validate;
@@ -62,6 +66,19 @@ pub(crate) fn nest_media_passthrough(
     );
 }
 
+/// Delivery mode of generated media: a URL to the file, or the bytes as
+/// base64 text.
+///
+/// The set has two values. A request with an unknown value fails to parse.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaDelivery {
+    /// The response carries a URL to the media file.
+    Url,
+    /// The response carries the media bytes as base64 text.
+    B64Json,
+}
+
 /// Side from which prompt tokens are truncated.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +109,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_n(&self) -> Option<u8>;
 
     fn get_best_of(&self) -> Option<u8>;
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        None
+    }
 
     fn nvext(&self) -> Option<&NvExt>;
 }
@@ -158,7 +179,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-        // `top_p` must be between MIN_TOP_P and MAX_TOP_P.
+        // `top_p` must be in (MIN_TOP_P_EXCLUSIVE, MAX_TOP_P].
         let mut top_p: Option<f32> = self.get_top_p();
         validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
         let frequency_penalty =
@@ -179,6 +200,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
+
+        let logit_bias = self.get_logit_bias();
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -216,6 +239,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             seed,
             use_beam_search: None,
             length_penalty: None,
+            logit_bias,
             guided_decoding,
             include_stop_str_in_output,
         })
@@ -276,6 +300,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
+            retain_model_stop_token_text: None,
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
@@ -390,6 +415,13 @@ pub enum GuidedToolConstraint {
     GuidedJsonNamed { tool_name: String },
     /// The model emits one call object or an array of `{name, parameters}` objects.
     GuidedJsonRequired,
+    /// The parsers crate's Beam turn grammar holds the whole turn on the model's own
+    /// wire: a non-empty analysis, then native calls whose arguments keep their schema
+    /// types, or the answer. Parsing stays native, framing every held tool's typed
+    /// arguments the way the grammar wrote them. `frames_answer`: the request's
+    /// `response_format` document is held inside the final channel behind the analysis
+    /// instead of being installed as a bare JSON constraint from the first token.
+    BeamTurnGrammar { frames_answer: bool },
 }
 
 impl GuidedToolConstraint {
@@ -402,6 +434,17 @@ impl GuidedToolConstraint {
 
     pub(crate) fn uses_structural_tag(&self) -> bool {
         matches!(self, Self::StructuralTag)
+    }
+
+    /// The request's `response_format` is produced inside the model's answer channel
+    /// behind its reasoning, so the output is a native turn and not a bare document.
+    pub(crate) fn frames_structured_answer(&self) -> bool {
+        matches!(
+            self,
+            Self::BeamTurnGrammar {
+                frames_answer: true
+            }
+        )
     }
 }
 
@@ -545,7 +588,14 @@ impl ParsingOptions {
             if !whole_response_decoder && !reasoning_would_select_v2 {
                 self.tool_call_parser = None;
             }
-            self.guided_tool_constraint = GuidedToolConstraint::None;
+            // The Beam turn grammar shaped the whole turn (answer included) and installs
+            // no tool JSON, so it still describes the output when calls are not allowed.
+            if !matches!(
+                self.guided_tool_constraint,
+                GuidedToolConstraint::BeamTurnGrammar { .. }
+            ) {
+                self.guided_tool_constraint = GuidedToolConstraint::None;
+            }
         }
         self
     }

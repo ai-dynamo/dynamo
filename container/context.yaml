@@ -149,8 +149,8 @@ sglang:
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
     # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
     # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
-    # ffmpeg is copied in. The CUDA Dynamo Rust wheel links against that same
-    # codec-limited build for frontend video decoding; XPU remains codec-free.
+    # ffmpeg is copied in. The CUDA and XPU Dynamo Rust wheels link against that
+    # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
   xpu:
     # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
@@ -183,9 +183,9 @@ trtllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.4.0rc0
+    runtime_image_tag: 1.4.0rc1
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@cab83184
+    baseline_sbom: release@3bedbe03
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
