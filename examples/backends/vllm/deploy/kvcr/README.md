@@ -38,12 +38,16 @@ The image tag must contain a Dynamo semantic release version. Pin the same
 image by digest for every component, for example
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:REPLACE_ME`. Until KVCR is
 available in a Dynamo release image, build that image from matching Dynamo,
-KVCR, and vLLM revisions. The memory-service variant requires KVCR's
-`--health-port`, `--health-host`, `--health-dependency-url`, and
-`--startup-timeout-seconds` flags, which are not all present in `v0.1.1`.
-vLLM's KVCR tier must accept `kvcr_service_socket_path` and forward
-`startup_timeout_seconds` to `KVCRConfig`. Record the three commit IDs and
-image digest used for each deployment.
+KVCR, and vLLM revisions. This example targets KVCR **0.2.0** at
+[`7ce17c358b867bd89f40a4a42bee9c76839506d0`](https://github.com/ai-dynamo/kvcr/commit/7ce17c358b867bd89f40a4a42bee9c76839506d0)
+and vLLM's 0.2.0 adapter at
+[`fed7de909f894fbee0c45130376aed2e2c9bf0d3`](https://github.com/vllm-project/vllm/commit/fed7de909f894fbee0c45130376aed2e2c9bf0d3).
+The vLLM adapter also needs the `startup_timeout_seconds` forwarding change:
+accept that optional tier setting and pass it to `KVCRConfig`. It is not in the
+vLLM commit above. KVCR requires NIXL 1.5.0 and the runtime's UCX, CUDA, and
+`libatomic` libraries. Record the Dynamo revision, patched vLLM revision, KVCR
+revision, and image digest for each deployment; these source pins alone do not
+establish that an existing image contains a compatible stack.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -64,14 +68,14 @@ KVCR_MEMORY_SERVICE_ENABLED=false ./deploy.sh
 KVCR_MEMORY_SERVICE_ENABLED=true ./deploy.sh
 ```
 
-The memory-service variant requires the KVCR HTTP-health implementation in both
-containers. To test it without rebuilding the existing compatible runtime image,
-build a pure-Python wheel from the KVCR feature tree and export
-`KVCR_WHEEL=/absolute/path/to/kvcr-0.1.1-py3-none-any.whl` before deployment.
+To test KVCR changes without rebuilding an otherwise compatible runtime image,
+build a pure-Python wheel from the pinned KVCR tree and export
+`KVCR_WHEEL=/absolute/path/to/kvcr-0.2.0-py3-none-any.whl` before deployment.
 The script mounts it through `PYTHONPATH` in both containers; it does not install
 packages, update vLLM, or change image environment settings. Rebuild the image
 for native dependency or vLLM changes. Without `KVCR_WHEEL`, the installed KVCR
-must support the flags above. For pinned registration, ensure
+must be compatible with this example. A wheel overlay does not upgrade an old
+vLLM adapter to the 0.2.0 API. For pinned registration, ensure
 `UCX_REG_NONBLOCK_MEM_TYPES` and `UCX_IB_ODP_PREFETCH` are unset in both containers.
 
 `deploy.sh` applies an immutable, content-addressed ConfigMap containing
@@ -108,9 +112,52 @@ supported, restart both workers to restore state tracking after worker 0
 restarts.
 
 In `agg-memory-service.yaml`, `dynamo.vllm` runs in `main`. A regular
-`kvcr-services` sidecar runs the KVCR memory service and state agent. Both
-containers mount `/run/kvcr` and the memory-backed `/dev/shm/kvcr` volume. A
-vLLM container restart leaves the service, Guard, and pool running.
+`kvcr-services` sidecar runs the KVCR memory service (`kvcr.service.server`)
+and, on worker 0 only, the state agent. Both containers mount `/run/kvcr` for
+the Unix socket. Only the sidecar mounts the memory-backed `/dev/shm/kvcr`
+volume. Guard passes the pool and control-listener file descriptors over the
+socket using `SCM_RIGHTS`; the engine maps the same backing pages without
+opening a pool path. No shared pool mount, `hostPath`, or permission-setting
+init container is needed in the engine. Both containers must use the same UID
+to access the service socket. A vLLM container restart leaves the service,
+Guard, and pool running.
+
+```mermaid
+flowchart LR
+    R["Dynamo frontend / KV router"]
+    subgraph P0["Worker 0 Pod · node A"]
+        E0["main container<br/>Dynamo / vLLM + in-engine KVCR"]
+        subgraph S0["kvcr-services container"]
+            G0["KVCR service / Guard"]
+            A0["kv_state_agent"]
+        end
+        M0["Guard-only pool volume<br/>/dev/shm/kvcr"]
+        G0 -->|"SCM_RIGHTS over /run/kvcr socket<br/>Pool + listener FDs"| E0
+        G0 -->|"allocates"| M0
+        E0 -->|"maps pool FD"| M0
+    end
+    E1["Worker 1 Pod · node B<br/>Same engine / Guard / pool arrangement<br/>No state agent"]
+    R -->|"requests"| E0
+    R -->|"requests"| E1
+    E0 -.->|"residency metadata"| A0
+    A0 -.->|"routing state"| R
+    E0 <-->|"KV payload: NIXL / UCX"| E1
+
+    classDef engine fill:#1565c033,stroke:#42a5f5
+    classDef guard fill:#76b90026,stroke:#76b900
+    classDef volume fill:#80808026,stroke:#888888
+    class E0,E1,R engine
+    class G0,A0 guard
+    class M0 volume
+    style P0 fill:transparent,stroke:#888888
+    style S0 fill:#76b90010,stroke:#76b900
+```
+
+Both engines report residency to worker 0's state agent. Each Guard can serve
+its preserved pool after its engine exits. The FD handoff
+does not let a replacement service adopt a live engine's pool; the coupled
+failure policy below still applies.
+
 `services.sh` starts KVCR and, on worker 0, the state agent. It uses Dynamo's
 `wait_any_exit` and process-group cleanup helpers: any child exit ends the
 wrapper and terminates/reaps its companion; SIGTERM does the same. Kubernetes'

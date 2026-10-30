@@ -21,7 +21,7 @@ if [ "$POD_INDEX" = "0" ]; then
     health_args+=(--health-dependency-url "http://127.0.0.1:${DYN_SYSTEM_PORT:-9091}/live")
 fi
 
-python3 -m kvcr.kvcr_service \
+python3 -m kvcr.service.server \
     --socket-path /run/kvcr/memory.sock \
     --pool-dir /dev/shm/kvcr \
     --guard-count 1 \

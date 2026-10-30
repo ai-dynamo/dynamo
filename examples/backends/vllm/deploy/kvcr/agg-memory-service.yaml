@@ -155,8 +155,6 @@ spec:
             readOnly: true
           - mountPath: /run/kvcr
             name: kvcr-socket
-          - mountPath: /dev/shm/kvcr
-            name: kvcr-memory
           workingDir: /workspace/examples/backends/vllm
         - args:
           - /opt/kvcr-startup/services.sh

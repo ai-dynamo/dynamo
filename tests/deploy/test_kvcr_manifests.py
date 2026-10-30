@@ -42,10 +42,10 @@ def _clear_deployment_options(monkeypatch):
 @pytest.mark.parametrize(
     "worker,exit_module,exit_code,guard_timeout",
     [
-        ("0", "kvcr.kvcr_service", 7, None),
+        ("0", "kvcr.service.server", 7, None),
         ("0", "dynamo.kv_state_agent", 0, "600"),
         ("0", None, 0, None),
-        ("1", "kvcr.kvcr_service", 7, None),
+        ("1", "kvcr.service.server", 7, None),
     ],
 )
 def test_services_supervises_children(
@@ -96,7 +96,7 @@ signal.pause()
             assert select.select([process.stdout], [], [], 5)[0], "child did not start"
             info = json.loads(process.stdout.readline())
             children[info["module"]] = info
-        guard_args = children["kvcr.kvcr_service"]["args"]
+        guard_args = children["kvcr.service.server"]["args"]
         assert guard_args[guard_args.index("--pool-sizes-gb") + 1] == "1024"
         assert guard_args[guard_args.index("--startup-timeout-seconds") + 1] == (
             guard_timeout or "30"
@@ -225,7 +225,7 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "DYN_HEALTH_CHECK_ENABLED=false" in command
     assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in command
     assert 'wait -n "$state_agent_pid" "$vllm_pid"' in command
-    assert "kvcr.kvcr_service" not in command
+    assert "kvcr.service.server" not in command
     assert 'case "$POD_INDEX" in' not in command
     assert '"cache_owner_ids": {"0": cache_owner_id()}' in command
     assert all(item["name"] != "POD_UID" for item in main["env"])
@@ -252,7 +252,7 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     sidecar_command = (_MANIFEST_DIR / "services.sh").read_text()
 
     assert sidecar["name"] == "kvcr-services"
-    assert "python3 -m kvcr.kvcr_service" in sidecar_command
+    assert "python3 -m kvcr.service.server" in sidecar_command
     assert "python3 -m dynamo.kv_state_agent" in sidecar_command
     assert "--guard-count 1" in sidecar_command
     assert '--pool-sizes-gb "${KVCR_POOL_SIZE_GIB:-2}"' in sidecar_command
@@ -281,9 +281,15 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
         assert sidecar["resources"][resource_class]["${DYNAMO_RDMA_RESOURCE}"] == "1"
     assert "IPC_LOCK" in sidecar["securityContext"]["capabilities"]["add"]
 
-    for container in (main, sidecar):
-        mounts = {mount["name"] for mount in container["volumeMounts"]}
-        assert mounts == {"kvcr-memory", "kvcr-socket", "kvcr-startup"}
+    assert {mount["name"] for mount in main["volumeMounts"]} == {
+        "kvcr-socket",
+        "kvcr-startup",
+    }
+    assert {mount["name"] for mount in sidecar["volumeMounts"]} == {
+        "kvcr-memory",
+        "kvcr-socket",
+        "kvcr-startup",
+    }
     memory = next(
         volume for volume in pod_spec["volumes"] if volume["name"] == "kvcr-memory"
     )
@@ -321,9 +327,9 @@ def test_deploy_script_renders_selected_variant(
             "KVCR_MEMORY_SERVICE_ENABLED": memory_service,
             "KVCR_POOL_SIZE_GIB": str(pool_gib),
             "KVCR_STARTUP_TIMEOUT_SECONDS": "900",
-            "KVCR_TERMINATION_GRACE_PERIOD_SECONDS": "180"
-            if pool_gib == 1024
-            else "30",
+            "KVCR_TERMINATION_GRACE_PERIOD_SECONDS": (
+                "180" if pool_gib == 1024 else "30"
+            ),
         }
     )
 
