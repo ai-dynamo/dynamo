@@ -146,7 +146,6 @@ impl HeldBindings {
 }
 
 impl SelectionCore {
-    /// Whether the catalog places `worker_id` in `partition`.
     pub(super) fn worker_in_partition(
         &self,
         worker_id: WorkerId,

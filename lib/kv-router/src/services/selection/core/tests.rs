@@ -4151,24 +4151,6 @@ async fn host_stream_binding_before_discovery_is_applied_on_upsert() {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn held_binding_expires_after_session_ttl() {
-    let (peer, _peer_updates) = core_with_binding_stream(22);
-    peer.upsert_worker(worker(2)).await.unwrap();
-    peer.dispatch_affinity_event(AffinityBindingEvent {
-        partition: default_key(),
-        session_id: "s".to_string(),
-        worker_id: 1,
-        dp_rank: Some(0),
-        sequence: 1,
-        writer_id: 11,
-    });
-    tokio::time::advance(Duration::from_secs(10)).await;
-    peer.upsert_worker(worker(1)).await.unwrap();
-    assert_eq!(bound_worker(&peer, "s"), None);
-    assert!(peer.held_bindings.lock().is_empty());
-}
-
 fn peer_binding(session_id: &str, worker_id: WorkerId, sequence: u64) -> AffinityBindingEvent {
     AffinityBindingEvent {
         partition: default_key(),

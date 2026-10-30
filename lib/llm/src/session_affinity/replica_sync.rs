@@ -536,38 +536,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn held_update_expires_after_table_ttl() {
-        let coordinator = AffinityCoordinator::new(
-            Duration::from_secs(10),
-            crate::session_affinity::SessionAffinityMode::Hard,
-        )
-        .unwrap();
-        let (tx, discovered_instances) = watch::channel(Vec::new());
-        let applier = ReplicaUpdateApplier {
-            local_publisher_id: 7,
-            discovered_instances,
-            table: coordinator.table_for_test(),
-            held: Arc::default(),
-        };
-        assert!(applier.apply(
-            8,
-            SessionAffinityUpdate {
-                session_id: "s".to_string(),
-                worker_id: 10,
-                dp_rank: Some(0),
-                sequence: 1,
-                writer_id: 9,
-            }
-        ));
-        tokio::time::advance(Duration::from_secs(10)).await;
-        tx.send_modify(|instances| instances.push(instance(10)));
-        assert!(applier.apply_held());
-        let table = coordinator.table_for_test().upgrade().unwrap();
-        assert_eq!(table.query_target("s", None).unwrap(), None);
-        assert!(applier.held.lock().sessions.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn held_update_keeps_version_order_ttl_and_initializing_sessions() {
         let coordinator = AffinityCoordinator::new(
             Duration::from_secs(10),

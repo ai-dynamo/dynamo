@@ -301,7 +301,6 @@ pub struct SelectionCore {
     session_affinity: Option<SessionAffinityConfig>,
     /// Writer id and publisher for session bindings the host carries to its peers.
     session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
-    /// Peer bindings waiting for this replica to discover their worker.
     held_bindings: parking_lot::Mutex<HeldBindings>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
