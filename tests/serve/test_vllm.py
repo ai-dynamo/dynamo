@@ -49,12 +49,6 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda12() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    # handles "12", "12.9", "12.9.1", etc.
-    return v.startswith("12")
-
-
 def _is_aarch64() -> bool:
     arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
     return arch in ("aarch64", "arm64")
@@ -62,10 +56,9 @@ def _is_aarch64() -> bool:
 
 def _xfail_lmcache_upstream_container():
     return pytest.mark.xfail(
-        _is_cuda12() or _is_aarch64(),
+        _is_aarch64(),
         reason=(
-            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
-            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
+            "LMCache is provided by the upstream vLLM image, and LMCache "
             "does not publish aarch64 wheels yet."
         ),
         strict=False,
@@ -106,10 +99,6 @@ vllm_configs = {
         # max_thinking_tokens payload below: vLLM only enables the thinking-
         # budget logits processor when reasoning_config is populated.
         script_args=["--reasoning-parser", "qwen3"],
-        # vLLM #43808 (0.23.0) moved the MRv2 thinking_token_budget check from
-        # startup to request time, removing the auto-fallback to V1. Force V1
-        # runner here until native MRv2 support is added.
-        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
