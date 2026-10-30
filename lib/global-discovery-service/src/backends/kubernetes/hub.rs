@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, PoisonError};
 
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, PoolEvent, PoolListing, Snapshot, WatchEvent,
@@ -85,6 +86,7 @@ impl McsPoolDirectory {
                 mcs,
                 pool_service_suffix,
                 frontends,
+                portless: Mutex::default(),
             },
         )))
     }
@@ -109,6 +111,8 @@ struct PoolNaming {
     mcs: McsImplementation,
     pool_service_suffix: String,
     frontends: FrontendService,
+    /// Frontend slices without the named port, so each is warned about once.
+    portless: Mutex<HashSet<String>>,
 }
 
 impl PoolNaming {
@@ -135,22 +139,29 @@ impl PoolNaming {
                 pool,
                 ready: ready_addresses(slice),
                 frontend_port: None,
+                ipv4: slice.address_type == "IPv4",
             });
         }
         let pool = self.pool_key(slice, &self.frontends.suffix)?;
         let Some(port) = tcp_port(slice, &self.frontends.port_name) else {
-            // The slice is the frontend Service's, so the name is misconfigured.
-            tracing::warn!(
-                slice = slice.metadata.name.as_deref().unwrap_or_default(),
-                port_name = %self.frontends.port_name,
-                "frontend EndpointSlice has no TCP port of that name; its frontends are not listed"
-            );
+            // The port name is misconfigured, or another Service's name ends
+            // with the suffix. Every slice event would repeat the warning.
+            let name = slice.metadata.name.clone().unwrap_or_default();
+            let mut portless = self.portless.lock().unwrap_or_else(PoisonError::into_inner);
+            if portless.insert(name.clone()) {
+                tracing::warn!(
+                    slice = name,
+                    port_name = %self.frontends.port_name,
+                    "frontend EndpointSlice has no TCP port of that name; its frontends are not listed"
+                );
+            }
             return None;
         };
         Some(SliceEntry {
             pool,
             ready: ready_addresses(slice),
             frontend_port: Some(port),
+            ipv4: slice.address_type == "IPv4",
         })
     }
 }
@@ -196,6 +207,8 @@ struct SliceEntry {
     ready: Vec<(String, IpAddr)>,
     /// `Some` for a frontend slice: the port its endpoints serve HTTP on.
     frontend_port: Option<u16>,
+    /// The slice holds IPv4 addresses.
+    ipv4: bool,
 }
 
 #[derive(Default)]
@@ -306,9 +319,15 @@ impl PoolIndex {
             }
         }
         // One address family, so a dual-stack frontend is listed once: IPv4
-        // when any frontend has an IPv4 address. Slices need not name their
-        // pods, so a pod's two addresses cannot always be matched.
-        let ipv4 = frontends.iter().any(SocketAddr::is_ipv4);
+        // when the pool has an IPv4 frontend slice, Ready endpoints or not, so
+        // that the family does not follow which slice was imported or became
+        // Ready first. Slices need not name their pods, so a pod's two
+        // addresses cannot always be matched.
+        let ipv4 = state
+            .slices
+            .iter()
+            .filter_map(|slice| self.slices.get(slice))
+            .any(|entry| entry.frontend_port.is_some() && entry.ipv4);
         let mut frontends: Vec<Url> = frontends
             .into_iter()
             .filter(|address| address.is_ipv4() == ipv4)
@@ -381,6 +400,7 @@ mod tests {
                 suffix: "-frontend".to_owned(),
                 port_name: "http".to_owned(),
             },
+            portless: Mutex::default(),
         }
     }
 
@@ -653,6 +673,31 @@ mod tests {
             ],
         );
         assert_eq!(frontends(&cache), ipv4);
+    }
+
+    #[test]
+    fn the_frontend_address_family_follows_the_slices_not_readiness() {
+        // On a dual-stack cluster the IPv4 slice is imported, but none of its
+        // endpoints is Ready yet, while the IPv6 slice's are: the pool keeps
+        // the IPv4 family instead of listing IPv6 frontends.
+        let cache = cache();
+        let mut ipv4 = frontend_pod_slice("f1", "IPv4", &[("frontend-a", "10.43.0.7")]);
+        for endpoint in &mut ipv4.endpoints {
+            endpoint.conditions = Some(EndpointConditions {
+                ready: Some(false),
+                ..Default::default()
+            });
+        }
+        sync(
+            &cache,
+            vec![
+                slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]),
+                ipv4,
+                frontend_pod_slice("f2", "IPv6", &[("frontend-a", "fd00::7")]),
+            ],
+        );
+        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
+        assert!(listing.frontends.is_empty(), "{:?}", listing.frontends);
     }
 
     #[test]
