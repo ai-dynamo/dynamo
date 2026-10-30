@@ -591,17 +591,49 @@ async fn check_remote_url_policy(allow_remote: bool) {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     advertise_images(&fixture);
+    fixture
+        .discovery
+        .advertises_video
+        .store(true, Ordering::SeqCst);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
-    for image in [
-        MultimodalData::RawUrl("http://example.com/image.png".into()),
-        MultimodalData::RawUrl("HTTPS://example.com/image.png".into()),
-        MultimodalData::Url("https://example.com/image.png".parse().unwrap()),
-        MultimodalData::RawUrl("data:image/png;base64,aW1hZ2U=".into()),
+    for (key, media) in [
+        (
+            "image_url",
+            MultimodalData::RawUrl("http://example.com/image.png".into()),
+        ),
+        (
+            "image_url",
+            MultimodalData::RawUrl("HTTPS://example.com/image.png".into()),
+        ),
+        (
+            "image_url",
+            MultimodalData::Url("https://example.com/image.png".parse().unwrap()),
+        ),
+        (
+            "image_url",
+            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2U=".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("http://example.com/video.mp4".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("HTTPS://example.com/video.mp4".into()),
+        ),
+        (
+            "video_url",
+            MultimodalData::Url("https://example.com/video.mp4".parse().unwrap()),
+        ),
+        (
+            "video_url",
+            MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".into()),
+        ),
     ] {
-        let inline = matches!(&image, MultimodalData::RawUrl(url) if url.starts_with("data:"));
+        let inline = matches!(&media, MultimodalData::RawUrl(url) if url.starts_with("data:"));
         let mut req = image_request();
-        req.multi_modal_data = Some(HashMap::from([("image_url".into(), vec![image])]));
+        req.multi_modal_data = Some(HashMap::from([(key.into(), vec![media])]));
         req.multi_modal_uuids = None;
         let ctx = mock_context();
         let handle = control.request(ctx.id(), RequestPlan::default());
