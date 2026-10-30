@@ -154,6 +154,13 @@ impl TieredMatchDetails {
             .and_then(|details| details.kv_transfer_candidates.as_ref())
             .or(self.device.kv_transfer_candidates.as_ref())
     }
+
+    pub(crate) fn into_kv_transfer_candidates(mut self) -> Option<KvTransferCandidates> {
+        self.lower_tier
+            .get_mut(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.take())
+            .or(self.device.kv_transfer_candidates)
+    }
 }
 
 impl From<&TieredMatchDetails> for WireTieredMatchDetails {
@@ -205,8 +212,6 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LowerTierQueryOptions {
     pub retain_kv_transfer_chain: bool,
-    /// Discover single-source suffix fetches beyond the target's local prefix.
-    pub fetch_continuation: bool,
 }
 
 fn merge_kv_transfer_tier_candidates(
@@ -351,7 +356,17 @@ pub fn query_lower_tiers_with_options_and_snapshot(
                 &tier_matches,
                 snapshot.clone(),
             );
-            if options.fetch_continuation {
+            // A detached suffix can only extend a positive device+host prefix.
+            // Cold destinations still use the root-prefix candidates above.
+            let mut frontiers: Vec<_> = tier_matches
+                .next_continuations
+                .values()
+                .map(|continuation| continuation.start_pos)
+                .filter(|&depth| depth > 0 && depth < sequence.len())
+                .collect();
+            frontiers.sort_unstable();
+            frontiers.dedup();
+            if !frontiers.is_empty() {
                 let candidates = tier_matches.kv_transfer_candidates.get_or_insert_with(|| {
                     KvTransferCandidates {
                         routing_snapshot: Some(snapshot.clone()),
@@ -360,7 +375,7 @@ pub fn query_lower_tiers_with_options_and_snapshot(
                 });
                 indexer
                     .backend()
-                    .extend_fetch_continuations(sequence, candidates, &snapshot);
+                    .extend_fetch_continuations(sequence, candidates, &snapshot, &frontiers);
                 if candidates.owner_prefix_blocks.is_empty()
                     && candidates.source_intervals.is_empty()
                 {
@@ -592,7 +607,6 @@ mod tests {
             &device_matches,
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
-                fetch_continuation: false,
             },
         );
         let candidates = result
@@ -648,7 +662,6 @@ mod tests {
             &device_matches,
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
-                fetch_continuation: false,
             },
         );
         let candidates = result
@@ -685,7 +698,6 @@ mod tests {
             &MatchDetails::default(),
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
-                fetch_continuation: false,
             },
         );
         let candidates = result
@@ -704,6 +716,77 @@ mod tests {
             candidates.owner_prefix_blocks,
             vec![(WorkerWithDpRank::new(7, 0).into(), 2)]
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_continuations_require_a_reachable_local_frontier() {
+        use crate::kv_hints::KvTransferSourceInterval;
+
+        let indexers = LowerTierIndexers::new(1, 4);
+        let host = indexers.get_or_create(StorageTier::HostPinned);
+        let full = WorkerWithDpRank::new(7, 0);
+        let suffix = WorkerWithDpRank::new(8, 0);
+        let target = WorkerWithDpRank::new(9, 0);
+        host.apply_event_and_wait(store_event(
+            7,
+            0,
+            1,
+            None,
+            &[11, 12, 13, 14],
+            &[101, 102, 103, 104],
+        ))
+        .await
+        .unwrap();
+        host.apply_event_and_wait(store_event(8, 0, 1, Some(102), &[13, 14], &[103, 104]))
+            .await
+            .unwrap();
+        let sequence = local_hashes(&[11, 12, 13, 14]);
+
+        // The absent target can fetch the root prefix even when every recorded
+        // destination is fully cached. A detached suffix cannot serve it.
+        for depth in [0, 1, 2, 3, 4] {
+            let mut device = MatchDetails::default();
+            if depth > 0 {
+                device.overlap_scores.scores.insert(target, depth as u32);
+                device
+                    .last_matched_hashes
+                    .insert(target, ExternalSequenceBlockHash(100 + depth as u64));
+                device.retain_kv_transfer_candidates(
+                    (101..=100 + depth as u64)
+                        .map(ExternalSequenceBlockHash)
+                        .collect(),
+                );
+            }
+            let result = query_lower_tiers_with_options(
+                &indexers,
+                &sequence,
+                &device,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+            );
+            let candidates = result[&StorageTier::HostPinned]
+                .kv_transfer_candidates
+                .as_ref()
+                .unwrap();
+            assert!(candidates.owner_prefix_blocks.contains(&(full.into(), 4)));
+            assert_eq!(
+                candidates.block_hashes,
+                (101..=104)
+                    .map(ExternalSequenceBlockHash)
+                    .collect::<Vec<_>>()
+            );
+            let expected = if (2..4).contains(&depth) {
+                vec![KvTransferSourceInterval {
+                    source: suffix.into(),
+                    start: 2,
+                    end: 4,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(candidates.source_intervals, expected, "depth={depth}");
+        }
     }
 
     #[tokio::test]
@@ -762,22 +845,26 @@ mod tests {
         device
             .last_matched_hashes
             .insert(worker, ExternalSequenceBlockHash(104));
+        let shorter = WorkerWithDpRank::new(8, 0);
+        device.overlap_scores.scores.insert(shorter, 2);
+        device
+            .last_matched_hashes
+            .insert(shorter, ExternalSequenceBlockHash(102));
         device.retain_kv_transfer_candidates((101..=104).map(ExternalSequenceBlockHash).collect());
         let sequence = local_hashes(&[11, 12, 13, 14, 15, 16]);
-        let query = |indexers, fetch_continuation, retain_kv_transfer_chain| {
+        let query = |indexers, retain_kv_transfer_chain| {
             query_lower_tiers_with_options_and_snapshot(
                 indexers,
                 &sequence,
                 &device,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain,
-                    fetch_continuation,
                 },
                 snapshot.clone(),
             )
         };
-        let off = query(&indexers, false, true);
-        let on = query(&indexers, true, true);
+        let off = query(&indexers, false);
+        let on = query(&indexers, true);
         assert_eq!(
             off[&StorageTier::HostPinned].hits,
             on[&StorageTier::HostPinned].hits
@@ -788,14 +875,6 @@ mod tests {
         );
         assert!(
             off[&StorageTier::HostPinned]
-                .kv_transfer_candidates
-                .as_ref()
-                .unwrap()
-                .source_intervals
-                .is_empty()
-        );
-        assert!(
-            query(&indexers, true, false)[&StorageTier::HostPinned]
                 .kv_transfer_candidates
                 .is_none()
         );
@@ -835,7 +914,7 @@ mod tests {
             replay_host.apply_event_and_wait(event).await.unwrap();
         }
         assert_eq!(
-            query(&replay, true, true)[&StorageTier::HostPinned]
+            query(&replay, true)[&StorageTier::HostPinned]
                 .kv_transfer_candidates
                 .as_ref()
                 .map(normalize),
@@ -857,7 +936,7 @@ mod tests {
             .unwrap();
         }
         assert!(
-            query(&indexers, true, true)[&StorageTier::HostPinned]
+            query(&indexers, true)[&StorageTier::HostPinned]
                 .kv_transfer_candidates
                 .as_ref()
                 .unwrap()

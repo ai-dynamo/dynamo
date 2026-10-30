@@ -637,88 +637,78 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
         .into_iter()
         .map(ExternalSequenceBlockHash)
         .collect();
-    for enabled in [false, true] {
-        let core = local_core(crate::config::KvRouterConfig {
-            router_fetch_continuation: enabled,
-            ..test_config(true)
-        });
-        for id in [1, 2] {
-            let mut worker = worker_with_kv_events(id);
-            worker.router_hint_worker_type = Some("decode".to_string());
-            core.upsert_worker(worker).await.unwrap();
-        }
-        let entry = core.entry(&default_key()).unwrap();
-        for (id, blocks) in [(1, 10), (2, 15)] {
-            entry
-                .indexer
-                .apply_event_routed(store_event(
-                    id,
-                    0,
-                    1,
-                    &[],
-                    &hashes[..blocks],
-                    StorageTier::Device,
-                ))
-                .await
-                .unwrap();
-        }
-        let mut sources = Vec::new();
-        for (id, start, end) in [(11, 10, 15), (12, 15, 20)] {
-            let event = store_event(
-                id,
-                0,
-                1,
-                &hashes[..start],
-                &hashes[start..end],
-                StorageTier::HostPinned,
-            );
-            entry
-                .indexer
-                .apply_event_routed(RouterEvent::with_cache_owner(
-                    id,
-                    event.event,
-                    StorageTier::HostPinned,
-                    owner(id as u8),
-                ))
-                .await
-                .unwrap();
-            sources.push((
-                owner(id as u8),
-                RouterHintSourceMetadata {
-                    source_control_endpoint: format!("tcp://source-{id}:9000"),
-                    worker_type: "decode".to_string(),
-                    topology_domains: HashMap::new(),
-                },
-                None,
-            ));
-        }
+    let core = local_core(test_config(true));
+    for id in [1, 2, 3, 4, 5] {
+        let mut worker = worker_with_kv_events(id);
+        worker.router_hint_worker_type = Some("decode".to_string());
+        core.upsert_worker(worker).await.unwrap();
+    }
+    let entry = core.entry(&default_key()).unwrap();
+    for (id, blocks, tier) in [
+        (1, 10, StorageTier::Device),
+        (2, 15, StorageTier::Device),
+        (3, 10, StorageTier::HostPinned),
+        (5, 20, StorageTier::Device),
+    ] {
         entry
             .indexer
-            .set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
-                ResidencyProjection::default(),
-                sources,
-            ));
-        entry.indexer.dump_events().await.unwrap();
-        for (target, source, end) in [(1, 11, 15), (2, 12, 20)] {
-            let response =
-                reserve_pinned(&core, &format!("target-{target}"), &tokens, target).await;
-            if !enabled {
-                assert!(response.kv_hint.is_none());
-                continue;
-            }
-            let hint = response.kv_hint.unwrap();
-            assert_eq!(hint.actions.len(), 1);
-            let payload: KvSourceLocationsPayload =
-                serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
-                    .unwrap();
-            assert_eq!(
-                payload.source_control_endpoint,
-                format!("tcp://source-{source}:9000")
-            );
-            assert_eq!(payload.block_hashes, sequence[..end]);
-        }
-        core.shutdown();
+            .apply_event_routed(store_event(id, 0, 1, &[], &hashes[..blocks], tier))
+            .await
+            .unwrap();
     }
+    let mut sources = Vec::new();
+    for (id, start, end) in [(11, 10, 15), (12, 15, 20), (13, 0, 5)] {
+        let event = store_event(
+            id,
+            0,
+            1,
+            &hashes[..start],
+            &hashes[start..end],
+            StorageTier::HostPinned,
+        );
+        entry
+            .indexer
+            .apply_event_routed(RouterEvent::with_cache_owner(
+                id,
+                event.event,
+                StorageTier::HostPinned,
+                owner(id as u8),
+            ))
+            .await
+            .unwrap();
+        sources.push((
+            owner(id as u8),
+            RouterHintSourceMetadata {
+                source_control_endpoint: format!("tcp://source-{id}:9000"),
+                worker_type: "decode".to_string(),
+                topology_domains: HashMap::new(),
+            },
+            None,
+        ));
+    }
+    entry
+        .indexer
+        .set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            sources,
+        ));
+    entry.indexer.dump_events().await.unwrap();
+    for (target, source, end) in [(1, 11, 15), (2, 12, 20), (3, 11, 15), (4, 13, 5)] {
+        let response = reserve_pinned(&core, &format!("target-{target}"), &tokens, target).await;
+        let hint = response.kv_hint.unwrap();
+        assert_eq!(hint.actions.len(), 1);
+        let payload: KvSourceLocationsPayload =
+            serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                .unwrap();
+        assert_eq!(
+            payload.source_control_endpoint,
+            format!("tcp://source-{source}:9000")
+        );
+        assert_eq!(payload.block_hashes, sequence[..end]);
+    }
+    let fully_cached = reserve_pinned(&core, "fully-cached", &tokens, 5).await;
+    assert!(fully_cached.kv_hint.is_none());
+    core.shutdown();
 }
 
 #[tokio::test]

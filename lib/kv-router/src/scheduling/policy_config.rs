@@ -360,7 +360,6 @@ impl RouterSettings {
             use_remote_indexer,
             serve_indexer,
             enable_session_prefix_index,
-            router_fetch_continuation,
             shared_cache_type,
             router_predicted_ttl_secs,
         );

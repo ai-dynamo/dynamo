@@ -247,18 +247,6 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_USE_REMOTE_INDEXER`
 </ParamField>
 
-<ParamField path="--router-fetch-continuation / --no-router-fetch-continuation" type="boolean" default="false">
-  **Experimental.** Allow one source to extend a worker's existing device/host-pinned prefix with a
-  continuation fetch hint. Requires hint-capable workers and a local event-driven indexer without
-  predict-on-route. Existing prefix fetch hints remain enabled when this option is false.
-  See [KV Fetch Hints](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints).
-
-  Environment variable: `DYN_ROUTER_FETCH_CONTINUATION`
-
-  YAML setting: `router.router_fetch_continuation` in `--router-policy-config`.
-  An explicit YAML value overrides the CLI and environment settings.
-</ParamField>
-
 <ParamField path="--serve-indexer / --no-serve-indexer" type="boolean" default="false">
   Serve this frontend's local KV indexers over the request plane. Requires `--router-mode kv` and is
   mutually exclusive with `--use-remote-indexer`.

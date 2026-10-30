@@ -736,8 +736,6 @@ impl SelectionCore {
                         &normalized.block_hashes,
                         LowerTierQueryOptions {
                             retain_kv_transfer_chain,
-                            fetch_continuation: retain_kv_transfer_chain
-                                && self.kv_router_config.router_fetch_continuation,
                         },
                     )
                     .instrument(tracing::info_span!("kv_router.find_matches"))
@@ -787,9 +785,8 @@ impl SelectionCore {
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
+            .then(|| tiered.into_kv_transfer_candidates())
             .flatten();
-        drop(tiered);
         Ok(PreparedSelectionInputs {
             block_hashes: normalized.block_hashes,
             sequence_hashes: normalized.sequence_hashes,

@@ -175,7 +175,7 @@ The optional `router` section configures shared cache and tracking infrastructur
 | Settings | YAML Keys Under `router` |
 |---|---|
 | Cache indexing | `use_kv_events`, `router_ttl_secs`, `router_approximate_cache_policy`, `router_event_threads`, `router_predicted_ttl_secs` |
-| External and session caches | `use_remote_indexer`, `serve_indexer`, `enable_session_prefix_index`, `shared_cache_type`, `router_fetch_continuation` |
+| External and session caches | `use_remote_indexer`, `serve_indexer`, `enable_session_prefix_index`, `shared_cache_type` |
 | Load tracking | `router_track_active_blocks`, `router_track_output_blocks`, `router_assume_kv_reuse`, `router_track_prefill_tokens`, `router_prefill_load_model` |
 | Replica synchronization and identity | `router_replica_sync`, `router_tracking_hash`, `router_tracking_key_file`, `router_tracking_key_id` |
 | Cache-tier accounting | `host_cache_hit_weight`, `disk_cache_hit_weight` |

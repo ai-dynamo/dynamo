@@ -231,47 +231,6 @@ def test_session_prefix_index_environment_flows_to_binding_kwargs(
     assert overridden["enable_session_prefix_index"] is False
 
 
-@pytest.mark.parametrize(
-    ("environment", "arguments", "expected"),
-    [
-        (None, [], False),
-        (None, ["--router-fetch-continuation"], True),
-        ("true", [], True),
-        ("true", ["--no-router-fetch-continuation"], False),
-        ("false", ["--router-fetch-continuation"], True),
-    ],
-)
-def test_fetch_continuation_cli_and_env_flow_to_binding_kwargs(
-    monkeypatch, environment, arguments, expected
-) -> None:
-    monkeypatch.delenv("DYN_ROUTER_FETCH_CONTINUATION", raising=False)
-    if environment is not None:
-        monkeypatch.setenv("DYN_ROUTER_FETCH_CONTINUATION", environment)
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    kwargs = KvRouterConfigBase.from_cli_args(
-        parser.parse_args(arguments)
-    ).kv_router_kwargs()
-
-    assert kwargs["router_fetch_continuation"] is expected
-
-
-def test_fetch_continuation_yaml_overrides_cli_and_env(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("DYN_ROUTER_FETCH_CONTINUATION", "true")
-    policy = tmp_path / "router.yaml"
-    policy.write_text("router:\n  router_fetch_continuation: false\n")
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-    config = KvRouterConfigBase.from_cli_args(
-        parser.parse_args(
-            ["--router-fetch-continuation", "--router-policy-config", str(policy)]
-        )
-    )
-
-    assert config.kv_router_kwargs()["router_fetch_continuation"] is False
-
-
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

@@ -128,7 +128,7 @@ pub struct KvTransferSourceInterval {
 pub struct KvTransferCandidates {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
-    /// Suffix-only coverage; empty unless fetch continuation was requested.
+    /// Suffix-only coverage that can extend an original device+host prefix.
     pub source_intervals: Vec<KvTransferSourceInterval>,
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }

@@ -961,11 +961,13 @@ impl LowerTierIndexer {
     /// intervals independently of worker attachment and per-worker tier progress.
     /// The selector tests these against the destination's original local depth;
     /// discovering a later interval does not imply a multi-source transfer plan.
+    /// `frontiers` is the sorted, distinct set of positive partial device+host depths.
     pub(super) fn extend_fetch_continuations(
         &self,
         sequence: &[LocalBlockHash],
         candidates: &mut KvTransferCandidates,
         snapshot: &ResidencyRoutingSnapshot,
+        frontiers: &[usize],
     ) {
         let owners = self.owners.snapshot.load();
         let view = OwnerView::new(&owners, snapshot.projection());
@@ -976,11 +978,17 @@ impl LowerTierIndexer {
             source_intervals,
             ..
         } = candidates;
+        let usable = |start, end| {
+            start > 0
+                && frontiers
+                    .get(frontiers.partition_point(|&depth| depth < start))
+                    .is_some_and(|&depth| depth < end)
+        };
         let mut record_run = |sources: &[KvTransferCandidateSource], start, end| {
             for &source in sources {
                 let interval = intervals.entry(source).or_insert((start, start));
                 if interval.1 != start {
-                    if interval.0 > 0 {
+                    if usable(interval.0, interval.1) {
                         source_intervals.push(KvTransferSourceInterval {
                             source,
                             start: interval.0,
@@ -1026,7 +1034,7 @@ impl LowerTierIndexer {
         }
         record_run(&sources, run_start, run_end);
         source_intervals.extend(intervals.into_iter().filter_map(|(source, (start, end))| {
-            (start > 0).then_some(KvTransferSourceInterval { source, start, end })
+            usable(start, end).then_some(KvTransferSourceInterval { source, start, end })
         }));
     }
 

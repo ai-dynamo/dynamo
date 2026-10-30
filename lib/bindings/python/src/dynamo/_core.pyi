@@ -1889,7 +1889,6 @@ class KvRouterConfig:
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
         enable_session_prefix_index: bool = False,
-        router_fetch_continuation: bool = False,
         shared_cache_multiplier: Optional[float] = None,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
@@ -1968,9 +1967,6 @@ class KvRouterConfig:
                 Lineage is fed from two sources: routing-lookup matches, and stored-block KV events that carry a session ID. Stored blocks without a session ID do not update lineage.
                 The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
                 The index retains at most 16,384 least-recently-used sessions and opportunistically reclaims unreferenced logical leaves.
-            router_fetch_continuation: Allow a single fetch source to extend a worker's existing device/host-pinned prefix with a continuation fetch hint (default: False).
-                Requires hint-capable workers and a local event-driven indexer without predict-on-route.
-                Existing prefix fetch hints remain enabled when false.
             shared_cache_multiplier: Deprecated; set this in the default policy parameters. Omitted values use the policy default (0.5 when shared cache is enabled).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).

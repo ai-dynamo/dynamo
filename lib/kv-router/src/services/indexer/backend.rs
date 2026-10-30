@@ -777,11 +777,9 @@ impl Indexer {
         sequence: Vec<LocalBlockHash>,
         options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        let retain_kv_transfer_chain =
-            options.retain_kv_transfer_chain && self.supports_kv_transfer_chain_retention();
         let options = LowerTierQueryOptions {
-            retain_kv_transfer_chain,
-            fetch_continuation: options.fetch_continuation && retain_kv_transfer_chain,
+            retain_kv_transfer_chain: options.retain_kv_transfer_chain
+                && self.supports_kv_transfer_chain_retention(),
         };
         self.find_matches_by_tier_with_options(sequence, options)
             .await
@@ -793,11 +791,9 @@ impl Indexer {
         sequence: &[LocalBlockHash],
         options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        let retain_kv_transfer_chain =
-            options.retain_kv_transfer_chain && self.supports_kv_transfer_chain_retention();
         let options = LowerTierQueryOptions {
-            retain_kv_transfer_chain,
-            fetch_continuation: options.fetch_continuation && retain_kv_transfer_chain,
+            retain_kv_transfer_chain: options.retain_kv_transfer_chain
+                && self.supports_kv_transfer_chain_retention(),
         };
         self.find_matches_by_tier_ref_with_options(sequence, options)
             .await
