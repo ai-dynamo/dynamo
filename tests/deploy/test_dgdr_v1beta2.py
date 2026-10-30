@@ -19,6 +19,7 @@ import aiohttp
 import pytest
 import yaml
 from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy.vcluster_utils import retry_vcluster_api_async
 
@@ -134,16 +135,23 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
                 ref = request_status.get("activeRunRef") or (refs[0] if refs else {})
                 run_name = ref.get("name")
             if run_name:
-                run = await _read_custom(
-                    custom, namespace, "dynamographdeploymentruns", run_name
-                )
-                status = run.get("status", {})
-                assert status.get("phase") != "Failed", status
-                if any(
-                    condition["type"] == "Completed" and condition["status"] == "True"
-                    for condition in status.get("conditions", [])
-                ):
-                    break
+                # activeRunRef reserves the name before the controller creates the Run.
+                try:
+                    run = await _read_custom(
+                        custom, namespace, "dynamographdeploymentruns", run_name
+                    )
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+                else:
+                    status = run.get("status", {})
+                    assert status.get("phase") != "Failed", status
+                    if any(
+                        condition["type"] == "Completed"
+                        and condition["status"] == "True"
+                        for condition in status.get("conditions", [])
+                    ):
+                        break
             await asyncio.sleep(5)
         else:
             pytest.fail(f"Request did not complete: request={request}, run={run}")
