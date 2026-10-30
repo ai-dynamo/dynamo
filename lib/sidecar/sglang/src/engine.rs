@@ -3,7 +3,7 @@
 
 //! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -36,8 +36,6 @@ use crate::protocol::{
     meta_u32, output_ids_to_u32, terminal_from_meta,
 };
 
-const POLICY_TAINT_PREFIX: &str = "dynamo.policy/";
-
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
@@ -47,7 +45,6 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     unregister_on_pause: bool,
-    policy_namespace: Option<String>,
     observations: watch::Sender<Option<EngineServingState>>,
     watcher_cancel: CancellationToken,
     native_http_max_event_bytes: usize,
@@ -133,9 +130,9 @@ impl SglangSidecarEngine {
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
-        if (args.controller_managed || args.policy_version_taints) && !args.unregister_on_pause {
+        if args.controller_managed && !args.unregister_on_pause {
             return Err(client::invalid_arg(
-                "controller admission or policy-version taints mode requires --unregister-on-pause=true",
+                "controller admission requires --unregister-on-pause=true",
             ));
         }
         if args.sidecar.common.route_to_encoder {
@@ -193,7 +190,6 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
-        let policy_namespace = args.policy_version_taints.then(|| common.namespace.clone());
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -234,7 +230,6 @@ impl SglangSidecarEngine {
                 bootstrap_host,
                 bootstrap_port,
                 unregister_on_pause: args.unregister_on_pause,
-                policy_namespace,
                 observations: watch::channel(None).0,
                 watcher_cancel: CancellationToken::new(),
                 native_http_max_event_bytes,
@@ -251,10 +246,6 @@ impl SglangSidecarEngine {
 impl LLMEngine for SglangSidecarEngine {
     fn serving_states(&self) -> Option<EngineServingStates> {
         Some(self.observations.subscribe())
-    }
-
-    fn managed_taint_prefix(&self) -> Option<&'static str> {
-        self.policy_namespace.as_ref().map(|_| POLICY_TAINT_PREFIX)
     }
 
     async fn verify_serving_admission(
@@ -652,7 +643,6 @@ impl LLMEngine for SglangSidecarEngine {
         let transport = self.transport;
         let cancel = self.watcher_cancel.clone();
         let observations = self.observations.clone();
-        let policy_namespace = self.policy_namespace.clone();
         let unregister_on_pause = self.unregister_on_pause;
         let instance_id = state.instance_id;
         *task = Some(tokio::spawn(async move {
@@ -663,7 +653,6 @@ impl LLMEngine for SglangSidecarEngine {
                 cancel,
                 unregister_on_pause,
                 instance_id,
-                policy_namespace,
             )
             .await;
         }));
@@ -703,31 +692,8 @@ impl Drop for ObservationGuard {
 fn serving_observation(
     state: &client::EngineState,
     unregister_on_pause: bool,
-    policy_namespace: Option<&str>,
 ) -> EngineServingState {
-    let mut ready = should_register_engine(state.healthy, state.is_pause, unregister_on_pause);
-    let mut taints = HashSet::new();
-    if let Some(namespace) = policy_namespace {
-        match state
-            .discovery
-            .model_info
-            .get("weight_version")
-            .and_then(Value::as_str)
-            .filter(|version| !version.trim().is_empty())
-        {
-            Some(version) => {
-                let encode = |value: &str| {
-                    url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
-                };
-                taints.insert(format!(
-                    "{POLICY_TAINT_PREFIX}version={}:{}",
-                    encode(namespace),
-                    encode(version)
-                ));
-            }
-            None => ready = false,
-        }
-    }
+    let ready = should_register_engine(state.healthy, state.is_pause, unregister_on_pause);
     EngineServingState {
         instance_id: state.instance_id,
         revision: state.revision,
@@ -741,7 +707,6 @@ fn serving_observation(
             .and_then(Value::as_str)
             .filter(|version| !version.trim().is_empty())
             .map(str::to_owned),
-        taints,
     }
 }
 
@@ -752,7 +717,6 @@ async fn watch_engine_state(
     cancel: CancellationToken,
     unregister_on_pause: bool,
     mut instance_id: u64,
-    policy_namespace: Option<String>,
 ) {
     let observations = ObservationGuard(observations);
     let mut revision = 0;
@@ -819,8 +783,7 @@ async fn watch_engine_state(
             first_snapshot = false;
             instance_id = state.instance_id;
             revision = state.revision;
-            let mut observation =
-                serving_observation(&state, unregister_on_pause, policy_namespace.as_deref());
+            let mut observation = serving_observation(&state, unregister_on_pause);
             observation.observation_epoch = observation_epoch;
             observations.0.send_replace(Some(observation));
         }
@@ -2413,41 +2376,6 @@ mod tests {
     }
 
     #[test]
-    fn policy_versions_are_observed_scoped_and_required_only_when_enabled() {
-        let mut state = super::client::EngineState {
-            instance_id: 9,
-            revision: 1,
-            healthy: true,
-            is_pause: false,
-            discovery: discovery(json!({})),
-        };
-        for value in [json!(null), json!(""), json!("   "), json!(1)] {
-            state.discovery.model_info["weight_version"] = value;
-            assert!(!super::serving_observation(&state, true, Some("run-a")).ready);
-            let legacy = super::serving_observation(&state, true, None);
-            assert!(legacy.ready);
-            assert!(legacy.taints.is_empty());
-        }
-        state.discovery.model_info["weight_version"] = json!("step:1");
-        let observed = super::serving_observation(&state, true, Some("run/a"));
-        assert!(observed.ready);
-        assert!(
-            observed
-                .taints
-                .contains("dynamo.policy/version=run%2Fa:step%3A1")
-        );
-        assert_ne!(
-            observed.taints,
-            super::serving_observation(&state, true, Some("run/b")).taints
-        );
-        state.is_pause = true;
-        assert!(!super::serving_observation(&state, true, Some("run/a")).ready);
-        state.is_pause = false;
-        state.healthy = false;
-        assert!(!super::serving_observation(&state, true, Some("run/a")).ready);
-    }
-
-    #[test]
     fn watcher_exit_withdraws_even_when_engine_retains_a_sender() {
         let (tx, rx) = tokio::sync::watch::channel(None);
         let state = super::client::EngineState {
@@ -2458,7 +2386,7 @@ mod tests {
             discovery: discovery(json!({})),
         };
         let guard = super::ObservationGuard(tx.clone());
-        tx.send_replace(Some(super::serving_observation(&state, true, None)));
+        tx.send_replace(Some(super::serving_observation(&state, true)));
         assert!(rx.borrow().is_some());
         drop(guard);
         assert!(rx.borrow().is_none());
@@ -2476,7 +2404,6 @@ mod tests {
             bootstrap_host: None,
             bootstrap_port: None,
             unregister_on_pause: true,
-            policy_namespace: None,
             observations: watch::channel(None).0,
             watcher_cancel: CancellationToken::new(),
             native_http_max_event_bytes: crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get(),
@@ -2490,23 +2417,6 @@ mod tests {
         assert!(!generation.is_cancelled());
         engine.cleanup().await.unwrap();
         assert!(generation.is_cancelled());
-    }
-
-    #[test]
-    fn policy_mode_rejects_keep_registered_on_pause_before_connecting() {
-        use clap::Parser;
-        let args = super::Args::try_parse_from([
-            "sidecar",
-            "--grpc-endpoint",
-            "http://127.0.0.1:1",
-            "--policy-version-taints",
-            "--unregister-on-pause=false",
-        ])
-        .unwrap();
-        let Err(error) = super::SglangSidecarEngine::from_parsed(args) else {
-            panic!("invalid configuration accepted");
-        };
-        assert!(error.to_string().contains("requires --unregister-on-pause"));
     }
 
     #[tokio::test]

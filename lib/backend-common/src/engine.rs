@@ -214,12 +214,6 @@ pub trait LLMEngine: Send + Sync + 'static {
             .build())
     }
 
-    /// Optional taint namespace owned by serving observations. Manual full-set
-    /// taint replacement is disabled while an engine owns this namespace.
-    fn managed_taint_prefix(&self) -> Option<&'static str> {
-        None
-    }
-
     /// Start the engine and return registration metadata.
     ///
     /// After this returns, the engine MUST be ready to accept `generate()`

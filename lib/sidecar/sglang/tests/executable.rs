@@ -50,8 +50,6 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "DYN_SGLANG_UNREGISTER_ON_PAUSE",
         "--controller-managed",
         "DYN_SGLANG_CONTROLLER_MANAGED",
-        "--policy-version-taints",
-        "DYN_SGLANG_POLICY_VERSION_TAINTS",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
     }

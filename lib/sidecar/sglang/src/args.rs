@@ -47,11 +47,6 @@ pub struct Args {
     #[arg(long, env = "DYN_SGLANG_CONTROLLER_MANAGED")]
     pub controller_managed: bool,
 
-    /// Project engine-reported weight_version into namespace-scoped policy taints.
-    /// Missing versions keep the endpoint unregistered. Requires unregister-on-pause.
-    #[arg(long, env = "DYN_SGLANG_POLICY_VERSION_TAINTS")]
-    pub policy_version_taints: bool,
-
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.
     #[arg(
