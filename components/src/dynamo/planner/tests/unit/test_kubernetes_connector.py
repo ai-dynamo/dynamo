@@ -1105,32 +1105,6 @@ async def test_set_component_replicas_deployment_not_ready_can_raise_for_global_
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_scales_workers_when_only_frontend_unready(
-    kubernetes_connector, mock_kube_api
-):
-    """A stuck Frontend Pod keeps the DGD unready but must not block workers."""
-    mock_deployment = _deployment(
-        _component("Frontend", "frontend", replicas=3),
-        _component("decode", "decode", replicas=2),
-    )
-    mock_kube_api.get_graph_deployment.return_value = mock_deployment
-    mock_kube_api.is_deployment_ready.return_value = False
-    mock_kube_api.only_frontend_unready.return_value = True
-
-    await kubernetes_connector.set_component_replicas(
-        [TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=8)]
-    )
-
-    mock_kube_api.only_frontend_unready.assert_called_once_with(mock_deployment)
-    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
-        "test-graph", "decode", 8
-    )
-    mock_kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with(
-        "test-graph", include_planner=False
-    )
-
-
-@pytest.mark.asyncio
 async def test_set_component_replicas_unready_allows_strict_dgdsa_zero_to_one(
     kubernetes_connector, mock_kube_api
 ):

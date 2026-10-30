@@ -638,7 +638,9 @@ class KubernetesAPI:
         The operator reports ``Ready=False`` when the graph failed, a rolling
         update is in progress, or any component is short of ready replicas.
         This rules out the first two and requires every non-planner,
-        non-frontend component to be stable on an observed spec generation.
+        non-frontend component to be stable on an observed spec generation,
+        measured against the owned DGDSA targets: an adapter write can lead the
+        DGD spec, and that scaling is not settled until status catches up.
         """
         status = deployment.get("status", {}) or {}
         state = status.get("state")
@@ -649,7 +651,16 @@ class KubernetesAPI:
             return False
         if not self.is_spec_generation_observed(deployment):
             return False
-        return self.non_planner_components_stable(deployment)[0]
+        try:
+            authoritative = self.fetch_authoritative_replica_targets(deployment)
+        except (client.ApiException, ValueError) as exc:
+            logger.warning(
+                "Cannot read authoritative replica targets; not treating the "
+                "deployment as Frontend-only unready: %s",
+                exc,
+            )
+            return False
+        return self.non_planner_components_stable(authoritative)[0]
 
     def fetch_authoritative_replica_targets(self, deployment: dict) -> dict:
         """Overlay declared DGDSA targets onto a DGD settlement snapshot.
