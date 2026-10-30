@@ -11,7 +11,7 @@ use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::Request
 
 /// An admitted decode route selected by `RoutingHost` together with the
 /// conditional-disagg policy's diagnostic signals.
-pub(super) struct ConditionalDisaggDecodeDecision {
+pub(crate) struct ConditionalDisaggDecodeDecision {
     pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,

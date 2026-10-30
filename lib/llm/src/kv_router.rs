@@ -70,6 +70,7 @@ mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
+pub(crate) mod stage_router;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
 // TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
