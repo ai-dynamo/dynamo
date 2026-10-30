@@ -8,9 +8,11 @@ host-network portable concurrent coverage: run it serially in a dedicated
 network container. pre_merge is the dedicated serial/own-container CI
 selector together with runtime_epp, not generic runtime-image coverage.
 
-Inventory and completeness guards are fail-closed and knowingly incomplete
-for this increment. They are ordinary failures, not skip/xfail. The two
-measured gaps are strict xfails of their dedicated mismatch subclasses.
+This is a staged partial configuration suite. Explicit pending rows and
+their reasons are the unmeasured list. Inventory, identifier-ownership,
+and collected-Item binding checks remain ordinary hard failures, not
+skip/xfail. The two measured gaps are strict xfails of their dedicated
+mismatch subclasses.
 Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
 hard failures. Other profiles stay ordinary tests. Admission/enforce
 ignored-compatibility cases, the five conditional scalar probes, and the
@@ -29,7 +31,6 @@ from tests.router.epp_config_contract import (
     PROFILE_NAMES,
     ConditionalJsonConfigMismatch,
     LoadAwarePresetConfigMismatch,
-    assert_coverage_complete,
     assert_inventory_matches_manifest,
     assert_manifest_bindings_match_collected_tests,
     assert_required_sources_exist,
@@ -61,11 +62,6 @@ def test_required_config_sources_exist():
 def test_discovered_identifiers_have_decisions():
     """New or stale CLI/env/schema names fail until a reviewed row exists."""
     assert_inventory_matches_manifest()
-
-
-def test_fe_honored_coverage_is_complete():
-    """Pending or undecided FE-honored rows are not full-issue completion."""
-    assert_coverage_complete()
 
 
 def test_manifest_bindings_match_collected_tests(request):

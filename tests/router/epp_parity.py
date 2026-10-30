@@ -85,9 +85,7 @@ PRIORITY_EPP_QUEUE_LOG = "debug,dynamo_kv_router::scheduling::queue=trace"
 QUEUE_ORDERING_TARGET = "dynamo_kv_router::scheduling::queue"
 QUEUE_ORDERING_MESSAGE = "ordering request"
 EPP_PREFILL_FALLBACK_TARGET = "dynamo_ext_proc::epp"
-EPP_PREFILL_FALLBACK_MESSAGE = (
-    "Prefill routing failed; falling back to aggregated mode"
-)
+EPP_PREFILL_FALLBACK_MESSAGE = "Prefill routing failed; falling back to aggregated mode"
 HELD_STREAM_JOIN_S = 2.0
 FRONTEND_CONTAINER_NAME = "frontend"
 EPP_CONTAINER_NAME = "epp"

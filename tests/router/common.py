@@ -6295,20 +6295,21 @@ def _prove_fe_priority_capacity(
 
 
 def _wait_epp_blocker_queue_ordering(stack, deadline: float, case_name: str) -> None:
+    # The held blocker schedules prefill and decode before mutation returns.
     last: list[str] = []
     while time.monotonic() < deadline:
         last = stack.epp_queue_ordering_records(after_bytes=0)
-        if len(last) > 1:
+        if len(last) > 2:
             raise AssertionError(
                 f"{case_name}: EPP blocker queue ordering records are {last}, "
-                "not exactly 1"
+                "not exactly 2"
             )
-        if len(last) == 1:
+        if len(last) == 2:
             return
         time.sleep(0.05)
     raise AssertionError(
         f"{case_name}: EPP blocker queue ordering records are {last}, "
-        "expected exactly 1"
+        "expected exactly 2"
     )
 
 
@@ -6329,9 +6330,7 @@ def _wait_epp_low_high_queue_ordering(
             _poll_held_admission(epp_low, 0.0) is not None
             or _poll_held_admission(epp_high, 0.0) is not None
         ):
-            raise AssertionError(
-                f"{case_name}: EPP low/high admitted before sentinel"
-            )
+            raise AssertionError(f"{case_name}: EPP low/high admitted before sentinel")
         last = stack.epp_queue_ordering_records(after_bytes=after_bytes)
         if len(last) > PRIORITY_QUEUE_LIMIT:
             raise AssertionError(
@@ -6362,15 +6361,12 @@ def _wait_epp_prefill_fallback(
         last = stack.epp_prefill_fallback_rejections(after_bytes=after_bytes)
         if len(last) > 1:
             raise AssertionError(
-                f"{case_name}: EPP prefill fallback records are extra: "
-                f"{len(last)}"
+                f"{case_name}: EPP prefill fallback records are extra: " f"{len(last)}"
             )
         if len(last) == 1:
             return
         time.sleep(0.05)
-    raise AssertionError(
-        f"{case_name}: EPP prefill fallback queue rejection is absent"
-    )
+    raise AssertionError(f"{case_name}: EPP prefill fallback queue rejection is absent")
 
 
 def _prove_epp_priority_capacity(

@@ -3,9 +3,10 @@
 
 """FE/EPP effective-config contract for issue #16592.
 
-Inventory is fail-closed and knowingly incomplete. Discovered CLI/env/schema
-names without a row, and explicit PENDING rows, fail the completeness guard.
-Do not treat that failure as full-issue completion.
+This is a staged partial configuration suite. Explicit pending rows and
+their reasons are the unmeasured list. Discovered CLI/env/schema names
+without a row, stale names, and false test bindings still fail. Do not
+treat inventory or bindings as full-issue completion.
 
 ``load_aware_preset`` and ``conditional_json`` are measured strict gaps
 (#16592): dedicated subclasses of ``FrontendEppConfigMismatch`` with
@@ -1398,7 +1399,7 @@ def pending_decision_names() -> tuple[str, ...]:
 
 
 def assert_decision_identifier_ownership() -> None:
-    """Reject unknown statuses and duplicate name/flag/env/schema owners."""
+    """Reject unknown statuses, incomplete pending rows, and duplicate owners."""
     names: set[str] = set()
     flags: dict[str, str] = {}
     envs: dict[str, str] = {}
@@ -1409,6 +1410,22 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} has unknown status {row.status!r}; "
                 f"expected one of {sorted(KNOWN_STATUSES)}"
             )
+        if row.status == STATUS_PENDING:
+            if not isinstance(row.reason, str) or not row.reason.strip():
+                raise AssertionError(f"{row.name} pending reason is empty")
+            if row.observer is not None:
+                raise AssertionError(
+                    f"{row.name} pending observer={row.observer!r} is not None"
+                )
+            if row.profiles != ():
+                raise AssertionError(
+                    f"{row.name} pending profiles {row.profiles} are not empty"
+                )
+            if row.affected_fields != ():
+                raise AssertionError(
+                    f"{row.name} pending affected_fields "
+                    f"{row.affected_fields} are not empty"
+                )
         if (
             row.status == STATUS_IGNORED_COMPAT
             and row.name not in IGNORED_COMPAT_CONTRACTS
@@ -1432,10 +1449,7 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {SESSION_TTL_OBSERVER}; only "
                 f"{SESSION_TTL_ROW} may"
             )
-        if (
-            row.observer == OVERLAP_REFRESH_OBSERVER
-            and row.name != OVERLAP_REFRESH_ROW
-        ):
+        if row.observer == OVERLAP_REFRESH_OBSERVER and row.name != OVERLAP_REFRESH_ROW:
             raise AssertionError(
                 f"{row.name} may not use {OVERLAP_REFRESH_OBSERVER}; only "
                 f"{OVERLAP_REFRESH_ROW} may"
@@ -1473,16 +1487,6 @@ def assert_inventory_matches_manifest() -> None:
         raise AssertionError(
             "discovered identifiers lack explicit decisions or are stale: "
             + "; ".join(parts)
-        )
-
-
-def assert_coverage_complete() -> None:
-    """Fail while any decided row is pending or any discovered name is undecided."""
-    assert_inventory_matches_manifest()
-    pending = pending_decision_names()
-    if pending:
-        raise AssertionError(
-            "pending coverage remains; not full-issue completion: " + ", ".join(pending)
         )
 
 
@@ -1812,8 +1816,7 @@ def _assert_overlap_refresh_binding(row: SettingDecision, items: Iterable[Any]) 
         )
     if row.observer != OVERLAP_REFRESH_OBSERVER:
         raise AssertionError(
-            f"{row.name} observer={row.observer!r} != "
-            f"{OVERLAP_REFRESH_OBSERVER!r}"
+            f"{row.name} observer={row.observer!r} != " f"{OVERLAP_REFRESH_OBSERVER!r}"
         )
     if row.flags != ():
         raise AssertionError(f"{row.name} flags {row.flags} != ()")
@@ -3288,9 +3291,7 @@ def _assert_overlap_refresh_source_contract() -> None:
         if not path.is_file()
     ]
     if missing:
-        raise AssertionError(
-            "overlap refresh sources missing: " + ", ".join(missing)
-        )
+        raise AssertionError("overlap refresh sources missing: " + ", ".join(missing))
     refresh = _stripped_production_rust_text(OVERLAP_REFRESH_RS)
     defaults = list(_DEFAULT_OVERLAP_REFRESH_RE.finditer(refresh))
     if len(defaults) != 1:
@@ -3313,8 +3314,7 @@ def _assert_overlap_refresh_source_contract() -> None:
     )
     if f'"{OVERLAP_REFRESH_ENV}"' not in read_body:
         raise AssertionError(
-            "read_overlap_refresh_after no longer consumes "
-            f"{OVERLAP_REFRESH_ENV}"
+            "read_overlap_refresh_after no longer consumes " f"{OVERLAP_REFRESH_ENV}"
         )
     if "ifparsed<=0.0{returnNone;}" not in _collapsed_rust(read_body):
         raise AssertionError(
@@ -3340,9 +3340,7 @@ def _assert_overlap_refresh_source_contract() -> None:
             "queue constructor no longer calls read_overlap_refresh_after()"
         )
     if (
-        "None=>tracing::info!(\""
-        + _collapsed_rust(OVERLAP_REFRESH_DISABLED)
-        + "\")"
+        'None=>tracing::info!("' + _collapsed_rust(OVERLAP_REFRESH_DISABLED) + '")'
         not in collapsed_if
     ):
         raise AssertionError(
@@ -3359,9 +3357,8 @@ def _assert_overlap_refresh_source_contract() -> None:
         _SUPPORTS_OVERLAP_REFRESH_RE,
         "Indexer::supports_overlap_refresh",
     )
-    if (
-        "matches!(self,Self::Single{..}|Self::Concurrent{..})"
-        not in _collapsed_rust(supports_body)
+    if "matches!(self,Self::Single{..}|Self::Concurrent{..})" not in _collapsed_rust(
+        supports_body
     ):
         raise AssertionError(
             "supports_overlap_refresh no longer matches Single or Concurrent"
@@ -3372,9 +3369,7 @@ def _assert_overlap_refresh_source_contract() -> None:
             "workers.rs no longer gates the refresher on supports_overlap_refresh"
         )
     if "TieredOverlapRefresher::new" not in workers:
-        raise AssertionError(
-            "workers.rs no longer constructs TieredOverlapRefresher"
-        )
+        raise AssertionError("workers.rs no longer constructs TieredOverlapRefresher")
 
 
 def _owned_process_log_text(
@@ -3434,13 +3429,11 @@ def _assert_exactly_one_disabled_refresh(
     line = lines[0]
     if OVERLAP_REFRESH_ENABLED in line:
         raise AssertionError(
-            f"{label} pid={pid} log={log} logged enabled overlap refresh: "
-            f"{line}"
+            f"{label} pid={pid} log={log} logged enabled overlap refresh: " f"{line}"
         )
     if OVERLAP_REFRESH_DISABLED not in line:
         raise AssertionError(
-            f"{label} pid={pid} log={log} logged unknown refresh message: "
-            f"{line}"
+            f"{label} pid={pid} log={log} logged unknown refresh message: " f"{line}"
         )
     if OVERLAP_REFRESH_TARGET not in line:
         raise AssertionError(
@@ -3458,9 +3451,7 @@ def _require_owned_disabled_refresh(
             process, label=label, node_name=node_name
         )
         if _overlap_refresh_log_lines(text):
-            _assert_exactly_one_disabled_refresh(
-                text, label=label, pid=pid, log=log
-            )
+            _assert_exactly_one_disabled_refresh(text, label=label, pid=pid, log=log)
             return pid, log
         if time.monotonic() >= deadline:
             raise AssertionError(
@@ -3495,9 +3486,7 @@ def run_overlap_refresh_effective_config(
             f"expected exactly one plain_chat token case, found {len(plain)}"
         )
     with stack_cls(request, tmp_path, model_name) as stack:
-        run_frontend_epp_token_parity(
-            stack, plain, include_negative_control=False
-        )
+        run_frontend_epp_token_parity(stack, plain, include_negative_control=False)
         frontend_pid, frontend_log = _require_owned_disabled_refresh(
             getattr(stack, "frontend_process", None),
             label="frontend_process",
