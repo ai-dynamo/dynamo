@@ -237,7 +237,7 @@ class HardwareSpec(BaseModel):
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget or use a numGpusPerNode or vramMb value that differs from the selected shape. A shape override without an explicit totalGpus is rejected.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget, use a different numGpusPerNode, or use a vramMb value more than 10% from the selected shape's measured VRAM. These shape overrides require an explicit totalGpus.",
     )
     numGpusPerNode: Optional[int] = Field(
         default=None,

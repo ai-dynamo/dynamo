@@ -729,9 +729,10 @@ spec:
                         capped at 32 to limit profiler search space. For example, same-type nodes
                         with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU
                         shape yields an automatic budget of 8. This cap may be removed in a future
-                        release. Set this field explicitly to override the derived budget or use a
-                        numGpusPerNode or vramMb value that differs from the selected shape. A shape
-                        override without an explicit totalGpus is rejected.
+                        release. Set this field explicitly to override the derived budget, use a
+                        different numGpusPerNode, or use a vramMb value more than 10% from the
+                        selected shape's measured VRAM. These shape overrides require an explicit
+                        totalGpus.
                       format: int32
                       type: integer
                     vramMb:
