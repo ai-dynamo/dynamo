@@ -21,6 +21,9 @@ use crate::{GrpcEndpoint, GrpcTransportConfig, cannot_connect, invalid_argument}
 
 pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+/// The `:authority` of requests over a Unix socket, which has no host of its
+/// own. gRPC sends `localhost`; tonic would otherwise send a placeholder.
+const UNIX_SOCKET_ORIGIN: &str = "http://localhost";
 
 /// Tonic's default plaintext TCP connector, except that it rejects a socket
 /// connected to itself.
@@ -92,6 +95,12 @@ impl GrpcChannelPool {
     /// `bootstrap`: true for synchronous constructors that run before logging
     /// initialization and need retry warnings on stderr. Deferred launcher
     /// discovery and `LLMEngine::start` pass false to use tracing.
+    ///
+    /// A `unix://` endpoint is retried like a TCP one, because its socket may
+    /// not exist until the engine has started, and each of its channels
+    /// reconnects through the same path after the engine drops it. Tonic dials
+    /// the socket itself (a self-connect is a TCP-only hazard); connecting to
+    /// one never waits, so the attempt timeout does not apply to it.
     pub async fn connect(
         peer: &str,
         endpoint: &GrpcEndpoint,
@@ -99,9 +108,14 @@ impl GrpcChannelPool {
         bootstrap: bool,
     ) -> Result<Self, DynamoError> {
         let endpoint_label = endpoint.to_string();
-        let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
-            invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
-        })?;
+        let mut tonic_endpoint =
+            Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
+                invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
+            })?;
+        let unix_socket = endpoint.is_unix_socket();
+        if unix_socket {
+            tonic_endpoint = tonic_endpoint.origin(Uri::from_static(UNIX_SOCKET_ORIGIN));
+        }
         let channels = connect_pool_with(
             peer,
             &endpoint_label,
@@ -109,8 +123,15 @@ impl GrpcChannelPool {
             bootstrap,
             |_, attempt_timeout| {
                 let endpoint = tonic_endpoint.clone().connect_timeout(attempt_timeout);
-                let connector = RejectSelfConnect::new();
-                async move { endpoint.connect_with_connector(connector).await }
+                async move {
+                    if unix_socket {
+                        endpoint.connect().await
+                    } else {
+                        endpoint
+                            .connect_with_connector(RejectSelfConnect::new())
+                            .await
+                    }
+                }
             },
         )
         .await?;

@@ -13,7 +13,7 @@
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
  * - Route docs-artifact tests to recipe-check without core E2E checks
- * - Route sidecar files to sidecar/Rust checks and framework-native E2E where needed
+ * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -60,6 +60,26 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  {
+    file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'the video fixture triggers the nightly harness checksum tests'
+  },
+  {
+    file: 'lib/sidecar/trtllm/ci/resolve_nightly.py',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'nightly resolver changes run its CPU tests'
+  },
+  {
+    file: '.github/workflows/pr.yaml',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'PR workflow wiring runs the nightly resolver CPU tests'
+  },
+  {
+    file: 'lib/llm/src/lib.rs',
+    expect: { sidecar_trtllm_image: false },
+    desc: 'unrelated Rust changes do not run resolver CPU tests'
+  },
   {
     file: 'scripts/protocol_compatibility/composition/openai.py',
     expect: { ignore: true, rust: false, core: false, frontend: false },
@@ -170,6 +190,11 @@ const testCases = [
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
   },
   {
+    file: '.github/workflows/pre-merge.yml',
+    expect: { examples: true },
+    desc: 'a change to the Recipe Check job definition runs Recipe Check'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
@@ -180,6 +205,7 @@ const testCases = [
     desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
@@ -187,8 +213,8 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: true },
-    desc: 'trtllm sidecar contracts trigger Rust checks and trtllm E2E'
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',
@@ -197,18 +223,8 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: true },
-    desc: 'trtllm sidecar source triggers Rust checks and trtllm E2E'
-  },
-  {
-    file: 'tests/serve/test_sidecar.py',
-    expect: { sidecar: true, trtllm: true },
-    desc: 'shared sidecar test changes trigger the TensorRT-LLM sidecar E2E'
-  },
-  {
-    file: 'tests/utils/trtllm_media_overlay.py',
-    expect: { sidecar: true, trtllm: true },
-    desc: 'media helper changes trigger the TensorRT-LLM sidecar E2E'
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
   },
   {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
@@ -237,7 +253,7 @@ const testCases = [
   },
   {
     file: 'Cargo.lock',
-    expect: { sidecar: true, rust: true },
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true },
     desc: 'root lockfile is a sidecar image build input'
   },
 

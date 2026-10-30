@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ai-dynamo-runtime==1.7.0",
-    "aisimulate==0.13.0.dev202610160000000073 ; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.13.0.dev202610290000000087 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     # Set the CA bundle floor for transitive HTTP clients outside containers too.
     "certifi>=2026.10.23",
@@ -54,7 +54,7 @@ artifact-delivery = [
 
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.4.0rc0",
+    "tensorrt-llm==1.4.0rc1",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -133,6 +133,7 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 
 [project.entry-points."aisimulate.output_adapters"]
 dgd = "dynamo.aisimulate.output.dgd:create_adapter"
+dgdr_run = "dynamo.aisimulate.output.dgdr_run:create_adapter"
 
 [dependency-groups]
 docs = [
@@ -254,6 +255,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # pytest 9.2.0 started raising errors for warnings from pytest_configure hooks.
+    # pytest-asyncio warns there while asyncio_default_fixture_loop_scope is unset.
+    'ignore:The configuration option "asyncio_default_fixture_loop_scope" is unset:pytest.PytestDeprecationWarning',
     # kr8s 0.20.13 predates Kubernetes 1.36; keep its version warning visible
     # without aborting deploy tests. Remove when the pinned release supports 1.36.
     # Upstream coverage: https://github.com/kr8s-org/kr8s/pull/744
@@ -418,6 +422,13 @@ markers = [
 # Same as Black.
 line-length = 88
 indent-width = 4
+
+[tool.ruff.lint]
+# E4, E7, E9, and F are the rules that ruff 0.5.2 enabled by default. Newer ruff enables many more.
+# W605 flags invalid escape sequences, and PLW0602 flags a `global` name that is never assigned.
+# TODO: enable flake8-bugbear (B) after its findings on main are fixed. Ruff has no B950;
+# E501 (line too long) is the closest ruff rule.
+select = ["E4", "E7", "E9", "F", "W605", "PLW0602"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]

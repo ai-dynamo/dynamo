@@ -92,7 +92,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
           # The pinned engine ships OpenEngine bindings under tensorrt_llm,
@@ -230,7 +230,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
           startupProbe:
             exec:
               command: *engineReadyCommand

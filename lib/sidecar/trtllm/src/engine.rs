@@ -17,29 +17,53 @@ use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
-use tokio::sync::{Mutex as AsyncMutex, OnceCell};
+use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelInfoResponse, ModelLimits, SupportedMedia, TrtllmClient};
+use crate::client::{self, ModelInfo, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request_with_routing};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
-const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
-
-struct FailedDiscovery {
-    error: DynamoError,
-    retry_at: Instant,
-}
-
-const LOAD_STALENESS_LIMIT: Duration = Duration::from_secs(30);
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Routing health limits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoutingSupervision {
+    pub(crate) metadata_poll_interval: Duration,
+    /// Separate from the interval so tests can poll quickly without timing out RPCs.
+    pub(crate) metadata_poll_timeout: Duration,
+    pub(crate) metadata_recovery_limit: Duration,
+    pub(crate) load_staleness_limit: Duration,
+}
+
+impl RoutingSupervision {
+    pub(crate) const PRODUCTION: Self = Self {
+        metadata_poll_interval: Duration::from_secs(5),
+        metadata_poll_timeout: Duration::from_secs(5),
+        metadata_recovery_limit: Duration::from_secs(30),
+        load_staleness_limit: Duration::from_secs(30),
+    };
+}
+
+/// Short limits so failure-path tests do not wait out [`RoutingSupervision::PRODUCTION`].
+#[cfg(test)]
+impl Default for RoutingSupervision {
+    fn default() -> Self {
+        Self {
+            metadata_poll_interval: Duration::from_millis(25),
+            metadata_poll_timeout: Duration::from_secs(5),
+            metadata_recovery_limit: Duration::from_secs(1),
+            load_staleness_limit: Duration::from_millis(500),
+        }
+    }
+}
 
 struct RoutingState {
     node: Option<crate::node::NodeMetadata>,
@@ -64,12 +88,11 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
-    /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
-    connection: OnceCell<(TrtllmClient, ModelLimits)>,
+    /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
+    connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
-    rediscovered_limits: OnceCell<ModelLimits>,
-    discovery_failure: AsyncMutex<Option<FailedDiscovery>>,
     routing: OnceCell<RoutingState>,
+    supervision: RoutingSupervision,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
     load_failed: CancellationToken,
@@ -90,30 +113,39 @@ impl TrtllmSidecarEngine {
             subagent_affinity_auth_key: None,
             connection: OnceCell::new(),
             started: OnceCell::new(),
-            rediscovered_limits: OnceCell::new(),
-            discovery_failure: AsyncMutex::new(None),
             routing: OnceCell::new(),
+            supervision: RoutingSupervision::PRODUCTION,
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
             load_failed: CancellationToken::new(),
         }
     }
 
+    /// Shorten supervision so failure-path tests do not wait out production limits.
+    #[cfg(test)]
+    pub(crate) fn with_supervision(mut self, supervision: RoutingSupervision) -> Self {
+        self.supervision = supervision;
+        self
+    }
+
     /// Fence a restarted native engine before continuing with stale discovery.
     pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
         tokio::select! {
             _ = self.load_failed.cancelled() => {
-                anyhow::bail!("Routing load remained unavailable for 30 seconds; withdrawing worker")
+                anyhow::bail!(
+                    "Routing load remained unavailable for {} seconds; withdrawing worker",
+                    self.supervision.load_staleness_limit.as_secs_f64()
+                )
             }
             result = async {
-                let mut ticks = tokio::time::interval(Duration::from_secs(5));
+                let mut ticks = tokio::time::interval(self.supervision.metadata_poll_interval);
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticks.tick().await;
                     if let (Some((client, _)), Some(routing)) = (self.connection.get(), self.routing.get())
                         && let Some(node) = &routing.node
                     {
-                        return crate::headless::monitor_engine(client, node, &routing.sources).await;
+                        return crate::headless::monitor_engine(client, node, &routing.sources, self.supervision).await;
                     }
                 }
             } => result,
@@ -238,66 +270,6 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-    async fn limits_for_request(
-        &self,
-        client: &TrtllmClient,
-        initial: ModelLimits,
-        request: &PreprocessedRequest,
-    ) -> Result<ModelLimits, DynamoError> {
-        if let Some(limits) = self.rediscovered_limits.get() {
-            return Ok(*limits);
-        }
-        let has_supported_media = request.multi_modal_data.as_ref().is_some_and(|media| {
-            ["image_url", "video_url", "audio_url"]
-                .iter()
-                .any(|key| media.get(*key).is_some_and(|items| !items.is_empty()))
-        });
-        if !has_supported_media || initial.supported_media.is_some() {
-            return Ok(initial);
-        }
-
-        // Serialize attempts and retain failures through the retry delay, so waiters
-        // share a failed RPC instead of each spending another RPC timeout.
-        let arrived_at = Instant::now();
-        let mut failure = self.discovery_failure.lock().await;
-        if let Some(failure) = &*failure
-            && arrived_at < failure.retry_at
-        {
-            return Err(failure.error.clone());
-        }
-        let result: Result<ModelLimits, DynamoError> = self
-            .rediscovered_limits
-            .get_or_try_init(|| async {
-                match client.model_limits(&self.model.source).await? {
-                    ModelInfoResponse::Available(mut reported) => {
-                        if let Some(engine_context_length) = reported.context_length
-                            && Some(engine_context_length) != initial.context_length
-                        {
-                            tracing::warn!(
-                                configured_context_length = ?initial.context_length,
-                                engine_context_length,
-                                "--context-length disagrees with the context length TensorRT-LLM \
-                                 reported; using the configured --context-length"
-                            );
-                        }
-                        reported.context_length = initial.context_length;
-                        Ok(reported)
-                    }
-                    ModelInfoResponse::Unsupported(_) => Ok(ModelLimits {
-                        supported_media: Some(SupportedMedia::default()),
-                        ..initial
-                    }),
-                }
-            })
-            .await
-            .copied();
-        *failure = result.as_ref().err().map(|error| FailedDiscovery {
-            error: error.clone(),
-            retry_at: Instant::now() + DISCOVERY_RETRY_DELAY,
-        });
-        result
-    }
-
     pub(crate) async fn bootstrap(
         (engine, config): (Self, WorkerConfig),
     ) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -312,7 +284,7 @@ impl TrtllmSidecarEngine {
         Ok((engine, config))
     }
 
-    async fn connect(&self) -> Result<(TrtllmClient, ModelLimits), DynamoError> {
+    async fn connect(&self) -> Result<(TrtllmClient, ModelInfo), DynamoError> {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections.get(),
@@ -330,85 +302,15 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        // `--context-length` wins over what the engine reports, and is the
-        // only source when the engine reports nothing usable. The resolved
-        // value backs both the registered window and the default-`max_tokens`
-        // path in `convert::max_tokens`.
-        let model = &self.model;
-        let limits = match model.context_length {
-            // Configured: the engine is consulted once, to cross-check the
-            // value and to learn its output cap. It may not answer at all --
-            // an older server has no Control service -- and that must not stop
-            // a worker whose window the operator already supplied.
-            //
-            // Neither branch waits for the engine to be *ready*, only to answer.
-            // Readiness belongs to the engine's health service, which is what
-            // the Kubernetes probes use and what DEP #14897 standardises on
-            // (`grpc.health.v1` Check/Watch, with registration driven by
-            // `Watch`). Do not grow a second readiness protocol here.
-            Some(configured) => {
-                let reported = match client.model_limits(&model.source).await {
-                    Ok(ModelInfoResponse::Available(reported)) => reported,
-                    Ok(ModelInfoResponse::Unsupported(status)) => {
-                        tracing::warn!(
-                            code = ?status.code(),
-                            message = status.message(),
-                            configured_context_length = configured,
-                            "Control.GetModelInfo is unavailable; using the configured \
-                             --context-length"
-                        );
-                        ModelLimits {
-                            supported_media: Some(SupportedMedia::default()),
-                            ..Default::default()
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            configured_context_length = configured,
-                            "Control.GetModelInfo failed transiently; using the configured \
-                             --context-length and deferring media capability discovery"
-                        );
-                        ModelLimits::default()
-                    }
-                };
-                if let Some(engine_context_length) = reported.context_length
-                    && engine_context_length != configured
-                {
-                    tracing::warn!(
-                        configured_context_length = configured,
-                        engine_context_length,
-                        "--context-length disagrees with the context length TensorRT-LLM \
-                         reported; using the configured --context-length"
-                    );
-                }
-                ModelLimits {
-                    context_length: Some(configured),
-                    ..reported
-                }
-            }
-            // Nothing configured: the engine is the only source. It binds its
-            // gRPC port only after the model has loaded, but the sidecar and the
-            // engine start independently, so wait for it either way.
-            None => {
-                // Failing here beats registering a worker that advertises
-                // capacity and then rejects, with a non-migratable 4xx, every
-                // request that omits `max_tokens` -- which is most chat
-                // traffic. The operator gets one startup error naming the fix
-                // instead of a worker that looks healthy and serves half.
-                client
-                    .wait_for_model_limits(&model.source, deadline, self.transport.retry_interval)
-                    .await
-                    .map_err(|error| {
-                        client::invalid_argument(format!(
-                            "no context length is available: {error}. TensorRT-LLM reports one \
-                             only when it was started with --max_seq_len; otherwise supply \
-                             --context-length."
-                        ))
-                    })?
-            }
-        };
-        Ok((client, limits))
+        let info = client
+            .wait_for_model_info(
+                &self.model.source,
+                self.model.context_length,
+                deadline,
+                self.transport.retry_interval,
+            )
+            .await?;
+        Ok((client, info))
     }
 }
 
@@ -420,7 +322,8 @@ impl LLMEngine for TrtllmSidecarEngine {
         }
         // Synchronous constructors retain deferred discovery; the CLI and Python
         // sidecar launcher reuse the connection prepared by their async bootstrap.
-        let (client, limits) = self.connection.get_or_try_init(|| self.connect()).await?;
+        let (client, info) = self.connection.get_or_try_init(|| self.connect()).await?;
+        let limits = &info.limits;
         self.started
             .set(())
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
@@ -523,6 +426,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
+        config.served_model_name = Some(info.served_model_name.clone());
         if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
             config.runtime_data.insert(
                 crate::node::NODE_METADATA_KEY.to_string(),
@@ -538,7 +442,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (client, limits) = self
+        let (client, info) = self
             .connection
             .get()
             .filter(|_| self.started.initialized())
@@ -608,25 +512,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
-        let limits = tokio::select! {
-            biased;
-            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
-            _ = &mut shutdown_cancellation => None,
-            result = self.limits_for_request(client, *limits, &request) => Some(result?),
-        };
-        let Some(limits) = limits else {
-            let output = cancelled(&state);
-            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
-        };
-        let proto_request = build_generate_request_with_routing(
-            request,
-            &request_id,
-            &self.model.source,
-            Some(limits),
-            self.mode,
-            use_dp_targeting,
-        )?;
-
         // The same deferral applies here, not just to the streaming loop below.
         // `generate` sends the request and then awaits response headers, so
         // losing this race can drop a request the engine has already accepted
@@ -638,11 +523,21 @@ impl LLMEngine for TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(
-                proto_request,
-                target_dp_rank,
-                parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
-            ) => Some(result?),
+            result = async {
+                let proto_request = build_generate_request_with_routing(
+                    request,
+                    &request_id,
+                    &self.model.source,
+                    Some(info.limits),
+                    self.mode,
+                    use_dp_targeting,
+                )?;
+                client.generate(
+                    proto_request,
+                    target_dp_rank,
+                    parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
+                ).await
+            } => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -760,6 +655,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         let cancel = self.cancel.clone();
         let task_slot = Arc::clone(&self.metrics_task);
         let load_failed = self.load_failed.clone();
+        let load_staleness_limit = self.supervision.load_staleness_limit;
 
         let bindings = MetricsBindings {
             dp_ranks: (0..dp_size).collect(),
@@ -771,7 +667,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     let mut interval = tokio::time::interval(LOAD_POLL_INTERVAL);
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut warned = false;
-                    let mut deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
+                    let mut deadline = tokio::time::Instant::now() + load_staleness_limit;
                     loop {
                         tokio::select! {
                             biased;
@@ -795,7 +691,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }) {
                                     Ok(snapshots) => {
                                         warned = false;
-                                        deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
+                                        deadline = tokio::time::Instant::now() + load_staleness_limit;
                                         for snapshot in snapshots {
                                             publisher.publish(snapshot.dp_rank, snapshot);
                                         }

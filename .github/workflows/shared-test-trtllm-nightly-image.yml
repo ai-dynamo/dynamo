@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: TRT-LLM Sidecar Upstream Nightly Media
+
+on:
+  workflow_call:
+    inputs:
+      builder_name:
+        required: true
+        type: string
+    secrets:
+      HF_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build media integration client
+    runs-on: prod-builder-v3
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.config.outputs.image }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Test nightly selection and media harness
+        run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
+      - name: Resolve latest upstream nightly
+        id: config
+        run: >-
+          python3 lib/sidecar/trtllm/ci/resolve_nightly.py
+          --output resolved-nightly.json
+          --github-output "$GITHUB_OUTPUT"
+      - name: Refresh BuildKit builder
+        uses: $/.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+      - name: Build test executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --target sidecar-trtllm-image-tests \
+            --platform linux/amd64 -f lib/sidecar/Dockerfile \
+            --output type=local,dest=trtllm-image-tests .
+          cp resolved-nightly.json trtllm-image-tests/nightly.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: trtllm-image-tests-${{ github.sha }}
+          path: trtllm-image-tests/
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: Upstream TRT-LLM ${{ matrix.media }} integration (1 GPU)
+    strategy:
+      fail-fast: false
+      matrix:
+        media: [image, video]
+    needs: build
+    runs-on: [gpu-1, amd64, v2, us-west-2]
+    timeout-minutes: 30
+    container:
+      image: ${{ needs.build.outputs.image }}
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        PRTE_ALLOW_RUN_AS_ROOT: '1'
+        PRTE_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
+        # Open MPI 5 singleton worker spawning fails with long K8s hostnames.
+        PMIX_HOSTNAME: mpi-node0
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: upb
+        TRTLLM_NO_USAGE_STATS: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: trtllm-image-tests-${{ github.sha }}
+          path: trtllm-image-tests
+      - name: Install pinned OpenEngine bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          source lib/sidecar/trtllm/launch/common.sh
+          trtllm_ensure_openengine_bindings python3
+      - name: Run live ${{ matrix.media }} integration test
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: >-
+          python3 lib/sidecar/trtllm/ci/run_image_test.py
+          --binary trtllm-image-tests/trtllm-image-tests
+          --config trtllm-image-tests/nightly.json
+          --media ${{ matrix.media }}
+          --results test-results/trtllm-nightly-${{ matrix.media }}
+      - name: Upload engine logs and test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: trtllm-nightly-${{ matrix.media }}-results-${{ github.sha }}
+          path: test-results/trtllm-nightly-${{ matrix.media }}/
+          if-no-files-found: warn
+          retention-days: 7

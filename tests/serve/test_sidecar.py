@@ -6,22 +6,15 @@
 import importlib.util
 import os
 import pathlib
-import runpy
 from dataclasses import dataclass, field
 
 import pytest
 
-from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
-)
-from tests.serve.conftest import (
-    MULTIMODAL_IMG_URL,
-    MULTIMODAL_VIDEO_EXPECTED,
-    MULTIMODAL_VIDEO_URL,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import (
@@ -31,16 +24,14 @@ from tests.utils.engine_metrics import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
-from tests.utils.multimodal import make_audio_payload
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
-    chat_payload,
     disaggregated_kv_routing_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
     kv_routing_payload,
-    multimodal_payload_default,
     sglang_generate_cancellation_payloads,
+    stop_string_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -53,12 +44,6 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 )
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
-)
-trtllm_whisper_chat_template = os.path.join(
-    WORKSPACE_DIR, "tests/serve/fixtures/trtllm_whisper_chat_template.jinja"
-)
-trtllm_whisper_engine_args = os.path.join(
-    WORKSPACE_DIR, "tests/serve/fixtures/trtllm_whisper_agg.yaml"
 )
 
 
@@ -172,7 +157,10 @@ def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
     return {name: (0,) for name in names}
 
 
-# Text cases stay sequential until their sidecar launch paths are profiled.
+# Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
+# has not been profiled for the sidecar launch path. Add one once measured, to
+# admit these into the parallel stage alongside the equivalent dynamo.{backend}
+# scenarios in tests/serve/test_{vllm,sglang,trtllm}.py.
 sidecar_configs = {
     "vllm_aggregated": SidecarConfig(
         name="vllm_aggregated",
@@ -180,7 +168,6 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.vllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
@@ -193,9 +180,15 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
-        request_payloads=_aggregated_payloads(
-            VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_aggregated_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            # The frontend matches stop strings; vLLM never receives them.
+            *stop_string_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
     ),
     "sglang_aggregated": SidecarConfig(
         name="sglang_aggregated",
@@ -204,7 +197,6 @@ sidecar_configs = {
         script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
@@ -240,7 +232,6 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.trtllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.requested_trtllm_kv_tokens(4096),
             pytest.mark.timeout(780),
@@ -264,74 +255,6 @@ sidecar_configs = {
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
     ),
-    "trtllm_aggregated_audio": SidecarConfig(
-        name="trtllm_aggregated_audio",
-        directory=trtllm_sidecar_dir,
-        script_name="agg.sh",
-        marks=[
-            pytest.mark.trtllm,
-            pytest.mark.multimodal,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(6.0),
-            pytest.mark.requested_trtllm_kv_tokens(2048),
-            pytest.mark.timeout(960),
-            # This is the only test that covers audio URL handling across the
-            # frontend, sidecar, and OpenEngine boundary.
-            pytest.mark.pre_merge,
-        ],
-        model="openai/whisper-tiny",
-        timeout=900,
-        delayed_start=60,
-        env={
-            "AGG_ENGINE_ARGS": trtllm_whisper_engine_args,
-            "DYN_CUSTOM_JINJA_TEMPLATE": trtllm_whisper_chat_template,
-            "MODALITY": "multimodal",
-            "PYTHONUNBUFFERED": "1",
-            "TRTLLM_CONTEXT_LENGTH": "1500",
-            "TRTLLM_DISABLE_GUIDED_DECODING": "1",
-        },
-        request_payloads=[make_audio_payload(["thoughts affected Hester"])],
-    ),
-    "trtllm_aggregated_multimodal": SidecarConfig(
-        name="trtllm_aggregated_multimodal",
-        directory=trtllm_sidecar_dir,
-        script_name="agg.sh",
-        marks=[
-            pytest.mark.trtllm,
-            pytest.mark.multimodal,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(12.0),
-            pytest.mark.requested_trtllm_kv_tokens(32768),
-            pytest.mark.timeout(960),
-            pytest.mark.pre_merge,
-            pytest.mark.installs_extra_dependencies,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        timeout=900,
-        delayed_start=60,
-        env={
-            "DYN_MM_ALLOW_INTERNAL": "1",
-            "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["opencv-python-headless"],
-            "PYTHONUNBUFFERED": "1",
-            "TRTLLM_MEDIA_ALLOW_PRIVATE_URLS": "1",
-        },
-        request_payloads=[
-            multimodal_payload_default(
-                image_url=MULTIMODAL_IMG_URL,
-                text="Describe what you see in this image.",
-                expected_response=["green", "square"],
-            ),
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail."},
-                    {"type": "video_url", "video_url": {"url": MULTIMODAL_VIDEO_URL}},
-                ],
-                expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                max_tokens=100,
-                temperature=0.0,
-            ),
-        ],
-    ),
     "trtllm_disaggregated": SidecarConfig(
         name="trtllm_disaggregated",
         directory=trtllm_sidecar_dir,
@@ -339,7 +262,6 @@ sidecar_configs = {
         gpu_env=_on_first_gpu("TRTLLM_PREFILL_GPU", "TRTLLM_DECODE_GPU"),
         marks=[
             pytest.mark.trtllm,
-            pytest.mark.core,
             # Both engines share one GPU: the handoff is what this covers, and
             # a co-resident pair keeps it on the existing 1-GPU sidecar runner.
             # `requested_trtllm_kv_tokens` caps each engine's KV pool so the
@@ -387,7 +309,6 @@ sidecar_configs = {
         gpu_env=_on_first_gpu("VLLM_PREFILL_GPU", "VLLM_DECODE_GPU"),
         marks=[
             pytest.mark.vllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -421,7 +342,6 @@ sidecar_configs = {
         ],
         marks=[
             pytest.mark.sglang,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -607,19 +527,6 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
-    if (
-        config.name
-        in {
-            "trtllm_aggregated_multimodal",
-            "trtllm_aggregated_audio",
-        }
-        and not _trtllm_serves_openengine()
-    ):
-        if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":
-            pytest.fail(TRTLLM_OPENENGINE_SKIP_REASON)
-        pytest.skip(TRTLLM_OPENENGINE_SKIP_REASON)
-    if config.name == "trtllm_aggregated_multimodal":
-        request.getfixturevalue("image_server")
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -640,6 +547,7 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     return config
 
 
+@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
@@ -653,11 +561,6 @@ def test_serve_deployment(
     predownload_models,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
-    if sidecar_config_test.name == "trtllm_aggregated_image":
-        runpy.run_path(
-            os.path.join(WORKSPACE_DIR, "tests/utils/trtllm_media_overlay.py"),
-            run_name="__main__",
-        )
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
