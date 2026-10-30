@@ -225,7 +225,7 @@ impl SliceIndex for PoolIndex {
     /// One slice changed or went away. Touches only that slice's pool.
     fn upsert(
         &mut self,
-        _naming: &PoolNaming,
+        naming: &PoolNaming,
         key: SliceKey,
         entry: Option<SliceEntry>,
     ) -> Vec<PoolEvent> {
@@ -239,7 +239,7 @@ impl SliceIndex for PoolIndex {
             if let Some(state) = self.pools.get_mut(&pool) {
                 state.slices.remove(&key);
             }
-            events.extend(self.rebuild(&pool));
+            events.extend(self.rebuild(naming, &pool));
         }
         if let Some(pool) = new_pool {
             self.pools
@@ -247,14 +247,14 @@ impl SliceIndex for PoolIndex {
                 .or_default()
                 .slices
                 .insert(key);
-            events.extend(self.rebuild(&pool));
+            events.extend(self.rebuild(naming, &pool));
         }
         events
     }
 
     /// A relist: every slice at once. Rebuilds every pool; the cache
     /// publishes one `Resync` instead of per-pool events.
-    fn replace(&mut self, _naming: &PoolNaming, slices: HashMap<SliceKey, SliceEntry>) {
+    fn replace(&mut self, naming: &PoolNaming, slices: HashMap<SliceKey, SliceEntry>) {
         self.slices = slices;
         for pool in self.pools.values_mut() {
             pool.slices.clear();
@@ -268,7 +268,7 @@ impl SliceIndex for PoolIndex {
         }
         let pools: Vec<PoolKey> = self.pools.keys().cloned().collect();
         for pool in &pools {
-            self.rebuild(pool);
+            self.rebuild(naming, pool);
         }
     }
 
@@ -287,7 +287,7 @@ impl SliceIndex for PoolIndex {
 impl PoolIndex {
     /// Recomputes one pool from its slices. Returns the event to publish if
     /// the listing changed.
-    fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
+    fn rebuild(&mut self, naming: &PoolNaming, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
         // Every Ready PoolRelay pod streams the pool's state: the operator runs
         // active-active replicas, each reports to every router, and routers
@@ -353,9 +353,33 @@ impl PoolIndex {
         if state.listing.as_ref() == Some(&listing) {
             return None;
         }
+        if lost_frontends(state.listing.as_ref(), &listing.frontends) {
+            // Routers have nowhere to send the pool's requests. Usually its
+            // frontend Service is not exported, or its frontends are not
+            // Ready yet.
+            let imported = state
+                .slices
+                .iter()
+                .filter_map(|slice| self.slices.get(slice))
+                .any(|entry| entry.frontend_port.is_some());
+            tracing::warn!(
+                pool = ?key,
+                frontend_service = %format!("{}{}", key.dgd_name(), naming.frontends.suffix),
+                port_name = %naming.frontends.port_name,
+                frontend_slices_imported = imported,
+                "this pool is live but has no Ready frontend, so it is listed without frontends; \
+                 check that its frontend Service is exported and its frontends are Ready"
+            );
+        }
         state.listing = Some(listing.clone());
         Some(WatchEvent::Upserted(listing))
     }
+}
+
+/// A pool is warned about when it goes live without frontends or loses its
+/// last one, not on each slice event while it has none.
+fn lost_frontends(listed: Option<&PoolListing>, frontends: &[Url]) -> bool {
+    frontends.is_empty() && listed.is_none_or(|listing| !listing.frontends.is_empty())
 }
 
 #[cfg(test)]
@@ -795,6 +819,38 @@ mod tests {
                 "{name} {protocol} {port}"
             );
         }
+    }
+
+    #[test]
+    fn a_pool_that_loses_its_frontend_slice_is_listed_without_frontends() {
+        let cache = cache();
+        let frontend = frontend_slice("west", "mocker", &[("10.43.0.2", true)]);
+        sync(
+            &cache,
+            vec![
+                slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]),
+                frontend.clone(),
+            ],
+        );
+        let before = listing(&cache, &key("west", "mocker")).expect("live pool");
+        let mut events = cache.events.subscribe();
+
+        // The frontend Service's export was removed. Its Ready PoolRelay
+        // keeps the pool live.
+        cache.apply(watcher::Event::Delete(frontend));
+        let Ok(WatchEvent::Upserted(after)) = events.try_recv() else {
+            panic!("expected the pool without frontends");
+        };
+        assert!(after.frontends.is_empty());
+        assert_eq!(after.relay_identities, before.relay_identities);
+        assert!(events.try_recv().is_err());
+
+        // That is warned about once: when the pool loses its last frontend
+        // or goes live without one, not again while it has none.
+        assert!(lost_frontends(Some(&before), &after.frontends));
+        assert!(lost_frontends(None, &after.frontends));
+        assert!(!lost_frontends(Some(&after), &after.frontends));
+        assert!(!lost_frontends(None, &before.frontends));
     }
 
     #[test]
