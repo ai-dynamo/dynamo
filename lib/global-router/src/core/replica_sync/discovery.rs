@@ -104,8 +104,6 @@ mod tests {
 
         assert_peers(&hub, &["http://static:8000/", "http://a:8000/"]).await;
 
-        // A new set adds and removes; the pinned peer survives, even if the
-        // set lists and then drops it.
         publish
             .send(vec![
                 url("http://b:8000"),

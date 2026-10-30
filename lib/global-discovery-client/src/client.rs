@@ -119,7 +119,6 @@ impl GlobalDiscoveryClient {
     }
 }
 
-/// The most of an error response's body kept for the error.
 const ERROR_BODY_BYTES: usize = 1024;
 
 /// At most [`ERROR_BODY_BYTES`] of `response`'s body, read no further, as

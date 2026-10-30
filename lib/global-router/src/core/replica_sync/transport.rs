@@ -671,7 +671,6 @@ impl ReplicaRequestLeaseObserver for ReplicaHub {
 }
 
 impl ReplicaHub {
-    /// The core took the mirrored booking `request_id`.
     fn booking_admitted(&self, request_id: &str) {
         self.admit_at(request_id, Instant::now());
     }
@@ -684,12 +683,10 @@ impl ReplicaHub {
         }
     }
 
-    /// The core let the mirrored booking `request_id` go.
     fn booking_completed(&self, request_id: &str) {
         self.open.remove(request_id);
     }
 
-    /// The core saw progress on the mirrored booking `request_id`.
     #[cfg(test)]
     fn booking_progressed(&self, request_id: &str) {
         if let Some(mut open) = self.open.get_mut(request_id) {
