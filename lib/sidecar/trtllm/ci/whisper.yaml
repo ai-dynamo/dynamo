@@ -17,3 +17,4 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.2
   cross_kv_cache_fraction: 0.5
   use_kv_cache_manager_v2: true
+guided_decoding_backend: null

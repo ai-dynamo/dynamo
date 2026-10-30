@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        media: [image, video]
+        media: [image, video, audio]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
@@ -88,6 +88,10 @@ jobs:
           set -euo pipefail
           source lib/sidecar/trtllm/launch/common.sh
           trtllm_ensure_openengine_bindings python3
+      - name: Install TRT-LLM video decoder
+        if: matrix.media == 'video'
+        run: >-
+          python3 components/src/dynamo/common/utils/install_media_decoders.py trtllm
       - name: Run live ${{ matrix.media }} integration test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

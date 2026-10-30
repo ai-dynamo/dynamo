@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -73,11 +74,39 @@ FIXTURES = {
         ],
         "context_length": 2048,
     },
+    "audio": {
+        "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
+        "token_ids": [],
+        "context_length": 1500,
+    },
 }
 VIDEO_PATH = (
     Path(__file__).resolve().parents[3] / "llm/tests/data/media/triangle_240p_10.mp4"
 )
 VIDEO_SHA256 = "04171a85ee3ba5ac9118b0a5858adf0892b49474cdf15320e32599a3d1ab9919"
+
+AUDIO_URL = (
+    "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/"
+    "8e35ed77aeece087fa53abf2a68a282dc13efc8c/"
+    "datasets/mini_en/wav/1221-135766-0002.wav"
+)
+AUDIO_SHA256 = "65b222837919ccbb924a4e1077413ea7cc6af3e68b663b012a9539d5c05850f0"
+
+
+def prepare_audio(results):
+    with urllib.request.urlopen(AUDIO_URL, timeout=30) as response:
+        data = response.read(1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != AUDIO_SHA256:
+        raise ValueError("Audio fixture does not match the validated speech sample")
+    path = results / "audio-data-uri.txt"
+    path.write_text("data:audio/wav;base64," + base64.b64encode(data).decode("ascii"))
+    return path
+
+
+def model_config(config, media):
+    if media == "audio":
+        return {**config, **config["audio"]}
+    return config
 
 
 def video_data_uri(path=VIDEO_PATH):
@@ -95,13 +124,15 @@ def validate_response(media, caption, response, input_token_count):
         colors = [word for word in words if word in ("red", "blue")]
         if colors[:2] != ["red", "blue"]:
             raise AssertionError(f"Expected red, then blue, got: {caption}")
+    elif media == "audio":
+        if "thoughts affected hester" not in " ".join(words):
+            raise AssertionError(f"Unexpected speech transcription: {caption}")
     elif not {"triangle", "triangular"}.intersection(words):
         raise AssertionError(
             f"Expected a triangle in the video description, got: {caption}"
         )
-    if (
-        response["completion_tokens"] <= 0
-        or response["prompt_tokens"] <= input_token_count
+    if response["completion_tokens"] <= 0 or (
+        media != "audio" and response["prompt_tokens"] <= input_token_count
     ):
         raise AssertionError(f"Missing authoritative {media} token usage: {response}")
 
@@ -166,7 +197,7 @@ def run(args, results):
 
     fixture = FIXTURES[args.media]
     test = f"tests::e2e::e2e_real_openengine_{args.media}"
-    config = json.loads(args.config.read_text())
+    config = model_config(json.loads(args.config.read_text()), args.media)
     identity = {
         **config,
         "media": args.media,
@@ -180,6 +211,7 @@ def run(args, results):
         )
 
     video = video_data_uri() if args.media == "video" else None
+    audio_path = prepare_audio(results) if args.media == "audio" else None
 
     binary = args.binary.resolve()
     binary.chmod(binary.stat().st_mode | 0o111)
@@ -195,40 +227,44 @@ def run(args, results):
         config["model"], revision=config["model_revision"]
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-    # The fixed Rust fixture uses Qwen3-VL's rendering of this exact message.
-    # Check it against the pinned tokenizer so a template change fails loudly.
-    token_ids = tokenizer.apply_chat_template(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": args.media},
-                    {"type": "text", "text": fixture["prompt"]},
-                ],
-            }
-        ],
-        tokenize=True,
-        add_generation_prompt=True,
-    )
     expected_ids = fixture["token_ids"]
-    token_ids = (
-        token_ids["input_ids"]
-        if isinstance(token_ids, dict) or hasattr(token_ids, "input_ids")
-        else token_ids
-    )
-    if token_ids != expected_ids:
-        raise RuntimeError(f"{args.media} fixture tokenizer mismatch: {token_ids}")
+    if args.media != "audio":
+        # The fixed Rust fixture uses Qwen3-VL's rendering of this exact message.
+        # Check it against the pinned tokenizer so a template change fails loudly.
+        token_ids = tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": args.media},
+                        {"type": "text", "text": fixture["prompt"]},
+                    ],
+                }
+            ],
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        token_ids = (
+            token_ids["input_ids"]
+            if isinstance(token_ids, dict) or hasattr(token_ids, "input_ids")
+            else token_ids
+        )
+        if token_ids != expected_ids:
+            raise RuntimeError(f"{args.media} fixture tokenizer mismatch: {token_ids}")
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     options = results / "engine.yaml"
     context_length = fixture["context_length"]
-    options.write_text(
-        f"max_batch_size: 1\nmax_num_tokens: {context_length}\n"
-        f"kv_cache_config:\n  max_tokens: {context_length}\n"
-        "  free_gpu_memory_fraction: 0.15\n"
-    )
+    if args.media == "audio":
+        options.write_text(Path(__file__).with_name("whisper.yaml").read_text())
+    else:
+        options.write_text(
+            f"max_batch_size: 1\nmax_num_tokens: {context_length}\n"
+            f"kv_cache_config:\n  max_tokens: {context_length}\n"
+            "  free_gpu_memory_fraction: 0.15\n"
+        )
     result_path = results / "response.json"
     engine = None
     try:
@@ -264,6 +300,9 @@ def run(args, results):
             )
             if video is not None:
                 env["TRTLLM_E2E_VIDEO_DATA_URI"] = video
+            if audio_path is not None:
+                env["TRTLLM_E2E_AUDIO_DATA_URI_FILE"] = str(audio_path)
+                env["TRTLLM_E2E_AUDIO_PROMPT"] = fixture["prompt"]
             run_rust_test(binary, env, test, results)
     finally:
         stop_engine(engine)

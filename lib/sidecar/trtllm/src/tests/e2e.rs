@@ -514,7 +514,7 @@ async fn e2e_real_openengine_video() {
     );
 }
 
-/// `TRTLLM_E2E_AUDIO_DATA_URI` must contain a complete `data:audio/...` URI.
+/// Set `TRTLLM_E2E_AUDIO_DATA_URI` or `TRTLLM_E2E_AUDIO_DATA_URI_FILE` to a data URI.
 #[tokio::test]
 #[ignore = "requires a live audio-capable TensorRT-LLM OpenEngine server"]
 async fn e2e_real_openengine_audio() {
@@ -522,14 +522,20 @@ async fn e2e_real_openengine_audio() {
         .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
     let model =
         std::env::var("TRTLLM_E2E_MODEL").unwrap_or_else(|_| "openai/whisper-tiny".to_string());
-    let audio = std::env::var("TRTLLM_E2E_AUDIO_DATA_URI")
-        .expect("set TRTLLM_E2E_AUDIO_DATA_URI to an audio data URI");
+    let audio = match std::env::var("TRTLLM_E2E_AUDIO_DATA_URI_FILE") {
+        Ok(path) => std::fs::read_to_string(path).expect("read audio data URI"),
+        Err(_) => std::env::var("TRTLLM_E2E_AUDIO_DATA_URI")
+            .expect("set TRTLLM_E2E_AUDIO_DATA_URI or TRTLLM_E2E_AUDIO_DATA_URI_FILE"),
+    };
+    let prompt = std::env::var("TRTLLM_E2E_AUDIO_PROMPT")
+        .unwrap_or_else(|_| "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>".into());
     let engine = TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(&endpoint, "--grpc-endpoint").expect("valid endpoint"),
         transport(1),
         ConfiguredModel {
             source: model.clone(),
             context_length: None,
+            ..Default::default()
         },
         AGG,
     );
@@ -540,7 +546,7 @@ async fn e2e_real_openengine_audio() {
 
     let mut request = PreprocessedRequest::builder()
         .model(model)
-        .token_ids(vec![50258, 50259, 50359, 50363])
+        .token_ids(vec![])
         .stop_conditions(StopConditions {
             max_tokens: Some(96),
             ..Default::default()
@@ -552,6 +558,7 @@ async fn e2e_real_openengine_audio() {
         .output_options(OutputOptions::default())
         .build()
         .expect("request");
+    request.extra_args = Some(json!({"formatted_prompt": prompt}));
     request.multi_modal_data = Some(HashMap::from([(
         "audio_url".to_string(),
         vec![MultimodalData::RawUrl(audio)],
@@ -572,5 +579,21 @@ async fn e2e_real_openengine_audio() {
         usage.prompt_tokens, usage.completion_tokens
     );
 
+    if let Ok(path) = std::env::var("TRTLLM_E2E_RESULT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "token_ids": generated,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            }))
+            .expect("serialize audio result"),
+        )
+        .expect("write audio result");
+    }
+    assert!(
+        usage.completion_tokens > 0,
+        "expected completion token usage"
+    );
     assert!(!generated.is_empty(), "expected audio-conditioned output");
 }
