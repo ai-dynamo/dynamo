@@ -147,6 +147,8 @@ Content-Type: application/json
 
 Omitting the field in a patch leaves its value unchanged; pass `false` to disable it. Changing its effective value resets the worker's listeners and indexed cache state, as described under [Worker Restarts](#worker-restarts).
 
+Custom discovery sources must include the setting in their worker records. The Kubernetes EPP adapter does not detect the SGLang build and currently leaves this setting unset, which uses `false`.
+
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
 record. If the model or routing group changes, the worker is removed from the

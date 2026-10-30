@@ -264,7 +264,7 @@ curl -X POST http://localhost:8090/register \
   }'
 ```
 
-For initial `--workers`, the indexer's `--engine-owned-mm-identity` flag applies to every listed source. Use separate HTTP registrations for sources with different event formats. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
+The flag depends on the SGLang build, not the model. For initial `--workers`, the indexer's `--engine-owned-mm-identity` flag applies to every listed source. Use separate HTTP registrations for sources with different event formats. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
 
 ### `POST /unregister` — Deregister an instance
 

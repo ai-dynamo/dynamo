@@ -114,13 +114,23 @@ Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image car
 
 SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
 
-The compatibility behavior below requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
+This compatibility support is unreleased. It requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
 
 On these builds, Dynamo accepts the wide values in KV events and indexes only complete text blocks before the first image or video block. The media block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache, but image- and video-aware routing is unavailable. This applies both to URL passthrough and to `--frontend-decoding`.
 
-Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. Without it, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. Without it, values that do not fit in 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
 
-Exclusion tracking is bounded to 1,048,576 block IDs per event normalizer across cache tiers. If it fills up, Dynamo logs a warning and accepts only stores with no parent for the affected worker rank until an `AllBlocksCleared` event. Existing text evictions continue to apply. This fallback can miss additional text-prefix hits, but prevents an unknown-parent store from invalidating the relay's worker state.
+To check a build before registering a direct source, run this in the SGLang engine's Python environment:
+
+```bash
+python3 -c 'from sglang.srt.managers.schedule_batch import MultimodalDataItem; print("pad_values" in MultimodalDataItem.__struct_fields__)'
+```
+
+`True` identifies a wide-token build and requires the flag above. `False` identifies a legacy build. The result depends on the SGLang build, not the selected model.
+
+The [SGLang sidecar](sidecar.md) cannot inspect the engine build and leaves the flag disabled. It excludes values that do not fit in 32 bits, but does not provide the full multimodal exclusion behavior above. Media-aware routing on wide-token builds is not supported through the sidecar.
+
+Dynamo tracks up to 1,048,576 excluded block IDs per KV event publisher or direct source listener, across cache tiers. At the limit, it logs `Multimodal exclusion state is full` and, for that worker rank, accepts only new root stores (blocks with no parent) until the engine clears its cache. Existing text evictions still apply. Routing may miss additional text-prefix hits until that cache clear.
 
 ### Launch an Aggregated Deployment
 
