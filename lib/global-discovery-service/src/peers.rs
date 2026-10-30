@@ -14,7 +14,13 @@
 //! Each instance is asked twice per heartbeat interval, with a timeout of
 //! half of one, so each copy is refreshed at least once per heartbeat
 //! interval. Copies therefore stay alive while the lease is more than two
-//! heartbeat intervals.
+//! heartbeat intervals. Each copy is timed from when it was asked for, so it
+//! never outlives its original.
+//!
+//! Lists are `Estimated` while copies may be missing: while another instance
+//! has not answered completely for long enough that the copies from its last
+//! answer may start to lapse, for a lease after one leaves, and while a
+//! restarted instance has not yet heard from all of its own PoolRelays.
 //!
 //! The instances find each other the way PoolRelays find the routers: from
 //! the service's own Service, exported through MCS, so its imported
@@ -49,8 +55,10 @@ pub struct PeerSync {
     /// How often to ask each instance, and how long to wait for its reply:
     /// half the heartbeat interval.
     every: Duration,
-    /// Copies from an instance's last answer lapse within this, so one that
-    /// has not answered for as long may be missing registrations here.
+    /// Copies from an instance's last answer may start to lapse after this,
+    /// a heartbeat interval and a round before its lease ends.
+    missing_after: Duration,
+    /// Copies from an instance that left lapse within this.
     lease_duration: Duration,
     /// Set once every instance has been asked. Until then this instance may
     /// know only its own PoolRelays, so it is not ready.
@@ -95,6 +103,10 @@ impl PeerSync {
             store,
             instance,
             every,
+            missing_after: lease
+                .duration()
+                .saturating_sub(lease.heartbeat_interval())
+                .saturating_sub(every),
             lease_duration: lease.duration(),
             synced,
             client,
@@ -109,8 +121,7 @@ impl PeerSync {
         let mut unreachable: HashSet<RouterReplicaId> = HashSet::new();
         // Logged when it changes. Zero means registrations stay local.
         let mut others_reached = None;
-        // When each instance last answered.
-        let mut answered: HashMap<RouterReplicaId, Instant> = HashMap::new();
+        let mut answers = Answers::default();
         let mut ticks = tokio::time::interval(self.every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -131,8 +142,8 @@ impl PeerSync {
             let mut reached = 0;
             for (peer, reply) in peers.items.iter().zip(replies) {
                 match reply {
-                    Ok((reply, received)) => {
-                        answered.insert(peer.replica.clone(), received);
+                    Ok((reply, sent)) => {
+                        answers.record(&peer.replica, reply.complete, sent);
                         if unreachable.remove(&peer.replica) {
                             tracing::info!(
                                 peer = %peer.replica.0,
@@ -142,7 +153,7 @@ impl PeerSync {
                         if reply.instance != self.instance {
                             reached += 1;
                         }
-                        self.absorb(reply, received);
+                        self.absorb(reply, sent);
                     }
                     Err(error) => {
                         if unreachable.insert(peer.replica.clone()) {
@@ -157,10 +168,9 @@ impl PeerSync {
             }
             // Forget instances that left, so one that comes back is logged.
             unreachable.retain(|id| peers.items.iter().any(|peer| &peer.replica == id));
-            answered.retain(|id, _| peers.items.iter().any(|peer| &peer.replica == id));
-            self.store.set_copies_missing(copies_missing(
+            self.store.set_copies_missing(answers.copies_missing(
                 &peers,
-                &answered,
+                self.missing_after,
                 self.lease_duration,
                 Instant::now(),
             ));
@@ -172,15 +182,16 @@ impl PeerSync {
         }
     }
 
-    /// Copies each registration in `reply` for the time it had left when the
-    /// reply was `received`, so waiting for a slower instance does not
-    /// lengthen it. Skips this instance's own reply: copying its own
-    /// registrations back would make them copies, which are not shared.
-    fn absorb(&self, reply: SharedRegistrations, received: Instant) {
+    /// Copies each registration in `reply` for the time it had left, counted
+    /// from when the request was `sent`, so neither the reply's transit nor
+    /// waiting for a slower instance lengthens it. Skips this instance's own
+    /// reply: copying its own registrations back would make them copies,
+    /// which are not shared.
+    fn absorb(&self, reply: SharedRegistrations, sent: Instant) {
         if reply.instance == self.instance {
             return;
         }
-        let waited = received.elapsed();
+        let waited = sent.elapsed();
         for shared in reply.registrations {
             let (registration, remaining) = shared.into_registration();
             self.store
@@ -189,29 +200,70 @@ impl PeerSync {
     }
 }
 
-/// Whether registrations made with another instance may be missing here: the
-/// list of instances may be incomplete, or one has not answered within
-/// `lease_duration`, by when the copies from its last answer have lapsed.
-fn copies_missing(
-    peers: &Snapshot<RouterReplica>,
-    answered: &HashMap<RouterReplicaId, Instant>,
-    lease_duration: Duration,
-    now: Instant,
-) -> bool {
-    peers.completeness != Completeness::Exact
-        || peers.items.iter().any(|peer| {
-            answered
-                .get(&peer.replica)
-                .is_none_or(|at| now.saturating_duration_since(*at) >= lease_duration)
-        })
+/// What the rounds so far say about each instance, to tell whether copies from
+/// another instance may be missing here.
+#[derive(Default)]
+struct Answers {
+    /// When each listed instance last answered with all of its registrations,
+    /// by when the request was sent.
+    complete: HashMap<RouterReplicaId, Instant>,
+    /// Instances that left the list, and when. Copies from them may still
+    /// lapse.
+    departed: HashMap<RouterReplicaId, Instant>,
 }
 
-/// Also returns when the reply arrived.
+impl Answers {
+    /// Notes a reply to a request `sent` then. A reply from an instance that
+    /// has not heard from all of its PoolRelays yet, such as one that just
+    /// restarted, does not count.
+    fn record(&mut self, peer: &RouterReplicaId, complete: bool, sent: Instant) {
+        if complete {
+            self.complete.insert(peer.clone(), sent);
+        }
+    }
+
+    /// Ends a round over `peers` at `now`, and says whether registrations
+    /// made with another instance may be missing here: the list of instances
+    /// may be incomplete, a listed one has not answered completely within
+    /// `missing_after`, or one left less than `lease_duration` ago.
+    fn copies_missing(
+        &mut self,
+        peers: &Snapshot<RouterReplica>,
+        missing_after: Duration,
+        lease_duration: Duration,
+        now: Instant,
+    ) -> bool {
+        let listed = |id: &RouterReplicaId| peers.items.iter().any(|peer| &peer.replica == id);
+        let left: Vec<RouterReplicaId> = self
+            .complete
+            .keys()
+            .filter(|id| !listed(id))
+            .cloned()
+            .collect();
+        for id in left {
+            self.complete.remove(&id);
+            self.departed.insert(id, now);
+        }
+        self.departed.retain(|id, since| {
+            !listed(id) && now.saturating_duration_since(*since) < lease_duration
+        });
+        peers.completeness != Completeness::Exact
+            || !self.departed.is_empty()
+            || peers.items.iter().any(|peer| {
+                self.complete
+                    .get(&peer.replica)
+                    .is_none_or(|at| now.saturating_duration_since(*at) >= missing_after)
+            })
+    }
+}
+
+/// Also returns when the request was sent.
 async fn fetch(
     client: &reqwest::Client,
     peer: &RouterReplica,
 ) -> anyhow::Result<(SharedRegistrations, Instant)> {
     let url = peer.url.join("registrations")?;
+    let sent = Instant::now();
     let reply = client
         .get(url)
         .send()
@@ -219,7 +271,7 @@ async fn fetch(
         .error_for_status()?
         .json()
         .await?;
-    Ok((reply, Instant::now()))
+    Ok((reply, sent))
 }
 
 #[cfg(test)]
@@ -410,45 +462,79 @@ mod tests {
     }
 
     #[test]
-    fn copies_may_be_missing_until_every_instance_answers_within_a_lease() {
-        let lease = lease().duration();
+    fn copies_may_be_missing_before_an_instance_misses_its_lease() {
+        // A 1 s heartbeat, a 3 s lease and rounds every 0.5 s: copies from an
+        // instance's last answer may start to lapse 1.5 s after it.
+        let lease = lease();
+        let missing_after = Duration::from_millis(1500);
         let url = Url::parse("http://10.43.0.9:8080/").unwrap();
-        let peers = |completeness| Snapshot {
-            items: vec![peer("a", &url), peer("b", &url)],
+        let peers = |completeness, ids: &[&str]| Snapshot {
+            items: ids.iter().map(|id| peer(id, &url)).collect(),
             completeness,
         };
+        let (a, b) = (
+            RouterReplicaId("a".to_owned()),
+            RouterReplicaId("b".to_owned()),
+        );
         let then = Instant::now();
-        let both = HashMap::from([
-            (RouterReplicaId("a".to_owned()), then),
-            (RouterReplicaId("b".to_owned()), then),
-        ]);
-        assert!(!copies_missing(
-            &peers(Completeness::Exact),
-            &both,
-            lease,
-            then + lease / 2
+        let both = || {
+            let mut answers = Answers::default();
+            answers.record(&a, true, then);
+            answers.record(&b, true, then);
+            answers
+        };
+        let missing = |answers: &mut Answers, peers: Snapshot<RouterReplica>, at: Instant| {
+            answers.copies_missing(&peers, missing_after, lease.duration(), at)
+        };
+
+        assert!(!missing(
+            &mut both(),
+            peers(Completeness::Exact, &["a", "b"]),
+            then + missing_after / 2
         ));
-        // A lease after their last answers, their copies have lapsed.
-        assert!(copies_missing(
-            &peers(Completeness::Exact),
-            &both,
-            lease,
-            then + lease
+        // Before their copies may lapse, not when the lease ends.
+        assert!(missing(
+            &mut both(),
+            peers(Completeness::Exact, &["a", "b"]),
+            then + missing_after
         ));
-        // One never answered.
-        let only_a = HashMap::from([(RouterReplicaId("a".to_owned()), then)]);
-        assert!(copies_missing(
-            &peers(Completeness::Exact),
-            &only_a,
-            lease,
+        // An answer without all of the instance's registrations, as a
+        // restarted instance's first answers are, does not count.
+        let mut restarted = Answers::default();
+        restarted.record(&a, true, then);
+        restarted.record(&b, false, then);
+        assert!(missing(
+            &mut restarted,
+            peers(Completeness::Exact, &["a", "b"]),
             then
         ));
         // The list of instances may be incomplete.
-        assert!(copies_missing(
-            &peers(Completeness::Estimated),
-            &both,
-            lease,
+        assert!(missing(
+            &mut both(),
+            peers(Completeness::Estimated, &["a", "b"]),
             then
+        ));
+
+        // An instance that left: copies from it may lapse for a lease after.
+        let mut answers = both();
+        assert!(missing(
+            &mut answers,
+            peers(Completeness::Exact, &["a"]),
+            then
+        ));
+        let later = then + Duration::from_secs(1);
+        answers.record(&a, true, later);
+        assert!(missing(
+            &mut answers,
+            peers(Completeness::Exact, &["a"]),
+            later
+        ));
+        let after_a_lease = then + lease.duration();
+        answers.record(&a, true, after_a_lease);
+        assert!(!missing(
+            &mut answers,
+            peers(Completeness::Exact, &["a"]),
+            after_a_lease
         ));
     }
 
@@ -456,6 +542,7 @@ mod tests {
     fn reply(instance: &str, model: &str, expires_in_ms: u64) -> SharedRegistrations {
         serde_json::from_value(json!({
             "instance": instance,
+            "complete": true,
             "registrations": [{"registration": registration(model), "expires_in_ms": expires_in_ms}],
         }))
         .unwrap()
@@ -475,11 +562,12 @@ mod tests {
         sync.absorb(reply(&sync.instance, "m1", 500), Instant::now());
         assert!(store.list().await.unwrap().items.is_empty());
 
-        // Another instance's reply waited 300 ms for a slower one's, so its
-        // copy has 200 ms left, not 500.
-        let received = Instant::now();
+        // The request to another instance was sent 300 ms ago, for example
+        // as it waited for a slower one's reply, so its copy has 200 ms
+        // left, not 500.
+        let sent = Instant::now();
         tokio::time::advance(Duration::from_millis(300)).await;
-        sync.absorb(reply("b", "m1", 500), received);
+        sync.absorb(reply("b", "m1", 500), sent);
         assert_eq!(store.list().await.unwrap().items.len(), 1);
         tokio::time::advance(Duration::from_millis(250)).await;
         assert!(store.list().await.unwrap().items.is_empty());

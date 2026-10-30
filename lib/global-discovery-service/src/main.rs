@@ -163,7 +163,7 @@ struct Args {
         conflicts_with = "tls_cert_path"
     )]
     peer_service: Option<String>,
-    /// Namespace of `--peer-service`. Defaults to `--router-namespace`.
+    /// Namespace of `--peer-service`. Defaults to this pod's namespace.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
@@ -435,7 +435,7 @@ async fn mcs_backend(
                 namespace: args
                     .peer_namespace
                     .clone()
-                    .unwrap_or_else(|| namespace.clone()),
+                    .unwrap_or_else(|| client.default_namespace().to_owned()),
                 name: peer_service.clone(),
                 port_name: args.peer_port_name.clone(),
             };

@@ -35,7 +35,13 @@ pub trait RegistrationExchange: Send + Sync {
     fn adopt(&self, registration: PoolRegistration, remaining: Duration);
 
     /// Whether registrations made with another instance may be missing
-    /// here: one has not answered within a lease, or the list of instances
-    /// may be incomplete. While they may be, lists are `Estimated`.
+    /// here: one has not answered completely in time, one left, or the list
+    /// of instances may be incomplete. While they may be, lists are
+    /// `Estimated`.
     fn set_copies_missing(&self, missing: bool);
+
+    /// Whether every PoolRelay that registers with this instance has done so
+    /// since it started: a lease has passed. Until then, an instance that
+    /// copies its registrations may be missing some.
+    fn holds_every_local_registration(&self) -> bool;
 }

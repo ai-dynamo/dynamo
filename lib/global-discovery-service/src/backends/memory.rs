@@ -170,8 +170,7 @@ impl RegistrationExchange for MemoryPoolStore {
 
     /// The live registrations PoolRelays made here, with the time each has
     /// left. Copies are left out, so each registration is shared only by the
-    /// instance that received it, and a copy outlives its original by no more
-    /// than the time a reply takes to arrive.
+    /// instance that received it.
     fn local_registrations(&self) -> Vec<(PoolRegistration, Duration)> {
         let now = Instant::now();
         self.lock()
@@ -180,6 +179,10 @@ impl RegistrationExchange for MemoryPoolStore {
             .filter(|registered| registered.local && registered.expires_at > now)
             .map(|registered| (registered.registration.clone(), registered.expires_at - now))
             .collect()
+    }
+
+    fn holds_every_local_registration(&self) -> bool {
+        Instant::now().saturating_duration_since(self.started) >= self.lease.duration()
     }
 
     /// Watchers get a `Resync` when this changes whether lists are `Exact`.

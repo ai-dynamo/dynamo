@@ -192,6 +192,7 @@ async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) 
     };
     Json(SharedRegistrations {
         instance: sharing.instance.clone(),
+        complete: sharing.registrations.holds_every_local_registration(),
         registrations: sharing
             .registrations
             .local_registrations()
@@ -256,6 +257,10 @@ fn error_response(error: DiscoveryError) -> Response {
 pub(crate) struct SharedRegistrations {
     /// The instance that answered.
     pub(crate) instance: String,
+    /// The answering instance has heard from every PoolRelay that registers
+    /// with it: a lease has passed since it started. A restarted instance's
+    /// first replies may lack registrations it has not heard again yet.
+    pub(crate) complete: bool,
     pub(crate) registrations: Vec<SharedRegistration>,
 }
 
