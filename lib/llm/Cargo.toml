@@ -169,7 +169,8 @@ axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
 utoipa = { version = "5.3", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+# Depends on utoipa 6; openapi_docs.rs passes it only the spec URL, so utoipa 5 above is unaffected.
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 
 # grpc-service
