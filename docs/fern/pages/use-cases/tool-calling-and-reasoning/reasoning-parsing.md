@@ -40,6 +40,7 @@ Some models emit reasoning separately from their final response. Dynamo can spli
     - `moonshotai/Kimi-K2.5*` / Kimi K2.6 format-compatible outputs: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
     - `google/gemma-4-*` thinking models: `--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --custom-jinja-template examples/chat_templates/gemma4_tool.jinja`
     - `Qwen/Qwen3.5*`: `--dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3`
+    - Beam channel-grammar models: `--dyn-tool-call-parser beam --dyn-reasoning-parser beam`
     - MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
     - MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
 
@@ -335,6 +336,20 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
         **Notes:** `<\|channel>thought\n...<channel\|>` with `thought\n` role label stripped. Aliases: `gemma-4`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Beam">
+    <AccordionGroup>
+      <Accordion title="Beam channel-grammar models">
+        **Parser:** `beam`
+
+        **Upstream name:** none (Dynamo-native unified family)
+
+        **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
+
+        **Notes:** `<\|channel\|>analysis<\|message\|>...<\|end\|>` is reasoning; the final channel is the answer. Pair with `--dyn-tool-call-parser beam` (both flags required). Supplied prior reasoning is always rendered back into the history (`preserve_thinking: true` and omitted are the same; `false` is accepted and has no effect); history turns without reasoning render an empty analysis block (`allow_missing_thinking` defaults to true on this route).
       </Accordion>
     </AccordionGroup>
   </Accordion>
