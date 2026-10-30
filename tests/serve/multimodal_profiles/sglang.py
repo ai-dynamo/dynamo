@@ -32,10 +32,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=400,
                 profiled_vram_gib=9.8,  # actual peak with the mamba cap below
                 requested_sglang_kv_tokens=8192,
-                # Qwen3.5 is a hybrid (linear-attention) model. SGLang sizes its
-                # mamba state cache from free VRAM, not --max-total-tokens, so
-                # without a cap each worker takes a share of the whole card and
-                # starves co-scheduled tests in the GPU-parallel stage.
+                # SGLang sizes the Qwen3.5 mamba cache from free VRAM, not
+                # --max-total-tokens; without a cap it starves co-scheduled tests.
                 env={
                     "SINGLE_GPU": "true",
                     "SGLANG_EXTRA_ARGS": "--max-mamba-cache-size 64",
