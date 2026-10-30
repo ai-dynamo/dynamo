@@ -43,7 +43,6 @@ pub async fn follow_peer_set(
     }
 }
 
-/// Brings the hub's peers to `wanted` plus `pinned`.
 fn apply_peer_set(hub: &ReplicaHub, pinned: &HashSet<Url>, wanted: &[Url]) {
     let mut keep = pinned.clone();
     for url in wanted {
@@ -104,7 +103,6 @@ mod tests {
         let (publish, peers) = watch::channel(vec![url("http://a:8000")]);
         tokio::spawn(follow_peer_set(hub.clone(), peers, cancel.clone()));
 
-        // The set present at start applies, beside the pinned peer.
         assert_peers(&hub, &["http://static:8000/", "http://a:8000/"]).await;
 
         // A new set adds and removes; the pinned peer survives, even if the
