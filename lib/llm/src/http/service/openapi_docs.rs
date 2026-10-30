@@ -36,6 +36,7 @@
 use std::sync::Arc;
 
 use axum::{Router, body::Bytes, http::StatusCode, response::IntoResponse};
+use dynamo_decisions::protocols::{openai as decisions_oai, systemone as decisions_jev};
 use tokio::sync::OnceCell;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 use utoipa::{OpenApi, ToSchema};
@@ -86,7 +87,11 @@ pub struct OpenApiOptions {
             crate::protocols::openai::responses::NvCreateResponse,
             super::openai::ErrorMessage,
             super::openai::ToolCallDispatchPayload<'static>,
-            super::openai::ReasoningDispatchPayload<'static>
+            super::openai::ReasoningDispatchPayload<'static>,
+            decisions_jev::Request,
+            decisions_jev::Response,
+            decisions_oai::Request,
+            decisions_oai::Response
         )
     )
 )]
@@ -182,6 +187,7 @@ pub fn generate_openapi_spec_with_options(
     // represent the 3.2 version. HTTP and file export share this final representation.
     let mut document = serde_json::to_value(openapi).map_err(|error| error.to_string())?;
     document["openapi"] = serde_json::json!("3.2.0");
+    annotate_decision_errors(&mut document, route_docs)?;
     for route in route_docs {
         let Some((_, chunk, chat)) = completion_response_types(route) else {
             continue;
@@ -196,6 +202,67 @@ pub fn generate_openapi_spec_with_options(
         media["itemSchema"] = streaming_event_schema(&chunk, chat, options);
     }
     Ok(document)
+}
+
+/// Error bodies follow the released decision adapter, not the generic completion envelope.
+fn annotate_decision_errors(
+    document: &mut serde_json::Value,
+    routes: &[RouteDoc],
+) -> Result<(), String> {
+    use serde_json::json;
+
+    for route in routes {
+        if route.method() != axum::http::Method::POST {
+            continue;
+        }
+        let (name, schema) = match route.openapi_kind() {
+            Some(OpenApiRouteKind::Decisions) => (
+                "DecisionOpenAiError",
+                json!({
+                    "type": "object", "required": ["error"],
+                    "properties": {"error": {
+                        "type": "object", "required": ["message", "type", "param", "code"],
+                        "properties": {
+                            "message": {"type": "string"}, "type": {"type": "string"},
+                            "param": {"type": "null"}, "code": {"type": "string"}
+                        }
+                    }}
+                }),
+            ),
+            Some(OpenApiRouteKind::SystemOne) => (
+                "DecisionSystemOneError",
+                json!({
+                    "oneOf": [
+                        {"type": "object", "required": ["detail"], "properties": {"detail": {
+                            "type": "array", "minItems": 1, "items": {
+                                "type": "object", "required": ["loc", "msg", "type"],
+                                "properties": {
+                                    "loc": {"type": "array", "items": {"type": "string"}},
+                                    "msg": {"type": "string"}, "type": {"type": "string"}
+                                }
+                            }
+                        }}},
+                        {"type": "object", "required": ["detail", "code"], "properties": {
+                            "detail": {"type": "string"}, "code": {"type": "string"}
+                        }}
+                    ]
+                }),
+            ),
+            _ => continue,
+        };
+        document["components"]["schemas"][name] = schema;
+        let responses = document["paths"][route.path()]["post"]["responses"]
+            .as_object_mut()
+            .ok_or_else(|| format!("missing decision responses for {route}"))?;
+        for (status, response) in responses {
+            if status.parse::<u16>().is_ok_and(|status| status >= 400) {
+                response["content"] = json!({"application/json": {"schema": {
+                    "$ref": format!("#/components/schemas/{name}")
+                }}});
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Describe parsed data-bearing SSE events for a registered completion response.
@@ -417,6 +484,8 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
         Some(OpenApiRouteKind::Completions) => "/v1/completions",
         Some(OpenApiRouteKind::Embeddings) => "/v1/embeddings",
         Some(OpenApiRouteKind::Responses) => "/v1/responses",
+        Some(OpenApiRouteKind::Decisions) => super::systemone::DECISIONS_PATH,
+        Some(OpenApiRouteKind::SystemOne) => super::systemone::DEFAULT_PATH,
         None => path,
     };
     let summary = generate_summary_for_path(description_path);
@@ -434,6 +503,55 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
 
     // Add responses
     operation = operation.response("200", success_response(route));
+
+    if route.method() == axum::http::Method::POST
+        && matches!(
+            route.openapi_kind(),
+            Some(OpenApiRouteKind::SystemOne | OpenApiRouteKind::Decisions)
+        )
+    {
+        use utoipa::openapi::ContentBuilder;
+        let schema = if route.openapi_kind() == Some(OpenApiRouteKind::SystemOne) {
+            <decisions_jev::Response as utoipa::PartialSchema>::schema()
+        } else {
+            <decisions_oai::Response as utoipa::PartialSchema>::schema()
+        };
+        operation = operation.response(
+            "200",
+            ResponseBuilder::new()
+                .description("Ordered typed answers with uncalibrated label probabilities")
+                .content(
+                    "application/json",
+                    ContentBuilder::new().schema(Some(schema)).build(),
+                )
+                .build(),
+        );
+        for (status, description) in [
+            ("413", "Request body exceeds 4 MiB"),
+            ("415", "Content-Type must be application/json"),
+            (
+                "429",
+                "Capacity rejection when configured as 429; code is rate_limit_exceeded",
+            ),
+            ("499", "Request cancelled"),
+            ("500", "Malformed or incomplete native scoring response"),
+            ("502", "Executor result failed decision contract validation"),
+            ("504", "Decision preflight or execution deadline exceeded"),
+        ] {
+            operation = operation.response(
+                status,
+                ResponseBuilder::new().description(description).build(),
+            );
+        }
+        if route.openapi_kind() == Some(OpenApiRouteKind::SystemOne) {
+            operation = operation.response(
+                "422",
+                ResponseBuilder::new()
+                    .description("Invalid question, unsupported control, or prompt/token budget")
+                    .build(),
+            );
+        }
+    }
 
     operation = operation.response(
         "400",
@@ -533,6 +651,35 @@ fn add_request_body_for_route(
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
     let (description, schema, example) = match kind {
+        Some(OpenApiRouteKind::SystemOne) => {
+            let mut schema = <decisions_jev::Request as utoipa::PartialSchema>::schema();
+            if let RefOr::T(utoipa::openapi::schema::Schema::Object(object)) = &mut schema {
+                object.additional_properties = Some(Box::new(
+                    utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+                ));
+            }
+            (
+                "Jev text evaluation; unsupported controls are rejected; unknown top-level fields are ignored",
+                schema,
+                serde_json::json!({
+                    "model": "Qwen/Qwen3.8-27B", "state": "The payment failed.",
+                    "questions": {"route": {"type": "choice", "criteria": {
+                        "billing": "Payment issues", "technical": "Integration failures"
+                    }}}
+                }),
+            )
+        }
+        Some(OpenApiRouteKind::Decisions) => (
+            "OpenAI Decisions text evaluation; unsupported fields and controls are rejected",
+            <decisions_oai::Request as utoipa::PartialSchema>::schema(),
+            serde_json::json!({
+                "model":"Qwen/Qwen3.8-27B", "input":"The payment failed.",
+                "questions":[{"type":"choice", "name":"route", "instructions":"Choose a team", "choices":[
+                    {"value":"billing","description":"Payment issues"},
+                    {"value":"technical","description":"Integration failures"}
+                ]}]
+            }),
+        ),
         Some(OpenApiRouteKind::ChatCompletions) => (
             "Chat completion request with model, messages, and optional parameters",
             create_chat_completion_schema(),
@@ -648,6 +795,8 @@ fn create_response_example() -> serde_json::Value {
 /// Generate a human-readable summary for a path
 fn generate_summary_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Score System One questions".to_string(),
+        "/v1/decisions" => "Evaluate bounded decision questions".to_string(),
         "/v1/chat/completions" => "Create chat completion".to_string(),
         "/v1/completions" => "Create text completion".to_string(),
         "/v1/embeddings" => "Create embeddings".to_string(),
@@ -665,6 +814,8 @@ fn generate_summary_for_path(path: &str) -> String {
 /// Generate a detailed description for a path
 fn generate_description_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Experimental aggregate SGLang API. Each question is scored in one prefill-only operation; answers contain probabilities normalized over the permitted labels, not calibrated probabilities of correctness.".to_string(),
+        "/v1/decisions" => "Experimental OpenAI Decisions text evaluation over a qualified SGLang worker. No format selector, streaming, or image inputs are supported.".to_string(),
         "/v1/chat/completions" => {
             "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's chat completions API."
@@ -877,6 +1028,9 @@ mod tests {
                 OpenApiRouteKind::Completions => ("Create text completion", "given prompt"),
                 OpenApiRouteKind::Embeddings => ("Create embeddings", "embedding vector"),
                 OpenApiRouteKind::Responses => ("Create response", "given input"),
+                OpenApiRouteKind::Decisions | OpenApiRouteKind::SystemOne => {
+                    unreachable!("only completion, embedding, and response routers are registered")
+                }
             };
             assert_eq!(operation["summary"], summary);
             assert!(
@@ -1177,6 +1331,136 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn systemone_openapi_describes_typed_requests_answers_and_errors() {
+        let value =
+            generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/systemone")
+                .with_openapi_kind(OpenApiRouteKind::SystemOne)])
+            .unwrap();
+        let operation = &value["paths"]["/v1/systemone"]["post"];
+        assert_eq!(operation["summary"], "Score System One questions");
+        assert!(
+            operation["requestBody"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("unknown top-level fields are ignored")
+        );
+        assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["additionalProperties"],
+            true
+        );
+        assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
+        for status in [
+            "400", "404", "413", "415", "422", "429", "499", "500", "502", "503", "504", "529",
+        ] {
+            assert!(
+                operation["responses"].get(status).is_some(),
+                "missing {status}"
+            );
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/DecisionSystemOneError",
+                "missing System One error schema for {status}"
+            );
+        }
+        let schemas = &value["components"]["schemas"];
+        assert!(schemas["DecisionSystemOneQuestion"]["oneOf"].is_array());
+        assert!(schemas["DecisionSystemOneAnswer"]["oneOf"].is_array());
+    }
+
+    #[test]
+    fn decisions_openapi_documents_only_the_openai_contract() {
+        let value =
+            generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/decisions")
+                .with_openapi_kind(OpenApiRouteKind::Decisions)])
+            .unwrap();
+        let operation = &value["paths"]["/v1/decisions"]["post"];
+        let request = &operation["requestBody"]["content"]["application/json"]["schema"];
+        assert!(request["properties"].get("questions").is_some());
+        assert!(request["properties"].get("nvext").is_none());
+        assert!(request.get("oneOf").is_none());
+        assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
+        assert!(
+            operation["responses"]["200"]["content"]
+                .get("text/event-stream")
+                .is_none()
+        );
+        assert!(
+            value["components"]["schemas"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|name| !name.starts_with("DecisionSglang"))
+        );
+        assert!(operation["responses"].get("429").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("415").is_some());
+        assert!(operation["responses"].get("502").is_some());
+        assert!(operation["responses"].get("422").is_none());
+        for (status, response) in operation["responses"].as_object().unwrap() {
+            if status != "200" {
+                assert_eq!(
+                    response["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/DecisionOpenAiError",
+                    "missing OpenAI error schema for {status}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn systemone_custom_path_preserves_its_schema() {
+        use super::super::{service_v2::HttpService, systemone};
+
+        let service = HttpService::builder().build().unwrap();
+        let (mut routes, _) = systemone::router(
+            service.state_clone(),
+            Some("/experimental/~score".to_string()),
+        );
+        routes.push(RouteDoc::new(axum::http::Method::POST, "/v1/systemone"));
+        routes.push(
+            RouteDoc::new(axum::http::Method::GET, "/v1/decisions")
+                .with_openapi_kind(OpenApiRouteKind::Decisions),
+        );
+        let value = generate_openapi_spec(&routes).unwrap();
+        let operation = &value["paths"]["/experimental/~score"]["post"];
+        assert_eq!(operation["summary"], "Score System One questions");
+        assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+        assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
+        assert!(operation["responses"].get("429").is_some());
+        assert_eq!(
+            operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DecisionSystemOneError"
+        );
+        assert!(
+            value["paths"]["/v1/systemone"]["post"]["responses"]["400"]
+                .get("content")
+                .is_none()
+        );
+        assert!(
+            value["paths"]["/v1/decisions"]["get"]["responses"]["400"]
+                .get("content")
+                .is_none()
+        );
+        assert!(value["paths"]["/v1/decisions"]["post"]["requestBody"]["content"].is_object());
+        assert_eq!(
+            value["paths"]["/v1/systemone"]["post"]["requestBody"]["content"],
+            serde_json::json!({})
+        );
+        assert!(
+            value["paths"]["/v1/decisions"]["get"]
+                .get("requestBody")
+                .is_none()
+        );
+        assert!(
+            value["paths"]["/v1/decisions"]["get"]["responses"]["200"]
+                .get("content")
+                .is_none()
+        );
+        assert_eq!(value["paths"].as_object().unwrap().len(), 3);
     }
 
     #[test]
