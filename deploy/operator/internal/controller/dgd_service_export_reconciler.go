@@ -80,11 +80,12 @@ const clusterSetIDTTL = time.Minute
 // that is a Global Router pool through the configured Multi-Cluster Services
 // implementation, and withdraws the exports when it stops being one. A DGD is a
 // pool while a DynamoPoolRelay of the same name exists. It creates and deletes
-// only ServiceExports that the DGD controls.
+// only ServiceExports that the DGD controls, at the multicluster.x-k8s.io version
+// that the gates resolved.
 type dgdServiceExportReconciler struct {
 	dgdResourceSyncer
 	config *configv1alpha1.OperatorConfiguration
-	gate   features.Gate
+	gates  features.Gates
 	// exports reads ServiceExports, which are unstructured: the manager's client
 	// would read them from the API server, so this is the manager's cache, filled
 	// by the controller's ServiceExport watch.
@@ -97,12 +98,12 @@ type dgdServiceExportReconciler struct {
 func newDGDServiceExportReconciler(
 	syncer dgdResourceSyncer,
 	config *configv1alpha1.OperatorConfiguration,
-	gate features.Gate,
+	gates features.Gates,
 	exports client.Reader,
 	clusterSetID func(context.Context) string,
 ) *dgdServiceExportReconciler {
 	return &dgdServiceExportReconciler{
-		dgdResourceSyncer: syncer, config: config, gate: gate, exports: exports, clusterSetID: clusterSetID,
+		dgdResourceSyncer: syncer, config: config, gates: gates, exports: exports, clusterSetID: clusterSetID,
 	}
 }
 
@@ -116,7 +117,7 @@ func (r *dgdServiceExportReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (*metav1.Condition, error) {
-	if !r.gate.Enabled(features.MultiClusterExport) {
+	if !r.gates.Enabled(features.MultiClusterExport) {
 		return nil, nil
 	}
 	relay, err := r.poolRelay(ctx, dgd)
@@ -146,7 +147,7 @@ func (r *dgdServiceExportReconciler) reconcileExports(
 	relay *nvidiacomv1alpha1.DynamoPoolRelay,
 ) (*metav1.Condition, error) {
 	implementation := r.config.MultiCluster.MCSImplementation
-	existing, err := multicluster.ListExports(ctx, r.exports, dgd.Namespace, implementation)
+	existing, err := multicluster.ListExports(ctx, r.exports, r.gates.ServiceExportVersion, dgd.Namespace, implementation)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +214,7 @@ func (r *dgdServiceExportReconciler) export(
 	name string,
 ) error {
 	// Owned by the DGD, the export is deleted with it.
-	serviceExport := multicluster.RenderServiceExport(dgd.Namespace, name, dgd.Name)
+	serviceExport := multicluster.RenderServiceExport(r.gates.ServiceExportVersion, dgd.Namespace, name, dgd.Name)
 	if err := ctrl.SetControllerReference(dgd, serviceExport, r.Scheme()); err != nil {
 		return fmt.Errorf("failed to set the owner of ServiceExport %s: %w", name, err)
 	}
@@ -242,7 +243,7 @@ func (r *dgdServiceExportReconciler) withdraw(
 	}
 
 	// The UID precondition deletes exactly the export just read.
-	serviceExport := multicluster.NewServiceExport()
+	serviceExport := multicluster.NewServiceExport(r.gates.ServiceExportVersion)
 	serviceExport.SetNamespace(dgd.Namespace)
 	serviceExport.SetName(export.Name)
 	if err := r.Delete(ctx, serviceExport, client.Preconditions{UID: &export.UID}); err != nil {

@@ -509,7 +509,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	// DynamoPoolRelay makes the DGD of the same name a pool.
 	if r.RuntimeConfig.Gate.Enabled(features.MultiClusterExport) {
 		ctrlBuilder = ctrlBuilder.Watches(
-			multicluster.NewServiceExport(),
+			multicluster.NewServiceExport(r.RuntimeConfig.Gate.ServiceExportVersion),
 			handler.EnqueueRequestsFromMapFunc(r.mapServiceExportToDGDRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc:  func(ce event.CreateEvent) bool { return true },

@@ -106,10 +106,10 @@ func TestServiceNames(t *testing.T) {
 }
 
 func TestRenderServiceExport(t *testing.T) {
-	t.Log("Render the export of pool qwen's PoolRelay Service")
-	export := RenderServiceExport("dynamo", "qwen-pool-relay", "qwen")
-	if got := export.GroupVersionKind(); got != ServiceExportGVK {
-		t.Errorf("GroupVersionKind = %v, want %v", got, ServiceExportGVK)
+	t.Log("Render the export of pool qwen's PoolRelay Service at the version the gate resolved")
+	export := RenderServiceExport("v1alpha1", "dynamo", "qwen-pool-relay", "qwen")
+	if export.GetAPIVersion() != "multicluster.x-k8s.io/v1alpha1" || export.GetKind() != "ServiceExport" {
+		t.Errorf("export type = %s %s, want multicluster.x-k8s.io/v1alpha1 ServiceExport", export.GetAPIVersion(), export.GetKind())
 	}
 	if export.GetNamespace() != "dynamo" || export.GetName() != "qwen-pool-relay" {
 		t.Errorf("export = %s/%s, want dynamo/qwen-pool-relay", export.GetNamespace(), export.GetName())
@@ -122,7 +122,7 @@ func TestRenderServiceExport(t *testing.T) {
 // exportWithConditions returns a ServiceExport whose status holds conditions,
 // each given as type, status, reason and message.
 func exportWithConditions(conditions ...[4]string) *unstructured.Unstructured {
-	export := RenderServiceExport("dynamo", "qwen-pool-relay", "qwen")
+	export := RenderServiceExport("v1alpha1", "dynamo", "qwen-pool-relay", "qwen")
 	items := make([]any, 0, len(conditions))
 	for _, condition := range conditions {
 		items = append(items, map[string]any{
@@ -272,11 +272,11 @@ func TestListExports(t *testing.T) {
 	})
 	owned.SetFinalizers([]string{"example.com/hold"})
 	owned.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
-	foreign := RenderServiceExport("dynamo", "qwen-frontend", "qwen")
+	foreign := RenderServiceExport("v1alpha1", "dynamo", "qwen-frontend", "qwen")
 	foreign.SetUID("export-2")
-	elsewhere := RenderServiceExport("other", "qwen-frontend", "qwen")
+	elsewhere := RenderServiceExport("v1alpha1", "other", "qwen-frontend", "qwen")
 	mapper := meta.NewDefaultRESTMapper(nil)
-	mapper.Add(ServiceExportGVK, meta.RESTScopeNamespace)
+	mapper.Add(ServiceExportGroupKind.WithVersion("v1alpha1"), meta.RESTScopeNamespace)
 	reader := fake.NewClientBuilder().
 		WithScheme(runtime.NewScheme()).
 		WithRESTMapper(mapper).
@@ -284,7 +284,7 @@ func TestListExports(t *testing.T) {
 		Build()
 
 	t.Log("List the exports in namespace dynamo, as Karmada sees them")
-	got, err := ListExports(context.Background(), reader, "dynamo", configv1alpha1.MCSImplementationKarmada)
+	got, err := ListExports(context.Background(), reader, "v1alpha1", "dynamo", configv1alpha1.MCSImplementationKarmada)
 	if err != nil {
 		t.Fatalf("ListExports: %v", err)
 	}

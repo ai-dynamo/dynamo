@@ -56,10 +56,14 @@ func TestResolveMultiClusterExport(t *testing.T) {
 			}))
 			defer server.Close()
 
-			t.Log("Require the ServiceExport resource and preserve discovery failures")
-			enabled, err := resolveMultiClusterExport(t.Context(), &rest.Config{Host: server.URL})
-			if enabled != (tt.wantErr == "") || (err == nil) != (tt.wantErr == "") {
-				t.Fatalf("resolveMultiClusterExport() = %v, %v; want enabled=%v, error=%q", enabled, err, tt.wantErr == "", tt.wantErr)
+			t.Log("Require the ServiceExport resource, return its version, and preserve discovery failures")
+			version, err := resolveMultiClusterExport(t.Context(), &rest.Config{Host: server.URL})
+			wantVersion := ""
+			if tt.wantErr == "" {
+				wantVersion = "v1alpha1"
+			}
+			if version != wantVersion || (err == nil) != (tt.wantErr == "") {
+				t.Fatalf("resolveMultiClusterExport() = %q, %v; want %q, error=%q", version, err, wantVersion, tt.wantErr)
 			}
 			if err != nil && err.Error() != tt.wantErr {
 				t.Errorf("resolveMultiClusterExport() error = %q, want %q", err, tt.wantErr)

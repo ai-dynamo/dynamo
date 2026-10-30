@@ -29,16 +29,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ServiceExportGVK is the SIG Multicluster ServiceExport. Every supported
+// ServiceExportGroupKind is the SIG Multicluster ServiceExport. Every supported
 // implementation reads it in the cluster that runs the Service, Karmada included:
 // its ServiceExport controller watches this kind in member clusters. Karmada
 // watches a member only while its control plane has propagated at least one
 // ServiceExport there, so keep one in place in each member. That setup is outside
-// the operator.
-var ServiceExportGVK = schema.GroupVersionKind{
-	Group:   "multicluster.x-k8s.io",
-	Version: "v1alpha1",
-	Kind:    "ServiceExport",
+// the operator. The operator reads and writes it at the multicluster.x-k8s.io
+// version that the multiClusterExport feature gate resolved.
+var ServiceExportGroupKind = schema.GroupKind{
+	Group: "multicluster.x-k8s.io",
+	Kind:  "ServiceExport",
 }
 
 // ClusterPropertyGVK is the About API's ClusterProperty (KEP-2149), which holds
@@ -145,17 +145,21 @@ func UsesClusterSetID(implementation configv1alpha1.MCSImplementation) bool {
 	return implementation == configv1alpha1.MCSImplementationStandard
 }
 
-// NewServiceExport returns an empty ServiceExport, to watch exports or to name one.
-func NewServiceExport() *unstructured.Unstructured {
+// NewServiceExport returns an empty ServiceExport at version, to watch exports or
+// to name one. version must be a multicluster.x-k8s.io version that the cluster
+// serves.
+func NewServiceExport(version string) *unstructured.Unstructured {
 	serviceExport := &unstructured.Unstructured{}
-	serviceExport.SetGroupVersionKind(ServiceExportGVK)
+	serviceExport.SetGroupVersionKind(ServiceExportGroupKind.WithVersion(version))
 	return serviceExport
 }
 
-// RenderServiceExport returns the ServiceExport for the Service named name in
-// namespace, labeled with the DGD that exports it. It sets no owner reference.
-func RenderServiceExport(namespace, name, dgdName string) *unstructured.Unstructured {
-	serviceExport := NewServiceExport()
+// RenderServiceExport returns the ServiceExport at version for the Service named
+// name in namespace, labeled with the DGD that exports it. It sets no owner
+// reference. version must be a multicluster.x-k8s.io version that the cluster
+// serves.
+func RenderServiceExport(version, namespace, name, dgdName string) *unstructured.Unstructured {
+	serviceExport := NewServiceExport(version)
 	serviceExport.SetNamespace(namespace)
 	serviceExport.SetName(name)
 	serviceExport.SetLabels(map[string]string{
@@ -197,17 +201,19 @@ type Export struct {
 	Detail string
 }
 
-// ListExports returns the ServiceExports in namespace by name, with what
-// implementation reports on them. reader should serve unstructured objects from
-// a cache: the manager's client reads them from the API server.
+// ListExports returns the ServiceExports in namespace by name, read at version,
+// with what implementation reports on them. reader should serve unstructured
+// objects from a cache: the manager's client reads them from the API server.
 func ListExports(
 	ctx context.Context,
 	reader client.Reader,
-	namespace string,
+	version, namespace string,
 	implementation configv1alpha1.MCSImplementation,
 ) (map[string]Export, error) {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(ServiceExportGVK.GroupVersion().WithKind(ServiceExportGVK.Kind + "List"))
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: ServiceExportGroupKind.Group, Version: version, Kind: ServiceExportGroupKind.Kind + "List",
+	})
 	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list ServiceExports: %w", err)
 	}

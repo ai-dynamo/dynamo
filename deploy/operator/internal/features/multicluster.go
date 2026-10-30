@@ -5,6 +5,7 @@ package features
 
 import (
 	"context"
+	"errors"
 
 	"k8s.io/client-go/rest"
 )
@@ -25,14 +26,19 @@ import (
 const MultiClusterExport Name = "multiClusterExport"
 
 // resolveMultiClusterExport verifies API availability for a configured MCS
-// implementation. A nil config retains the native discovery-unavailable error.
-func resolveMultiClusterExport(ctx context.Context, config *rest.Config) (bool, error) {
+// implementation and returns the multicluster.x-k8s.io version at which the
+// cluster serves ServiceExports. A nil config retains the native
+// discovery-unavailable error.
+func resolveMultiClusterExport(ctx context.Context, config *rest.Config) (string, error) {
 	// Every supported implementation reads the SIG Multicluster ServiceExport.
-	available, err := detectAPIAvailability(ctx, config, "multicluster.x-k8s.io", "v1alpha1", "serviceexports")
+	const version = "v1alpha1"
+	available, err := detectAPIAvailability(ctx, config, "multicluster.x-k8s.io", version, "serviceexports")
 	if err != nil {
-		return false, err
+		return "", err
 	}
-
-	return resolve(new(true), available,
-		"multiCluster.mcsImplementation is set but the multicluster.x-k8s.io/v1alpha1 ServiceExport API was not detected in the cluster")
+	if !available {
+		return "", errors.New("multiCluster.mcsImplementation is set but the multicluster.x-k8s.io/v1alpha1 " +
+			"ServiceExport API was not detected in the cluster")
+	}
+	return version, nil
 }

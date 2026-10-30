@@ -157,7 +157,8 @@ type Gate interface {
 	Enabled(Name) bool
 }
 
-// Gates is the complete set of operator feature gates.
+// Gates is the complete set of operator feature gates, with the API version
+// that a gate resolved where its consumers depend on it.
 type Gates struct {
 	Checkpoint         bool `json:"checkpoint"`
 	Grove              bool `json:"grove"`
@@ -170,6 +171,11 @@ type Gates struct {
 	Istio              bool `json:"istio"`
 	MultiClusterExport bool `json:"multiClusterExport"`
 	GPUDiscovery       bool `json:"gpuDiscovery"`
+
+	// ServiceExportVersion is not a gate. It is the multicluster.x-k8s.io
+	// version that the operator reads and writes ServiceExports in, set
+	// whenever MultiClusterExport is enabled.
+	ServiceExportVersion string `json:"-"`
 }
 
 // Defaults returns the default feature gates.
@@ -287,11 +293,12 @@ func New(
 	}
 
 	// Export Global Router pools only through a configured MCS implementation whose
-	// ServiceExport API this cluster serves.
+	// ServiceExport API this cluster serves, at the version it serves.
 	if config.MultiCluster.MCSImplementation != configv1alpha1.MCSImplementationNone {
-		if gates.MultiClusterExport, err = resolveMultiClusterExport(ctx, mgr.GetConfig()); err != nil {
+		if gates.ServiceExportVersion, err = resolveMultiClusterExport(ctx, mgr.GetConfig()); err != nil {
 			return Gates{}, err
 		}
+		gates.MultiClusterExport = true
 	}
 
 	logValues := make([]any, 0, 2*len(allNames))
