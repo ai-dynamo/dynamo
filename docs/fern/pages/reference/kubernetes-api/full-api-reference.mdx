@@ -5568,7 +5568,7 @@ TracePVCSource names one trace file on a PersistentVolumeClaim in the Request na
 **Appears in:** [TraceSourceSpec](#tracesourcespec)
 
 <ParamField path="claimName" type="string">
-ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISimulate container.
+ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISimulate container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>` until its execution stops; deleting the claim cancels the Runs that read it.
 **Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 </ParamField>
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -284,42 +286,111 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 	defer runWatch.Stop()
 	startClusterTestDGDRV1beta2Controllers(t, env, plannerImage, operatorImage)
 
-	t.Log("The kubelet refuses the subPath, so the Run fails before AISimulate reads anything")
-	var failed nvidiacomv1beta2.DynamoGraphDeploymentRun
-	deadline := time.NewTimer(5 * time.Minute)
-	defer deadline.Stop()
-	for failed.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseFailed {
-		select {
-		case event, ok := <-runWatch.ResultChan():
-			require.True(t, ok, "Run watch closed before the Run failed")
-			require.NotEqual(t, watch.Error, event.Type, "Run watch failed")
-			run, ok := event.Object.(*nvidiacomv1beta2.DynamoGraphDeploymentRun)
-			require.Truef(t, ok, "Run watch returned %T", event.Object)
-			require.NotEqual(t, nvidiacomv1beta2.DGDRRunPhaseSucceeded, run.Status.Phase, "Run read a trace outside its claim")
-			failed = *run.DeepCopy()
-		case <-deadline.C:
-			t.Fatal("the Run did not fail for its escaping trace symlink")
+	t.Log("The kubelet refuses the subPath, so the sweeper waits and the open Run reports it verbatim")
+	var waiting nvidiacomv1beta2.DynamoGraphDeploymentRun
+	awaitClusterTestRun(t, runWatch, "the Run did not report its waiting sweeper", func(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool {
+		waiting = *run.DeepCopy()
+		condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+		return condition != nil && condition.Reason == dgdrRunReasonContainerWaiting
+	})
+	condition := meta.FindStatusCondition(waiting.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.NotNil(t, waiting.Status.JobRef)
+	require.Nil(t, waiting.Status.CompletionTime)
+
+	t.Log("The sweeper never started: its pod reports the kubelet's waiting state, which the Run carries verbatim")
+	var pods corev1.PodList
+	require.NoError(t, env.Client().List(ctx, &pods, client.InNamespace(env.Namespace()),
+		client.MatchingLabels{batchv1.JobNameLabel: waiting.Status.JobRef.Name}))
+	require.Len(t, pods.Items, 1)
+	var sweeper *corev1.ContainerStatus
+	for i := range pods.Items[0].Status.ContainerStatuses {
+		if pods.Items[0].Status.ContainerStatuses[i].Name == dgdrRunSweeperContainer {
+			sweeper = &pods.Items[0].Status.ContainerStatuses[i]
 		}
 	}
-	condition := meta.FindStatusCondition(failed.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
-	require.NotNil(t, condition)
-	require.Equal(t, dgdrRunReasonTraceSourceUnavailable, condition.Reason)
-	require.Contains(t, condition.Message, `cannot be mounted: failed to prepare subPath for volumeMount "trace"`)
+	require.NotNil(t, sweeper)
+	require.NotNil(t, sweeper.State.Waiting)
+	require.Nil(t, sweeper.State.Running)
+	require.Nil(t, sweeper.LastTerminationState.Terminated)
+	require.Zero(t, sweeper.RestartCount)
+	require.Contains(t, condition.Message, fmt.Sprintf("container %q is waiting: %s: ", dgdrRunSweeperContainer, sweeper.State.Waiting.Reason))
 
-	t.Log("No Candidate was published, and the completed Run deletes its Job")
+	t.Log("The waiting container alone neither ends the Run nor makes the operator delete its Job")
+	require.Never(t, func() bool {
+		job := &batchv1.Job{}
+		err := env.Client().Get(ctx, client.ObjectKey{Namespace: env.Namespace(), Name: waiting.Status.JobRef.Name}, job)
+		run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+		require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(&waiting), run))
+		return err != nil || job.DeletionTimestamp != nil ||
+			meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	}, 20*time.Second, time.Second)
+
+	t.Log("The Run's finalizer protects the claim; deleting the claim cancels the Run")
+	claim := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, env.Client().Get(ctx, client.ObjectKey{Namespace: env.Namespace(), Name: trace.claim}, claim))
+	require.Contains(t, claim.Finalizers, dgdrRunTraceClaimFinalizer(waiting.UID))
+	require.NoError(t, env.Client().Delete(ctx, claim))
+	var canceled nvidiacomv1beta2.DynamoGraphDeploymentRun
+	awaitClusterTestRun(t, runWatch, "the Run was not canceled with its claim", func(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool {
+		canceled = *run.DeepCopy()
+		return meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	})
+
+	t.Log("The Job and its pod were gone before the Run failed with TraceSourceDeleted")
+	var jobs batchv1.JobList
+	require.NoError(t, env.Client().List(ctx, &jobs, client.InNamespace(env.Namespace())))
+	for i := range jobs.Items {
+		require.False(t, metav1.IsControlledBy(&jobs.Items[i], &canceled), "Job %q of the canceled Run still exists", jobs.Items[i].Name)
+	}
+	require.NoError(t, env.Client().List(ctx, &pods, client.InNamespace(env.Namespace()),
+		client.MatchingLabels{batchv1.JobNameLabel: waiting.Status.JobRef.Name}))
+	require.Empty(t, pods.Items)
+	condition = meta.FindStatusCondition(canceled.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	require.Equal(t, nvidiacomv1beta2.DGDRRunPhaseFailed, canceled.Status.Phase)
+	require.Equal(t, dgdrRunReasonTraceSourceDeleted, condition.Reason)
+
+	t.Log("No Candidate was published, and the completed Run releases the claim")
 	var candidates nvidiacomv1beta2.DynamoGraphDeploymentCandidateList
 	require.NoError(t, env.Client().List(ctx, &candidates, client.InNamespace(env.Namespace())))
 	require.Empty(t, candidates.Items)
 	require.Eventually(t, func() bool {
-		var jobs batchv1.JobList
-		require.NoError(t, env.Client().List(ctx, &jobs, client.InNamespace(env.Namespace())))
-		for i := range jobs.Items {
-			if metav1.IsControlledBy(&jobs.Items[i], &failed) {
-				return false
-			}
+		stored := &corev1.PersistentVolumeClaim{}
+		err := env.Client().Get(ctx, client.ObjectKeyFromObject(claim), stored)
+		if apierrors.IsNotFound(err) {
+			return true
 		}
-		return true
-	}, time.Minute, time.Second, "the failed Run's Job was not deleted")
+		require.NoError(t, err)
+		return !slices.Contains(stored.Finalizers, dgdrRunTraceClaimFinalizer(waiting.UID))
+	}, time.Minute, time.Second, "the canceled Run did not release its claim")
+}
+
+// awaitClusterTestRun reads Run events from runWatch until done accepts one, failing with message
+// after five minutes. No Run may ever succeed: none of them may read a trace outside its claim.
+func awaitClusterTestRun(
+	t *testing.T,
+	runWatch watch.Interface,
+	message string,
+	done func(*nvidiacomv1beta2.DynamoGraphDeploymentRun) bool,
+) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Minute)
+	defer deadline.Stop()
+	for {
+		select {
+		case event, ok := <-runWatch.ResultChan():
+			require.True(t, ok, "Run watch closed: %s", message)
+			require.NotEqual(t, watch.Error, event.Type, "Run watch failed")
+			run, ok := event.Object.(*nvidiacomv1beta2.DynamoGraphDeploymentRun)
+			require.Truef(t, ok, "Run watch returned %T", event.Object)
+			require.NotEqual(t, nvidiacomv1beta2.DGDRRunPhaseSucceeded, run.Status.Phase, "Run read a trace outside its claim")
+			if done(run) {
+				return
+			}
+		case <-deadline.C:
+			t.Fatal(message)
+		}
+	}
 }
 
 // startClusterTestDGDRV1beta2Controllers starts the production Request and Run controllers for env.

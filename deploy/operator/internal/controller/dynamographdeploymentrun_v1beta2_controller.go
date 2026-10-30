@@ -129,7 +129,7 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch;update
 // +kubebuilder:rbac:groups="",resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 
@@ -142,18 +142,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if run.DeletionTimestamp != nil {
+		// The trace claim reconciler releases the claim once the Jobs of the deleted Run are gone.
 		return ctrl.Result{}, nil
 	}
-
-	// A Run fails for its trace while its Job may still run, because the failure is recorded before
-	// the Job is deleted: a failed or stale write then leaves the Job in place rather than gone and
-	// recreated. Deleting it is the one step left for such a completed Run.
-	if completed := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted); completed != nil &&
-		completed.Status == metav1.ConditionTrue {
-		if completed.Reason != dgdrRunReasonTraceSourceUnavailable {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, r.deleteUnfinishedJobs(ctx, run)
+	if meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
+		return r.retireCompletedRun(ctx, run)
 	}
 
 	if condition := dgdrRunPendingPermanentFailure(run); condition != nil {
@@ -178,7 +171,8 @@ func dgdrRunPendingPermanentFailure(run *nvidiacomv1beta2.DynamoGraphDeploymentR
 		return nil
 	}
 	switch condition.Reason {
-	case dgdrRunReasonInvalidExecution, dgdrRunReasonInvalidResource, commoncontroller.EventReasonOwnershipConflict:
+	case dgdrRunReasonInvalidExecution, dgdrRunReasonInvalidResource, commoncontroller.EventReasonOwnershipConflict,
+		dgdrRunReasonTraceSourceUnavailable:
 		return condition
 	default:
 		return nil
@@ -200,7 +194,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) beginPermanentFailure(
 		ObservedGeneration: run.Generation,
 	})
 	// Like every Run status write, the marker carries the resourceVersion the cache showed, so a
-	// stale Run cannot overwrite a newer status, such as a recorded trace failure.
+	// stale Run cannot overwrite a newer status, such as a terminal cancellation.
 	if !apiequality.Semantic.DeepEqual(original.Status, run.Status) {
 		if err := r.Status().Patch(ctx, run, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
 			return ctrl.Result{}, &dgdrRunRetryableError{cause: fmt.Errorf("record permanent failure for Run %q: %w", run.Name, err)}
@@ -221,15 +215,12 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) finishPermanentFailure(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	stopped, err := r.stopOwnedJobs(ctx, run, jobs, "after permanent failure")
+	completed, err := r.stopAndCompleteRun(ctx, run, jobs, "after permanent failure", reason, cause.Error())
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !stopped {
+	if !completed {
 		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
-	}
-	if err := r.completeRun(ctx, run, reason, cause.Error()); err != nil {
-		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, reconcile.TerminalError(cause)
 }
@@ -252,44 +243,43 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
 		job = &jobs[0]
 	}
 	if supersedingGeneration, cancelRequested := dgdrRunSupersedingGeneration(run); cancelRequested {
-		return r.cancelSupersededRun(ctx, run, job, supersedingGeneration)
+		completed, err := r.stopAndCompleteRun(ctx, run, jobs, "for supersession", dgdrRunReasonSuperseded,
+			fmt.Sprintf("Run was superseded by Request generation %s", supersedingGeneration))
+		if err != nil || completed {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
 	}
 
-	// A Job that can never mount its trace would keep the Run active forever, so a Run that has not
-	// created its Job checks the claim before anything is created for it. A recorded jobRef, or a Job
-	// the API server already holds, means the Job was created even if the cache does not show it yet;
-	// it is checked below once the cache shows it.
+	// The trace claim decides whether the Run may execute, before anything is created for it.
+	var claim *corev1.PersistentVolumeClaim
+	if source := dgdrRunTraceClaim(run); source != nil {
+		claim, err = r.traceClaim(ctx, run, source)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// Deleting the claim cancels the Run whatever its pod has started, unless its Job already
+		// finished: the Job's own outcome then decides the Run. A claim that is gone after the Run
+		// created its Job was protected by the Run, so it was deleted, too. Before the first Job, a
+		// missing claim keeps the Run open, and only a claim no Job could ever mount fails it.
+		executed := job != nil || run.Status.JobRef != nil
+		switch {
+		case (claim != nil && claim.DeletionTimestamp != nil) || (claim == nil && executed):
+			if job == nil || !dgdrRunJobFinished(job) {
+				return r.cancelForDeletedTraceClaim(ctx, run, jobs, source)
+			}
+		case claim == nil:
+			return ctrl.Result{}, r.reportMissingTraceClaim(ctx, run, source)
+		case !executed:
+			if unusable := dgdrRunUnusableTraceClaim(claim); unusable != "" {
+				return r.beginPermanentFailure(ctx, run, dgdrRunReasonTraceSourceUnavailable, fmt.Errorf(
+					"trace PersistentVolumeClaim %q in namespace %q %s", source.ClaimName, run.Namespace, unusable))
+			}
+		}
+	}
+
 	resourceName := dgdrRunResourceName(run.Name)
-	if job == nil && run.Status.JobRef == nil {
-		unavailable, err := r.traceSourceUnavailable(ctx, run, false)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if unavailable != "" {
-			created, err := r.runJobExists(ctx, run, resourceName)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !created {
-				return ctrl.Result{}, r.completeRun(ctx, run, dgdrRunReasonTraceSourceUnavailable, unavailable)
-			}
-		}
-	}
-
-	// A Job whose sweeper can never read the trace would stay pending with nothing to end it: the
-	// Run fails, and the completed Run then deletes the Job. Claim and pod events wake the Run for
-	// this check.
-	if job != nil && dgdrRunTraceClaim(run) != nil && !dgdrRunJobFinished(job) {
-		unavailable, err := r.jobTraceUnavailable(ctx, run, job)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if unavailable != "" {
-			return ctrl.Result{}, r.completeRun(ctx, run, dgdrRunReasonTraceSourceUnavailable,
-				fmt.Sprintf("%s; Job %q is deleted", unavailable, job.Name))
-		}
-	}
-
 	if err := r.reconcilePublisherAccess(ctx, run, resourceName); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -301,6 +291,13 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
 		return ctrl.Result{}, err
 	}
 
+	// The Run protects its trace claim before it creates the Job and while the Job runs. claim is
+	// nil here for a Run without a trace, or for one whose claim is gone after its Job finished.
+	if claim != nil {
+		if err := r.protectTraceClaim(ctx, run, claim, job); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if job == nil {
 		job = r.buildJob(run, resourceName, execution)
 		if err := controllerutil.SetControllerReference(run, job, r.Scheme()); err != nil {
@@ -329,26 +326,24 @@ func dgdrRunSupersedingGeneration(run *nvidiacomv1beta2.DynamoGraphDeploymentRun
 	return cancelGenerationValue, err == nil && cancelGeneration > runGeneration
 }
 
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelSupersededRun(
+// stopAndCompleteRun stops every execution of run and, once the API server confirms that none is
+// left, completes run as Failed with reason and message. It reports whether run was completed;
+// otherwise the caller retries after the stop. jobs are the Jobs of run the cache shows. run must
+// not be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) stopAndCompleteRun(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-	job *batchv1.Job,
-	supersedingGeneration string,
-) (ctrl.Result, error) {
-	var cached []batchv1.Job
-	if job != nil {
-		cached = []batchv1.Job{*job}
+	jobs []batchv1.Job,
+	action, reason, message string,
+) (bool, error) {
+	stopped, err := r.stopOwnedJobs(ctx, run, jobs, action)
+	if err != nil || !stopped {
+		return false, err
 	}
-	stopped, err := r.stopOwnedJobs(ctx, run, cached, "for supersession")
-	if err != nil {
-		return ctrl.Result{}, err
+	if err := r.completeRun(ctx, run, reason, message); err != nil {
+		return false, err
 	}
-	if !stopped {
-		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
-	}
-
-	return ctrl.Result{}, r.completeRun(ctx, run, dgdrRunReasonSuperseded,
-		fmt.Sprintf("Run was superseded by Request generation %s", supersedingGeneration))
+	return true, nil
 }
 
 // stopOwnedJobs stops every execution visible through either the informer cache or the API
@@ -439,70 +434,192 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) ownedJobs(
 
 const (
 	dgdrRunReasonTraceSourceUnavailable = "TraceSourceUnavailable"
-	dgdrRunClaimProtectionFinalizer     = "kubernetes.io/pvc-protection"
+	dgdrRunReasonTraceSourceMissing     = "TraceSourceMissing"
+	dgdrRunReasonTraceSourceDeleted     = "TraceSourceDeleted"
+	dgdrRunReasonContainerWaiting       = "ContainerWaiting"
+	// dgdrRunTraceClaimFinalizerPrefix and the Run UID name the finalizer by which one Run protects
+	// its trace claim: nvidia.com/dgdr-run-<run-uid>.
+	dgdrRunTraceClaimFinalizerPrefix = "nvidia.com/dgdr-run-"
 )
 
-// traceSourceUnavailable returns why a Job could not mount the Run's trace claim, or "" when it
-// can or the Run replays no trace. scheduled tells whether a pod of the Job is already bound to a
-// node: the kubelet still mounts a claim being deleted while the pvc-protection finalizer keeps it
-// for that pod. The answer fails the Run terminally, so the claim is read through the uncached API
-// reader: claim events only wake the Run, and a claim the cache has not observed yet, such as one
-// created just before the Run, must not end it. A Pending claim is accepted: a WaitForFirstConsumer
-// claim binds only once its first pod is scheduled. Access modes are not checked: whether another
-// pod holds a ReadWriteOnce or ReadWriteOncePod claim is a scheduling question, not a terminal one.
-// Other read errors are returned for a retry. run must not be nil.
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) traceSourceUnavailable(
-	ctx context.Context,
-	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-	scheduled bool,
-) (string, error) {
-	source := dgdrRunTraceClaim(run)
-	if source == nil {
-		return "", nil
-	}
-	name := source.ClaimName
-	claim := &corev1.PersistentVolumeClaim{}
-	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: name}, claim)
-	if apierrors.IsNotFound(err) {
-		return fmt.Sprintf("trace PersistentVolumeClaim %q does not exist in namespace %q", name, run.Namespace), nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("get trace PersistentVolumeClaim %q in namespace %q: %w", name, run.Namespace, err)
-	}
-
-	// Each state below keeps the Job from ever mounting the claim read-only as a filesystem.
-	reason := ""
-	switch {
-	case claim.DeletionTimestamp != nil && !(scheduled && controllerutil.ContainsFinalizer(claim, dgdrRunClaimProtectionFinalizer)):
-		reason = "is being deleted"
-	case claim.Spec.VolumeMode != nil && *claim.Spec.VolumeMode == corev1.PersistentVolumeBlock:
-		reason = "is a raw block volume, not a filesystem"
-	case claim.Status.Phase == corev1.ClaimLost:
-		reason = "has lost its PersistentVolume"
-	default:
-		return "", nil
-	}
-	return fmt.Sprintf("trace PersistentVolumeClaim %q in namespace %q %s", name, run.Namespace, reason), nil
+// dgdrRunTraceClaimFinalizer returns the finalizer by which the Run with uid protects its trace
+// claim. Each Run holds its own, so Runs that share a claim never release each other's protection.
+func dgdrRunTraceClaimFinalizer(uid types.UID) string {
+	return dgdrRunTraceClaimFinalizerPrefix + string(uid)
 }
 
-// runJobExists reports whether the API server holds the Job this Run controls under name. Creating
-// the Job and recording its jobRef are separate writes, so a Job can exist while both the cache and
-// status.jobRef miss it. The Job is therefore read through the uncached API reader, and only right
-// before the Run would be failed terminally for its trace claim.
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) runJobExists(
+// traceClaim returns the claim source names, as the cache shows it, or nil when the cache shows no
+// such claim. A claim that has not appeared yet keeps the Run pending, and the claim's events wake
+// the Run, so the cache answers. run and source must not be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) traceClaim(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-	name string,
-) (bool, error) {
-	job := &batchv1.Job{}
-	err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: name}, job)
+	source *nvidiacomv1beta2.TracePVCSource,
+) (*corev1.PersistentVolumeClaim, error) {
+	claim := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: source.ClaimName}, claim)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("get Job %q of Run %q: %w", name, run.Name, err)
+		return nil, fmt.Errorf("get trace PersistentVolumeClaim %q in namespace %q: %w", source.ClaimName, run.Namespace, err)
 	}
-	return metav1.IsControlledBy(job, run), nil
+	return claim, nil
+}
+
+// dgdrRunUnusableTraceClaim returns why a Job could never mount claim read-only as a filesystem, or
+// "" when it can. Only structured fields decide: a raw block claim, or a claim that lost its
+// volume. A Pending claim is usable: a WaitForFirstConsumer claim binds only once its first pod is
+// scheduled. Access modes are not checked: whether another pod holds a ReadWriteOnce or
+// ReadWriteOncePod claim is a scheduling question. claim must not be nil.
+func dgdrRunUnusableTraceClaim(claim *corev1.PersistentVolumeClaim) string {
+	switch {
+	case claim.Spec.VolumeMode != nil && *claim.Spec.VolumeMode == corev1.PersistentVolumeBlock:
+		return "is a raw block volume, not a filesystem"
+	case claim.Status.Phase == corev1.ClaimLost:
+		return "has lost its PersistentVolume"
+	default:
+		return ""
+	}
+}
+
+// reportMissingTraceClaim keeps run open while its trace claim does not exist. The claim's creation
+// wakes the Run, which then starts. run and source must not be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reportMissingTraceClaim(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	source *nvidiacomv1beta2.TracePVCSource,
+) error {
+	original := run.DeepCopy()
+	run.Status.Phase = nvidiacomv1beta2.DGDRRunPhasePending
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
+		Status: metav1.ConditionFalse,
+		Reason: dgdrRunReasonTraceSourceMissing,
+		Message: fmt.Sprintf("trace PersistentVolumeClaim %q does not exist in namespace %q; the Run starts once it is created",
+			source.ClaimName, run.Namespace),
+		ObservedGeneration: run.Generation,
+	})
+	if apiequality.Semantic.DeepEqual(original.Status, run.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, run, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return &dgdrRunRetryableError{cause: fmt.Errorf("report the missing trace claim of Run %q: %w", run.Name, err)}
+	}
+	return nil
+}
+
+// protectTraceClaim adds the finalizer of run to claim, which the cache shows not being deleted.
+// Before the Run creates its Job, job is nil and the finalizer is patched even when the cache shows
+// it already: the patch carries the resourceVersion the cache showed, so the API server fails it
+// when the cached claim is stale, such as when the cache has not shown the claim's deletion yet, and
+// a successful patch confirms that the claim is not being deleted. The API server also refuses a new
+// finalizer on a claim being deleted. Every failure is retryable: the refused finalizer is reported
+// as Invalid, which would otherwise fail the Run permanently, and the next pass reads the claim again
+// and cancels the Run if the claim is being deleted. While job runs, a finalizer removed by hand is
+// restored; a finished job needs no protection. claim is updated to the stored object. run and claim
+// must not be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) protectTraceClaim(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	claim *corev1.PersistentVolumeClaim,
+	job *batchv1.Job,
+) error {
+	if job != nil && (dgdrRunJobFinished(job) || controllerutil.ContainsFinalizer(claim, dgdrRunTraceClaimFinalizer(run.UID))) {
+		return nil
+	}
+	original := claim.DeepCopy()
+	controllerutil.AddFinalizer(claim, dgdrRunTraceClaimFinalizer(run.UID))
+	if err := r.Patch(ctx, claim, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return &dgdrRunRetryableError{cause: fmt.Errorf("protect trace PersistentVolumeClaim %q for Run %q: %w", claim.Name, run.Name, err)}
+	}
+	return nil
+}
+
+// cancelForDeletedTraceClaim stops the execution of run because its trace claim is being deleted or
+// is gone, and then fails run with TraceSourceDeleted. jobs are the Jobs of run the cache shows.
+// When the cache shows none, a Job the API server already holds is stopped as well, unless it
+// finished: its own outcome decides the Run once the cache shows it. The Run keeps its finalizer on
+// the claim until it completes. run and source must not be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelForDeletedTraceClaim(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	jobs []batchv1.Job,
+	source *nvidiacomv1beta2.TracePVCSource,
+) (ctrl.Result, error) {
+	if len(jobs) == 0 {
+		live, err := r.uncachedOwnedJobs(ctx, run)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		for i := range live {
+			if dgdrRunJobFinished(&live[i]) {
+				return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+			}
+		}
+		jobs = live
+	}
+
+	completed, err := r.stopAndCompleteRun(ctx, run, jobs, "for its deleted trace claim", dgdrRunReasonTraceSourceDeleted,
+		fmt.Sprintf("trace PersistentVolumeClaim %q in namespace %q was deleted, which cancels the Run", source.ClaimName, run.Namespace))
+	if err != nil || completed {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+}
+
+// retireCompletedRun keeps a completed Run free of live executions and then releases its trace
+// claim. Completed=True means that no execution of the Run is left, but a stale pass can still
+// create a Job after the Run completed; such an unfinished Job is stopped. Releasing the claim is an
+// absence decision the cache cannot make alone, because the Job cache can miss a Job that was just
+// created, so the API server confirms that no unfinished Job of the Run is left first. run must not
+// be nil.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) retireCompletedRun(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+) (ctrl.Result, error) {
+	jobs, err := r.ownedJobs(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	unfinished := make([]batchv1.Job, 0, len(jobs))
+	for i := range jobs {
+		if !dgdrRunJobFinished(&jobs[i]) {
+			unfinished = append(unfinished, jobs[i])
+		}
+	}
+	if len(unfinished) > 0 {
+		if _, err := r.stopOwnedJobs(ctx, run, unfinished, "of a completed Run"); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+	}
+
+	// Only a trace claim that still carries the Run's finalizer needs the uncached confirmation.
+	source := dgdrRunTraceClaim(run)
+	if source == nil {
+		return ctrl.Result{}, nil
+	}
+	claim, err := r.traceClaim(ctx, run, source)
+	if err != nil || claim == nil || !controllerutil.ContainsFinalizer(claim, dgdrRunTraceClaimFinalizer(run.UID)) {
+		return ctrl.Result{}, err
+	}
+	live, err := r.uncachedOwnedJobs(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	for i := range live {
+		if !dgdrRunJobFinished(&live[i]) {
+			return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+		}
+	}
+
+	original := claim.DeepCopy()
+	controllerutil.RemoveFinalizer(claim, dgdrRunTraceClaimFinalizer(run.UID))
+	if err := r.Patch(ctx, claim, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return ctrl.Result{}, fmt.Errorf("release trace PersistentVolumeClaim %q of Run %q: %w", claim.Name, run.Name, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // dgdrRunTraceClaim returns the claim the Run's trace is read from, or nil when it replays no trace.
@@ -542,69 +659,16 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) runsForTraceClaim(ctx contex
 	return requests
 }
 
-// dgdrRunJobFinished reports whether job reports a finished pod or a terminal or interim terminal
-// condition, so its outcome no longer depends on the trace. The Job runs one pod, because its
-// backoffLimit is 0. job must not be nil.
+// dgdrRunJobFinished reports whether job has a terminal JobComplete or JobFailed condition. The Job
+// controller adds either only after the Job's pod terminated, so a finished Job no longer uses the
+// trace claim and its outcome is final. job must not be nil.
 func dgdrRunJobFinished(job *batchv1.Job) bool {
-	uncounted := job.Status.UncountedTerminatedPods
-	if job.Status.Succeeded > 0 || job.Status.Failed > 0 ||
-		(uncounted != nil && len(uncounted.Succeeded)+len(uncounted.Failed) > 0) {
-		return true
-	}
-	for _, conditionType := range []batchv1.JobConditionType{
-		batchv1.JobComplete, batchv1.JobFailed, batchv1.JobSuccessCriteriaMet, batchv1.JobFailureTarget,
-	} {
+	for _, conditionType := range []batchv1.JobConditionType{batchv1.JobComplete, batchv1.JobFailed} {
 		if condition := dgdrRunJobCondition(job, conditionType); condition != nil && condition.Status == corev1.ConditionTrue {
 			return true
 		}
 	}
 	return false
-}
-
-// jobTraceUnavailable returns why job, which has not finished, can never read the Run's trace, or
-// "" when it can or still may.
-//
-// A sweeper that cannot mount the trace file waits in CreateContainerConfigError until the pod is
-// deleted, so that is reported whatever the claim does. The claim itself matters until the sweeper
-// has started. Before its pod is scheduled, the pod cannot get a claim that is unusable. A scheduled
-// pod still cannot mount a claim that is gone, lost or a block volume, or one being deleted without
-// pvc-protection, as when the claim goes while the pod is bound; pvc-protection keeps a claim being
-// deleted for the pods bound to it, and the kubelet mounts it. While the cache shows fewer pods than
-// the Job counts as active, whether one is scheduled or started is unknown and nothing is reported;
-// the pod's event wakes the Run again. The pod cache can lag a binding by a moment, and a claim
-// deleted in that moment fails the Run although its pod just got the claim. run and job must not
-// be nil.
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) jobTraceUnavailable(
-	ctx context.Context,
-	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-	job *batchv1.Job,
-) (string, error) {
-	pods, err := r.jobPods(ctx, job)
-	if err != nil {
-		return "", err
-	}
-
-	// A trace file the sweeper cannot mount, whether or not the claim is usable.
-	source := dgdrRunTraceClaim(run)
-	for i := range pods {
-		if message := dgdrRunTraceMountFailure(&pods[i]); message != "" {
-			return fmt.Sprintf("trace file %q on PersistentVolumeClaim %q cannot be mounted: %s",
-				source.Path, source.ClaimName, message), nil
-		}
-	}
-
-	// The claim, until the sweeper has started.
-	if ptr.Deref(job.Status.Ready, 0) > 0 || int(job.Status.Active) > len(pods) {
-		return "", nil
-	}
-	scheduled := false
-	for i := range pods {
-		if dgdrRunSweeperStarted(&pods[i]) {
-			return "", nil
-		}
-		scheduled = scheduled || pods[i].Spec.NodeName != ""
-	}
-	return r.traceSourceUnavailable(ctx, run, scheduled)
 }
 
 // jobPods returns the pods job controls, as the cache shows them. job must not be nil.
@@ -622,52 +686,28 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) jobPods(ctx context.Context,
 	return pods, nil
 }
 
-// dgdrRunSweeperStarted reports whether pod's sweeper container has been created and started, so it
-// mounted the trace. The pod cache drops a running state, so a reported sweeper that is not waiting
-// has started. pod must not be nil.
-func dgdrRunSweeperStarted(pod *corev1.Pod) bool {
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == dgdrRunSweeperContainer &&
-			(status.State.Waiting == nil || status.LastTerminationState.Terminated != nil) {
-			return true
+// dgdrRunWaitingContainer returns the first sweeper, then publisher, container of pods that waits
+// for a reason other than its ordinary start, such as a mount, configuration or image error. The
+// result is only a diagnostic: a waiting container may start once its cause is fixed, so it never
+// ends the Run. Only the container name and its waiting reason and message are read, which the
+// operator's pod cache keeps.
+func dgdrRunWaitingContainer(pods []corev1.Pod) (string, corev1.ContainerStateWaiting, bool) {
+	for _, name := range []string{dgdrRunSweeperContainer, dgdrRunPublisherContainer} {
+		for i := range pods {
+			for _, status := range pods[i].Status.ContainerStatuses {
+				waiting := status.State.Waiting
+				if status.Name != name || waiting == nil {
+					continue
+				}
+				switch waiting.Reason {
+				case "", "ContainerCreating", "PodInitializing":
+					continue
+				}
+				return name, *waiting, true
+			}
 		}
 	}
-	return false
-}
-
-// dgdrRunTraceMountFailure returns the kubelet's message when pod's sweeper cannot start because
-// the trace file cannot be mounted, such as a missing file on a read-only claim or a symlink that
-// leaves the claim, or "" otherwise. pod must not be nil.
-func dgdrRunTraceMountFailure(pod *corev1.Pod) string {
-	for _, status := range pod.Status.ContainerStatuses {
-		waiting := status.State.Waiting
-		if status.Name == dgdrRunSweeperContainer && waiting != nil && waiting.Reason == "CreateContainerConfigError" &&
-			strings.Contains(waiting.Message, fmt.Sprintf("volumeMount %q", dgdrRunTraceVolume)) {
-			return waiting.Message
-		}
-	}
-	return ""
-}
-
-// deleteUnfinishedJobs deletes the Jobs run controls that have not finished, with their pods. run
-// failed because those Jobs could never read its trace. The UID precondition keeps a Job created
-// under the same name since the cache showed it. run must not be nil.
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) deleteUnfinishedJobs(ctx context.Context, run *nvidiacomv1beta2.DynamoGraphDeploymentRun) error {
-	jobs, err := r.ownedJobs(ctx, run)
-	if err != nil {
-		return err
-	}
-	for i := range jobs {
-		job := &jobs[i]
-		if dgdrRunJobFinished(job) {
-			continue
-		}
-		err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground), client.Preconditions{UID: &job.UID})
-		if client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("delete Job %q: %w", job.Name, err)
-		}
-	}
-	return nil
+	return "", corev1.ContainerStateWaiting{}, false
 }
 
 // dgdrRunJobPod reports whether obj is a pod of a Job named like a Run's AISimulate Job.
@@ -1616,6 +1656,20 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 		reason, message = dgdrRunReasonRunning, dgdrRunMessageRunning
 	}
 
+	// A container of the unfinished Job that waits on an error is reported verbatim. It keeps the
+	// Run open: the container may start once its cause is fixed, and only the Job's conditions or an
+	// explicit cancellation end the Run.
+	if completed == metav1.ConditionFalse {
+		pods, err := r.jobPods(ctx, job)
+		if err != nil {
+			return err
+		}
+		if container, waiting, found := dgdrRunWaitingContainer(pods); found {
+			reason = dgdrRunReasonContainerWaiting
+			message = fmt.Sprintf("container %q is waiting: %s: %s", container, waiting.Reason, waiting.Message)
+		}
+	}
+
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta2.DGDRRunConditionCompleted,
 		Status:             completed,
@@ -1624,8 +1678,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 		ObservedGeneration: run.Generation,
 	})
 
-	// A stale Run must not overwrite a newer status, such as a trace failure recorded while the Job
-	// was still pending, so the write carries the resourceVersion the cache showed.
+	// A stale Run must not overwrite a newer status, such as a terminal cancellation, so the write
+	// carries the resourceVersion the cache showed.
 	if apiequality.Semantic.DeepEqual(original.Status, run.Status) {
 		return nil
 	}

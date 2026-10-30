@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 )
@@ -1960,24 +1963,10 @@ func TestDGDRRunInputRebuildsANonObjectTraceSourceParent(t *testing.T) {
 
 func TestV1beta2RunControllerFailsARunWhoseTraceClaimCannotBeMounted(t *testing.T) {
 	tests := []struct {
-		name    string
-		missing bool
-		mutate  func(*corev1.PersistentVolumeClaim)
-		reason  string
+		name   string
+		mutate func(*corev1.PersistentVolumeClaim)
+		reason string
 	}{
-		{
-			name:    "missing claim",
-			missing: true,
-			reason:  `trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`,
-		},
-		{
-			name: "claim being deleted",
-			mutate: func(claim *corev1.PersistentVolumeClaim) {
-				claim.DeletionTimestamp = new(metav1.Now())
-				claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
-			},
-			reason: `trace PersistentVolumeClaim "request-traces" in namespace "default" is being deleted`,
-		},
 		{
 			name: "raw block claim",
 			mutate: func(claim *corev1.PersistentVolumeClaim) {
@@ -1995,17 +1984,19 @@ func TestV1beta2RunControllerFailsARunWhoseTraceClaimCannotBeMounted(t *testing.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objects := []client.Object{dgdrRunWithTraceForTest(t, map[string]any{})}
-			if !tt.missing {
-				claim := traceClaimForTest()
-				tt.mutate(claim)
-				objects = append(objects, claim)
-			}
-			f := newDGDRRunFixture(t, objects...)
+			claim := traceClaimForTest()
+			tt.mutate(claim)
+			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
+			request := ctrl.Request{Namespace: "default", Name: "search-1"}
 
-			t.Log("Reconcile twice: the first pass fails the Run, the second sees it completed")
-			f.reconcile()
-			f.reconcile()
+			t.Log("The first pass records the failure marker, the second confirms no Job exists and fails the Run")
+			result, err := f.reconciler.Reconcile(t.Context(), request)
+			if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+				t.Fatalf("marker result/error = %+v/%v, want a durable marker and a retry", result, err)
+			}
+			if _, err := f.reconciler.Reconcile(t.Context(), request); !errors.Is(err, reconcile.TerminalError(nil)) {
+				t.Fatalf("reconcile error = %v, want a terminal failure", err)
+			}
 
 			t.Log("The Run is Failed and Completed with the claim named in the message")
 			run := f.run()
@@ -2022,10 +2013,59 @@ func TestV1beta2RunControllerFailsARunWhoseTraceClaimCannotBeMounted(t *testing.
 				t.Fatalf("condition observedGeneration = %d, want %d", condition.ObservedGeneration, run.Generation)
 			}
 
-			t.Log("Nothing was created for the Run")
+			t.Log("Nothing was created for the Run, and the claim was never protected")
 			assertNoDGDRRunResources(t, f.client)
+			if stored, found := f.claim(); !found || len(stored.Finalizers) != 0 {
+				t.Fatalf("claim = %+v (found %t), want it without finalizers", stored, found)
+			}
 		})
 	}
+}
+
+func TestV1beta2RunControllerKeepsARunOpenUntilItsTraceClaimExists(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}))
+
+	t.Log("Without the claim the Run stays open with a diagnostic, and nothing is created for it")
+	f.reconcile()
+	f.reconcile()
+	run := f.run()
+	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if run.Status.Phase != nvidiacomv1beta2.DGDRRunPhasePending || condition == nil ||
+		condition.Status != metav1.ConditionFalse || condition.Reason != dgdrRunReasonTraceSourceMissing {
+		t.Fatalf("status = %+v, want Pending and Completed=False/%s", run.Status, dgdrRunReasonTraceSourceMissing)
+	}
+	want := `trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"; the Run starts once it is created`
+	if condition.Message != want || run.Status.CompletionTime != nil {
+		t.Fatalf("condition message = %q, completionTime = %v; want %q and no completion", condition.Message, run.Status.CompletionTime, want)
+	}
+	assertNoDGDRRunResources(t, f.client)
+
+	t.Log("The claim's creation wakes the Run, which protects the claim and starts")
+	if err := f.client.Create(t.Context(), traceClaimForTest()); err != nil {
+		t.Fatalf("create claim: %v", err)
+	}
+	if got := f.reconciler.runsForTraceClaim(t.Context(), traceClaimForTest()); len(got) != 1 || got[0].Name != "search-1" {
+		t.Fatalf("claim event requests = %v, want the Run", got)
+	}
+	f.reconcile()
+	assertDGDRRunPendingStatus(t, f.run(), f.job().Name)
+	assertDGDRRunTraceClaimFinalizers(t, f, dgdrRunTraceClaimFinalizer("run-uid"))
+}
+
+func TestV1beta2RunControllerCreatesNothingForATraceClaimBeingDeleted(t *testing.T) {
+	claim := traceClaimForTest()
+	claim.DeletionTimestamp = new(metav1.Now())
+	claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
+
+	t.Log("Deleting the claim before the first Job cancels the Run like a deletion after it")
+	f.reconcile()
+	f.reconcile()
+	assertDGDRRunCanceledForTrace(t, f.run(), "")
+
+	t.Log("Nothing was created, and no finalizer was added to the claim being deleted")
+	assertNoDGDRRunResources(t, f.client)
+	assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 }
 
 func assertNoDGDRRunResources(t *testing.T, c client.Client) {
@@ -2040,6 +2080,43 @@ func assertNoDGDRRunResources(t *testing.T, c client.Client) {
 		if n := meta.LenList(list); n != 0 {
 			t.Fatalf("%T has %d items, want none", list, n)
 		}
+	}
+}
+
+// claim returns the stored trace claim and whether it exists.
+func (f *dgdrRunFixture) claim() (*corev1.PersistentVolumeClaim, bool) {
+	f.t.Helper()
+	claim := &corev1.PersistentVolumeClaim{}
+	err := f.client.Get(f.t.Context(), types.NamespacedName{Namespace: "default", Name: "request-traces"}, claim)
+	if apierrors.IsNotFound(err) {
+		return nil, false
+	}
+	if err != nil {
+		f.t.Fatalf("get claim: %v", err)
+	}
+	return claim, true
+}
+
+// assertDGDRRunTraceClaimFinalizers checks that the stored trace claim carries exactly want.
+func assertDGDRRunTraceClaimFinalizers(t *testing.T, f *dgdrRunFixture, want ...string) {
+	t.Helper()
+	claim, found := f.claim()
+	if !found {
+		t.Fatalf("claim is gone, want finalizers %v", want)
+	}
+	if !slices.Equal(claim.Finalizers, want) {
+		t.Fatalf("claim finalizers = %v, want %v", claim.Finalizers, want)
+	}
+}
+
+func TestDGDRRunTraceClaimFinalizerIsAQualifiedName(t *testing.T) {
+	t.Log("A Run UID completes the finalizer to a qualified name within the length limits")
+	finalizer := dgdrRunTraceClaimFinalizer("0f8fad5b-d9cb-469f-a165-70867728950e")
+	if finalizer != "nvidia.com/dgdr-run-0f8fad5b-d9cb-469f-a165-70867728950e" {
+		t.Fatalf("finalizer = %q", finalizer)
+	}
+	if errs := validation.IsQualifiedName(finalizer); len(errs) != 0 {
+		t.Fatalf("finalizer %q is not a qualified name: %v", finalizer, errs)
 	}
 }
 
@@ -2060,6 +2137,9 @@ func TestV1beta2RunControllerAcceptsAnUnboundOrSharedTraceClaim(t *testing.T) {
 		{name: "claim without a volume mode", mutate: func(claim *corev1.PersistentVolumeClaim) {
 			claim.Spec.VolumeMode = nil
 		}},
+		{name: "claim protected by Kubernetes and another controller", mutate: func(claim *corev1.PersistentVolumeClaim) {
+			claim.Finalizers = []string{"kubernetes.io/pvc-protection", "example.com/hold"}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2068,16 +2148,19 @@ func TestV1beta2RunControllerAcceptsAnUnboundOrSharedTraceClaim(t *testing.T) {
 			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
 			f.reconcile()
 			assertDGDRRunPendingStatus(t, f.run(), f.job().Name)
+
+			t.Log("The claim keeps its finalizers and gains the Run's")
+			assertDGDRRunTraceClaimFinalizers(t, f, append(claim.Finalizers, dgdrRunTraceClaimFinalizer("run-uid"))...)
 		})
 	}
 }
 
 func TestV1beta2RunControllerRetriesATransientTraceClaimReadError(t *testing.T) {
 	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
-	f.reconciler.APIReader = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+	f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
-				return errors.New("API server unavailable")
+				return errors.New("cache unavailable")
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
@@ -2085,7 +2168,7 @@ func TestV1beta2RunControllerRetriesATransientTraceClaimReadError(t *testing.T) 
 
 	t.Log("A read error other than NotFound is returned for a retry")
 	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
-	if err == nil || !strings.Contains(err.Error(), "API server unavailable") {
+	if err == nil || !strings.Contains(err.Error(), "cache unavailable") {
 		t.Fatalf("reconcile error = %v, want the claim read error", err)
 	}
 
@@ -2096,127 +2179,238 @@ func TestV1beta2RunControllerRetriesATransientTraceClaimReadError(t *testing.T) 
 	assertNoDGDRRunResources(t, f.client)
 }
 
-func TestV1beta2RunControllerKeepsFollowingAStartedJobAfterItsTraceClaimDisappears(t *testing.T) {
+func TestV1beta2RunControllerProtectsTheTraceClaimBeforeCreatingTheJob(t *testing.T) {
 	tests := []struct {
-		name      string
-		status    batchv1.JobStatus
-		podNode   string
-		podPhase  corev1.PodPhase
-		wantPhase nvidiacomv1beta2.DGDRRunPhase
+		name string
+		// patchErr, when set, fails the claim patch that protects the claim.
+		patchErr error
+	}{
+		{name: "the protection is persisted"},
+		{name: "the claim patch fails", patchErr: errors.New("API server unavailable")},
+		{
+			name: "the claim patch conflicts with a newer claim",
+			patchErr: apierrors.NewConflict(schema.GroupResource{Resource: "persistentvolumeclaims"}, "request-traces",
+				errors.New("the object has been modified")),
+		},
+		{
+			name: "the API server refuses a new finalizer on a claim being deleted",
+			patchErr: apierrors.NewInvalid(schema.GroupKind{Kind: "PersistentVolumeClaim"}, "request-traces", field.ErrorList{
+				field.Forbidden(field.NewPath("metadata", "finalizers"), "no new finalizers can be added if the object is being deleted"),
+			}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			f := newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+						calls = append(calls, "protect claim")
+						if tt.patchErr != nil {
+							return tt.patchErr
+						}
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						calls = append(calls, "create Job")
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
+
+			t.Log("Reconcile the Run once")
+			_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{Namespace: "default", Name: "search-1"})
+
+			if tt.patchErr == nil {
+				t.Log("The claim is protected before the Job is created")
+				if err != nil {
+					t.Fatalf("reconcile: %v", err)
+				}
+				if want := []string{"protect claim", "create Job"}; !reflect.DeepEqual(calls, want) {
+					t.Fatalf("calls = %v, want %v", calls, want)
+				}
+				assertDGDRRunTraceClaimFinalizers(t, f, dgdrRunTraceClaimFinalizer("run-uid"))
+				return
+			}
+
+			t.Log("A failed protection is retried: no Job is created and the Run is not failed")
+			if err == nil || dgdrRunIsPermanentError(err) {
+				t.Fatalf("reconcile error = %v, want a retryable error", err)
+			}
+			if want := []string{"protect claim"}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("calls = %v, want %v", calls, want)
+			}
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("Jobs = %d, want none without protection", len(jobs))
+			}
+			if run := f.run(); len(run.Status.Conditions) != 0 {
+				t.Fatalf("status = %+v, want untouched", run.Status)
+			}
+		})
+	}
+}
+
+func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
+	waitingSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: "failed to prepare subPath"},
+	}}}
+	creatingSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+	}}}
+	runningSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
+		Running: &corev1.ContainerStateRunning{},
+	}}}
+	tests := []struct {
+		name   string
+		status batchv1.JobStatus
+		// pod, when set, is the Job's pod as the cache shows it.
+		pod *corev1.PodStatus
+		// podNode binds the pod to a node.
+		podNode string
+		// removeClaim removes the claim completely, as when its finalizers were removed by hand.
+		removeClaim bool
 	}{
 		{
-			name:      "pod scheduled while its images are pulled",
-			status:    batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-			podNode:   "node-a",
-			podPhase:  corev1.PodPending,
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the Job counts a pod the pod cache does not show",
+			status: batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
 		},
 		{
-			name:      "a container exited after the pod was ready",
-			status:    batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-			podNode:   "node-a",
-			podPhase:  corev1.PodRunning,
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the pod is not scheduled",
+			status: batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
+			pod:    &corev1.PodStatus{Phase: corev1.PodPending},
 		},
 		{
-			name:      "pod ready while the pod cache still shows it unscheduled",
-			status:    batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
-			podPhase:  corev1.PodPending,
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:    "the pod is scheduled while its images are pulled",
+			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
+			pod:     &corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: creatingSweeper},
+			podNode: "node-a",
 		},
 		{
-			name:      "Job tracks a succeeded pod it has not counted",
-			status:    batchv1.JobStatus{UncountedTerminatedPods: &batchv1.UncountedTerminatedPods{Succeeded: []types.UID{"pod"}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:    "the sweeper waits on a mount error",
+			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
+			pod:     &corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: waitingSweeper},
+			podNode: "node-a",
 		},
 		{
-			name:      "Job tracks a failed pod it has not counted",
-			status:    batchv1.JobStatus{UncountedTerminatedPods: &batchv1.UncountedTerminatedPods{Failed: []types.UID{"pod"}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:    "the sweeper runs",
+			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
+			pod:     &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
+			podNode: "node-a",
 		},
 		{
-			name:      "Job met its success criteria",
-			status:    batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the pod is ready while the pod cache still shows it unscheduled",
+			status: batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
+			pod:    &corev1.PodStatus{Phase: corev1.PodPending},
 		},
 		{
-			name:      "Job reached its failure target",
-			status:    batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the Job tracks a succeeded pod it has not counted",
+			status: batchv1.JobStatus{UncountedTerminatedPods: &batchv1.UncountedTerminatedPods{Succeeded: []types.UID{"pod"}}},
 		},
 		{
-			name:      "Job counted a succeeded pod",
-			status:    batchv1.JobStatus{Succeeded: 1},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the Job met its success criteria",
+			status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue}}},
 		},
 		{
-			name:      "Job counted a failed pod",
-			status:    batchv1.JobStatus{Failed: 1},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseRunning,
+			name:   "the Job reached its failure target",
+			status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}}},
 		},
 		{
-			name:      "Job complete",
-			status:    batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded,
-		},
-		{
-			name:      "Job failed",
-			status:    batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}},
-			wantPhase: nvidiacomv1beta2.DGDRRunPhaseFailed,
+			name:        "the claim is gone after its finalizers were removed by hand",
+			status:      batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
+			pod:         &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
+			podNode:     "node-a",
+			removeClaim: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claim := traceClaimForTest()
 			claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
-			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
+			var propagation []metav1.DeletionPropagation
+			f := newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						options := &client.DeleteOptions{}
+						options.ApplyOptions(opts)
+						propagation = append(propagation, ptr.Deref(options.PropagationPolicy, ""))
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
 			f.reconcile()
+			finalizer := dgdrRunTraceClaimFinalizer("run-uid")
+			assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", finalizer)
 
-			t.Log("The Job, and its pod where the row has one, report the pod past the claim")
+			t.Log("The Job reports the row's execution state; a test finalizer stands in for its pods' cleanup")
 			job := f.job()
+			job.Finalizers = []string{"example.com/pods-terminating"}
+			if err := f.client.Update(t.Context(), job); err != nil {
+				t.Fatalf("hold Job deletion: %v", err)
+			}
 			job.Status = tt.status
 			job.Status.StartTime = new(metav1.Now())
 			if err := f.client.Status().Update(t.Context(), job); err != nil {
 				t.Fatalf("update Job status: %v", err)
 			}
-			if tt.podPhase != "" {
-				createDGDRRunJobPodForTest(t, f.client, job, tt.podNode, corev1.PodStatus{Phase: tt.podPhase})
+			if tt.pod != nil {
+				createDGDRRunJobPodForTest(t, f.client, job, tt.podNode, *tt.pod)
 			}
+			f.reconcile()
 
 			t.Log("Delete the claim")
 			if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
 				t.Fatalf("delete claim: %v", err)
 			}
-
-			t.Log("Hide the Job from the cached List, as a lagging informer would")
-			cached := f.reconciler.Client
-			f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
-				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					if _, ok := list.(*batchv1.JobList); ok {
-						return nil
-					}
-					return c.List(ctx, list, opts...)
-				},
-			})
-			_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
-			if !apierrors.IsAlreadyExists(err) {
-				t.Fatalf("reconcile error = %v, want the Job create to hit AlreadyExists until the cache catches up", err)
+			if tt.removeClaim {
+				stored, _ := f.claim()
+				stored.Finalizers = nil
+				if err := f.client.Update(t.Context(), stored); err != nil {
+					t.Fatalf("remove claim finalizers: %v", err)
+				}
 			}
 
-			t.Log("Once the cache shows the Job again, the Job, not the claim, decides the Run")
-			f.reconciler.Client = cached
+			t.Log("The Run stops its Job in the foreground and stays open while the Job is deleted")
 			f.reconcile()
-			if kept := f.job(); kept.UID != job.UID {
-				t.Fatalf("Job UID = %q, want the started Job %q kept", kept.UID, job.UID)
+			f.reconcile()
+			if stopped := f.job(); stopped.UID != job.UID || stopped.DeletionTimestamp == nil {
+				t.Fatalf("Job = %+v, want the Job %q being deleted", stopped.ObjectMeta, job.UID)
 			}
-			run := f.run()
-			if run.Status.Phase != tt.wantPhase {
-				t.Fatalf("phase = %q, want %q", run.Status.Phase, tt.wantPhase)
+			if !reflect.DeepEqual(propagation, []metav1.DeletionPropagation{metav1.DeletePropagationForeground}) {
+				t.Fatalf("Job deletions = %v, want one foreground deletion", propagation)
 			}
-			condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
-			if condition == nil || condition.Reason == dgdrRunReasonTraceSourceUnavailable {
-				t.Fatalf("Completed condition = %+v, want the Job, not the claim, to decide it", condition)
+			if meta.IsStatusConditionTrue(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
+				t.Fatalf("status = %+v, want the Run open until its Job is gone", f.run().Status)
 			}
+			if !tt.removeClaim {
+				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", finalizer)
+			}
+
+			t.Log("Once the Job and its pods are gone, the Run fails with TraceSourceDeleted and keeps the claim until then")
+			job = f.job()
+			job.Finalizers = nil
+			if err := f.client.Update(t.Context(), job); err != nil {
+				t.Fatalf("finish Job deletion: %v", err)
+			}
+			f.reconcile()
+			assertDGDRRunCanceledForTrace(t, f.run(), job.Name)
+			if !tt.removeClaim {
+				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", finalizer)
+			}
+
+			t.Log("The completed Run releases the claim and never recreates its Job")
+			f.reconcile()
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("Jobs = %d, want none", len(jobs))
+			}
+			if tt.removeClaim {
+				if _, found := f.claim(); found {
+					t.Fatal("claim exists, want it gone")
+				}
+				return
+			}
+			assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 		})
 	}
 }
@@ -2240,338 +2434,319 @@ func createDGDRRunJobPodForTest(t *testing.T, c client.Client, job *batchv1.Job,
 	}
 }
 
-// assertDGDRRunFailedForTrace checks that the Run failed for its trace with a message that starts
-// with reason and names the Job, and that the completed Run deleted that Job.
-func assertDGDRRunFailedForTrace(t *testing.T, c client.Client, run *nvidiacomv1beta2.DynamoGraphDeploymentRun, jobName, reason string) {
+// assertDGDRRunCanceledForTrace checks that run failed because its trace claim was deleted, with the
+// jobRef of jobName, or none when jobName is empty.
+func assertDGDRRunCanceledForTrace(t *testing.T, run *nvidiacomv1beta2.DynamoGraphDeploymentRun, jobName string) {
 	t.Helper()
-	jobs := &batchv1.JobList{}
-	if err := c.List(t.Context(), jobs, client.InNamespace("default")); err != nil {
-		t.Fatalf("list Jobs: %v", err)
-	}
-	if len(jobs.Items) != 0 {
-		t.Fatalf("Jobs = %d, want the Job that could never read the trace deleted", len(jobs.Items))
-	}
 	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
 	if run.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseFailed || condition == nil ||
-		condition.Status != metav1.ConditionTrue || condition.Reason != dgdrRunReasonTraceSourceUnavailable {
-		t.Fatalf("status = %+v, want Failed and Completed=True/%s", run.Status, dgdrRunReasonTraceSourceUnavailable)
+		condition.Status != metav1.ConditionTrue || condition.Reason != dgdrRunReasonTraceSourceDeleted {
+		t.Fatalf("status = %+v, want Failed and Completed=True/%s", run.Status, dgdrRunReasonTraceSourceDeleted)
 	}
-	wantSuffix := fmt.Sprintf(`; Job %q is deleted`, jobName)
-	if !strings.HasPrefix(condition.Message, reason) || !strings.HasSuffix(condition.Message, wantSuffix) {
-		t.Fatalf("condition message = %q, want prefix %q and suffix %q", condition.Message, reason, wantSuffix)
+	want := `trace PersistentVolumeClaim "request-traces" in namespace "default" was deleted, which cancels the Run`
+	if condition.Message != want || run.Status.CompletionTime == nil {
+		t.Fatalf("condition message = %q, completionTime = %v; want %q and a completion time",
+			condition.Message, run.Status.CompletionTime, want)
 	}
-	if run.Status.CompletionTime == nil || run.Status.JobRef == nil || run.Status.JobRef.Name != jobName {
-		t.Fatalf("completionTime = %v, jobRef = %+v; want a completion time and the Job's jobRef",
-			run.Status.CompletionTime, run.Status.JobRef)
-	}
-}
-
-func TestV1beta2RunControllerDeletesAnUnscheduledJobWhoseTraceClaimBecomesUnusable(t *testing.T) {
-	tests := []struct {
-		name         string
-		finalizers   []string
-		deleteClaim  bool
-		mutate       func(*corev1.PersistentVolumeClaim)
-		updateStatus bool
-		reason       string
-	}{
-		{
-			name:        "claim deleted",
-			deleteClaim: true,
-			reason:      `trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`,
-		},
-		{
-			name:        "claim being deleted",
-			finalizers:  []string{"kubernetes.io/pvc-protection"},
-			deleteClaim: true,
-			reason:      `trace PersistentVolumeClaim "request-traces" in namespace "default" is being deleted`,
-		},
-		{
-			name: "claim replaced by a raw block claim",
-			mutate: func(claim *corev1.PersistentVolumeClaim) {
-				claim.Spec.VolumeMode = ptr.To(corev1.PersistentVolumeBlock)
-			},
-			reason: `trace PersistentVolumeClaim "request-traces" in namespace "default" is a raw block volume`,
-		},
-		{
-			name:         "claim lost its volume",
-			mutate:       func(claim *corev1.PersistentVolumeClaim) { claim.Status.Phase = corev1.ClaimLost },
-			updateStatus: true,
-			reason:       `trace PersistentVolumeClaim "request-traces" in namespace "default" has lost its PersistentVolume`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			claim := traceClaimForTest()
-			claim.Finalizers = tt.finalizers
-			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
-			f.reconcile()
-			job := f.job()
-
-			t.Log("The Job's pod is created but not scheduled yet")
-			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
-			if err := f.client.Status().Update(t.Context(), job); err != nil {
-				t.Fatalf("update Job status: %v", err)
-			}
-			createDGDRRunJobPodForTest(t, f.client, job, "", corev1.PodStatus{Phase: corev1.PodPending})
-			f.reconcile()
-			assertDGDRRunRunningStatus(t, f.run(), job.Name)
-
-			t.Log("The claim becomes unusable before the pod is scheduled")
-			if tt.deleteClaim {
-				if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
-					t.Fatalf("delete claim: %v", err)
-				}
-			}
-			if tt.mutate != nil {
-				stored := &corev1.PersistentVolumeClaim{}
-				if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(claim), stored); err != nil {
-					t.Fatalf("get claim: %v", err)
-				}
-				tt.mutate(stored)
-				var err error
-				if tt.updateStatus {
-					err = f.client.Status().Update(t.Context(), stored)
-				} else {
-					err = f.client.Update(t.Context(), stored)
-				}
-				if err != nil {
-					t.Fatalf("update claim: %v", err)
-				}
-			}
-
-			t.Log("Reconcile twice: the first pass fails the Run, the second deletes the Job of the completed Run")
-			f.reconcile()
-			f.reconcile()
-			assertDGDRRunFailedForTrace(t, f.client, f.run(), job.Name, tt.reason)
-		})
+	if (jobName == "" && run.Status.JobRef != nil) || (jobName != "" && (run.Status.JobRef == nil || run.Status.JobRef.Name != jobName)) {
+		t.Fatalf("jobRef = %+v, want %q", run.Status.JobRef, jobName)
 	}
 }
 
-func TestV1beta2RunControllerDeletesAJobWhoseSweeperCannotMountTheTraceFile(t *testing.T) {
-	const prefix = `trace file "retune/w-1.jsonl.gz" on PersistentVolumeClaim "request-traces" cannot be mounted: `
+func TestV1beta2RunControllerLetsAFinishedJobDecideAfterItsTraceClaimIsDeleted(t *testing.T) {
 	tests := []struct {
 		name       string
-		container  string
-		reason     string
-		message    string
-		wantFailed bool
+		condition  batchv1.JobConditionType
+		wantPhase  nvidiacomv1beta2.DGDRRunPhase
+		wantReason string
+		// hideJob hides the Job from the cached List for the first pass after the deletion.
+		hideJob bool
 	}{
-		{
-			name:       "a subPath that resolves outside the claim",
-			container:  dgdrRunSweeperContainer,
-			reason:     "CreateContainerConfigError",
-			message:    `failed to prepare subPath for volumeMount "trace" of container "sweeper"`,
-			wantFailed: true,
-		},
-		{
-			name:       "a missing file on a read-only claim",
-			container:  dgdrRunSweeperContainer,
-			reason:     "CreateContainerConfigError",
-			message:    `failed to create subPath directory for volumeMount "trace" of container "sweeper"`,
-			wantFailed: true,
-		},
-		{
-			name:      "another volume of the sweeper is left to the Job",
-			container: dgdrRunSweeperContainer,
-			reason:    "CreateContainerConfigError",
-			message:   `failed to prepare subPath for volumeMount "input" of container "sweeper"`,
-		},
-		{
-			name:      "the publisher is left to the Job",
-			container: dgdrRunPublisherContainer,
-			reason:    "CreateContainerConfigError",
-			message:   `failed to prepare subPath for volumeMount "trace" of container "publisher"`,
-		},
-		{
-			name:      "a sweeper image that cannot be pulled is left to the Job",
-			container: dgdrRunSweeperContainer,
-			reason:    "ErrImagePull",
-			message:   `failed to pull image`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
-			f.reconcile()
-			job := f.job()
-
-			t.Log("The scheduled pod's container waits with the row's reason while the claim is usable")
-			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
-			if err := f.client.Status().Update(t.Context(), job); err != nil {
-				t.Fatalf("update Job status: %v", err)
-			}
-			createDGDRRunJobPodForTest(t, f.client, job, "node-a", corev1.PodStatus{
-				Phase: corev1.PodPending,
-				ContainerStatuses: []corev1.ContainerStatus{{
-					Name:  tt.container,
-					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: tt.reason, Message: tt.message}},
-				}},
-			})
-
-			t.Log("Reconcile twice and expect only a trace mount failure to fail the Run and delete its Job")
-			f.reconcile()
-			f.reconcile()
-			if !tt.wantFailed {
-				if kept := f.job(); kept.UID != job.UID {
-					t.Fatalf("Job UID = %q, want the Job %q kept", kept.UID, job.UID)
-				}
-				assertDGDRRunRunningStatus(t, f.run(), job.Name)
-				return
-			}
-			assertDGDRRunFailedForTrace(t, f.client, f.run(), job.Name, prefix+tt.message)
-		})
-	}
-}
-
-func TestV1beta2RunControllerFailsAScheduledJobOnlyForAClaimItCanNeverMount(t *testing.T) {
-	tests := []struct {
-		name           string
-		finalizers     []string
-		deleteClaim    bool
-		lose           bool
-		sweeperStarted bool
-		reason         string
-	}{
-		{
-			name:        "claim being deleted while pvc-protection keeps it for the pod",
-			finalizers:  []string{"kubernetes.io/pvc-protection"},
-			deleteClaim: true,
-		},
-		{
-			name:        "claim gone while the pod was bound",
-			deleteClaim: true,
-			reason:      `trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`,
-		},
-		{
-			name:        "claim being deleted without pvc-protection",
-			finalizers:  []string{"example.com/hold"},
-			deleteClaim: true,
-			reason:      `trace PersistentVolumeClaim "request-traces" in namespace "default" is being deleted`,
-		},
-		{
-			name:   "claim lost its volume",
-			lose:   true,
-			reason: `trace PersistentVolumeClaim "request-traces" in namespace "default" has lost its PersistentVolume`,
-		},
-		{
-			name:           "sweeper started before the claim went",
-			deleteClaim:    true,
-			sweeperStarted: true,
-		},
+		{name: "the Job completed", condition: batchv1.JobComplete,
+			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded, wantReason: dgdrRunReasonSucceeded},
+		{name: "the Job failed", condition: batchv1.JobFailed,
+			wantPhase: nvidiacomv1beta2.DGDRRunPhaseFailed, wantReason: dgdrRunReasonJobFailed},
+		{name: "the Job completed but the cache does not show it yet", condition: batchv1.JobComplete,
+			wantPhase: nvidiacomv1beta2.DGDRRunPhaseSucceeded, wantReason: dgdrRunReasonSucceeded, hideJob: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claim := traceClaimForTest()
-			claim.Finalizers = tt.finalizers
+			claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
 			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
 			f.reconcile()
+
+			t.Log("The Job finishes, and then the claim is deleted")
 			job := f.job()
-
-			t.Log("The Job's pod is bound to a node; its sweeper is created or still waits")
-			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
+			job.Status.StartTime = new(metav1.Now())
+			job.Status.Conditions = []batchv1.JobCondition{{Type: tt.condition, Status: corev1.ConditionTrue}}
 			if err := f.client.Status().Update(t.Context(), job); err != nil {
-				t.Fatalf("update Job status: %v", err)
+				t.Fatalf("finish Job: %v", err)
 			}
-			sweeper := corev1.ContainerStatus{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
-				Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
-			}}
-			if tt.sweeperStarted {
-				sweeper.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
-			}
-			createDGDRRunJobPodForTest(t, f.client, job, "node-a", corev1.PodStatus{
-				Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{sweeper},
-			})
-
-			t.Log("The claim changes after the binding")
-			if tt.deleteClaim {
-				if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
-					t.Fatalf("delete claim: %v", err)
-				}
-			}
-			if tt.lose {
-				stored := &corev1.PersistentVolumeClaim{}
-				if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(claim), stored); err != nil {
-					t.Fatalf("get claim: %v", err)
-				}
-				stored.Status.Phase = corev1.ClaimLost
-				if err := f.client.Status().Update(t.Context(), stored); err != nil {
-					t.Fatalf("lose claim: %v", err)
-				}
+			if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
+				t.Fatalf("delete claim: %v", err)
 			}
 
-			t.Log("Reconcile twice and expect only a claim the pod can never mount to end the Run")
-			f.reconcile()
-			f.reconcile()
-			if tt.reason == "" {
-				if kept := f.job(); kept.UID != job.UID {
-					t.Fatalf("Job UID = %q, want the Job %q kept", kept.UID, job.UID)
+			if tt.hideJob {
+				t.Log("A pass that finds the finished Job only in the API server waits for the cache")
+				cached := f.reconciler.Client
+				f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*batchv1.JobList); ok {
+							return nil
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+				result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+				if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+					t.Fatalf("result/error = %+v/%v, want a retry", result, err)
 				}
-				assertDGDRRunRunningStatus(t, f.run(), job.Name)
-				return
+				f.reconciler.Client = cached
 			}
-			assertDGDRRunFailedForTrace(t, f.client, f.run(), job.Name, tt.reason)
+
+			t.Log("The finished Job is kept and decides the Run")
+			f.reconcile()
+			if kept := f.job(); kept.UID != job.UID || kept.DeletionTimestamp != nil {
+				t.Fatalf("Job = %+v, want the finished Job %q kept", kept.ObjectMeta, job.UID)
+			}
+			run := f.run()
+			condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+			if run.Status.Phase != tt.wantPhase || condition == nil || condition.Status != metav1.ConditionTrue ||
+				condition.Reason != tt.wantReason {
+				t.Fatalf("status = %+v, want %s and Completed=True/%s", run.Status, tt.wantPhase, tt.wantReason)
+			}
+
+			t.Log("The completed Run releases the claim")
+			f.reconcile()
+			assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 		})
 	}
 }
 
-func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceFailure(t *testing.T) {
+func TestV1beta2RunControllerReleasesTheTraceClaimOnlyAfterTheRunCompletes(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
+	f.reconcile()
+	finalizer := dgdrRunTraceClaimFinalizer("run-uid")
+
+	t.Log("The running Run keeps its protection")
+	job := f.job()
+	job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(1)), StartTime: new(metav1.Now())}
+	if err := f.client.Status().Update(t.Context(), job); err != nil {
+		t.Fatalf("start Job: %v", err)
+	}
+	f.reconcile()
+	assertDGDRRunRunningStatus(t, f.run(), job.Name)
+	assertDGDRRunTraceClaimFinalizers(t, f, finalizer)
+
+	t.Log("The Job completes; the pass that records the outcome keeps the protection")
+	job = f.job()
+	job.Status.Active, job.Status.Ready = 0, new(int32(0))
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.client.Status().Update(t.Context(), job); err != nil {
+		t.Fatalf("complete Job: %v", err)
+	}
+	f.reconcile()
+	if f.run().Status.Phase != nvidiacomv1beta2.DGDRRunPhaseSucceeded {
+		t.Fatalf("status = %+v, want Succeeded", f.run().Status)
+	}
+	assertDGDRRunTraceClaimFinalizers(t, f, finalizer)
+
+	t.Log("The completed Run releases the claim and keeps its finished Job")
+	f.reconcile()
+	assertDGDRRunTraceClaimFinalizers(t, f)
+	if kept := f.job(); kept.UID != job.UID {
+		t.Fatalf("Job UID = %q, want the finished Job %q kept", kept.UID, job.UID)
+	}
+}
+
+func TestV1beta2RunControllerStopsAnUnfinishedJobOfACompletedRunBeforeReleasingItsClaim(t *testing.T) {
 	tests := []struct {
 		name string
-		// jobCondition, when set, finishes the Job after the trace failure was recorded.
-		jobCondition batchv1.JobConditionType
-		// duplicateJob adds a second, unfinished Job the Run controls, so the stale pass fails the
-		// Run permanently and writes the permanent-failure marker.
-		duplicateJob bool
+		// hideJob hides the Job from the cached List until the last step.
+		hideJob bool
 	}{
-		{name: "the trace is still unreadable"},
-		{name: "the Job completes after the failure", jobCondition: batchv1.JobComplete},
-		{name: "a second Job appears after the Job completes", jobCondition: batchv1.JobComplete, duplicateJob: true},
+		{name: "the cache shows the Job"},
+		{name: "only the API server shows the Job", hideJob: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
 			f.reconcile()
 			job := f.job()
+			finalizer := dgdrRunTraceClaimFinalizer("run-uid")
 
-			t.Log("The Job's pod waits unscheduled while the Run is Running")
-			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
+			t.Log("The Run is completed while its Job still runs, as after a stale pass created the Job")
+			run := f.run()
+			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+				Type: nvidiacomv1beta2.DGDRRunConditionCompleted, Status: metav1.ConditionTrue,
+				Reason: dgdrRunReasonSuperseded, Message: "Run was superseded by Request generation 2",
+			})
+			run.Status.Phase = nvidiacomv1beta2.DGDRRunPhaseFailed
+			if err := f.client.Status().Update(t.Context(), run); err != nil {
+				t.Fatalf("complete Run: %v", err)
+			}
+
+			if tt.hideJob {
+				t.Log("While the cache misses the Job, the API server keeps the claim protected")
+				cached := f.reconciler.Client
+				f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*batchv1.JobList); ok {
+							return nil
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+				result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+				if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+					t.Fatalf("result/error = %+v/%v, want a retry", result, err)
+				}
+				assertDGDRRunTraceClaimFinalizers(t, f, finalizer)
+				f.reconciler.Client = cached
+			}
+
+			t.Log("The completed Run stops the Job before it releases the claim")
+			f.reconcile()
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("Jobs = %d, want the unfinished Job %q stopped", len(jobs), job.UID)
+			}
+			assertDGDRRunTraceClaimFinalizers(t, f, finalizer)
+			f.reconcile()
+			assertDGDRRunTraceClaimFinalizers(t, f)
+			if condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted); condition == nil ||
+				condition.Reason != dgdrRunReasonSuperseded {
+				t.Fatalf("Completed condition = %+v, want the recorded outcome kept", condition)
+			}
+		})
+	}
+}
+
+func TestV1beta2RunControllerKeepsAnotherRunsProtectionOfASharedTraceClaim(t *testing.T) {
+	first := dgdrRunWithTraceForTest(t, map[string]any{})
+	second := dgdrRunWithTraceForTest(t, map[string]any{})
+	second.Name, second.UID = "search-2", "run-uid-2"
+	f := newDGDRRunFixture(t, first, second, traceClaimForTest())
+
+	t.Log("Each Run protects the shared claim with its own finalizer")
+	f.reconcile()
+	if _, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(second)}); err != nil {
+		t.Fatalf("reconcile second Run: %v", err)
+	}
+	assertDGDRRunTraceClaimFinalizers(t, f, dgdrRunTraceClaimFinalizer("run-uid"), dgdrRunTraceClaimFinalizer("run-uid-2"))
+
+	t.Log("The first Run completes and releases only its own protection")
+	var job *batchv1.Job
+	jobs := f.jobs()
+	for i := range jobs {
+		if metav1.IsControlledBy(&jobs[i], first) {
+			job = &jobs[i]
+		}
+	}
+	if job == nil {
+		t.Fatalf("Jobs = %d, want one of the first Run", len(jobs))
+	}
+	job.Status.StartTime = new(metav1.Now())
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.client.Status().Update(t.Context(), job); err != nil {
+		t.Fatalf("complete first Job: %v", err)
+	}
+	f.reconcile()
+	f.reconcile()
+	assertDGDRRunTraceClaimFinalizers(t, f, dgdrRunTraceClaimFinalizer("run-uid-2"))
+}
+
+func TestV1beta2RunControllerNeverRecreatesACanceledJobWhileItsOutcomeIsUnrecorded(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
+	f.reconcile()
+	f.reconcile()
+	jobName := f.job().Name
+	assertDGDRRunPendingStatus(t, f.run(), jobName)
+
+	t.Log("Delete the claim; the first pass stops the Job")
+	if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
+		t.Fatalf("delete claim: %v", err)
+	}
+	f.reconcile()
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want the Job stopped", len(jobs))
+	}
+
+	t.Log("Fail the status patch that records the cancellation")
+	cached := f.reconciler.Client
+	f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return errors.New("injected status patch failure")
+		},
+	})
+	if _, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())}); err == nil {
+		t.Fatal("reconcile error = nil, want the injected status patch failure")
+	}
+
+	t.Log("The claim is still being deleted, so no pass creates another Job")
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want none", len(jobs))
+	}
+	assertDGDRRunPendingStatus(t, f.run(), jobName)
+
+	t.Log("The next pass records the cancellation")
+	f.reconciler.Client = cached
+	f.reconcile()
+	assertDGDRRunCanceledForTrace(t, f.run(), jobName)
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want none", len(jobs))
+	}
+}
+
+func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		// recreateClaim replaces the deleted claim with a new one under the same name before the stale
+		// pass, so the stale pass protects it and creates a Job for the completed Run.
+		recreateClaim bool
+	}{
+		{name: "the claim is still being deleted"},
+		{name: "the claim was recreated under the same name", recreateClaim: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := traceClaimForTest()
+			claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
+			f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
+			f.reconcile()
+			job := f.job()
+
+			t.Log("The Job runs while the Run is Running")
+			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(1)), StartTime: new(metav1.Now())}
 			if err := f.client.Status().Update(t.Context(), job); err != nil {
 				t.Fatalf("update Job status: %v", err)
 			}
-			createDGDRRunJobPodForTest(t, f.client, job, "", corev1.PodStatus{Phase: corev1.PodPending})
 			f.reconcile()
 			stale := f.run()
 			assertDGDRRunRunningStatus(t, stale, job.Name)
 
-			t.Log("The claim goes and the trace failure is recorded")
+			t.Log("The claim is deleted, the Job is stopped and the cancellation is recorded")
 			if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
 				t.Fatalf("delete claim: %v", err)
 			}
 			f.reconcile()
-			failed := f.run()
-			if condition := meta.FindStatusCondition(failed.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted); condition == nil ||
-				condition.Reason != dgdrRunReasonTraceSourceUnavailable {
-				t.Fatalf("Completed condition = %+v, want %s", condition, dgdrRunReasonTraceSourceUnavailable)
-			}
-			if tt.jobCondition != "" {
-				stored := f.job()
-				stored.Status.Conditions = []batchv1.JobCondition{{Type: tt.jobCondition, Status: corev1.ConditionTrue}}
-				if err := f.client.Status().Update(t.Context(), stored); err != nil {
-					t.Fatalf("finish Job: %v", err)
+			f.reconcile()
+			canceled := f.run()
+			assertDGDRRunCanceledForTrace(t, canceled, job.Name)
+			if tt.recreateClaim {
+				f.reconcile()
+				if stored, found := f.claim(); found {
+					stored.Finalizers = nil
+					if err := f.client.Update(t.Context(), stored); err != nil {
+						t.Fatalf("finish claim deletion: %v", err)
+					}
 				}
-			}
-			if tt.duplicateJob {
-				duplicate := f.job().DeepCopy()
-				duplicate.Name += "-duplicate"
-				duplicate.ResourceVersion, duplicate.UID = "", ""
-				duplicate.Status = batchv1.JobStatus{}
-				if err := f.client.Create(t.Context(), duplicate); err != nil {
-					t.Fatalf("create duplicate Job: %v", err)
+				if err := f.client.Create(t.Context(), traceClaimForTest()); err != nil {
+					t.Fatalf("recreate claim: %v", err)
 				}
 			}
 
-			t.Log("A pass that still reads the Running Run conflicts instead of overwriting the failure")
+			t.Log("A pass that still reads the Running Run conflicts instead of overwriting the cancellation")
 			cached := f.reconciler.Client
 			f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -2587,82 +2762,154 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceFailure(t *testing.T) 
 				t.Fatalf("reconcile error = %v, want a status conflict", err)
 			}
 			f.reconciler.Client = cached
-			if got := f.run(); !reflect.DeepEqual(got.Status, failed.Status) {
-				t.Fatalf("status = %+v, want the recorded failure %+v", got.Status, failed.Status)
+			if got := f.run(); !reflect.DeepEqual(got.Status, canceled.Status) {
+				t.Fatalf("status = %+v, want the recorded cancellation %+v", got.Status, canceled.Status)
+			}
+			wantStaleJobs := 0
+			if tt.recreateClaim {
+				wantStaleJobs = 1
+			}
+			if jobs := f.jobs(); len(jobs) != wantStaleJobs {
+				t.Fatalf("Jobs = %d after the stale pass, want %d", len(jobs), wantStaleJobs)
 			}
 
-			t.Log("The next pass deletes the Job only if it has not finished, and keeps the failure")
+			t.Log("The completed Run stops any Job the stale pass created, then releases the claim")
 			f.reconcile()
-			if tt.jobCondition == "" {
-				assertDGDRRunFailedForTrace(t, f.client, f.run(), job.Name,
-					`trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`)
-				return
+			f.reconcile()
+			if jobs := f.jobs(); len(jobs) != 0 {
+				t.Fatalf("Jobs = %d, want none left", len(jobs))
 			}
-			if jobs := f.jobs(); len(jobs) != 1 || jobs[0].UID != job.UID {
-				t.Fatalf("Jobs = %d, want only the finished Job %q kept", len(jobs), job.UID)
+			if tt.recreateClaim {
+				assertDGDRRunTraceClaimFinalizers(t, f)
+			} else {
+				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 			}
-			if got := f.run(); !reflect.DeepEqual(got.Status, failed.Status) {
-				t.Fatalf("status = %+v, want the recorded failure %+v", got.Status, failed.Status)
+			if got := f.run(); !reflect.DeepEqual(got.Status, canceled.Status) {
+				t.Fatalf("status = %+v, want the recorded cancellation %+v", got.Status, canceled.Status)
 			}
 		})
 	}
 }
 
-func TestV1beta2RunControllerWaitsUntilTheCacheShowsAnActiveJobsPod(t *testing.T) {
-	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
-	f.reconcile()
-
-	t.Log("The Job counts an active pod that the pod cache does not show yet")
-	job := f.job()
-	job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
-	if err := f.client.Status().Update(t.Context(), job); err != nil {
-		t.Fatalf("update Job status: %v", err)
-	}
-
-	t.Log("The claim disappears; whether the pod is scheduled is unknown, so the Job is kept for now")
-	if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
-		t.Fatalf("delete claim: %v", err)
-	}
-	f.reconcile()
-	if kept := f.job(); kept.UID != job.UID {
-		t.Fatalf("Job UID = %q, want the Job %q kept", kept.UID, job.UID)
-	}
-	assertDGDRRunRunningStatus(t, f.run(), job.Name)
-}
-
-func TestV1beta2RunControllerKeepsTheJobUntilTheTraceFailureIsRecorded(t *testing.T) {
-	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
-	f.reconcile()
-	f.reconcile()
-	jobName := f.job().Name
-	assertDGDRRunPendingStatus(t, f.run(), jobName)
-
-	t.Log("Delete the claim, then fail the status patch that records the trace failure")
-	if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
-		t.Fatalf("delete claim: %v", err)
-	}
-	cached := f.reconciler.Client
-	f.reconciler.Client = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
-		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
-			return errors.New("injected status patch failure")
+func TestV1beta2RunControllerReportsAWaitingContainerWithoutEndingTheRun(t *testing.T) {
+	tests := []struct {
+		name      string
+		container string
+		reason    string
+		message   string
+		// wantReason is the Run's Completed reason; a diagnostic carries the container's state verbatim.
+		wantReason string
+	}{
+		{
+			name:       "a subPath that resolves outside the claim",
+			container:  dgdrRunSweeperContainer,
+			reason:     "CreateContainerConfigError",
+			message:    `failed to prepare subPath for volumeMount "trace" of container "sweeper"`,
+			wantReason: dgdrRunReasonContainerWaiting,
 		},
-	})
-	if _, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())}); err == nil {
-		t.Fatal("reconcile error = nil, want the injected status patch failure")
+		{
+			name:       "a missing file on a read-only claim",
+			container:  dgdrRunSweeperContainer,
+			reason:     "CreateContainerConfigError",
+			message:    `failed to create subPath directory for volumeMount "trace" of container "sweeper"`,
+			wantReason: dgdrRunReasonContainerWaiting,
+		},
+		{
+			name:       "a kubelet message in other words",
+			container:  dgdrRunSweeperContainer,
+			reason:     "CreateContainerConfigError",
+			message:    "the trace mount could not be prepared",
+			wantReason: dgdrRunReasonContainerWaiting,
+		},
+		{
+			name:       "another volume of the sweeper",
+			container:  dgdrRunSweeperContainer,
+			reason:     "CreateContainerConfigError",
+			message:    `failed to prepare subPath for volumeMount "input" of container "sweeper"`,
+			wantReason: dgdrRunReasonContainerWaiting,
+		},
+		{
+			name:       "the publisher",
+			container:  dgdrRunPublisherContainer,
+			reason:     "CreateContainerConfigError",
+			message:    `failed to prepare subPath for volumeMount "trace" of container "publisher"`,
+			wantReason: dgdrRunReasonContainerWaiting,
+		},
+		{
+			name:       "a sweeper image that cannot be pulled",
+			container:  dgdrRunSweeperContainer,
+			reason:     "ErrImagePull",
+			message:    "failed to pull image",
+			wantReason: dgdrRunReasonContainerWaiting,
+		},
+		{
+			name:       "a container that is being created",
+			container:  dgdrRunSweeperContainer,
+			reason:     "ContainerCreating",
+			wantReason: dgdrRunReasonRunning,
+		},
+		{
+			name:       "a container that waits for its pod to initialize",
+			container:  dgdrRunPublisherContainer,
+			reason:     "PodInitializing",
+			wantReason: dgdrRunReasonRunning,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleted bool
+			f := newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					deleted = true
+					return c.Delete(ctx, obj, opts...)
+				},
+			}, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
+			f.reconcile()
+			job := f.job()
 
-	t.Log("The Job stays until the failure is recorded, so no pass can create another one")
-	if job := f.job(); job.Name != jobName {
-		t.Fatalf("Job = %q, want %q kept", job.Name, jobName)
+			t.Log("The scheduled pod's container waits with the row's reason")
+			job.Status = batchv1.JobStatus{Active: 1, Ready: new(int32(0)), StartTime: new(metav1.Now())}
+			if err := f.client.Status().Update(t.Context(), job); err != nil {
+				t.Fatalf("update Job status: %v", err)
+			}
+			createDGDRRunJobPodForTest(t, f.client, job, "node-a", corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  tt.container,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: tt.reason, Message: tt.message}},
+				}},
+			})
+
+			t.Log("Reconcile twice: the Run stays open with the diagnostic and its Job is kept")
+			f.reconcile()
+			f.reconcile()
+			if kept := f.job(); kept.UID != job.UID || kept.DeletionTimestamp != nil || deleted {
+				t.Fatalf("Job = %+v (deleted %t), want the Job %q kept", kept.ObjectMeta, deleted, job.UID)
+			}
+			run := f.run()
+			condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+			if run.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseRunning || run.Status.CompletionTime != nil || condition == nil ||
+				condition.Status != metav1.ConditionFalse || condition.Reason != tt.wantReason {
+				t.Fatalf("status = %+v, want Running and Completed=False/%s", run.Status, tt.wantReason)
+			}
+			if want := fmt.Sprintf("container %q is waiting: %s: %s", tt.container, tt.reason, tt.message); tt.wantReason == dgdrRunReasonContainerWaiting &&
+				condition.Message != want {
+				t.Fatalf("condition message = %q, want %q", condition.Message, want)
+			}
+
+			t.Log("Once the container starts, the Run reports the running Job again")
+			pod := &corev1.Pod{}
+			if err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: job.Name + "-pod"}, pod); err != nil {
+				t.Fatalf("get pod: %v", err)
+			}
+			pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			if err := f.client.Status().Update(t.Context(), pod); err != nil {
+				t.Fatalf("start container: %v", err)
+			}
+			f.reconcile()
+			assertDGDRRunRunningStatus(t, f.run(), job.Name)
+		})
 	}
-	assertDGDRRunPendingStatus(t, f.run(), jobName)
-
-	t.Log("The next passes record the failure and then delete the Job")
-	f.reconciler.Client = cached
-	f.reconcile()
-	f.reconcile()
-	assertDGDRRunFailedForTrace(t, f.client, f.run(), jobName,
-		`trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`)
 }
 
 func TestV1beta2RunControllerWakesTheRunsThatReadAChangedTraceClaim(t *testing.T) {
@@ -2746,7 +2993,7 @@ func TestV1beta2RunControllerWakesTheRunOfAJobPod(t *testing.T) {
 	}
 }
 
-func TestV1beta2RunControllerKeepsAJobWhoseJobRefWasNeverRecorded(t *testing.T) {
+func TestV1beta2RunControllerCancelsAJobWhoseJobRefWasNeverRecorded(t *testing.T) {
 	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), traceClaimForTest())
 	cached := f.reconciler.Client
 
@@ -2770,7 +3017,7 @@ func TestV1beta2RunControllerKeepsAJobWhoseJobRefWasNeverRecorded(t *testing.T) 
 		t.Fatalf("update Job status: %v", err)
 	}
 
-	t.Log("Delete the claim and hide the Job from the cached List")
+	t.Log("Delete the claim and hide the Job from the cached List; the API server still shows the Job, which is stopped")
 	if err := f.client.Delete(t.Context(), traceClaimForTest()); err != nil {
 		t.Fatalf("delete claim: %v", err)
 	}
@@ -2782,16 +3029,182 @@ func TestV1beta2RunControllerKeepsAJobWhoseJobRefWasNeverRecorded(t *testing.T) 
 			return c.List(ctx, list, opts...)
 		},
 	})
-	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
-	if !apierrors.IsAlreadyExists(err) {
-		t.Fatalf("reconcile error = %v, want the Job create to hit AlreadyExists instead of failing the Run", err)
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("result/error = %+v/%v, want the stop and a retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want the Job stopped", len(jobs))
 	}
 	if condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted); condition != nil {
-		t.Fatalf("Completed condition = %+v, want none while the Job exists", condition)
+		t.Fatalf("Completed condition = %+v, want none until the stop is confirmed", condition)
 	}
 
-	t.Log("Once the cache shows the Job, the Job drives the Run")
+	t.Log("Once the API server confirms the Job is gone, the Run is canceled")
 	f.reconciler.Client = cached
 	f.reconcile()
-	assertDGDRRunRunningStatus(t, f.run(), job.Name)
+	assertDGDRRunCanceledForTrace(t, f.run(), "")
+}
+
+// newDGDRRunTraceClaimFixture returns a trace claim reconciler over a fake client holding objects,
+// whose cached Job List the returned hide flag can make empty.
+func newDGDRRunTraceClaimFixture(
+	t *testing.T,
+	objects ...client.Object,
+) (*DynamoGraphDeploymentRunTraceClaimReconciler, client.Client, *bool) {
+	t.Helper()
+	f := newDGDRRunFixture(t, objects...)
+	hide := new(bool)
+	cached := interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*batchv1.JobList); ok && *hide {
+				return nil
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	return &DynamoGraphDeploymentRunTraceClaimReconciler{Client: cached, APIReader: f.client}, f.client, hide
+}
+
+func TestDGDRRunTraceClaimReconcilerReleasesOnlyRunsThatCanNoLongerExecute(t *testing.T) {
+	const otherFinalizer = "kubernetes.io/pvc-protection"
+	live := dgdrRunWithTraceForTest(t, map[string]any{})
+	live.Name, live.UID = "live", "live-uid"
+	deleting := dgdrRunWithTraceForTest(t, map[string]any{})
+	deleting.Name, deleting.UID = "deleting", "deleting-uid"
+	deleting.DeletionTimestamp = new(metav1.Now())
+	deleting.Finalizers = []string{metav1.FinalizerDeleteDependents}
+	tests := []struct {
+		name string
+		// runs exist besides the claim; jobFor lists the UIDs that control a Job.
+		runs   []*nvidiacomv1beta2.DynamoGraphDeploymentRun
+		jobFor []types.UID
+		// hideJobs makes the cache miss every Job, as a lagging informer would.
+		hideJobs     bool
+		uids         []types.UID
+		claimDeleted bool
+		want         []string
+	}{
+		{name: "a Run that exists", runs: []*nvidiacomv1beta2.DynamoGraphDeploymentRun{live},
+			uids: []types.UID{"live-uid"}, want: []string{dgdrRunTraceClaimFinalizer("live-uid")}},
+		{name: "a deleted Run whose Job remains", jobFor: []types.UID{"gone-uid"},
+			uids: []types.UID{"gone-uid"}, want: []string{dgdrRunTraceClaimFinalizer("gone-uid")}},
+		{name: "a deleted Run whose Job only the API server shows", jobFor: []types.UID{"gone-uid"}, hideJobs: true,
+			uids: []types.UID{"gone-uid"}, want: []string{dgdrRunTraceClaimFinalizer("gone-uid")}},
+		{name: "a deleted Run whose Job is gone", uids: []types.UID{"gone-uid"}},
+		{name: "a Run being deleted whose Job remains", runs: []*nvidiacomv1beta2.DynamoGraphDeploymentRun{deleting},
+			jobFor: []types.UID{"deleting-uid"}, uids: []types.UID{"deleting-uid"},
+			want: []string{dgdrRunTraceClaimFinalizer("deleting-uid")}},
+		{name: "a Run being deleted whose Job is gone", runs: []*nvidiacomv1beta2.DynamoGraphDeploymentRun{deleting},
+			uids: []types.UID{"deleting-uid"}},
+		{name: "a deleted Run and a Run that exists share the claim", runs: []*nvidiacomv1beta2.DynamoGraphDeploymentRun{live},
+			uids: []types.UID{"gone-uid", "live-uid"}, want: []string{dgdrRunTraceClaimFinalizer("live-uid")}},
+		{name: "a claim being deleted after the operator restarted", uids: []types.UID{"gone-uid"}, claimDeleted: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := traceClaimForTest()
+			claim.Finalizers = []string{otherFinalizer}
+			for _, uid := range tt.uids {
+				claim.Finalizers = append(claim.Finalizers, dgdrRunTraceClaimFinalizer(uid))
+			}
+			if tt.claimDeleted {
+				claim.DeletionTimestamp = new(metav1.Now())
+			}
+			objects := []client.Object{claim}
+			for _, run := range tt.runs {
+				objects = append(objects, run.DeepCopy())
+			}
+			for i, uid := range tt.jobFor {
+				owner := &nvidiacomv1beta2.DynamoGraphDeploymentRun{Name: string(uid), UID: uid}
+				objects = append(objects, &batchv1.Job{
+					Name: fmt.Sprintf("job-%d-aisimulate", i), Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(owner, nvidiacomv1beta2.GroupVersion.WithKind("DynamoGraphDeploymentRun")),
+					},
+				})
+			}
+			reconciler, c, hide := newDGDRRunTraceClaimFixture(t, objects...)
+			*hide = tt.hideJobs
+
+			t.Log("Reconcile the claim")
+			if _, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(claim)}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			t.Log("Only the finalizers of Runs that can still execute remain, beside foreign ones")
+			stored := &corev1.PersistentVolumeClaim{}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(claim), stored); err != nil {
+				t.Fatalf("get claim: %v", err)
+			}
+			want := append([]string{otherFinalizer}, tt.want...)
+			if !reflect.DeepEqual(stored.Finalizers, want) {
+				t.Fatalf("finalizers = %v, want %v", stored.Finalizers, want)
+			}
+		})
+	}
+}
+
+func TestDGDRRunTraceClaimReconcilerReleasesTheClaimOfADeletedRun(t *testing.T) {
+	claim := traceClaimForTest()
+	claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	f := newDGDRRunFixture(t, dgdrRunWithTraceForTest(t, map[string]any{}), claim)
+	claimReconciler := &DynamoGraphDeploymentRunTraceClaimReconciler{Client: f.client, APIReader: f.client}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(claim)}
+	f.reconcile()
+	job := f.job()
+
+	t.Log("The Run is deleted while its Job still runs; the Job keeps the claim protected")
+	if err := f.client.Delete(t.Context(), f.run()); err != nil {
+		t.Fatalf("delete Run: %v", err)
+	}
+	if _, err := claimReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("reconcile claim: %v", err)
+	}
+	assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection", dgdrRunTraceClaimFinalizer("run-uid"))
+
+	t.Log("The Job's deletion event maps to the claim, which is then released")
+	if got := dgdrRunTraceClaimOfJob(t.Context(), job); !reflect.DeepEqual(got, []reconcile.Request{request}) {
+		t.Fatalf("Job event requests = %v, want %v", got, []reconcile.Request{request})
+	}
+	if err := f.client.Delete(t.Context(), job); err != nil {
+		t.Fatalf("delete Job: %v", err)
+	}
+	if _, err := claimReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("reconcile claim: %v", err)
+	}
+	assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
+}
+
+func TestDGDRRunTraceClaimReconcilerWatchesOnlyWhatReleasesAClaim(t *testing.T) {
+	run := dgdrRunWithTraceForTest(t, map[string]any{})
+	withoutTrace := dgdrRunForTest(t, map[string]any{})
+	claimRequest := []reconcile.Request{{Namespace: "default", Name: "request-traces"}}
+	unowned := &batchv1.Job{Name: "nightly", Namespace: "default", Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{dgdrRunTraceClaimVolume(run.Spec.Workload.Trace.Source.PVC)}},
+	}}}
+
+	t.Log("Claims pass the filter only while a Run protects them")
+	protected := traceClaimForTest()
+	protected.Finalizers = []string{"kubernetes.io/pvc-protection", dgdrRunTraceClaimFinalizer("run-uid")}
+	if !dgdrRunProtectsTraceClaim(protected) || dgdrRunProtectsTraceClaim(traceClaimForTest()) {
+		t.Fatal("only a claim with a Run finalizer passes the filter")
+	}
+
+	t.Log("Run and Job deletions map to the claim the Run reads")
+	if got := dgdrRunTraceClaimOfRun(t.Context(), run); !reflect.DeepEqual(got, claimRequest) {
+		t.Fatalf("Run requests = %v, want %v", got, claimRequest)
+	}
+	if got := dgdrRunTraceClaimOfRun(t.Context(), withoutTrace); len(got) != 0 {
+		t.Fatalf("Run without a trace requests = %v, want none", got)
+	}
+	if got := dgdrRunTraceClaimOfJob(t.Context(), unowned); len(got) != 0 {
+		t.Fatalf("Job no Run controls requests = %v, want none", got)
+	}
+
+	t.Log("Only deletions pass the Run and Job event filter")
+	if dgdrRunDeleteEvents.Create(event.CreateEvent{Object: run}) || dgdrRunDeleteEvents.Update(event.UpdateEvent{ObjectOld: run, ObjectNew: run}) ||
+		!dgdrRunDeleteEvents.Delete(event.DeleteEvent{Object: run}) || dgdrRunDeleteEvents.Generic(event.GenericEvent{Object: run}) {
+		t.Fatal("the event filter must pass deletions only")
+	}
 }

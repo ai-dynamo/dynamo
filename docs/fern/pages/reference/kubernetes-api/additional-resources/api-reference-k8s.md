@@ -3986,7 +3986,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `claimName` _string_ | ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.<br />The Run Job mounts only the trace file from it, read-only, and only into the AISimulate<br />container. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br /> |
+| `claimName` _string_ | ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.<br />The Run Job mounts only the trace file from it, read-only, and only into the AISimulate<br />container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`<br />until its execution stops; deleting the claim cancels the Runs that read it. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br /> |
 | `path` _string_ | Path names one trace file relative to the root of the claim. It is neither a directory<br />nor a glob. It must not start or end with '/' and must not contain empty, '.' or '..'<br />segments or a NUL character, which no file name can hold. The file must be complete before<br />the Request is created and must never be rewritten: every Run of the Request reads it when<br />its Job starts. |  | MaxLength: 1024 <br />MinLength: 1 <br /> |
 
 

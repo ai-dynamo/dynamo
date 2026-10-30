@@ -168,7 +168,8 @@ const (
 type TracePVCSource struct {
 	// ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
 	// The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
-	// container.
+	// container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
+	// until its execution stops; deleting the claim cancels the Runs that read it.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
