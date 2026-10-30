@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
 import queue
 import socket
@@ -30,6 +31,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from multiprocessing.managers import BaseManager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qs, urlparse
@@ -90,6 +92,7 @@ PROCESS_TIMEOUT_S = 240.0
 EXT_PROC_TIMEOUT_S = 45.0
 FRONTEND_QUERY_TIMEOUT_S = 45.0
 TLS_HANDSHAKE_TIMEOUT_S = 5.0
+KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S = 5.0
 INITIAL_EVENTS_END_ANNOTATION = "k8s.io/initial-events-end"
 _SCOPED_CLEAR_ENV = (
     "NATS_SERVER",
@@ -484,6 +487,11 @@ class LoopbackKubeAPI:
     def listed_metadata(self) -> list[dict[str, Any]]:
         with self._lock:
             return [json.loads(json.dumps(obj)) for obj in self._metadata.values()]
+
+    def get_failures(self) -> list[str]:
+        """Return a copy of recorded fixture-API failures."""
+        with self._lock:
+            return list(self.failures)
 
     def _next_rv(self) -> str:
         self._resource_version += 1
@@ -2084,6 +2092,141 @@ def ready_container_names(pod: Mapping[str, Any]) -> set[str]:
     return names
 
 
+_LOOPBACK_KUBE_API_EXPOSED = (
+    "start",
+    "stop",
+    "add_ready_container",
+    "listed_metadata",
+    "listed_pods",
+    "get_failures",
+)
+_SPAWN_CTX = multiprocessing.get_context("spawn")
+
+
+# Routing hosts LoopbackKubeAPI in a spawned process: DistributedRuntime::new
+# block_on holds the pytest GIL, so a same-process API thread cannot serve
+# kube list/watch during that constructor. spawn is required; fork would
+# copy an initialized Tokio runtime.
+class LoopbackKubeAPIManager(BaseManager):
+    """Spawned BaseManager host for the existing LoopbackKubeAPI fixture."""
+
+
+LoopbackKubeAPIManager.register(
+    "LoopbackKubeAPI",
+    LoopbackKubeAPI,
+    exposed=_LOOPBACK_KUBE_API_EXPOSED,
+)
+
+
+def _reap_owned_manager_process(process: Any) -> None:
+    """Bounded join of the retained manager Process; kill only that child."""
+    if process.is_alive():
+        process.join(timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S)
+    if process.is_alive():
+        raise RuntimeError(
+            f"owned kube API manager child pid {process.pid} did not exit"
+        )
+    logger.info(
+        "Loopback Kubernetes API manager child pid=%s exitcode=%s alive=%s",
+        process.pid,
+        process.exitcode,
+        process.is_alive(),
+    )
+
+
+def _shutdown_unregistered_manager(
+    manager: LoopbackKubeAPIManager, start_error: BaseException
+) -> None:
+    try:
+        process = manager._process
+    except AttributeError:
+        return
+    if process.pid is None:
+        return
+    try:
+        _reap_owned_manager_process(process)
+    except RuntimeError as join_exc:
+        raise join_exc from start_error
+
+
+class LoopbackKubeAPIOwner:
+    """Typed parent owner for the spawned LoopbackKubeAPI proxy.
+
+    Live ``.failures`` reads the true proxy. Cleanup snapshots after API.stop
+    and before manager shutdown. After the manager exits, ``.failures`` returns
+    a copy of that snapshot or the saved snapshot error; never a fake empty.
+    """
+
+    def __init__(self, proxy: Any) -> None:
+        self._proxy = proxy
+        self._failures_snapshot: list[str] | None = None
+        self._snapshot_error: BaseException | None = None
+        self._manager_exited = False
+
+    def start(self) -> None:
+        self._proxy.start()
+
+    def snapshot_failures(self) -> None:
+        """Record true failures after API.stop and before manager shutdown."""
+        if self._failures_snapshot is not None:
+            return
+        try:
+            self._failures_snapshot = list(self._proxy.get_failures())
+            self._snapshot_error = None
+        except BaseException as exc:
+            self._snapshot_error = exc
+            raise
+
+    def mark_manager_exited(self) -> None:
+        self._manager_exited = True
+
+    def stop(self) -> None:
+        self._proxy.stop()
+
+    def add_ready_container(
+        self,
+        *,
+        identity: PodIdentity,
+        dynamo_namespace: str,
+        container_name: str,
+        http_port: int,
+    ) -> None:
+        self._proxy.add_ready_container(
+            identity=identity,
+            dynamo_namespace=dynamo_namespace,
+            container_name=container_name,
+            http_port=http_port,
+        )
+
+    def listed_metadata(self) -> list[dict[str, Any]]:
+        return self._proxy.listed_metadata()
+
+    def listed_pods(self) -> list[dict[str, Any]]:
+        return self._proxy.listed_pods()
+
+    def get_failures(self) -> list[str]:
+        if self._failures_snapshot is not None:
+            return list(self._failures_snapshot)
+        if self._manager_exited:
+            if self._snapshot_error is not None:
+                raise self._snapshot_error
+            raise RuntimeError(
+                "Loopback Kubernetes API manager exited before failures were "
+                "snapshotted"
+            )
+        return list(self._proxy.get_failures())
+
+    @property
+    def failures(self) -> list[str]:
+        return self.get_failures()
+
+
 class EppFrontendRoutingParityStack:
     """Two mockers, one served remote index, and fresh FE/EPP consumers."""
 
@@ -2094,7 +2237,9 @@ class EppFrontendRoutingParityStack:
         self.identity = resolve_pod_identity()
         self._stack = ExitStack()
         self._lock: FileLock | None = None
-        self.kube_api: LoopbackKubeAPI | None = None
+        self._kube_api_manager: LoopbackKubeAPIManager | None = None
+        self._kube_api_manager_process = None
+        self.kube_api: LoopbackKubeAPIOwner | None = None
         self.kubeconfig: Path | None = None
         self.namespace: str | None = None
         self.component_name = "mocker"
@@ -2156,7 +2301,9 @@ class EppFrontendRoutingParityStack:
     def __enter__(self) -> EppFrontendRoutingParityStack:
         try:
             return self._start(MockerProcess)
-        except Exception:
+        except BaseException:
+            # PyO3 PanicException is a BaseException. Close the spawned
+            # manager and any later stack resources before it leaves.
             self._stack.close()
             raise
 
@@ -2205,9 +2352,25 @@ class EppFrontendRoutingParityStack:
             self.identity.pod_namespace,
         )
         self.kubeconfig = kubeconfig
-        self.kube_api = LoopbackKubeAPI(self.identity.pod_namespace, api_port)
+        manager = LoopbackKubeAPIManager(
+            ctx=_SPAWN_CTX,
+            shutdown_timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S,
+        )
+        try:
+            manager.start()
+        except BaseException as exc:
+            _shutdown_unregistered_manager(manager, exc)
+            raise
+        process = manager._process
+        self._kube_api_manager = manager
+        self._kube_api_manager_process = process
+        logger.info("Loopback Kubernetes API manager child pid=%s", process.pid)
+        self._stack.callback(self._shutdown_kube_api_manager)
+
+        self.kube_api = LoopbackKubeAPIOwner(
+            manager.LoopbackKubeAPI(self.identity.pod_namespace, api_port)
+        )
         self.kube_api.start()
-        self._stack.callback(self.kube_api.stop)
 
         proto_modules = _ExtProcModules(self.tmp_path / "ext_proc_pb")
         self._stack.callback(proto_modules.close)
@@ -2553,6 +2716,68 @@ class EppFrontendRoutingParityStack:
         if close_error is not None and exc_type is None:
             raise close_error
         return None
+
+    def _shutdown_kube_api_manager(self) -> None:
+        owner = self.kube_api
+        manager = self._kube_api_manager
+        process = self._kube_api_manager_process
+        self._kube_api_manager = None
+        self._kube_api_manager_process = None
+        held: list[BaseException] = []
+
+        def _run_cleanup() -> None:
+            try:
+                try:
+                    if owner is not None:
+                        try:
+                            owner.stop()
+                        finally:
+                            owner.snapshot_failures()
+                finally:
+                    if manager is not None:
+                        manager.shutdown()
+            except BaseException as exc:
+                held.append(exc)
+            finally:
+                if owner is not None:
+                    owner.mark_manager_exited()
+
+        thread = threading.Thread(
+            target=_run_cleanup,
+            name="epp-parity-kube-api-cleanup",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S)
+        timeout_error = None
+        reap_error = None
+        if thread.is_alive():
+            timeout_error = TimeoutError(
+                "Loopback Kubernetes API cleanup exceeded "
+                f"{KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S}s"
+            )
+            if process is not None:
+                try:
+                    _reap_owned_manager_process(process)
+                except BaseException as exc:
+                    reap_error = exc
+            thread.join(timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S)
+        elif process is not None:
+            try:
+                _reap_owned_manager_process(process)
+            except BaseException as exc:
+                reap_error = exc
+        if owner is not None:
+            owner.mark_manager_exited()
+        if timeout_error is not None:
+            cause = held[0] if held else reap_error
+            if cause is not None:
+                raise timeout_error from cause
+            raise timeout_error
+        if held:
+            raise held[0]
+        if reap_error is not None:
+            raise reap_error
 
     def _shutdown_provider(self) -> None:
         router = self.provider_router
