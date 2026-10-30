@@ -3,6 +3,8 @@
 
 """Unit tests for load_multimodal_embeddings in prefill_worker_utils."""
 
+import asyncio
+import gc
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -14,6 +16,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.embedding_transfer import LocalEmbeddingReceiver
 from dynamo.vllm.multimodal_utils import prefill_worker_utils as mod
 from dynamo.vllm.multimodal_utils.protocol import MultiModalGroup, MultiModalInput
 
@@ -135,6 +138,7 @@ async def test_encode_worker_request_carries_image_cache_scope():
     assert len(groups) == 1
     assert pending is not None
     assert json.loads(captured_payloads[0])["image_cache_scope"] == "session-42"
+    receiver.release_tensor.assert_not_called()
     pending.release_all()
     receiver.release_tensor.assert_called_once_with(7)
 
@@ -388,3 +392,192 @@ class TestMultimodalEmbeddingLoader:
         assert call_args[0][1] == [url_miss]
         expected = torch.cat((cached_tensor, miss_tensor))
         assert torch.equal(mm_data["image"], expected)
+
+
+def _embedding_transfer_client(transfer_request, group_shapes):
+    async def _round_robin(payload, *, context=None):
+        response = json.loads(payload)
+        groups = response["multimodal_inputs"]
+        groups[0]["serialized_request"] = transfer_request
+        for group, shape in zip(groups, group_shapes, strict=True):
+            group["embeddings_shape"] = shape
+        encoded = json.dumps(response)
+
+        async def _stream():
+            yield SimpleNamespace(data=lambda: encoded)
+
+        return _stream()
+
+    client = Mock()
+    client.instance_ids.return_value = ["encode-0"]
+    client.round_robin = AsyncMock(side_effect=_round_robin)
+    items = ["https://example.com/image.png"] * len(group_shapes)
+    return client, items
+
+
+def _local_transfer_fixture(tmp_path, *, coalesced=False, invalid_shape=False):
+    from safetensors.torch import save_file
+
+    expected = torch.arange(12, dtype=torch.float32).reshape(1, 3, 4)
+    path = tmp_path / "embedding.safetensors"
+    save_file({"ec_cache": expected}, path)
+    receiver = LocalEmbeddingReceiver()
+    group_shapes = (
+        [[1, 2, 4], [1, 2 if invalid_shape else 1, 4]]
+        if coalesced
+        else [list(expected.shape)]
+    )
+    client, items = _embedding_transfer_client(
+        {
+            "embeddings_shape": list(expected.shape),
+            "embedding_dtype_str": "float32",
+            "serialized_request": str(path),
+        },
+        group_shapes,
+    )
+    return client, receiver, items, path, expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coalesced", [False, True])
+async def test_completed_local_transfers_release_files_and_preserve_tensors(
+    tmp_path, coalesced
+):
+    client, receiver, items, path, expected = _local_transfer_fixture(
+        tmp_path, coalesced=coalesced
+    )
+    groups, pending = await mod._fetch_from_encode_workers(
+        client, items, "local-success", receiver
+    )
+
+    assert pending is None
+    assert not path.exists()
+    assert receiver.received_tensors == {}
+    del receiver
+    gc.collect()
+    actual = torch.cat([group.loaded_embedding for group in groups], dim=1)
+    torch.testing.assert_close(actual, expected)
+    if coalesced:
+        assert groups[0].loaded_embedding.untyped_storage().data_ptr() == (
+            groups[1].loaded_embedding.untyped_storage().data_ptr()
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_transfer_attachment_error_releases_completed_file(tmp_path):
+    client, receiver, items, path, _ = _local_transfer_fixture(
+        tmp_path, coalesced=True, invalid_shape=True
+    )
+    with pytest.raises(RuntimeError, match="token count"):
+        await mod._fetch_from_encode_workers(client, items, "local-invalid", receiver)
+
+    assert not path.exists()
+    assert receiver.received_tensors == {}
+
+
+@pytest.fixture
+def nixl_read_transfer(monkeypatch):
+    from dynamo import nixl_connect
+    from dynamo.common.multimodal.embedding_transfer import NixlReadEmbeddingReceiver
+
+    # Exercise real receiver/descriptor/pool ownership with native calls mocked.
+    monkeypatch.setattr(nixl_connect, "nixl_api", Mock())
+    receiver = NixlReadEmbeddingReceiver(
+        embedding_hidden_size=16, max_item_mm_token=8, max_items=1
+    )
+    descriptor = receiver.warmedup_descriptors.queue[0]
+    expected = torch.arange(12, dtype=torch.float32).reshape(1, 3, 4)
+    descriptor._data_ref[: expected.numel() * expected.element_size()].view(
+        torch.float32
+    ).copy_(expected.flatten())
+    completion = AsyncMock()
+    receiver.connector.begin_read = AsyncMock(
+        return_value=SimpleNamespace(wait_for_completion=completion)
+    )
+    release = Mock(wraps=receiver.release_tensor)
+    monkeypatch.setattr(receiver, "release_tensor", release)
+    client, items = _embedding_transfer_client(
+        {
+            "embeddings_shape": list(expected.shape),
+            "embedding_dtype_str": "float32",
+            "serialized_request": {
+                "descriptors": [{"ptr": 1, "size": 48, "device": "cpu"}],
+                "operation_kind": 1,
+                "notification_key": "test-completion",
+                "nixl_metadata": "unused-by-mocked-native-read",
+            },
+        },
+        [list(expected.shape)],
+    )
+    return client, receiver, items, expected, completion, release, descriptor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["cache", "assembly", "ownership"])
+async def test_completed_nixl_transfer_released_on_processing_error(
+    nixl_read_transfer, monkeypatch, failure_stage
+):
+    client, receiver, items, _, _, release, _ = nixl_read_transfer
+    cache = (
+        MultimodalEmbeddingCacheManager(capacity_bytes=1024)
+        if failure_stage == "cache"
+        else None
+    )
+    loader = mod.MultiModalEmbeddingLoader(client, receiver, cache)
+    model = "qwen2-vl-test" if failure_stage == "assembly" else MODEL
+    if failure_stage == "assembly":
+        expected_error = ValueError
+        message = "No image grid"
+    else:
+        expected_error = RuntimeError
+        message = "injected copy failure"
+        monkeypatch.setattr(
+            torch.Tensor, "clone", Mock(side_effect=RuntimeError(message))
+        )
+
+    with pytest.raises(expected_error, match=message):
+        await loader.load_multimodal_embeddings(items, "nixl-error", model=model)
+
+    release.assert_called_once_with(0)
+    assert receiver.inuse_descriptors == {}
+    assert receiver.warmedup_descriptors.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_nixl_transfer_waits_for_completion_and_owns_returned_tensor(
+    nixl_read_transfer,
+):
+    (
+        client,
+        receiver,
+        items,
+        expected,
+        completion,
+        release,
+        descriptor,
+    ) = nixl_read_transfer
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _complete():
+        started.set()
+        await finish.wait()
+
+    completion.side_effect = _complete
+    loader = mod.MultiModalEmbeddingLoader(client, receiver)
+    task = asyncio.create_task(
+        loader.load_multimodal_embeddings(items, "nixl-success", model=MODEL)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        release.assert_not_called()
+        assert receiver.warmedup_descriptors.empty()
+    finally:
+        finish.set()
+        output = await asyncio.wait_for(task, timeout=5)
+
+    release.assert_called_once_with(0)
+    assert receiver.inuse_descriptors == {}
+    assert receiver.warmedup_descriptors.qsize() == 1
+    descriptor._data_ref.zero_()
+    torch.testing.assert_close(output["image"], expected)
