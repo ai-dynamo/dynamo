@@ -1027,7 +1027,83 @@ class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Fun
 class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
     """Test parser creation logic."""
 
+    @pytest.mark.parametrize("chunk_size", [None, 1, 7])
+    @pytest.mark.parametrize("answer_kind", ["tool", "quoted", "plain"])
+    def test_muse_channel_handoff(self, answer_kind, chunk_size):
+        """Check Muse channel boundaries for complete responses and stream chunks.
+
+        A tool call after an answer preamble must produce a structured call.
+        Quoted tool syntax and plain answers must remain answer content.
+        The reasoning text must remain separate in each case.
+        """
+        tool_header = "<|start|>assistant to=get_weather<|message|>"
+        body = (
+            '<atem:function_calls><atem:invoke name="get_weather">'
+            '<atem:parameter name="city">Paris</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        if answer_kind == "tool":
+            answer = "Let me check."
+            visible = answer + "<|eom|>" + tool_header + body
+            expected_calls = [("get_weather", {"city": "Paris"})]
+        else:
+            answer = (
+                "Example: " + tool_header + body
+                if answer_kind == "quoted"
+                else "Hello."
+            )
+            visible = answer
+            expected_calls = []
+        raw = (
+            " to=self<|message|>Check weather.<|eom|>"
+            "<|start|>assistant to=user<|message|>" + visible
+        )
+        tool_parser, reasoner = create_parsers(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ]
+            },
+            tool_call_parser_name="muse",
+            reasoning_parser_name="muse",
+        )
+        if chunk_size is None:
+            reasoning, normal = reasoner.parse_non_stream(raw)
+            content, calls = tool_parser.parse_non_stream(normal)
+        else:
+            reasoning, content, calls = "", "", []
+            chunks = [raw[i : i + chunk_size] for i in range(0, len(raw), chunk_size)]
+            for chunk in [*chunks, None]:
+                thought, normal = (
+                    reasoner.parse_stream_end()
+                    if chunk is None
+                    else reasoner.parse_stream_chunk(chunk)
+                )
+                reasoning += thought or ""
+                if normal:
+                    text, new_calls = tool_parser.parse_stream_chunk(normal)
+                    content += text
+                    calls.extend(new_calls)
+            text, new_calls = tool_parser.parse_stream_end()
+            content += text
+            calls.extend(new_calls)
+        assert reasoning == "Check weather."
+        assert content == answer
+        assert [
+            (call.name, json.loads(call.parameters)) for call in calls
+        ] == expected_calls
+
     def test_no_parsers(self):
+        """Check that unset parser names produce no parsers."""
         tcp, rp = create_parsers(
             {}, tool_call_parser_name=None, reasoning_parser_name=None
         )
