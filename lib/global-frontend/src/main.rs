@@ -472,7 +472,6 @@ mod tests {
 
     const POOL: &str = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
 
-    /// The transport the command line `rest` asks for, after the pool.
     fn transport(rest: &[&str]) -> Result<Option<ReplicaTransport>> {
         let args = Args::try_parse_from([&["global-frontend", POOL], rest].concat())?;
         replica_transport(&args)
