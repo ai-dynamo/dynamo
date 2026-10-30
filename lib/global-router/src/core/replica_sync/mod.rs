@@ -17,17 +17,21 @@
 //! into frames, and hands inbound frames back to the core. [`server`]
 //! serves the frames to subscribing peers as routes on the replica's API
 //! router, and [`dialer`] subscribes to each peer and applies what it
-//! sends. The built-in ZMQ mesh (`--replica-sync-port`) is a separate
+//! sends. [`discovery`] keeps the hub's peers matching a set published
+//! from outside, such as the Global Frontend's poll of Global Discovery.
+//! The core's built-in ZMQ mesh ([`crate::ReplicaSync`]) is a separate
 //! transport the core runs itself; a replica uses one or the other.
 //!
 //! [`ActiveSequenceEvent`]: dynamo_kv_router::protocols::ActiveSequenceEvent
 //! [`AffinityBindingEvent`]: dynamo_kv_router::services::selection::AffinityBindingEvent
 
 pub mod dialer;
+pub mod discovery;
 pub mod server;
 pub mod transport;
 pub mod wire;
 
+pub use discovery::follow_peer_set;
 pub use dynamo_global_common::replica_sync::{CONTRACT_MARKER, proto};
 pub use transport::{GrpcReplicaSync, ReplicaHub, ReplicaSyncStats, peer_url};
 pub use wire::{WireError, from_wire_binding, from_wire_event, to_wire_binding, to_wire_event};

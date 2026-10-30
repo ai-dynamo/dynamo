@@ -361,6 +361,27 @@ impl CoreSelector {
         }
     }
 
+    /// The peers the gRPC transport follows right now, when this replica
+    /// replicates over gRPC.
+    pub fn replica_peers(&self) -> Option<Vec<Url>> {
+        self.grpc.as_ref().map(|grpc| grpc.hub.peers())
+    }
+
+    /// Keeps the gRPC transport's peers matching each set `peers`
+    /// publishes, such as the replicas Global Discovery lists, until
+    /// `cancel` fires or the sender drops. Peers given at build time stay
+    /// however the set changes. `None` unless this replica replicates over
+    /// gRPC. Run it as a task.
+    pub fn follow_peers(
+        &self,
+        peers: watch::Receiver<Vec<Url>>,
+        cancel: CancellationToken,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        self.grpc
+            .as_ref()
+            .map(|grpc| replica_sync::follow_peer_set(grpc.hub.clone(), peers, cancel))
+    }
+
     /// Subscribes to another replica's events, `endpoint` as the transport
     /// names peers: `tcp://host:port` over the mesh, `http://host:port` over
     /// gRPC. `Ok(false)` if it was already a peer.
