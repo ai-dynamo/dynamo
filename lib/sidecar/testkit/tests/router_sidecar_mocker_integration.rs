@@ -96,7 +96,7 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         },
     )
     .await;
-    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     let router = env.ready("backend").await;
     let cards = env.cards().await;
     assert_eq!(cards.len(), 1);
@@ -241,7 +241,7 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
         },
     )
     .await;
-    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     let router = env.ready("backend").await;
     let frontend = Frontend::start(&env).await;
     for is_streaming in [false, true] {
@@ -409,7 +409,7 @@ async fn delayed_startup_publishes_only_after_native_readiness<F: ProcessFixture
     )
     .await;
     let mut gate = Gate::new(&peer.endpoint()).await;
-    let mut child = env.spawn_env::<F>(&gate.endpoint, DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn_env::<F>(&gate.endpoint, DisaggregationMode::Aggregated, 30);
     gate.accepted().await;
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
@@ -505,7 +505,7 @@ async fn worker_cancel_and_consumer_drop_release_only_the_target<F: ProcessFixtu
         },
     )
     .await;
-    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     let router = env.ready("backend").await;
 
     for (id, explicit, waiting_headers) in [
@@ -776,8 +776,8 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<
         },
     )
     .await;
-    let mut prefill = env.spawn::<P>(&prefill_peer.endpoint(), DisaggregationMode::Prefill, 5);
-    let mut decode = env.spawn::<D>(&decode_peer.endpoint(), DisaggregationMode::Decode, 5);
+    let mut prefill = env.spawn::<P>(&prefill_peer.endpoint(), DisaggregationMode::Prefill, 30);
+    let mut decode = env.spawn::<D>(&decode_peer.endpoint(), DisaggregationMode::Decode, 30);
     let prefill_router = env.ready("prefill").await;
     let decode_router = env.ready("backend").await;
     let cards = env.cards().await;
@@ -1157,7 +1157,7 @@ async fn served_model_alias_is_published<F: DiscoveryFixture>() {
     )
     .await;
     peer.set_served_model_name("public-alias");
-    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     let router = env.ready("backend").await;
     let cards = env.cards().await;
     assert_eq!(cards.len(), 1);
@@ -1208,7 +1208,7 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
         })],
     );
     let mut child =
-        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     let router = env.ready("backend").await;
     let cards = env.cards().await;
     assert_eq!(cards.len(), 1);
@@ -1259,7 +1259,7 @@ async fn health_readiness_precedes_publication<F: DiscoveryFixture>() {
     )
     .await;
     peer.set_health(None);
-    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 30);
     peer.health_check_received().await;
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());

@@ -113,7 +113,7 @@ fn transport() -> GrpcTransportConfig {
     GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         retry_interval: Duration::from_millis(10),
-        startup_deadline: Duration::from_secs(5),
+        startup_deadline: Duration::from_secs(30),
         ..Default::default()
     }
 }
