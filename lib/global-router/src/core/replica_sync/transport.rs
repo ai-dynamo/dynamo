@@ -27,6 +27,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_kv_router::services::selection::{
     HostReplicaChannels, HostReplicaSyncFactory, SelectionService, SessionBindingUpdates,
 };
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -109,6 +110,15 @@ struct Counters {
     bookings_released: AtomicU64,
 }
 
+impl Counters {
+    fn released(&self, peer: &Url, released: u64) {
+        if released > 0 {
+            self.bookings_released.fetch_add(released, Relaxed);
+            tracing::info!(%peer, released, "freed the bookings of a replica that left");
+        }
+    }
+}
+
 /// One replica's end of the stream: the core's channels in, frames out, and
 /// the peers it follows.
 pub struct ReplicaHub {
@@ -127,7 +137,7 @@ pub struct ReplicaHub {
     /// The router ids each peer's stream has carried events for.
     routers_of: DashMap<Url, HashSet<u64>>,
     cancel: CancellationToken,
-    counters: Counters,
+    counters: Arc<Counters>,
 }
 
 impl ReplicaHub {
@@ -151,7 +161,7 @@ impl ReplicaHub {
             open: DashMap::new(),
             routers_of: DashMap::new(),
             cancel,
-            counters: Counters::default(),
+            counters: Arc::default(),
         })
     }
 
@@ -230,12 +240,15 @@ impl ReplicaHub {
     }
 
     /// Frees, in the core, every booking still open from the router ids
-    /// `peer`'s stream carried, unless another peer still carries them.
+    /// `peer`'s stream carried, unless another peer still carries them. A
+    /// free the partition cannot take at once is delivered as soon as it
+    /// can, never lost.
     fn release_bookings_of(&self, peer: &Url) {
         let Some((_, routers)) = self.routers_of.remove(peer) else {
             return;
         };
         let mut released = 0u64;
+        let mut pending = Vec::new();
         for router_id in routers {
             let still_carried = self
                 .routers_of
@@ -255,17 +268,34 @@ impl ReplicaHub {
                     router_id,
                     lora_name: booking.lora_name,
                 };
-                match self.partitions.get(&partition) {
-                    Some(inbound) if inbound.try_send(free).is_ok() => released += 1,
-                    _ => {
+                let Some(inbound) = self.partitions.get(&partition) else {
+                    self.counters.events_unroutable.fetch_add(1, Relaxed);
+                    continue;
+                };
+                match inbound.try_send(free) {
+                    Ok(()) => released += 1,
+                    Err(TrySendError::Full(free)) => pending.push((inbound.clone(), free)),
+                    Err(TrySendError::Closed(_)) => {
                         self.counters.events_dropped.fetch_add(1, Relaxed);
                     }
                 }
             }
         }
-        if released > 0 {
-            self.counters.bookings_released.fetch_add(released, Relaxed);
-            tracing::info!(%peer, released, "freed the bookings of a replica that left");
+        self.counters.released(peer, released);
+        if !pending.is_empty() {
+            let (counters, peer) = (self.counters.clone(), peer.clone());
+            tokio::spawn(async move {
+                let mut released = 0u64;
+                for (inbound, free) in pending {
+                    match inbound.send(free).await {
+                        Ok(()) => released += 1,
+                        Err(_) => {
+                            counters.events_dropped.fetch_add(1, Relaxed);
+                        }
+                    }
+                }
+                counters.released(&peer, released);
+            });
         }
     }
 
@@ -321,9 +351,11 @@ impl ReplicaHub {
     /// peer no longer followed is ignored: it cannot re-book what
     /// [`Self::remove_peer`] freed.
     pub fn apply_from(&self, peer: &Url, frame: proto::ReplicaFrame, service: &SelectionService) {
-        if !self.peers.contains_key(peer) {
+        // Held while the frame is applied, so `remove_peer` waits for it:
+        // nothing lands after the peer's bookings are freed.
+        let Some(_followed) = self.peers.get(peer) else {
             return;
-        }
+        };
         self.apply_inner(Some(peer), frame, service);
     }
 

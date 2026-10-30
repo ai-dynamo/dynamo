@@ -50,7 +50,6 @@ const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the replicas are listed from Global Discovery: the cadence of
 /// the frontend's other periodic reads of the fleet (`ROUND_TRIP_INTERVAL`).
 const DISCOVERY_POLL_INTERVAL: Duration = ROUND_TRIP_INTERVAL;
-/// How long one Global Discovery call may take.
 const DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How each request picks a pool.
@@ -526,7 +525,6 @@ mod tests {
             transport(&[&CORE[..], &grpc_flag[..], &peers[..]].concat()).unwrap(),
             expected
         );
-        // Peers imply the transport.
         assert_eq!(
             transport(&[&CORE[..], &peers[..]].concat()).unwrap(),
             expected
