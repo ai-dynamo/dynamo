@@ -14,7 +14,9 @@
 #   - Consistent UX: same startup output and exit behavior across all backends
 #   - Less per-script boilerplate (no manual PID tracking or custom cleanup traps)
 #   - wait_any_exit propagates the first failing child's exit code and lets the
-#     EXIT trap tear down the rest, so failures and Ctrl+C behave predictably
+#     EXIT trap tear down the rest, so failures and Ctrl+C behave predictably.
+#     DYN_LAUNCH_WAIT_ALL=1 waits for every child instead, for tests that
+#     fault one worker and expect the others to keep serving
 #
 # Usage:
 #   source "$(dirname "$(readlink -f "$0")")/../common/launch_utils.sh"
@@ -185,6 +187,11 @@ wait_any_exit() {
     if ! jobs -p | grep -q .; then
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
+    fi
+    if [[ "${DYN_LAUNCH_WAIT_ALL:-}" == "1" ]]; then
+        # Fault-injection tests kill one worker and keep serving on the rest.
+        wait
+        dynamo_reap_and_exit 0
     fi
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0

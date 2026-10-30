@@ -2806,6 +2806,41 @@ async fn check_decode_cancellation(is_cancelled_before_submission: bool) {
     .expect("server stream dropped after first token");
 }
 
+/// A decode request whose client already cancelled, still deferred until its
+/// first token, ends as cancelled on shutdown rather than being migrated.
+#[tokio::test]
+async fn shutdown_after_deferred_decode_cancellation_is_not_migrated() {
+    let service = FakeVllm::default();
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Decode,
+        1,
+        model_info(),
+    );
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(
+            decode_request(),
+            GenerateContext::new(context.clone(), None),
+        )
+        .await
+        .expect("decode stream");
+    context.stop_generating();
+    engine.cleanup().await.expect("cleanup");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("shutdown did not end the stream")
+        .expect("terminal item")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
 #[tokio::test]
 async fn decode_cancellation_maps_premature_eof_to_cancelled() {
     let service = FakeVllm::default();
