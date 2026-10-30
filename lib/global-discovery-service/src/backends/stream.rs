@@ -15,8 +15,10 @@ pub(super) const EVENT_BUFFER: usize = 1024;
 
 /// `subscribe_now` must subscribe and take its snapshot under the lock that
 /// senders hold while they send, so the stream misses no event and sees none
-/// twice. The snapshot is `None` until the source has a complete view; the
-/// stream then starts at the first `Resync` it receives.
+/// twice. The snapshot is `None` until the source has listed everything once
+/// (for MCS, at kube's `InitDone`), and the stream then starts at the first
+/// `Resync` it receives. Whether a snapshot lists every item is its
+/// `completeness`, which each `Resync` carries too.
 pub(super) fn watch_stream<T, K, F>(
     subscribe_now: F,
     cancel: CancellationToken,
@@ -43,7 +45,7 @@ where
                 received = receiver.recv() => received,
             };
             match received {
-                // The first complete view arrived after this subscription.
+                // The first full listing arrived after this subscription.
                 Ok(WatchEvent::Resync(snapshot)) if !started => {
                     started = true;
                     for event in initial_events(snapshot) {

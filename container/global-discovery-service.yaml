@@ -73,11 +73,15 @@ spec:
       serviceAccountName: global-discovery-service
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: global-discovery
           image: IMAGE
           args:
-            - --listen=0.0.0.0:8080
+            # Takes IPv4 and IPv6. On nodes with IPv6 turned off, use
+            # 0.0.0.0:8080.
+            - --listen=[::]:8080
             - --pool-discovery=karmada
             - --router-namespace=global-discovery
             - --router-service=global-router

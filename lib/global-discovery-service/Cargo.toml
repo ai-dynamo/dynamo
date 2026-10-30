@@ -37,5 +37,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+dynamo-global-discovery-client = { path = "../global-discovery-client" }
+
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -7,6 +7,8 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
+//! - `POST /routers`: `RegisterRouter` from the design, not available yet.
+//!   It answers `501` with the reason.
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; and with MCS, also
@@ -19,12 +21,12 @@
 //! - `GET /registrations`: the registrations this instance's PoolRelays
 //!   made, for the other instances ([`crate::peers`]).
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
-//!   for readiness; liveness needs only the TCP port. With mTLS, a probe
-//!   needs a client certificate too, so probe with TCP or a command.
+//!   for readiness; liveness needs only the TCP port.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
-//! traits. It runs on `dynamo-http-server`, so it gets TLS and mTLS the way
-//! the Dynamo frontend does.
+//! traits. It runs on `dynamo-http-server`, so it gets TLS the way the Dynamo
+//! frontend does. mTLS waits until `dynamo-global-discovery-client` can
+//! present a client certificate.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -37,6 +39,7 @@ use crate::pool_discovery::{
     RegistrationExchange, ReplicaDirectory,
 };
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -91,20 +94,18 @@ impl fmt::Debug for Sharing {
     }
 }
 
-/// TLS for the listener. With `client_ca`, callers must also present a
-/// certificate that it signed (mTLS).
+/// TLS for the listener.
 #[derive(Clone, Debug)]
 pub struct Tls {
     pub cert: PathBuf,
     pub key: PathBuf,
-    pub client_ca: Option<PathBuf>,
 }
 
 /// The service's HTTP routes.
 pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
-        .route("/routers", get(list_routers))
+        .route("/routers", get(list_routers).post(register_router))
         .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .with_state(Arc::new(backend))
@@ -125,8 +126,8 @@ pub async fn serve(
         port: address.port(),
         enable_tls: tls.is_some(),
         tls_cert_path: tls.as_ref().map(|tls| tls.cert.clone()),
-        tls_key_path: tls.as_ref().map(|tls| tls.key.clone()),
-        tls_client_ca_cert_path: tls.and_then(|tls| tls.client_ca),
+        tls_key_path: tls.map(|tls| tls.key),
+        tls_client_ca_cert_path: None,
     };
     // The observer counts inference requests, and this service has none, so
     // shutdown goes straight to letting open requests finish.
@@ -137,9 +138,11 @@ pub async fn serve(
         .await
 }
 
+/// The body is checked after the registrar, so that a backend without one
+/// answers `501` whatever the body is.
 async fn register_pool(
     State(backend): State<Arc<PoolDiscoveryBackend>>,
-    Json(registration): Json<PoolRegistration>,
+    registration: Result<Json<PoolRegistration>, JsonRejection>,
 ) -> Response {
     let Some(registrar) = &backend.registrar else {
         return (
@@ -147,6 +150,10 @@ async fn register_pool(
             "this service takes no registrations",
         )
             .into_response();
+    };
+    let Json(registration) = match registration {
+        Ok(registration) => registration,
+        Err(rejection) => return rejection.into_response(),
     };
     match registrar.register(registration).await {
         Ok(lease) => Json(lease).into_response(),
@@ -196,6 +203,20 @@ async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) 
             .collect(),
     })
     .into_response()
+}
+
+/// `RegisterRouter` from the design. The service takes no router
+/// registrations yet, so every call answers `501`, whatever its body. With
+/// MCS, routers need not register. Without it, how a router proves it is a
+/// router, and what it sends, are not decided, and trusting every caller
+/// would let a fake router entry receive every pool's state.
+async fn register_router() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "router registration is not implemented yet. Router replicas come from the router \
+         Service's EndpointSlices, which MCS imports, or from the service's configuration.",
+    )
+        .into_response()
 }
 
 /// Lists what `GET /pools` and `GET /routers` would serve. With pools from
@@ -254,9 +275,12 @@ impl SharedRegistration {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::pool_discovery::{Directory, RouterReplica, RouterReplicaId, Snapshot, WatchStream};
     use async_trait::async_trait;
     use dynamo_global_common::Lease;
+    use dynamo_global_discovery_client::GlobalDiscoveryClient;
     use serde_json::{Value, json};
     use url::Url;
 
@@ -359,6 +383,22 @@ mod tests {
         shutdown.cancel();
     }
 
+    /// The real client against the real routes, so that the two cannot
+    /// drift apart while both test suites pass.
+    #[tokio::test]
+    async fn the_discovery_client_registers_and_lists_routers() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let client =
+            GlobalDiscoveryClient::new(Url::parse(&base).unwrap(), Duration::from_secs(5)).unwrap();
+        let pool: PoolRegistration = serde_json::from_value(registration()).unwrap();
+        let lease = client.register_pool(&pool).await.unwrap();
+        assert_eq!(lease, Lease::new(5, 15).unwrap());
+        assert_eq!(client.routers().await.unwrap(), vec![router_replica()]);
+        let (_, pools) = get_json(&base, "/pools").await;
+        assert_eq!(pools["pools"][0]["key"], registration()["key"]);
+        shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn routers_use_the_client_shape() {
         let (base, shutdown) = start(registrations_backend()).await;
@@ -384,12 +424,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routers_cannot_register_and_the_answer_says_why() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let registration =
+            json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"});
+        for body in [String::new(), registration.to_string()] {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/routers"))
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::NOT_IMPLEMENTED,
+                "{body}"
+            );
+            let reason = response.text().await.unwrap();
+            // The reason names no flags: the binary's flags are not this layer's.
+            assert!(
+                reason.starts_with("router registration is not implemented yet")
+                    && reason.contains("EndpointSlices")
+                    && !reason.contains("--"),
+                "{reason}"
+            );
+        }
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn backend_without_registrar_refuses_registrations() {
         let mut backend = registrations_backend();
         backend.registrar = None;
         let (base, shutdown) = start(backend).await;
         let (status, _) = post_pool(&base, &registration()).await;
         assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
+        // Whatever the body is.
+        let (status, _) = post_pool(&base, &json!({})).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_registration_must_be_json() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .body(registration().to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
         shutdown.cancel();
     }
 
