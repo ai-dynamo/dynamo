@@ -233,6 +233,9 @@ pub(crate) fn parsers_v2_selected() -> bool {
 pub(crate) struct UnifiedRequestPolicy {
     pub reasoning_disabled: bool,
     pub structured_response: bool,
+    /// A top-level `guided_*` grammar may own the output from the first token even
+    /// where the prompt opened a thought; the first bytes decide the channel.
+    pub explicit_guidance: bool,
 }
 
 impl UnifiedRequestPolicy {
@@ -264,7 +267,7 @@ impl UnifiedRequestPolicy {
     }
 
     fn inspects_json_prefill(self, constraint: &GuidedToolConstraint) -> bool {
-        self.structured_response || constraint.installs_guided_json()
+        self.structured_response || self.explicit_guidance || constraint.installs_guided_json()
     }
 
     fn batch_starting_state(
@@ -556,15 +559,7 @@ impl JsonPrefillProbe {
         }
     }
 
-    fn decision_for_family(
-        &mut self,
-        family: &str,
-        terminal: bool,
-        latest_text: &str,
-    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
-        if let Some(decision) = self.marker_decision {
-            return Ok(Some(decision));
-        }
+    fn has_control_marker(&mut self, family: &str, terminal: bool, latest_text: &str) -> bool {
         let first_push = self.marker_probe.is_none();
         let shield = self
             .marker_probe
@@ -586,6 +581,39 @@ impl JsonPrefillProbe {
             keep_from += 1;
         }
         self.marker_suffix.drain(..keep_from);
+
+        has_candidate
+    }
+
+    /// Under an explicit `guided_*` grammar the prompt's open thought does not decide
+    /// the channel: a JSON root is the answer whatever its strings contain, an unquoted
+    /// control marker hands the decision to the prompt rules, and marker-free text is
+    /// the grammar's output once the turn ends.
+    fn explicit_guidance_decision(
+        &mut self,
+        family: &str,
+        terminal: bool,
+        latest_text: &str,
+    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
+        if starts_bare_json(&self.text) {
+            return Ok(Some(UnifiedParserStartingState::Response));
+        }
+        if self.has_control_marker(family, terminal, latest_text) {
+            return detect_prefill(family, &self.text).map(Some);
+        }
+        Ok(terminal.then_some(UnifiedParserStartingState::Response))
+    }
+
+    fn decision_for_family(
+        &mut self,
+        family: &str,
+        terminal: bool,
+        latest_text: &str,
+    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
+        if let Some(decision) = self.marker_decision {
+            return Ok(Some(decision));
+        }
+        let has_candidate = self.has_control_marker(family, terminal, latest_text);
 
         // Only complete unquoted controls require raw-prefix classification;
         // rescanning growing JSON for every punctuation-bearing chunk is quadratic.
@@ -3121,9 +3149,10 @@ fn resolve_guided_prefix(
         return None;
     }
     let mut choice = empty_choice(index);
-    if policy.structured_response
-        && (prefill == UnifiedParserStartingState::None
-            || decision == Some(UnifiedParserStartingState::None))
+    if policy.explicit_guidance
+        || policy.structured_response
+            && (prefill == UnifiedParserStartingState::None
+                || decision == Some(UnifiedParserStartingState::None))
     {
         choice.delta.content = Some(ChatCompletionMessageContent::Text(probe.text));
     } else {
@@ -3595,11 +3624,12 @@ where
                         // reasoning opener. Let the native parser recognize it.
                         probe.unopened_channel_decision(family, original.finish_reason.is_some())
                     } else {
-                        match probe.decision_for_family(
-                            family,
-                            original.finish_reason.is_some(),
-                            text,
-                        ) {
+                        let decision = if policy.explicit_guidance {
+                            probe.explicit_guidance_decision(family, original.finish_reason.is_some(), text)
+                        } else {
+                            probe.decision_for_family(family, original.finish_reason.is_some(), text)
+                        };
+                        match decision {
                             Ok(decision) => decision,
                             Err(error) => {
                                 tracing::warn!(
@@ -3614,11 +3644,12 @@ where
                     };
                     let awaiting_reasoning_boundary = prefill == UnifiedParserStartingState::Reasoning
                         && policy.structured_response
+                        && !policy.explicit_guidance
                         && !policy.reasoning_disabled
                         && probe_decision == Some(UnifiedParserStartingState::None)
                         && original.finish_reason.is_none();
                     if (probe.text.trim().is_empty() && original.finish_reason.is_none())
-                        || policy.structured_response
+                        || (policy.structured_response || policy.explicit_guidance)
                             && (probe_decision.is_none() || awaiting_reasoning_boundary)
                     {
                         undecided_guided_prefix.insert(original.index, probe);
@@ -3626,7 +3657,9 @@ where
                         emitted.push(original);
                         continue;
                     }
-                    if prefill == UnifiedParserStartingState::None
+                    if policy.explicit_guidance {
+                        detected_prefill = probe_decision.unwrap_or(prefill);
+                    } else if prefill == UnifiedParserStartingState::None
                         && probe_decision == Some(UnifiedParserStartingState::Response)
                     {
                         detected_prefill = UnifiedParserStartingState::Response;
@@ -3654,7 +3687,9 @@ where
                             && policy.inspects_json_prefill(&guided_tool_constraint)
                             && !has_consumed_harmony_prefix
                         {
-                            if policy.structured_response {
+                            if policy.explicit_guidance {
+                                detected_prefill
+                            } else if policy.structured_response {
                                 match original.delta.content.as_ref() {
                                     Some(ChatCompletionMessageContent::Text(text)) => match structured_json_response_prefill(family, text, original.finish_reason.is_some()) {
                                         Ok(Some(state)) => state,
@@ -5023,6 +5058,7 @@ pub(crate) mod tests {
         let structured = UnifiedRequestPolicy {
             reasoning_disabled: false,
             structured_response: true,
+            ..Default::default()
         };
         assert!(
             structured
@@ -5228,6 +5264,62 @@ pub(crate) mod tests {
             detect_prefill("minimax_m3", &format!("Check.</mm:think>{native}")).unwrap(),
             UnifiedParserStartingState::Reasoning
         );
+    }
+
+    #[tokio::test]
+    async fn minimax_m3_explicit_guidance_preserves_channels_at_every_split() {
+        for (input, expected_text, expected_reasoning) in [
+            ("Zürich 🙂", "Zürich 🙂", ""),
+            ("Plan.</mm:think>Zürich 🙂", "Zürich 🙂", "Plan."),
+            ("<mm:think>Plan.</mm:think>Zürich 🙂", "Zürich 🙂", "Plan."),
+            (r#"{"note":"</mm:think>"}"#, r#"{"note":"</mm:think>"}"#, ""),
+            ("<mm:think>unfinished", "", "unfinished"),
+            ("unfinished </mm:th", "unfinished </mm:th", ""),
+        ] {
+            for split in input.char_indices().map(|(at, _)| at).chain([input.len()]) {
+                for finish in [None, Some(FinishReason::Stop), Some(FinishReason::Length)] {
+                    let mut last = chunk(&input[split..], false);
+                    last.data.as_mut().unwrap().inner.choices[0].finish_reason = finish;
+                    let output = apply_stream_with_policy(
+                        stream::iter([chunk(&input[..split], false), last]),
+                        None,
+                        GuidedToolConstraint::None,
+                        UnifiedParserStartingState::Reasoning,
+                        "minimax_m3",
+                        true,
+                        UnifiedRequestPolicy {
+                            explicit_guidance: true,
+                            ..Default::default()
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(output.iter().all(|item| !item.is_error()));
+                    let choices = collect_choices(&output);
+                    let text: String = choices
+                        .iter()
+                        .filter_map(|choice| match &choice.delta.content {
+                            Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    let reasoning: String = choices
+                        .iter()
+                        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                        .collect();
+                    assert_eq!(
+                        (text.as_str(), reasoning.as_str()),
+                        (expected_text, expected_reasoning),
+                        "input={input:?}, split={split}, finish={finish:?}"
+                    );
+                    let finishes: Vec<_> = choices
+                        .iter()
+                        .filter_map(|choice| choice.finish_reason)
+                        .collect();
+                    assert_eq!(finishes, finish.into_iter().collect::<Vec<_>>());
+                }
+            }
+        }
     }
 
     #[test]
@@ -13750,6 +13842,7 @@ mod beam_routing_tests {
         let structured = UnifiedRequestPolicy {
             reasoning_disabled: false,
             structured_response: true,
+            ..Default::default()
         };
         let framed = parse_complete_with_policy(
             BEAM_UNIFIED_FAMILY,

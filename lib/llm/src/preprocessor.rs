@@ -5844,6 +5844,11 @@ impl OpenAIPreprocessor {
                     unified_parser::UnifiedRequestPolicy {
                         reasoning_disabled,
                         structured_response: Self::has_structured_response_format(request),
+                        // Same rule as `seed_reasoning_parser` on the v1 route: a
+                        // top-level `guided_*` grammar may own the output from
+                        // token 0 despite the prompt-opened `<mm:think>`.
+                        explicit_guidance: *family == "minimax_m3"
+                            && tool_choice::has_explicit_guided_decoding(request),
                     },
                 ));
             return Ok(Self::apply_unified_response_policies(
