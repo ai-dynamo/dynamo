@@ -111,7 +111,10 @@ fn builtin_policies_declare_capabilities() {
     }
     for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
         let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+        assert_eq!(
+            selector.required_worker_inputs(),
+            WorkerInputs::ACTIVE_REQUESTS
+        );
     }
 }
 
@@ -150,7 +153,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
-    assert_eq!(host.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+    assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
     assert!(host.hosted_occupancy.is_some());
     let selection = host
         .hosted_occupancy

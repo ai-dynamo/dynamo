@@ -740,7 +740,7 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
         input: crate::scheduling::selector::WorkerInputView<'_>,
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
 use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
+use dynamo_kv_router::selector::{HostedSelectionRequest, HostedWorkerPicker};
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
@@ -23,7 +24,7 @@ impl WorkerFilter for LegacyPolicy {
     }
 
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -40,7 +41,7 @@ impl WorkerScorer for LegacyPolicy {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -57,7 +58,7 @@ impl WorkerScorer for LegacyPolicy {
 
 impl WorkerPicker for LegacyPolicy {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -67,6 +68,25 @@ impl WorkerPicker for LegacyPolicy {
             .enumerate()
             .min_by(|(_, a), (_, b)| a.cost().total_cmp(&b.cost()))
             .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("empty candidate table"))
+    }
+}
+
+/// Reads the host's in-flight counts lazily, the way a least-loaded picker does.
+struct ActiveRequestsPicker;
+
+impl WorkerPicker for ActiveRequestsPicker {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::ACTIVE_REQUESTS
+    }
+
+    fn pick(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        (0..input.len())
+            .min_by_key(|&row| input.active_requests(row).unwrap_or(u64::MAX))
             .ok_or_else(|| WorkerSelectionPolicyError::failed("empty candidate table"))
     }
 }
@@ -146,4 +166,32 @@ fn legacy_service_catalog_registers_into_the_common_registry() {
     let provider: WorkerSelectionPolicyProvider = Arc::new(legacy_provider);
     legacy_registry.register("legacy", provider).unwrap();
     assert!(!registry.is_empty());
+}
+
+#[test]
+fn active_requests_pickers_select_through_the_public_hosted_api() {
+    #[allow(deprecated)]
+    let alias = WorkerInputs::OCCUPANCY;
+    assert_eq!(alias, WorkerInputs::ACTIVE_REQUESTS);
+
+    let Ok(picker) = WorkerSelectionPolicy::new(
+        KvRouterConfig::default(),
+        "decode",
+        Vec::new(),
+        Box::new(ActiveRequestsPicker),
+    )
+    .into_hosted_picker() else {
+        panic!("a picker-only ACTIVE_REQUESTS policy runs hosted");
+    };
+    let picker: HostedWorkerPicker = picker;
+    assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
+    let counts = |worker_id: u64| if worker_id == 4 { 0 } else { 3 };
+    let selected = picker
+        .select(
+            &[2, 4, 6],
+            Some(&counts),
+            &HostedSelectionRequest::new(32, 16),
+        )
+        .unwrap();
+    assert_eq!(selected.worker.worker_id, 4);
 }

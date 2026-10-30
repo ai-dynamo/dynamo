@@ -47,11 +47,11 @@ impl BuiltinWorkerSelector {
         let (worker_ids, occupancy) = input.into_hosted()?;
         if self
             .required_worker_inputs()
-            .contains(WorkerInputs::OCCUPANCY)
+            .contains(WorkerInputs::ACTIVE_REQUESTS)
             && occupancy.is_none()
         {
             return Err(dynamo_kv_router::WorkerSelectionPolicyError::failed(
-                "selector requires hosted OCCUPANCY input",
+                "selector requires hosted ACTIVE_REQUESTS input",
             )
             .into());
         }
@@ -62,7 +62,7 @@ impl BuiltinWorkerSelector {
 impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
         if self.mode.requires_occupancy() {
-            WorkerInputs::OCCUPANCY
+            WorkerInputs::ACTIVE_REQUESTS
         } else {
             WorkerInputs::NONE
         }
@@ -198,12 +198,12 @@ impl RoutingHost {
                 let preferred_worker = preferred_worker()?;
                 if selector
                     .required_worker_inputs()
-                    .contains(WorkerInputs::OCCUPANCY)
+                    .contains(WorkerInputs::ACTIVE_REQUESTS)
                 {
                     let occupancy = self
                         .hosted_occupancy
                         .as_ref()
-                        .expect("OCCUPANCY policy must have hosted occupancy state");
+                        .expect("ACTIVE_REQUESTS policy must have hosted occupancy state");
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
                         selector,
@@ -361,7 +361,7 @@ impl RoutingHost {
         };
         let uses_occupancy = self
             .required_worker_inputs()
-            .contains(WorkerInputs::OCCUPANCY);
+            .contains(WorkerInputs::ACTIVE_REQUESTS);
         let mut guard: RequestGuard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
@@ -569,7 +569,10 @@ mod tests {
     fn occupancy_policies_require_lazy_occupancy_input() {
         for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
             let selector = BuiltinWorkerSelector::new(mode).unwrap();
-            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+            assert_eq!(
+                selector.required_worker_inputs(),
+                WorkerInputs::ACTIVE_REQUESTS
+            );
             assert!(
                 selector
                     .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))

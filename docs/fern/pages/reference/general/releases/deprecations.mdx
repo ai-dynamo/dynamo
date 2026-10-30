@@ -37,6 +37,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update launch commands, imports, dashboards, alerts, and saved JSON together. Upgrade KV state agents and the routers that read their events together, because a router cannot decode state-agent events from the other version. Regenerate version-3 `dc_ckf_consumer_bench` corpora as version 4 before loading them.
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `WorkerInputs::OCCUPANCY` worker-selection input group** in favor of `WorkerInputs::ACTIVE_REQUESTS`, which custom pickers read through `WorkerInputView::active_requests(row)`. The alias still compiles with a deprecation warning and is slated for removal in Dynamo v1.9.0.
+
+  > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026

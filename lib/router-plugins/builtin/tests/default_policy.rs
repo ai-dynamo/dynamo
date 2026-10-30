@@ -253,6 +253,60 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
     }
 }
 
+/// The default picker's sampling buffers live in one thread-local slot per thread, shared by
+/// every instance. Instances on many threads, and two roles interleaved on one thread, must
+/// each pick exactly what the single-threaded reference picks with the same seed.
+#[test]
+fn default_picker_scratch_is_safe_across_threads_and_roles() {
+    const SELECTIONS: usize = 64;
+    let config = KvRouterConfig {
+        router_temperature: 0.7,
+        ..Default::default()
+    };
+    let reference_picks = |seed: u64| {
+        let (workers, request) = fixture(16, 127);
+        let reference =
+            dynamo_kv_router::DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", seed);
+        (0..SELECTIONS)
+            .map(|_| {
+                reference
+                    .select_worker(support::selection_input(&workers, &request, 16))
+                    .unwrap()
+                    .worker
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_42 = reference_picks(42);
+    let expected_7 = reference_picks(7);
+
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                let (workers, request) = fixture(16, 127);
+                let plugin = DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42);
+                for expected in &expected_42 {
+                    let actual = plugin
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap();
+                    assert_eq!(actual.worker, *expected);
+                }
+            });
+        }
+    });
+
+    let (workers, request) = fixture(16, 127);
+    let first = DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42);
+    let second = DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 7);
+    for (expected_first, expected_second) in expected_42.iter().zip(&expected_7) {
+        let input = support::selection_input(&workers, &request, 16);
+        assert_eq!(first.select_worker(input).unwrap().worker, *expected_first);
+        assert_eq!(
+            second.select_worker(input).unwrap().worker,
+            *expected_second
+        );
+    }
+}
+
 #[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
@@ -535,7 +589,7 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
             WorkerInputs::CACHE | WorkerInputs::LOAD
         }
         fn pick(
-            &mut self,
+            &self,
             context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
