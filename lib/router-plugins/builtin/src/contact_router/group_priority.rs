@@ -9,7 +9,7 @@
 //! `wv * group_tag + left * programs_left + env_s * env_seconds`, where the group
 //! tag is the version its first program started at; higher scores go first.
 
-use std::collections::{BTreeMap, HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -84,17 +84,20 @@ impl GroupTag {
 struct Group {
     wv: u64,
     left: usize,
-    /// Programs that ended without finishing, and when; a retry takes its slot back.
-    dropped: HashMap<String, Instant>,
+    /// Sessions that started a program; a second start is a retry and takes a slot back.
+    members: HashSet<String>,
+    /// When a program last ended without finishing; the group is kept for its retry.
+    dropped_at: Option<Instant>,
     aged: bool,
 }
 
 impl Group {
-    fn new(tag: &GroupTag, version: u64) -> Self {
+    fn new(tag: &GroupTag, version: u64, session: &str) -> Self {
         Self {
             wv: version,
             left: tag.size.max(1),
-            dropped: HashMap::new(),
+            members: HashSet::from([session.to_owned()]),
+            dropped_at: None,
             aged: false,
         }
     }
@@ -112,14 +115,14 @@ impl Groups {
         match self.0.entry(name.clone()) {
             Entry::Occupied(mut entry) => {
                 let group = entry.get_mut();
-                if group.dropped.remove(session).is_some() {
+                if group.left == 0 && !group.members.contains(session) {
+                    *group = Group::new(tag, version, session);
+                } else if !group.members.insert(session.to_owned()) {
                     group.left += 1;
-                } else if group.left == 0 {
-                    *group = Group::new(tag, version);
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert(Group::new(tag, version));
+                entry.insert(Group::new(tag, version, session));
             }
         }
     }
@@ -133,12 +136,12 @@ impl Groups {
     }
 
     /// Whether program `session` of `tag` joins a group that already started:
-    /// one still running, or one waiting for this session's retry.
+    /// one still running, or one this session already started.
     pub(crate) fn started(&self, tag: &GroupTag, session: &str) -> bool {
         tag.group
             .as_ref()
             .and_then(|name| self.0.get(name))
-            .is_some_and(|group| group.left > 0 || group.dropped.contains_key(session))
+            .is_some_and(|group| group.left > 0 || group.members.contains(session))
     }
 
     /// Programs of started groups that have not ended yet.
@@ -157,31 +160,30 @@ impl Groups {
         }
         group.aged = true;
         let wv = group.wv;
-        if group.dropped.is_empty() {
+        if group.dropped_at.is_none() {
             self.0.remove(name);
         }
         Some(wv)
     }
 
-    /// Program `session` of `tag` ended without finishing at `now`. Its slot
-    /// is freed until the same session starts again or `expire` forgets it.
-    pub(crate) fn drop_program(&mut self, tag: &GroupTag, session: &str, now: Instant) {
+    /// A program of `tag` ended without finishing at `now`. Its slot is freed
+    /// until its session starts again.
+    pub(crate) fn drop_program(&mut self, tag: &GroupTag, now: Instant) {
         let Some(group) = tag.group.as_ref().and_then(|name| self.0.get_mut(name)) else {
             return;
         };
-        if group.dropped.insert(session.to_owned(), now).is_none() {
-            group.left = group.left.saturating_sub(1);
-        }
+        group.left = group.left.saturating_sub(1);
+        group.dropped_at = Some(now);
     }
 
-    /// Forget programs dropped more than `retention` ago, and groups with
-    /// nothing left to wait for.
+    /// Forget groups with nothing left to wait for, once no retry is expected:
+    /// `retention` after their last dropped program.
     pub(crate) fn expire(&mut self, now: Instant, retention: Duration) {
         self.0.retain(|_, group| {
-            group
-                .dropped
-                .retain(|_, at| now.saturating_duration_since(*at) < retention);
-            group.left > 0 || !group.dropped.is_empty()
+            group.left > 0
+                || group
+                    .dropped_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < retention)
         });
     }
 
@@ -229,18 +231,23 @@ mod tests {
         let retention = Duration::from_secs(60);
         let mut groups = Groups::default();
         groups.start(&tag, 3, "a");
-        groups.drop_program(&tag, "a", now);
+        groups.drop_program(&tag, now);
         assert_eq!(groups.programs(), 1);
         assert_eq!(groups.end(&tag), Some(3));
         assert_eq!(groups.programs(), 0);
-        assert!(groups.started(&tag, "a") && !groups.started(&tag, "b"));
+        assert!(groups.started(&tag, "a") && !groups.started(&tag, "c"));
         groups.start(&tag, 9, "a");
         assert_eq!(groups.wv(&tag), Some(3));
         assert_eq!(groups.end(&tag), None);
-        groups.drop_program(&tag, "a", now);
         groups.expire(now + retention, retention);
         assert!(groups.0.is_empty());
         groups.start(&tag, 9, "c");
         assert_eq!((groups.wv(&tag), groups.programs()), (Some(9), 2));
+        // A retry long after its drop, while another member runs, takes its slot back.
+        groups.start(&tag, 9, "d");
+        groups.drop_program(&tag, now + retention);
+        groups.expire(now + 3 * retention, retention);
+        groups.start(&tag, 9, "d");
+        assert_eq!(groups.programs(), 2);
     }
 }

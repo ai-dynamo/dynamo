@@ -516,7 +516,7 @@ impl State {
         if let Some(program) = self.remove_program(session_id)
             && program.wv.is_some()
         {
-            self.groups.drop_program(&program.tag, session_id, now);
+            self.groups.drop_program(&program.tag, now);
         }
     }
 
