@@ -11,6 +11,7 @@ use std::{
 use anyhow::Result;
 #[cfg(test)]
 use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
@@ -406,6 +407,17 @@ pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
     inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
 }
 
+/// The worker inputs whose resources a router starts: the worker-selection policy's, plus those
+/// its role's hint policies read. A hint policy that reads cache inputs needs the KV index, its
+/// event subscription, and the shared cache even when the worker-selection policy reads none.
+pub(crate) fn router_index_inputs(
+    selection_inputs: WorkerInputs,
+    hint_policies: &HintPolicyFactory,
+    worker_type: WorkerType,
+) -> WorkerInputs {
+    selection_inputs | hint_policies.requirements(worker_type).worker_inputs()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -739,9 +751,14 @@ impl KvRouter {
         )?;
         let required_worker_inputs = prepared.inputs();
         let policy_factory = prepared.factory;
+        // Hint policies are a peer plugin role: they start the resources they read, such as the
+        // KV index, even when the worker-selection policy does not read it.
+        let hint_policies =
+            worker_selection_policy_registry().resolve_hint_policies(&kv_router_config)?;
+        let index_inputs = router_index_inputs(required_worker_inputs, &hint_policies, worker_type);
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
-        let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
+        let shared_cache = if index_inputs.contains(WorkerInputs::CACHE) {
             shared_cache
         } else {
             None
@@ -749,11 +766,8 @@ impl KvRouter {
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
-        let kv_event_source_requirement = KvEventSourceRequirement::derive(
-            worker_role,
-            &kv_router_config,
-            required_worker_inputs,
-        );
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &kv_router_config, index_inputs);
         let component = endpoint.component();
         // All chooser tasks are children of the routing load context owner.
         let cancellation_token = parent_token.child_token();
@@ -770,7 +784,7 @@ impl KvRouter {
             model_name: model_name.as_deref(),
             worker_role,
             metric_worker_type,
-            worker_inputs: required_worker_inputs,
+            worker_inputs: index_inputs,
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
@@ -894,6 +908,7 @@ impl KvRouter {
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
+                hint_policies,
             },
             workers_with_configs.clone(),
             Some(request_leases.replica_observer()),
@@ -2159,6 +2174,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn configured_hint_policies_start_the_kv_index_for_load_only_selection() {
+        use dynamo_kv_router::plugins::hint_policy::{
+            HintPolicy, HintPolicyDefinition, HintPolicyInstance, HintRequirements,
+        };
+
+        /// A hint policy that reads cache inputs.
+        struct CacheReader;
+
+        impl HintPolicy for CacheReader {
+            fn requirements(&self) -> HintRequirements {
+                HintRequirements::new()
+                    .with_actions()
+                    .with_inputs(WorkerInputs::CACHE)
+            }
+        }
+
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "hint_policies:\n  prefill: [reader]\n  instances:\n    - name: reader\n      type: cache_reader\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+        registry
+            .register_hint_policy(
+                "cache_reader",
+                Arc::new(|_| {
+                    Ok(HintPolicyDefinition::new(
+                        CacheReader.requirements(),
+                        Arc::new(|_, _, _| HintPolicyInstance::new("cache_reader", CacheReader)),
+                    ))
+                }),
+            )
+            .unwrap();
+        let hints = registry.resolve_hint_policies(&config).unwrap();
+        let requirement = |worker_type| {
+            KvEventSourceRequirement::derive(
+                Some(worker_type),
+                &config,
+                router_index_inputs(WorkerInputs::LOAD, &hints, worker_type),
+            )
+        };
+        assert_eq!(
+            requirement(WorkerType::Prefill),
+            KvEventSourceRequirement::CacheAwareRouting
+        );
+        // Roles without hint policies keep the selection policy's own requirement.
+        assert_eq!(
+            requirement(WorkerType::Aggregated),
+            KvEventSourceRequirement::NotRequired
+        );
     }
 
     struct FakeSharedCache {

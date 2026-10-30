@@ -34,9 +34,10 @@ pub use crate::services::common::replica_sync::{
     ReplicaPeerError, SchedulerLoadSink,
 };
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
+    HostCache, HostEligibility, HostHints, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig,
+    SessionBinding,
 };
 pub use error::SelectionError;
 pub use ingress::KvEventIngress;

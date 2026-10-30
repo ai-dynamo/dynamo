@@ -25,10 +25,10 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
-    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
+    SelectionService, SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
@@ -70,6 +70,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Builds the partition's worker-selection policy (see
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
+    /// The partition's hint policies, resolved from router configuration.
+    pub hint_policies: dynamo_kv_router::plugins::hint_policy::HintPolicyFactory,
 }
 
 fn record_queue_rejection(
@@ -288,6 +290,9 @@ impl EmbeddedSelection {
                 channels: replica_sync,
                 request_leases,
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+            },
+            hints: HostHints {
+                policies: Some(args.hint_policies),
             },
         })
         .build()

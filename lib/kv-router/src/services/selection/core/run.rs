@@ -43,16 +43,14 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
-use super::hint::transfer_hint_payload;
+use super::hint::{KV_HINT_FETCH_ACTION_ID, compose_kv_hint, transfer_hint_payload};
+use crate::plugins::hint_policy::runtime::ActionInputs;
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
 const JOIN_ATTEMPTS: usize = 2;
 const AFFINITY_INVALIDATIONS_BEFORE_YIELD: usize = 32;
 use super::*;
-
-/// Action id of the single `kv.fetch` action a selection's KV hint carries.
-const KV_HINT_FETCH_ACTION_ID: &str = "a1";
 
 pub(super) struct PreparedSelectionInputs {
     pub(super) block_hashes: Vec<LocalBlockHash>,
@@ -484,23 +482,29 @@ impl SelectionCore {
             (Some(endpoint), total_kv_blocks)
         };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        // Hints are attached to bookings only, for the source selection chose.
-        let kv_hint = match (
+        // The router's own fetch: bookings only, from the source selection chose.
+        let router_fetch = match (
             book,
             response.kv_transfer_source,
             response.kv_transfer_candidates.as_ref(),
         ) {
             (true, Some(source), Some(candidates)) => {
-                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates).map(
-                    |payload| {
-                        KvHint::new(
-                            admission.request_id().unwrap_or_default(),
-                            vec![KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload)],
-                        )
-                    },
-                )
+                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates)
+                    .map(|payload| KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload))
             }
             _ => None,
+        };
+        // Hint policies run for bookings only, never for previews.
+        let kv_hint = if book {
+            let inputs = ActionInputs {
+                request_id: admission.request_id().unwrap_or_default(),
+                worker: response.best_worker,
+                prompt_tokens: isl_tokens,
+                block_size: entry.block_size,
+            };
+            compose_kv_hint(&entry.hint_policies, &inputs, router_fetch)
+        } else {
+            None
         };
 
         // The routing hashes go to exactly one of: the reservation recorded

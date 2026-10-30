@@ -462,6 +462,15 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     assert_eq!(error.status_code(), 503);
 }
 
+fn host_with_hints(policies: crate::plugins::hint_policy::HintPolicyFactory) -> SelectionHost {
+    SelectionHost {
+        hints: HostHints {
+            policies: Some(policies),
+        },
+        ..SelectionHost::default()
+    }
+}
+
 /// Two event-driven workers; worker 1 holds every block of an 8-token
 /// prompt. `configure` adjusts each registration before upsert.
 async fn hint_fixture(
@@ -476,10 +485,33 @@ async fn hint_fixture_with(
     prompt_tokens: u32,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    hint_fixture_on(local_core(config), prompt_tokens, configure).await
+}
+
+/// Like [`hint_fixture`], with `host`'s hint policies and an optional worker-selection policy.
+async fn hint_policy_fixture(
+    host: SelectionHost,
+    policy_factory: Option<WorkerSelectionPolicyFactory>,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    let core = core_with(
+        test_config(true),
+        host,
+        policy_factory,
+        WorkerType::Aggregated,
+        None,
+    );
+    hint_fixture_on(core, 8, configure).await
+}
+
+async fn hint_fixture_on(
+    core: SelectionCore,
+    prompt_tokens: u32,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
-    let core = local_core(config);
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
@@ -4139,4 +4171,346 @@ async fn peer_bindings_converge_by_version() {
     // A stale version cannot displace the newer binding.
     peer.dispatch_affinity_event(first);
     assert_eq!(bound_worker(&peer, "s"), Some(3));
+}
+
+mod hint_policies {
+    use super::*;
+    use crate::plugins::hint_policy::runtime::ActionInputs;
+    use crate::plugins::hint_policy::{
+        HintActionContext, HintPolicy, HintPolicyDefinition, HintPolicyError, HintPolicyFactory,
+        HintPolicyInstance, HintRequirements,
+    };
+    use crate::plugins::worker_selection::{
+        WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+        WorkerSelectionContext,
+    };
+    use crate::scheduling::WorkerSelectionPolicyError;
+
+    /// Scores each worker by its negated device overlap, so cache reuse wins.
+    struct DeviceOverlapScorer;
+
+    impl WorkerScorer for DeviceOverlapScorer {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE
+        }
+
+        fn score(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                *cost = -candidate
+                    .cache()
+                    .map_or(0.0, |cache| cache.device_overlap_blocks());
+            }
+            Ok(())
+        }
+    }
+
+    /// The lowest cost wins; ties go to the lowest worker ID.
+    struct LowestCostPicker;
+
+    impl WorkerPicker for LowestCostPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    left.cost()
+                        .total_cmp(&right.cost())
+                        .then_with(|| left.worker().cmp(&right.worker()))
+                })
+                .map(|(row, _)| row)
+                .unwrap_or(0))
+        }
+    }
+
+    fn overlap_policy() -> Option<WorkerSelectionPolicyFactory> {
+        Some(Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::new(
+                config.clone(),
+                role.as_str(),
+                vec![Box::new(DeviceOverlapScorer)],
+                Box::new(LowestCostPicker),
+            )
+        }))
+    }
+
+    fn definition<P: HintPolicy + Clone>(policy: P) -> HintPolicyDefinition {
+        HintPolicyDefinition::new(
+            policy.requirements(),
+            Arc::new(move |_, _, _| HintPolicyInstance::new("test", policy.clone())),
+        )
+    }
+
+    fn hints(policies: Vec<(&str, HintPolicyDefinition)>) -> SelectionHost {
+        host_with_hints(
+            HintPolicyFactory::for_all_roles(
+                policies
+                    .into_iter()
+                    .map(|(name, definition)| (name.to_string(), definition)),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Records how often it runs, and emits one action naming the booked worker and prompt length.
+    #[derive(Clone)]
+    struct Recorder {
+        action_id: &'static str,
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    impl Recorder {
+        fn new(action_id: &'static str) -> Self {
+            Self {
+                action_id,
+                calls: Arc::default(),
+                fail: false,
+            }
+        }
+    }
+
+    impl HintPolicy for Recorder {
+        fn requirements(&self) -> HintRequirements {
+            HintRequirements::new().with_actions()
+        }
+
+        fn hint_kv_locality(
+            &self,
+            context: &HintActionContext<'_>,
+        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(HintPolicyError::new("recorder failed"));
+            }
+            Ok(vec![KvHintAction::new(
+                self.action_id,
+                "test.record",
+                "1",
+                [
+                    (
+                        "worker_id".to_string(),
+                        serde_json::json!(context.worker().worker_id),
+                    ),
+                    (
+                        "prompt_tokens".to_string(),
+                        serde_json::json!(context.prompt_tokens()),
+                    ),
+                ]
+                .into(),
+            )])
+        }
+    }
+
+    fn prompt_of(tokens: &[u32]) -> PromptRequest {
+        PromptRequest {
+            token_ids: Some(tokens.to_vec()),
+            ..PromptRequest::default()
+        }
+    }
+
+    async fn reserve(core: &SelectionCore, id: &str, tokens: &[u32]) -> SelectResponse {
+        let mut request = reserve_request(id);
+        request.prompt = prompt_of(tokens);
+        core.select_and_reserve(request).await.expect("reserve")
+    }
+
+    #[tokio::test]
+    async fn bookings_compose_policies_in_order_and_previews_never_run_them() {
+        let recorder = Recorder::new("record");
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![("record", definition(recorder.clone()))]),
+            None,
+            hint_capable,
+        )
+        .await;
+        let mut preview = select_request();
+        preview.prompt = prompt_of(&tokens);
+        preview.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
+        assert!(core.select(preview).await.unwrap().kv_hint.is_none());
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
+
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        let hint = response.kv_hint.expect("composed hint");
+        let types: Vec<_> = hint
+            .actions
+            .iter()
+            .map(|action| action.action_type.as_str())
+            .collect();
+        assert_eq!(types, ["kv.fetch", "test.record"]);
+        assert_eq!(hint.actions[1].payload["worker_id"], serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn rejected_output_drops_only_that_policy() {
+        let failing = Recorder {
+            fail: true,
+            ..Recorder::new("failing")
+        };
+        let duplicate = Recorder::new("record");
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![
+                ("failing", definition(failing)),
+                ("record", definition(Recorder::new("record"))),
+                ("duplicate", definition(duplicate.clone())),
+            ]),
+            None,
+            hint_capable,
+        )
+        .await;
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        let hint = response.kv_hint.expect("remaining actions");
+        let ids: Vec<_> = hint
+            .actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect();
+        // The router's fetch comes first; the failed policy and the policy reusing an action
+        // ID contribute nothing, and the booking still succeeds.
+        assert_eq!(ids, ["a1", "record"]);
+        assert_eq!(duplicate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replayed_reservations_run_hint_policies_for_the_booked_worker() {
+        let recorder = Recorder::new("record");
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![("record", definition(recorder.clone()))]),
+            overlap_policy(),
+            |_| {},
+        )
+        .await;
+        let mut select = select_request();
+        select.selection_id = Some("two-phase".to_string());
+        select.prompt = prompt_of(&tokens);
+        let selected = core.select(select).await.expect("select");
+        assert_eq!(selected.worker_id, 1);
+        assert!(selected.kv_hint.is_none());
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
+
+        let reserved = core
+            .create_reservation(replay_reservation("two-phase"))
+            .await
+            .expect("reserve");
+        assert_eq!(reserved.worker_id, 1);
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        let hint = reserved.kv_hint.expect("the booked worker's actions");
+        assert_eq!(hint.message_id, "two-phase");
+        assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(1));
+        assert_eq!(
+            hint.actions[0].payload["prompt_tokens"],
+            serde_json::json!(tokens.len())
+        );
+    }
+
+    /// Emits `count` actions with IDs `burst-0`, `burst-1`, ...
+    #[derive(Clone)]
+    struct Burst(usize);
+
+    impl HintPolicy for Burst {
+        fn requirements(&self) -> HintRequirements {
+            HintRequirements::new().with_actions()
+        }
+
+        fn hint_kv_locality(
+            &self,
+            _context: &HintActionContext<'_>,
+        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+            Ok((0..self.0)
+                .map(|index| {
+                    KvHintAction::new(
+                        format!("burst-{index}"),
+                        "test.burst",
+                        "1",
+                        Default::default(),
+                    )
+                })
+                .collect())
+        }
+    }
+
+    fn slot<P: HintPolicy>(name: &str, policy: P) -> super::super::hint::HintPolicySlot {
+        let (name, policy) = HintPolicyInstance::new(name, policy).into_parts();
+        super::super::hint::HintPolicySlot {
+            name,
+            policy: policy.expect("the policy runs at booking"),
+        }
+    }
+
+    #[test]
+    fn the_router_fetch_keeps_its_id_and_the_hint_stays_bounded() {
+        let inputs = ActionInputs {
+            request_id: "composed",
+            worker: WorkerWithDpRank::new(1, 0),
+            prompt_tokens: 8,
+            block_size: 4,
+        };
+        let router_fetch = KvHintAction::fetch(
+            "a1",
+            KvSourceLocationsPayload {
+                source_control_endpoint: "tcp://worker-2:9000".to_string(),
+                block_hashes: vec![crate::protocols::ExternalSequenceBlockHash(7)],
+            },
+        );
+        let policies = [
+            // A non-fetch action may not take the router's fetch ID.
+            slot("reuses_fetch_id", Recorder::new("a1")),
+            // Fills the hint to its limit.
+            slot("burst", Burst(31)),
+            // Would overflow the limit, so it is dropped whole.
+            slot("record", Recorder::new("record")),
+        ];
+        let hint = super::super::hint::compose_kv_hint(&policies, &inputs, Some(router_fetch))
+            .expect("composed hint");
+        assert_eq!(hint.actions.len(), 32);
+        assert_eq!(hint.actions[0].action_id, "a1");
+        assert_eq!(hint.actions[0].action_type, "kv.fetch");
+        assert!(
+            hint.actions[1..]
+                .iter()
+                .all(|action| action.action_type == "test.burst")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_bookings_get_their_own_context() {
+        let (core, _entry, _tokens) = hint_policy_fixture(
+            hints(vec![("record", definition(Recorder::new("record")))]),
+            overlap_policy(),
+            |_| {},
+        )
+        .await;
+        let core = Arc::new(core);
+        let bookings = (1..=8usize).map(|blocks| {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                let tokens: Vec<u32> = (1..=(4 * blocks) as u32).collect();
+                let id = format!("booking-{blocks}");
+                (tokens.len(), reserve(&core, &id, &tokens).await)
+            })
+        });
+        for booking in futures_util::future::join_all(bookings).await {
+            let (prompt_tokens, response) = booking.unwrap();
+            let hint = response.kv_hint.expect("recorded action");
+            // Each booking's actions carry its own prompt and its own booked worker.
+            assert_eq!(
+                hint.actions[0].payload["prompt_tokens"],
+                serde_json::json!(prompt_tokens)
+            );
+            assert_eq!(
+                hint.actions[0].payload["worker_id"],
+                serde_json::json!(response.worker_id)
+            );
+        }
+    }
 }
