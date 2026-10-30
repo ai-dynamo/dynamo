@@ -62,6 +62,8 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
         );
     }
 }
+mod worker_receiver;
+pub use worker_receiver::WorkerTaskReceiver;
 mod kv_indexer;
 mod local;
 mod lower_tier;

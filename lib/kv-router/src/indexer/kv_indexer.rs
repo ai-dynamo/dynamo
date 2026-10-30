@@ -101,7 +101,12 @@ fn apply_routing_decision_with_prune_tracking(
     pm.insert_block_entries(block_entries);
 }
 
-fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_counter: &mut u64) {
+fn apply_prune_removes(
+    trie: &mut RadixTree,
+    entries: Vec<BlockEntry>,
+    prune_manager: &WorkerPruneManager,
+    event_id_counter: &mut u64,
+) {
     let mut entries_by_worker = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
     for entry in entries {
         entries_by_worker
@@ -110,7 +115,11 @@ fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_
             .push(entry);
     }
 
-    for (worker, mut entries) in entries_by_worker {
+    for (worker, entries) in entries_by_worker {
+        let mut entries = prune_manager.take_pending_expirations(worker, entries);
+        if entries.is_empty() {
+            continue;
+        }
         entries.sort_unstable_by_key(|entry| entry.seq_position);
         *event_id_counter += 1;
         let event = RouterEvent::new(
@@ -288,7 +297,7 @@ fn drain_pending_mutations(
 
     if let Some(pm) = prune_manager {
         let entries = pm.drain_due_and_pending(tokio::time::Instant::now());
-        apply_prune_removes(trie, entries, event_id_counter);
+        apply_prune_removes(trie, entries, pm, event_id_counter);
     }
 }
 
@@ -623,6 +632,7 @@ impl KvIndexer {
                                         apply_prune_removes(
                                             &mut trie,
                                             entries,
+                                            pm,
                                             &mut event_id_counter,
                                         );
                                     }
@@ -1080,5 +1090,52 @@ mod fifo_reset_tests {
         let new_scores = indexer.find_matches(vec![LocalBlockHash(2)]).await.unwrap();
         assert!(!old_scores.scores.contains_key(&worker));
         assert_eq!(new_scores.scores.get(&worker), Some(&1));
+    }
+}
+
+#[cfg(test)]
+mod prune_ordering_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_routing_refresh_invalidates_a_dequeued_expiration() {
+        let ttl = std::time::Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl });
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hashes = vec![LocalBlockHash(1)];
+        let sequence_hashes = crate::protocols::compute_seq_hash_for_block(&hashes);
+        let mut trie = RadixTree::new();
+        let mut event_id = 0;
+        let route = || RoutingDecisionRequest {
+            worker,
+            local_hashes: hashes.clone(),
+            sequence_hashes: sequence_hashes.clone(),
+        };
+        apply_routing_decision_with_prune_tracking(
+            &mut trie,
+            route(),
+            &Some(manager.clone()),
+            &mut event_id,
+        );
+        tokio::time::advance(ttl).await;
+        let expired = manager.drain_due_and_pending(tokio::time::Instant::now());
+        assert_eq!(expired.len(), 1);
+        apply_routing_decision_with_prune_tracking(
+            &mut trie,
+            route(),
+            &Some(manager.clone()),
+            &mut event_id,
+        );
+        apply_prune_removes(&mut trie, expired, &manager, &mut event_id);
+        assert_eq!(
+            trie.find_matches(hashes.clone(), false).scores.get(&worker),
+            Some(&1)
+        );
+
+        tokio::time::advance(ttl).await;
+        let expired = manager.drain_due_and_pending(tokio::time::Instant::now());
+        apply_prune_removes(&mut trie, expired, &manager, &mut event_id);
+        assert!(trie.find_matches(hashes, false).scores.is_empty());
+        manager.shutdown();
     }
 }

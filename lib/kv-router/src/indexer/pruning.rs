@@ -13,11 +13,14 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, RouterEvent,
+    WorkerId, WorkerWithDpRank,
+};
 
 const WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD: usize = 10;
 /// Approximate TTL expirations are rounded up to this interval. A non-zero TTL
@@ -222,25 +225,36 @@ fn round_up_duration(duration: Duration, bucket: Duration) -> Duration {
 #[derive(Debug)]
 struct WorkerPruneState {
     timers: PruneManager<BlockEntry>,
+    // Expiration authorizes a removal until a refresh or explicit reset revokes
+    // it. Keep this separate from the delivery queue: a removal may already be
+    // queued on an indexer worker when the same block is refreshed.
+    pending_expirations: FxHashSet<BlockEntry>,
 }
 
 impl WorkerPruneState {
     fn new(config: PruneConfig) -> Self {
         Self {
             timers: PruneManager::new(config),
+            pending_expirations: FxHashSet::default(),
         }
     }
 
     fn insert_block_entries(&mut self, entries: Vec<BlockEntry>, now: Instant) {
+        for entry in &entries {
+            self.pending_expirations.remove(entry);
+        }
         self.timers.insert_at(entries, now);
     }
 
     fn remove_block_entry(&mut self, entry: &BlockEntry) {
         self.timers.remove(entry);
+        self.pending_expirations.remove(entry);
     }
 
     fn pop_expired(&mut self, now: Instant) -> Vec<BlockEntry> {
-        self.timers.pop_expired(now)
+        let expired = self.timers.pop_expired(now);
+        self.pending_expirations.extend(expired.iter().copied());
+        expired
     }
 
     fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
@@ -474,12 +488,149 @@ impl WorkerPruneManager {
             .collect()
     }
 
+    /// Consume still-current expiration ownership immediately before applying
+    /// a remove. The caller must serialize this check and backend application
+    /// with successful stores and retention changes for the same worker. An old
+    /// delivery may consume a newer authorization only after the current copy
+    /// has independently expired again; that copy is then eligible for removal.
+    pub(crate) fn take_pending_expirations(
+        &self,
+        worker: WorkerWithDpRank,
+        mut entries: Vec<BlockEntry>,
+    ) -> Vec<BlockEntry> {
+        let Some(state) = self.inner.workers.get(&worker) else {
+            return Vec::new();
+        };
+        let mut state = state.lock().expect("worker prune state mutex poisoned");
+        entries.retain(|entry| state.pending_expirations.remove(entry));
+        entries
+    }
+
     pub fn subscribe_ready(&self) -> watch::Receiver<u64> {
         self.inner.ready_tx.subscribe()
     }
 
     pub fn shutdown(&self) {
         self.inner.cancel.cancel();
+    }
+}
+
+/// TTL mutations applied on the same FIFO as the worker's backend events.
+/// Registration follows successful application even if the caller drops its
+/// acknowledgement; expiration is revalidated only when removal reaches the lane.
+pub(crate) struct ApproximateTtlTask {
+    manager: WorkerPruneManager,
+    worker: WorkerWithDpRank,
+    entries: Vec<BlockEntry>,
+    operation: ApproximateTtlOperation,
+}
+
+enum ApproximateTtlOperation {
+    Store {
+        event: RouterEvent,
+        response: oneshot::Sender<bool>,
+    },
+    Remove {
+        event_id: u64,
+    },
+}
+
+pub(crate) struct PendingTtlStore {
+    manager: WorkerPruneManager,
+    worker: WorkerWithDpRank,
+    entries: Vec<BlockEntry>,
+    response: oneshot::Sender<bool>,
+}
+
+pub(crate) enum PreparedTtlTask {
+    Store(RouterEvent, PendingTtlStore),
+    Remove(ApproximateTtlTask),
+}
+
+impl PendingTtlStore {
+    pub(crate) fn complete(
+        self,
+        result: Result<bool, super::KvRouterError>,
+    ) -> Result<(), super::KvRouterError> {
+        let applied = result?;
+        if applied {
+            self.manager
+                .insert_worker_block_entries(self.worker, self.entries);
+        }
+        let _ = self.response.send(applied);
+        Ok(())
+    }
+}
+
+impl ApproximateTtlTask {
+    pub(crate) fn store(
+        manager: WorkerPruneManager,
+        event: RouterEvent,
+        entries: Vec<BlockEntry>,
+        response: oneshot::Sender<bool>,
+    ) -> Self {
+        Self {
+            manager,
+            worker: WorkerWithDpRank::new(event.worker_id, event.event.dp_rank),
+            entries,
+            operation: ApproximateTtlOperation::Store { event, response },
+        }
+    }
+
+    pub(crate) fn remove(
+        manager: WorkerPruneManager,
+        worker: WorkerWithDpRank,
+        entries: Vec<BlockEntry>,
+        event_id: u64,
+    ) -> Self {
+        Self {
+            manager,
+            worker,
+            entries,
+            operation: ApproximateTtlOperation::Remove { event_id },
+        }
+    }
+
+    pub(crate) fn prepare(self) -> PreparedTtlTask {
+        if !matches!(self.operation, ApproximateTtlOperation::Store { .. }) {
+            return PreparedTtlTask::Remove(self);
+        }
+        let ApproximateTtlOperation::Store { event, response } = self.operation else {
+            unreachable!()
+        };
+        PreparedTtlTask::Store(
+            event,
+            PendingTtlStore {
+                manager: self.manager,
+                worker: self.worker,
+                entries: self.entries,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn into_remove_event(self) -> Option<RouterEvent> {
+        let ApproximateTtlOperation::Remove { event_id } = self.operation else {
+            unreachable!("store must be extracted before removal")
+        };
+        let mut entries = self
+            .manager
+            .take_pending_expirations(self.worker, self.entries);
+        if entries.is_empty() {
+            return None;
+        }
+        entries.sort_unstable_by_key(|entry| entry.key);
+        entries.dedup_by_key(|entry| entry.key);
+        Some(RouterEvent::new(
+            self.worker.worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
+                }),
+                dp_rank: self.worker.dp_rank,
+            },
+        ))
     }
 }
 
@@ -656,6 +807,69 @@ mod tests {
             worker,
             seq_position,
         }
+    }
+
+    #[rstest::rstest]
+    #[case::refresh("refresh")]
+    #[case::forget("forget")]
+    #[case::rank_reset("rank")]
+    #[case::worker_removal("worker")]
+    #[tokio::test(start_paused = true)]
+    async fn pending_expiration_is_revoked_after_dequeue(#[case] change: &str) {
+        let ttl = Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl });
+        let worker = WorkerWithDpRank::new(7, 0);
+        let block = test_block(worker, 42, 0);
+        manager.insert_block_entries(vec![block]);
+        time::advance(ttl).await;
+        let expired = manager.drain_due_and_pending(Instant::now());
+        assert_eq!(expired, vec![block]);
+
+        match change {
+            "refresh" => manager.insert_block_entries(vec![block]),
+            "forget" => manager.remove_block_entries(&[block]),
+            "rank" => manager.remove_worker_dp_rank(worker),
+            "worker" => manager.remove_worker(worker.worker_id),
+            _ => unreachable!(),
+        }
+        assert!(manager.take_pending_expirations(worker, expired).is_empty());
+
+        // Revocation must not prevent a later, independently authorized expiry.
+        manager.insert_block_entries(vec![block]);
+        time::advance(ttl).await;
+        let expired = manager.drain_due_and_pending(Instant::now());
+        assert_eq!(
+            manager.take_pending_expirations(worker, expired.clone()),
+            vec![block]
+        );
+        assert!(manager.take_pending_expirations(worker, expired).is_empty());
+        manager.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_delivery_can_consume_a_later_legitimate_expiration_once() {
+        let ttl = Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl });
+        let worker = WorkerWithDpRank::new(7, 0);
+        let block = test_block(worker, 42, 0);
+        manager.insert_block_entries(vec![block]);
+        time::advance(ttl).await;
+        let old_delivery = manager.drain_due_and_pending(Instant::now());
+        manager.insert_block_entries(vec![block]);
+        time::advance(ttl).await;
+        let new_delivery = manager.drain_due_and_pending(Instant::now());
+        assert_eq!(old_delivery, vec![block]);
+        assert_eq!(new_delivery, vec![block]);
+        assert_eq!(
+            manager.take_pending_expirations(worker, old_delivery),
+            vec![block]
+        );
+        assert!(
+            manager
+                .take_pending_expirations(worker, new_delivery)
+                .is_empty()
+        );
+        manager.shutdown();
     }
 
     /// Validate basic insert / expiry behaviour of [`PruneManager`].
