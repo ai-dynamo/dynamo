@@ -79,6 +79,7 @@ spec:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
           - "--lpx-enabled={{ .Values.lpx.enabled }}"
+          - "--dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}"
           - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
           - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
       {{- end }}
@@ -91,6 +92,7 @@ spec:
         {{- with .Values.controllerManager.manager.dgdrDefaultImage }}
         - {{ printf "--dgdr-default-image=%s" . | quote }}
         {{- end }}
+        - --dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}
         command:
         - /manager
         env:

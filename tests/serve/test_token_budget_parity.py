@@ -23,6 +23,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 MODEL = "Qwen/Qwen3-0.6B"
 CONTEXT_LIMIT = 128
+SGLANG_KV_TOKENS = 2048
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ PARITY_SPECS = (
             "vllm",
             "default",
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            reject_total_overflow=False,
         ),
         id="vllm-default",
         marks=[
@@ -88,7 +89,7 @@ PARITY_SPECS = (
         marks=[
             pytest.mark.sglang,
             pytest.mark.profiled_vram_gib(8.0),
-            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.requested_sglang_kv_tokens(SGLANG_KV_TOKENS),
         ],
     ),
     pytest.param(
@@ -102,7 +103,7 @@ PARITY_SPECS = (
         marks=[
             pytest.mark.sglang,
             pytest.mark.profiled_vram_gib(8.0),
-            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.requested_sglang_kv_tokens(SGLANG_KV_TOKENS),
         ],
     ),
     pytest.param(
@@ -198,8 +199,14 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
             str(port),
             "--context-length",
             str(CONTEXT_LIMIT),
+            # Cap KV by tokens, like the Dynamo worker; a low --mem-fraction-static
+            # alone exits -9 when co-tenants allocate GPU memory during startup.
+            "--max-total-tokens",
+            os.environ.get(
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS", str(SGLANG_KV_TOKENS)
+            ),
             "--mem-fraction-static",
-            "0.2",
+            "0.9",
             "--max-running-requests",
             "2",
             "--skip-server-warmup",

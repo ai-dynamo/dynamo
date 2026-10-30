@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
+
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Error, Result};
@@ -16,8 +20,15 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_llm::admission_gate::{
+    AdmissionRequest, AdmissionResponse, BackendAdmissionGate, WorkerAdmissionGate,
+};
+use dynamo_runtime::component::Component;
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+use dynamo_runtime::telemetry::LifecycleOperationRole;
 pub use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream, ManyOut,
@@ -30,8 +41,13 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
-use crate::python_payload::{PythonPayload, PythonResponseItem};
+use super::errors::{
+    http_like_error_to_dynamo, py_exception_to_backend_error, worker_unavailable_to_dynamo,
+};
+use crate::python_payload::{
+    EncodedPythonResponse, PythonPayload, PythonResponseItem, WaitClassification,
+    encode_python_item,
+};
 
 /// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -82,6 +98,10 @@ where
     G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
+        // Covers GIL acquisition plus the Rust->Python crossing that builds the
+        // request object and calls the handler's `generate`. Not token
+        // generation: the generator has not been advanced when this range ends.
+        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
@@ -118,9 +138,14 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
+        // the Python generator (and, for a worker, the engine) producing the item,
+        // so leaving it outside the range keeps engine time out of the bridge cost.
+        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
+        drop(nvtx_anext);
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -193,32 +218,172 @@ impl PythonAsyncEngine {
 }
 
 impl PythonAsyncEngine {
-    pub(crate) fn network_engine(&self) -> PythonNetworkEngine {
-        PythonNetworkEngine(self.0.clone())
+    pub(crate) fn chat_engine(
+        &self,
+        runtime_config: dynamo_llm::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> PythonChatEngine {
+        PythonChatEngine {
+            engine: self.0.clone(),
+            runtime_config: Arc::new(runtime_config),
+        }
+    }
+
+    pub(crate) fn network_engine(
+        &self,
+        backend_role: BackendRole,
+        admission: EndpointAdmission,
+    ) -> PythonNetworkEngine {
+        PythonNetworkEngine {
+            engine: self.0.clone(),
+            backend_role,
+            admission,
+        }
     }
 }
 
-/// Network-only Python engine. Requests and responses stay as Python-owned
-/// objects so the ingress adapter can transcode them directly to and from the
-/// configured request-plane codec.
-#[derive(Clone)]
-pub(crate) struct PythonNetworkEngine(PythonServerStreamingEngine);
+/// In-process frontend adapter. The generic/network Python engines retain
+/// their normal serialization contract, including the N-2 worker wire.
+pub(crate) struct PythonChatEngine {
+    engine: PythonServerStreamingEngine,
+    runtime_config: Arc<dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>,
+}
 
 #[async_trait::async_trait]
-impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
-    for PythonNetworkEngine
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for PythonChatEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<PythonPayload>,
-    ) -> Result<ManyOut<PythonResponseItem>, Error> {
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let runtime_config = self.runtime_config.clone();
         generate_python_stream(
-            &self.0,
+            &self.engine,
             request,
-            |_py, request| Ok(request.into_inner()),
-            unbuffered_python_response_stream,
+            move |py, request| {
+                // Ordinary Chat Completions retain direct typed serialization.
+                if request.responses_tools.is_none() {
+                    return Ok(pythonize(py, &request)?.unbind());
+                }
+                let value = request
+                    .python_chat_processor_request_json(&runtime_config)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+                Ok(pythonize(py, &value)?.unbind())
+            },
+            buffered_typed_response_stream::<NvCreateChatCompletionStreamResponse>,
         )
         .await
+    }
+}
+
+/// The role a Python endpoint serves as a model backend, once it has one.
+///
+/// A Python endpoint can serve any handler; it is a model backend only once
+/// `register_model` records its role, which it does before it builds and
+/// publishes the model card. The cell is the endpoint's own, shared by every
+/// clone, so a role recorded after serving starts applies to the next request.
+/// Its network engines admit a request through the backend admission gate only
+/// while a worker role is recorded: a generic endpoint never touches the gate.
+/// Each reads the role once per request, and admits the request and classifies
+/// its responses under that one reading, so a registration while it runs
+/// changes neither. The role decides only whether a request uses the gate.
+#[derive(Clone)]
+pub(crate) struct BackendRole(Arc<OnceLock<LifecycleOperationRole>>);
+
+impl BackendRole {
+    pub(crate) fn of(endpoint: &dynamo_runtime::component::Endpoint) -> Self {
+        Self(endpoint.lifecycle_operation_role())
+    }
+
+    /// Whether a request arriving now uses the gate: only while the endpoint
+    /// serves a worker role, never before one is recorded, and never for a
+    /// frontend, which serves no backend requests.
+    pub(crate) fn uses_admission(&self) -> bool {
+        match self.0.get() {
+            Some(
+                LifecycleOperationRole::Decode
+                | LifecycleOperationRole::Worker
+                | LifecycleOperationRole::Encode
+                | LifecycleOperationRole::Prefill,
+            ) => true,
+            Some(LifecycleOperationRole::Frontend) | None => false,
+        }
+    }
+}
+
+/// How a Python endpoint's network engines reach the admission gate of the
+/// worker the endpoint serves for: that worker's own handle, cloned from its
+/// runtime, and the component the endpoint serves.
+#[derive(Clone)]
+pub(crate) struct EndpointAdmission {
+    gate: WorkerAdmissionGate,
+    component: Component,
+}
+
+impl EndpointAdmission {
+    pub(crate) fn new(gate: WorkerAdmissionGate, component: Component) -> Self {
+        Self { gate, component }
+    }
+
+    /// The worker's gate. `register_model` creates it, for this endpoint's
+    /// component, before it records the role that lets a request use it, so a
+    /// request always receives the gate already created.
+    pub(crate) fn gate(&self) -> Arc<BackendAdmissionGate> {
+        self.gate.get_or_create(&self.component)
+    }
+}
+
+/// Network-only Python engine. Requests stay Python-owned objects, transcoded
+/// directly from the request-plane codec, and each response is encoded
+/// straight into the request's own codec as it leaves the handler.
+#[derive(Clone)]
+pub(crate) struct PythonNetworkEngine {
+    engine: PythonServerStreamingEngine,
+    backend_role: BackendRole,
+    admission: EndpointAdmission,
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<EncodedPythonResponse>, Error>
+    for PythonNetworkEngine
+{
+    /// A model backend's request is admitted through its worker's admission
+    /// gate before its handler is invoked; any other endpoint's request goes
+    /// straight to its handler.
+    async fn generate(
+        &self,
+        request: SingleIn<PythonPayload>,
+    ) -> Result<ManyOut<EncodedPythonResponse>, Error> {
+        let payload_codec = request.payload_codec();
+        let context = request.context();
+        let dp_rank = request.dp_rank();
+        let uses_admission = self.backend_role.uses_admission();
+        let generate = generate_python_stream(
+            &self.engine,
+            request,
+            |_py, request| Ok(request.into_inner()),
+            move |stream, ctx, request_id| {
+                encoded_python_response_stream(
+                    stream,
+                    ctx,
+                    request_id,
+                    payload_codec,
+                    WaitClassification::new(uses_admission),
+                )
+            },
+        );
+        if uses_admission {
+            self.admission
+                .gate()
+                .admit(&context, dp_rank, generate)
+                .await
+        } else {
+            generate.await
+        }
     }
 }
 
@@ -369,6 +534,9 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
+        // Per-response Python->Rust deserialization: pure Dynamo overhead paid
+        // once per streamed chunk.
+        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
         Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
@@ -381,6 +549,12 @@ where
 pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
         error.display(py);
+
+        // Checked before the backend mapping, whose `DynamoException` fallback
+        // would otherwise classify it as `Unknown`.
+        if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
+            return error;
+        }
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
             let mut builder = DynamoError::builder()
@@ -541,6 +715,34 @@ where
     Box::pin(ReceiverStream::new(spawn_response_forwarder::<Resp>(
         stream, ctx, request_id,
     )))
+}
+
+/// [`unbuffered_python_response_stream`], with each item encoded into the
+/// request-plane `payload_codec` before the stream yields it — the same parse
+/// and encoding the ingress would otherwise run on the raw item, in the same
+/// blocking step — and classified for backend admission while `classification`
+/// says the gate still reads it. The gate consumes this stream directly, so an
+/// item it yields is accepted in stream order. The generator is still polled
+/// only when the consumer asks for the next item, and only once the current
+/// one is fully encoded, so no Python object outlives its turn.
+fn encoded_python_response_stream(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+    payload_codec: RequestPlanePayloadCodec,
+    classification: WaitClassification,
+) -> DataStream<EncodedPythonResponse> {
+    let items = unbuffered_python_response_stream(stream, ctx, request_id);
+    Box::pin(futures::stream::unfold(
+        (items, classification),
+        move |(mut items, classification)| async move {
+            let item = items.next().await?;
+            let response =
+                encode_python_item(payload_codec, item, classification.classifies()).await;
+            classification.accepted(response.admission_output());
+            Some((response, (items, classification)))
+        },
+    ))
 }
 
 fn unbuffered_python_response_stream(
@@ -765,5 +967,37 @@ mod tests {
             ErrorClass::CapacityExhausted
         );
         assert_eq!(error_class_for_http_status(500), ErrorClass::Internal);
+    }
+
+    /// An endpoint's requests use the gate only while it serves a worker role:
+    /// never before a role is recorded, and never for a frontend. A role
+    /// recorded later, through the endpoint's shared cell, applies from then on.
+    #[test]
+    fn only_a_worker_role_uses_the_gate() {
+        use super::BackendRole;
+        use dynamo_runtime::telemetry::LifecycleOperationRole::{
+            Decode, Encode, Frontend, Prefill, Worker,
+        };
+        use std::sync::{Arc, OnceLock};
+
+        for (role, uses_admission) in [
+            (Decode, true),
+            (Worker, true),
+            (Encode, true),
+            (Prefill, true),
+            (Frontend, false),
+        ] {
+            let backend_role = BackendRole(Arc::new(OnceLock::from(role)));
+            assert_eq!(backend_role.uses_admission(), uses_admission, "{role:?}");
+        }
+
+        let cell = Arc::new(OnceLock::new());
+        let backend_role = BackendRole(Arc::clone(&cell));
+        assert!(!backend_role.uses_admission(), "no role recorded yet");
+        cell.set(Decode).expect("unset");
+        assert!(
+            backend_role.uses_admission(),
+            "a role recorded late applies"
+        );
     }
 }

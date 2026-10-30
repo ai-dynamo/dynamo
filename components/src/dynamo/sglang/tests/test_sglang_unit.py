@@ -9,12 +9,14 @@ import logging
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
@@ -37,6 +39,8 @@ from dynamo.sglang._compat import (
     supports_external_mm_hashes,
 )
 from dynamo.sglang.args import (
+    CUDA_COREDUMP_WAIT_ENV,
+    _default_cuda_coredump_wait,
     _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
@@ -149,6 +153,46 @@ def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
     else:
         with pytest.raises(ValueError, match="--freeze-gc-after-init"):
             sglang_args.Config(server_args, dynamo_args)
+
+
+@pytest.fixture
+def clean_coredump_env(monkeypatch):
+    # Register the key so teardown removes the value the helper writes.
+    monkeypatch.setenv(CUDA_COREDUMP_WAIT_ENV, "")
+    monkeypatch.delenv(CUDA_COREDUMP_WAIT_ENV)
+    monkeypatch.delenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", raising=False)
+    return monkeypatch
+
+
+def test_cuda_coredump_wait_skipped_when_coredumps_disabled(clean_coredump_env):
+    from sglang.srt.environ import envs
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "0"
+    assert envs.SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS.get() == 0.0
+
+
+def test_cuda_coredump_wait_keeps_explicit_value(clean_coredump_env):
+    clean_coredump_env.setenv(CUDA_COREDUMP_WAIT_ENV, "30")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "30"
+
+
+def test_cuda_coredump_wait_kept_when_user_coredumps_enabled(clean_coredump_env):
+    clean_coredump_env.setenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", "1")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
+
+
+def test_cuda_coredump_wait_kept_with_crash_dump_folder(clean_coredump_env, tmp_path):
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=str(tmp_path)))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
 
 
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
@@ -1887,6 +1931,194 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
     )
 
     assert use_modelexpress_remote_instance(args) is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "input_name", "worker_name", "expected"),
+    [
+        ({}, "Tokens", "Aggregated", True),
+        ({"max_running_requests": None}, "Tokens", "Aggregated", False),
+        ({"max_running_requests": 2}, "Tokens", "Aggregated", False),
+        ({"disable_overlap_schedule": False}, "Tokens", "Aggregated", False),
+        ({"pp_size": 2}, "Tokens", "Aggregated", False),
+        ({"speculative_algorithm": "EAGLE"}, "Tokens", "Aggregated", False),
+        ({"dllm_algorithm": "LowConfidence"}, "Tokens", "Aggregated", False),
+        ({"enable_priority_scheduling": True}, "Tokens", "Aggregated", False),
+        (
+            {"enable_priority_scheduling": True, "disable_priority_preemption": True},
+            "Tokens",
+            "Aggregated",
+            True,
+        ),
+        ({}, "Text", "Aggregated", False),
+        ({}, "Tokens", "Decode", False),
+        ({}, "Tokens", "Prefill", False),
+        (
+            {"max_running_requests": 2, "dp_size": 2, "enable_dp_attention": True},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"dp_size": 2}, "Tokens", "Aggregated", False),
+        ({"enable_dp_attention": True}, "Tokens", "Aggregated", False),
+        (
+            {"max_running_requests": 2, "attn_dp_size": 2},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"ep_join_mode": "scale"}, "Tokens", "Aggregated", False),
+    ],
+)
+def test_systemone_serial_capability_registration_gate(
+    monkeypatch, overrides, input_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.19")
+    server_args = SimpleNamespace(
+        **{
+            "max_running_requests": 1,
+            "disable_overlap_schedule": True,
+            "pp_size": 1,
+            "speculative_algorithm": None,
+            "enable_priority_scheduling": False,
+            "disable_priority_preemption": False,
+            **overrides,
+        }
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            getattr(sglang_register.ModelInput, input_name),
+            sglang_register.ModelType.Chat,
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        ("0.5.18", False),
+        ("0.5.19", True),
+        ("0.5.19+cu129", True),
+        ("0.5.20", False),
+        ("0.5.22", True),
+        ("0.5.22+cu130", True),
+        ("0.5.19+debug", False),
+        ("0.5.22+debug", False),
+        ("0.5.22+cu130.debug", False),
+        ("0.5.22.post1", False),
+        ("0.5.22rc1", False),
+    ],
+)
+def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+        is expected
+    )
+
+
+def test_systemone_unqualified_serial_version_warns(monkeypatch, caplog):
+    assert sglang_register is not None
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.20")
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    with caplog.at_level(logging.WARNING):
+        assert not sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+    assert "0.5.20" in caplog.text
+    assert "decision" in caplog.text.lower()
+
+
+def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
+    assert sglang_register is not None
+    with (REPO_ROOT / "pyproject.toml").open("rb") as project_file:
+        project = tomllib.load(project_file)
+    dependency = next(
+        Requirement(value)
+        for value in project["project"]["optional-dependencies"]["sglang"]
+        if Requirement(value).name == "sglang"
+    )
+    pins = list(dependency.specifier)
+    assert len(pins) == 1 and pins[0].operator == "=="
+    monkeypatch.setattr(sglang_register, "version", lambda package: pins[0].version)
+    assert sglang_register._supports_systemone_serial(
+        SimpleNamespace(
+            max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+        ),
+        sglang_register.ModelInput.Tokens,
+        sglang_register.ModelType.Chat,
+        sglang_register.WorkerType.Aggregated,
+    ), "Qualify the pinned SGLang release before enabling its decision profile"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("serial", [False, True])
+@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
+async def test_systemone_serial_capability_published_only_when_isolated(
+    monkeypatch, caplog, serial, installed
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    published = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda key, value: published.update({key: value})
+    )
+
+    async def fake_get_runtime_config(*args):
+        return runtime_config
+
+    async def fake_register_model(*args, **kwargs):
+        assert kwargs["runtime_config"] is runtime_config
+
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="model",
+        page_size=16,
+        max_running_requests=1,
+        disable_overlap_schedule=serial,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
+    )
+    with caplog.at_level(logging.INFO):
+        assert await sglang_register._register_model_with_runtime_config(
+            engine=SimpleNamespace(),
+            endpoint=SimpleNamespace(),
+            server_args=server_args,
+            dynamo_args=dynamo_args,
+            worker_type=sglang_register.WorkerType.Aggregated,
+        )
+    assert published["sglang_generate"] == "true"
+    assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
+    assert ("including chat and completions" in caplog.text) is serial
+    if serial:
+        assert f"Published SGLang {installed} System One capability" in caplog.text
+        assert "separate served-model name or namespace-scoped frontend" in caplog.text
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():

@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
     file: 'components/src/dynamo/artifacts/storage.py',
     expect: { core: true, frontend: true, vllm: false },
     desc: 'generic artifact transport keeps shared runtime CI'
@@ -163,6 +168,11 @@ const testCases = [
     file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
     expect: { core: false, docs: false, examples: true, operator: true },
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
+  },
+  {
+    file: '.github/workflows/pre-merge.yml',
+    expect: { examples: true },
+    desc: 'a change to the Recipe Check job definition runs Recipe Check'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',

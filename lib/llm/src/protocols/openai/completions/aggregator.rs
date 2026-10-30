@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use dynamo_runtime::error::DynamoError;
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use super::NvCreateCompletionResponse;
+use super::{CompletionEcho, NvCreateCompletionResponse};
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
@@ -31,6 +31,20 @@ struct DeltaChoice {
     text: String,
     finish_reason: Option<FinishReason>,
     logprobs: Option<dynamo_protocols::types::Logprobs>,
+    /// The echoed prompt (`echo: true`), prepended once the stream has ended.
+    echo: Option<CompletionEcho>,
+}
+
+impl DeltaChoice {
+    fn empty(index: u32) -> Self {
+        Self {
+            index,
+            text: String::new(),
+            finish_reason: None,
+            logprobs: None,
+            echo: None,
+        }
+    }
 }
 
 impl Default for DeltaAggregator {
@@ -75,19 +89,24 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+                    if let Some(echo) = delta.echo {
+                        let index = echo.choice_index;
+                        let state_choice = aggregator
+                            .choices
+                            .entry(index)
+                            .or_insert_with(|| DeltaChoice::empty(index));
+                        match state_choice.echo.as_mut() {
+                            Some(existing) => existing.merge(echo),
+                            None => state_choice.echo = Some(echo),
+                        }
+                    }
 
                     // handle the choices
                     for choice in delta.inner.choices {
-                        let state_choice =
-                            aggregator
-                                .choices
-                                .entry(choice.index)
-                                .or_insert(DeltaChoice {
-                                    index: choice.index,
-                                    text: "".to_string(),
-                                    finish_reason: None,
-                                    logprobs: None,
-                                });
+                        let state_choice = aggregator
+                            .choices
+                            .entry(choice.index)
+                            .or_insert_with(|| DeltaChoice::empty(choice.index));
 
                         state_choice.text.push_str(&choice.text);
 
@@ -152,6 +171,7 @@ impl DeltaAggregator {
         let response = NvCreateCompletionResponse {
             inner,
             nvext: aggregator.nvext,
+            echo: None,
         };
 
         Ok(response)
@@ -162,12 +182,16 @@ impl From<DeltaChoice> for dynamo_protocols::types::Choice {
     fn from(delta: DeltaChoice) -> Self {
         let finish_reason = delta.finish_reason.map(Into::into);
 
-        dynamo_protocols::types::Choice {
+        let mut choice = dynamo_protocols::types::Choice {
             index: delta.index,
             text: delta.text,
             finish_reason,
             logprobs: delta.logprobs,
+        };
+        if let Some(echo) = delta.echo {
+            echo.prepend_to(&mut choice);
         }
+        choice
     }
 }
 
@@ -239,7 +263,11 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        };
 
         Annotated {
             data: Some(response),
@@ -398,7 +426,11 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        };
 
         let annotated_delta = Annotated {
             data: Some(response),
@@ -473,5 +505,44 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert_eq!(error.message(), "unsupported logprobs");
+    }
+
+    #[tokio::test]
+    async fn echo_is_prepended_to_the_aggregated_choice() {
+        // The text rides the first chunk, the prompt logprobs the final one.
+        let mut first = create_test_delta(0, "Hi", None, Some(-0.3));
+        first.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
+            choice_index: 0,
+            text: "Prompt".to_string(),
+            logprobs: None,
+        });
+        let mut last = create_test_delta(0, "!", Some("stop".to_string()), Some(-0.7));
+        last.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
+            choice_index: 0,
+            text: String::new(),
+            logprobs: Some(dynamo_protocols::types::Logprobs {
+                tokens: vec!["Prompt".to_string()],
+                token_logprobs: vec![None],
+                top_logprobs: vec![serde_json::Value::Null],
+                text_offset: vec![],
+            }),
+        });
+
+        let response = DeltaAggregator::apply(
+            futures::stream::iter(vec![first, last]),
+            ParsingOptions::default(),
+        )
+        .await
+        .expect("aggregation");
+
+        assert!(response.echo.is_none());
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.text, "PromptHi!");
+        let logprobs = choice.logprobs.as_ref().expect("logprobs");
+        assert_eq!(logprobs.tokens, vec!["Prompt", "Hi", "!"]);
+        assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.3), Some(-0.7)]);
+        assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
+        // Generated offsets (0 in `create_test_delta`) move past the echoed text.
+        assert_eq!(logprobs.text_offset, vec![6, 6]);
     }
 }

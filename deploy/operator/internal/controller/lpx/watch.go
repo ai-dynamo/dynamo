@@ -18,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,6 +53,10 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
 		return ctrlBuilder.Complete(r)
 	}
+
+	// Do not add ResourceClaim, ResourceClaimTemplate or DeviceClass watches for Cyborg GPU
+	// validation: the resolved count does not affect the rendered workload. Lookup failures
+	// use ordinary error retries, and DGD edits already trigger reconciliation.
 
 	// Active integration observes its workload and scheduling dependencies.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &lpxv1alpha1.LPUPipelineRequest{}, pipelineRequestPCSOwnerUIDIndex, pipelineRequestOwnerUID); err != nil {
@@ -105,7 +108,7 @@ func mapChildToLPXGraphDeployment(_ context.Context, obj client.Object) []ctrl.R
 	if deploymentName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: deploymentName}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: deploymentName}}
 }
 
 // lpxGraphDeploymentPredicate observes every field that grants publication authority.
