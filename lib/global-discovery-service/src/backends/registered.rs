@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The MCS backend with registrations. A pool is listed only while both
-//! sources agree: MCS imports a Ready PoolRelay endpoint for it, and its
-//! PoolRelay has registered within the lease (`POST /pools`).
+//! sources agree: MCS imports a Ready PoolRelay endpoint for it, and one of
+//! its PoolRelays has registered within the lease (`POST /pools`).
 //!
 //! The two are matched by pool key, so a registration's `cluster_id` must be
 //! the name MCS gives the pool's cluster: its About API cluster ID with
@@ -11,7 +11,8 @@
 //!
 //! Each source gives what it knows best. The registration says what the pool
 //! serves: model, capabilities, capacity and location. MCS gives the
-//! addresses other clusters can reach: the Relay's, and the frontends'.
+//! addresses other clusters can reach: every Ready PoolRelay's, and the
+//! frontends'.
 //!
 //! Each source also covers a gap in the other. MCS drops a pool within
 //! seconds when its Relay stops or its export is removed. The lease drops a
@@ -285,7 +286,7 @@ impl Join {
                 tracing::warn!(
                     ?key,
                     "MCS lists a Ready PoolRelay for this pool, but the pool has no live \
-                     registration here, so it is not listed. Check that its PoolRelay calls \
+                     registration here, so it is not listed. Check that its PoolRelays call \
                      POST /pools on this service with this key."
                 );
             } else {
