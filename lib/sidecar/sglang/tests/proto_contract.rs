@@ -42,7 +42,7 @@ fn release_0522_fields_keep_their_wire_tags() {
 }
 
 #[test]
-fn release_0523_media_fields_keep_their_wire_tags() {
+fn media_fields_keep_their_wire_tags() {
     let request = dynamo_sglang_sidecar::proto::GenerateRequest {
         image_data: vec!["image".to_string()],
         video_data: vec!["video".to_string()],
