@@ -379,15 +379,13 @@ async fn cleanup<F: SidecarFixture>() {
     assert!(poll!(stream.next()).is_pending());
     engine.cleanup().await.unwrap();
     engine.cleanup().await.unwrap();
-    outputs.extend(bounded("cleanup shutdown", stream.collect::<Outputs>()).await);
-    // A migratable error, not a cancelled terminal, so the frontend moves the
-    // request to another worker instead of ending it short.
-    failure(outputs, &handle.tokens(), BackendError::EngineShutdown);
+    outputs.extend(bounded("cleanup cancellation", stream.collect::<Outputs>()).await);
+    terminal(outputs, &handle.tokens(), 3, FinishReason::Cancelled);
     bounded("cleanup remote drop", handle.wait(Event::Dropped)).await;
 
     let ctx = mock_context();
     let unsubmitted = control.request(ctx.id(), RequestPlan::default());
-    failure(
+    terminal(
         collect(
             &engine,
             request("mocker-model", vec![11, 22, 33], 3),
@@ -395,7 +393,8 @@ async fn cleanup<F: SidecarFixture>() {
         )
         .await,
         &[],
-        BackendError::EngineShutdown,
+        3,
+        FinishReason::Cancelled,
     );
     assert!(!unsubmitted.reached(Event::Received));
     fixture.scheduler_idle().await;

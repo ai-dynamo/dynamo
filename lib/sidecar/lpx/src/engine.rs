@@ -32,7 +32,6 @@ use crate::load;
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
 
 const ALREADY_STARTED: &str = "the LPX sidecar has already started";
-const SHUTDOWN_MESSAGE: &str = "LPX sidecar shut down before the request finished";
 
 /// What the sidecar executable runs, chosen from its arguments.
 pub enum Launch<S> {
@@ -323,13 +322,6 @@ impl LLMEngine for LpxSidecarEngine {
         // Hoisted so the loop below does not rebuild the boxed future per token.
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let shutdown = self.cancel.child_token();
-        // Shutdown migrates an unfinished request, as in-process; one whose
-        // client is gone just ends.
-        let migrate_on_shutdown = {
-            let shutdown = shutdown.clone();
-            let client = ctx.inner_arc();
-            move || shutdown.is_cancelled() && !client.is_stopped()
-        };
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
         let dispatched = tokio::select! {
@@ -361,9 +353,6 @@ impl LLMEngine for LpxSidecarEngine {
             return Ok(single(Err(error)));
         }
         let mut stream = match dispatched {
-            None if migrate_on_shutdown() => {
-                return Err(engine_shutdown(SHUTDOWN_MESSAGE));
-            }
             None => return Ok(single(Ok(cancelled(&state)))),
             Some(Ok(stream)) => stream,
             Some(Err(status)) => {
@@ -389,11 +378,7 @@ impl LLMEngine for LpxSidecarEngine {
                     }
                     _ = &mut shutdown_cancellation => {
                         drop(stream);
-                        if migrate_on_shutdown() {
-                            yield Err(engine_shutdown(SHUTDOWN_MESSAGE));
-                        } else {
-                            yield Ok(cancelled(&state));
-                        }
+                        yield Ok(cancelled(&state));
                         break;
                     }
                     message = stream.message() => match message {
