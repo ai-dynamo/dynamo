@@ -4,10 +4,14 @@
 """Unit tests for the EFA deploy-test helpers (tests/deploy/efa_utils.py)."""
 
 import re
+from unittest.mock import MagicMock
 
+import httpx
+import kr8s
 import pytest
 
 from tests.deploy.efa_utils import (
+    _read_pod_logs,
     parse_efa_device_metrics,
     runtime_version_override,
     sum_nixl_agent_samples,
@@ -170,3 +174,72 @@ def test_runtime_version_override_for_unversioned_tags(image: str) -> None:
     version = runtime_version_override(image)
     assert version is not None
     assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+
+
+_LIBFABRIC_LOG = ["nixl: Backend LIBFABRIC was instantiated", "efa_mr_reg ok"]
+
+
+def _fake_pod(current_reads: list, previous_read: BaseException) -> MagicMock:
+    """A one-container pod whose previous instance is missing.
+
+    Each current-log read takes the next item of ``current_reads``: an exception
+    is raised, a list is returned as the log lines.
+    """
+    pod = MagicMock()
+    pod.name = "sglang-disagg-efa-0-decode-abcde"
+    pod.raw = {"spec": {"containers": [{"name": "main"}]}}
+    reads = iter(current_reads)
+
+    def logs(*, previous: bool, **_kwargs):
+        result = previous_read if previous else next(reads)
+        if isinstance(result, BaseException):
+            raise result
+        return iter(result)
+
+    pod.logs = MagicMock(side_effect=logs)
+    return pod
+
+
+_NO_PREVIOUS = kr8s.ServerError("previous terminated container not found")
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_read_pod_logs_recovers_from_transient_tunnel_drop(monkeypatch) -> None:
+    """A log readable after a tunnel recovery is scored, not replaced by an empty log."""
+    sleep = MagicMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
+    pod = _fake_pod(
+        [httpx.ConnectError("All connection attempts failed"), _LIBFABRIC_LOG],
+        _NO_PREVIOUS,
+    )
+
+    assert "Backend LIBFABRIC was instantiated" in _read_pod_logs(pod)
+    sleep.assert_called_once_with(5)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_read_pod_logs_raises_when_tunnel_stays_down(monkeypatch) -> None:
+    """A log that cannot be read fails the read, not the LIBFABRIC check."""
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", MagicMock())
+    pod = _fake_pod(
+        [httpx.ConnectError("All connection attempts failed")] * 4, _NO_PREVIOUS
+    )
+
+    with pytest.raises(httpx.ConnectError):
+        _read_pod_logs(pod)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_read_pod_logs_tolerates_missing_previous_instance(monkeypatch) -> None:
+    sleep = MagicMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
+    pod = _fake_pod([_LIBFABRIC_LOG], _NO_PREVIOUS)
+
+    assert _read_pod_logs(pod) == "\n".join(_LIBFABRIC_LOG)
+    sleep.assert_not_called()

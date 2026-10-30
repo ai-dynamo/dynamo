@@ -30,6 +30,7 @@ from typing import Mapping
 # assert the same response contract as every other deploy test, and a fix to
 # that contract cannot land in one copy only.
 from tests.deploy.dgd_utils import (
+    _KR8S_VCLUSTER_CONNECTION_ERRORS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
     TEST_PROMPT,
@@ -37,6 +38,7 @@ from tests.deploy.dgd_utils import (
     ManagedDeployment,
     validate_chat_response,
 )
+from tests.deploy.vcluster_utils import retry_vcluster_api
 from tests.utils.client import send_request, wait_for_model_availability
 
 logger = logging.getLogger(__name__)
@@ -165,6 +167,11 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     healthy deployment), and a fallback that happened before a restart would
     otherwise be invisible. ``tail_lines`` bounds memory -- FI_LOG_LEVEL=info is
     extremely chatty and both workers' logs are held at once.
+
+    A read that fails is raised, never returned as an empty log: an empty log
+    scores as "LIBFABRIC never instantiated", which blames the backend for what
+    was a dropped vCluster API tunnel. Connection errors are retried while the
+    tunnel recovers; the only failure tolerated is a missing previous instance.
     """
     chunks = []
     spec = pod.raw.get("spec", {})
@@ -175,8 +182,21 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
             if container:
                 kwargs["container"] = container
             try:
-                chunks.append("\n".join(pod.logs(**kwargs)))
+                # pod.logs() is a generator, so the request only happens while
+                # it is consumed -- join inside the retried call.
+                chunks.append(
+                    retry_vcluster_api(
+                        f"reading logs of {pod.name}",
+                        lambda kwargs=kwargs: "\n".join(pod.logs(**kwargs)),
+                        _KR8S_VCLUSTER_CONNECTION_ERRORS,
+                        logger,
+                    )
+                )
+            except _KR8S_VCLUSTER_CONNECTION_ERRORS:
+                raise
             except Exception as e:  # noqa: BLE001 - no previous instance is normal
+                if not previous:
+                    raise
                 logger.debug(
                     "logs(previous=%s) unavailable for %s/%s: %s",
                     previous,
