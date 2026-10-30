@@ -28,6 +28,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 const testDGDName = "my-dgd"
@@ -190,8 +191,7 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
 	}
-	if (dst.Spec.Unauthenticated == nil) != (src.Spec.Unauthenticated == nil) ||
-		(dst.Spec.Unauthenticated != nil && *dst.Spec.Unauthenticated != *src.Spec.Unauthenticated) {
+	if !ptr.Equal(dst.Spec.Unauthenticated, src.Spec.Unauthenticated) {
 		t.Errorf("Unauthenticated: got %v, want %v", dst.Spec.Unauthenticated, src.Spec.Unauthenticated)
 	}
 	if dst.Spec.RuntimeVersionOverride != src.Spec.RuntimeVersionOverride {
