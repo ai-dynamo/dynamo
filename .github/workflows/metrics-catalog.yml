@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Metrics Catalog
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/metrics-catalog.yml'
+      - 'deploy/operator/internal/observability/**'
+      - 'deploy/operator/go.mod'
+      - 'deploy/operator/go.sum'
+      - 'docs/fern/pages/reference/observability/operator-metrics.mdx'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/metrics-catalog.yml'
+      - 'deploy/operator/internal/observability/**'
+      - 'deploy/operator/go.mod'
+      - 'deploy/operator/go.sum'
+      - 'docs/fern/pages/reference/observability/operator-metrics.mdx'
+
+permissions:
+  contents: read
+
+jobs:
+  operator-metrics-catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
+      - name: Compare operator metrics with the catalog
+        run: go -C deploy/operator test -mod=readonly -tags metriccatalog ./internal/observability -run '^TestOperatorMetricsCatalog' -count=1
