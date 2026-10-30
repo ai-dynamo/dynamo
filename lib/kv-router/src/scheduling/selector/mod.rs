@@ -26,8 +26,8 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
 };
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInfo, WorkerInputRows,
-    WorkerTransferInput,
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerCapacityExt, WorkerInfo,
+    WorkerInputRows, WorkerTransferInput,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,

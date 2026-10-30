@@ -359,51 +359,18 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<CandidateData>() == 128);
 
-/// Prefill budget assumed for a rank that does not report `max_num_batched_tokens`. Large
-/// enough that a fractional prefill threshold never fires on an unreported budget.
-pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+pub use dynamo_router_protocol::load::{DEFAULT_MAX_BATCHED_TOKENS, WorkerCapacity};
 
-/// Advertised capacity of one worker rank, from its runtime config. It changes only when
-/// the worker registers again, so hosts serve it from cached discovery state, not per request.
-/// Components read it through [`WorkerInfo::capacity`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WorkerCapacity {
-    max_num_batched_tokens: Option<u64>,
-    total_kv_blocks: Option<u64>,
+/// Reads a worker's advertised capacity from its runtime config. Lives beside
+/// [`WorkerConfigLike`] because the wire crate does not know the config trait.
+pub trait WorkerCapacityExt {
+    /// Read the capacity a worker advertises in its runtime config.
+    fn of<C: WorkerConfigLike>(config: &C) -> Self;
 }
 
-impl WorkerCapacity {
-    /// A reported zero means unreported. vLLM registers `total_kv_blocks = 0` as a placeholder
-    /// under the Ray data-parallel backend, and a zero budget would mark every rank full.
-    pub fn new(max_num_batched_tokens: Option<u64>, total_kv_blocks: Option<u64>) -> Self {
-        Self {
-            max_num_batched_tokens: max_num_batched_tokens.filter(|&value| value > 0),
-            total_kv_blocks: total_kv_blocks.filter(|&value| value > 0),
-        }
-    }
-
-    /// Read the capacity a worker advertises in its runtime config.
-    pub fn of<C: WorkerConfigLike>(config: &C) -> Self {
+impl WorkerCapacityExt for WorkerCapacity {
+    fn of<C: WorkerConfigLike>(config: &C) -> Self {
         Self::new(config.max_num_batched_tokens(), config.total_kv_blocks())
-    }
-
-    /// Prefill tokens the rank batches per engine step, when reported.
-    pub fn max_num_batched_tokens(self) -> Option<u64> {
-        self.max_num_batched_tokens
-    }
-
-    /// Total KV blocks the worker advertises for this rank, when reported: capacity, not free
-    /// blocks. Some adapters derive it from aggregate data (vLLM data parallelism publishes
-    /// the process total divided by the rank count), so treat it as approximate.
-    pub fn total_kv_blocks(self) -> Option<u64> {
-        self.total_kv_blocks
-    }
-
-    /// The budget fractional prefill thresholds are taken of: `max_num_batched_tokens`, or
-    /// [`DEFAULT_MAX_BATCHED_TOKENS`] when the rank does not report it.
-    pub(crate) fn prefill_budget(self) -> u64 {
-        self.max_num_batched_tokens
-            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
     }
 }
 

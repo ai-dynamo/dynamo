@@ -16,7 +16,7 @@ use dynamo_kv_router::indexer::{
     KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
     query_lower_tiers_with_options,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
+use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
 use dynamo_kv_router::protocols::{
     BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq,

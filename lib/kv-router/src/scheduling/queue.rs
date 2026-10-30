@@ -41,7 +41,9 @@ use super::types::{
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
+use crate::plugins::worker_selection::{
+    WorkerCapacity, WorkerCapacityExt, WorkerInputRows, WorkerLoadInput,
+};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,

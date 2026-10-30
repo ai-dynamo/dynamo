@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt, WorkerLoadInput};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::WorkerLoadProjection;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.

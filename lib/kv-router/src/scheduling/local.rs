@@ -30,7 +30,7 @@ use super::types::{
     WorkerAvailabilityProvider,
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
-use crate::plugins::worker_selection::WorkerCapacity;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{
     LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,

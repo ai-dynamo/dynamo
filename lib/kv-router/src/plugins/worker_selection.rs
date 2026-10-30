@@ -17,7 +17,7 @@ pub use context::WorkerSelectionContext;
 pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerCapacity, WorkerCapacityExt, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
     WorkerTransferInput,
 };
 
