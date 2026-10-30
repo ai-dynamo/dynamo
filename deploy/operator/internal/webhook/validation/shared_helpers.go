@@ -136,6 +136,7 @@ func runtimeVersionImageAndPathV1Alpha1(
 // toleratesMissingRuntimeVersionOverride reports whether componentType may omit
 // runtimeVersionOverride when its image tag carries no resolvable version.
 //
+// Components without a Dynamo role do not carry a Dynamo runtime contract.
 // EPP is never exempt. Whether eppConfig is required (legacy Go EPP) or
 // forbidden (native Rust EPP, 1.5.0+) is decided entirely by the resolved
 // runtime version, so an unresolvable version enforces neither half of the
@@ -145,7 +146,15 @@ func runtimeVersionImageAndPathV1Alpha1(
 // non-semver tag (a CI sha tag, :latest, a digest ref) would silently skip the
 // check that the DynamoGraphDeployment path still performs.
 func (v *sharedValidation) toleratesMissingRuntimeVersionOverride(componentType string) bool {
-	return v.allowMissingRuntimeVersionOverride && componentType != consts.ComponentTypeEPP
+	switch componentType {
+	case consts.ComponentTypeEPP:
+		return false
+	case consts.ComponentTypeFrontend, consts.ComponentTypeWorker, consts.ComponentTypePrefill,
+		consts.ComponentTypeDecode, consts.ComponentTypePlanner:
+		return v.allowMissingRuntimeVersionOverride
+	default:
+		return true
+	}
 }
 
 // runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
