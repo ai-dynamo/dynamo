@@ -106,7 +106,7 @@ Docs:     Added to the Metrics Catalog page
 ## Naming
 
 Apply these rules to the exported name, which is what dashboards and alerts see. The APIs
-assemble it from parts (see [Where things live](#where-things-live)).
+can add a prefix or a suffix to the name in the code.
 
 **N1.** The exported name is snake_case and starts with `dynamo_<subsystem>_`.
 
@@ -183,8 +183,8 @@ not make it visible: pre-create its children as well (**L6**).
 **R2.** Do not add a metric that no production code updates.
 
 **R3.** When you add, rename, or remove a name in `lib/runtime/src/metrics/prometheus_names.rs`,
-regenerate its Python mirror in the same pull request (see [Where things live](#where-things-live)).
-Never edit the mirror by hand.
+regenerate its Python mirror in the same pull request with
+`cargo run -p dynamo-codegen --bin gen-python-prometheus-names`. Never edit the mirror by hand.
 
 ## Patterns to follow
 
@@ -275,72 +275,3 @@ are separate fields when the JSONL console format is on
 
 **T3.** Use a trace span, which is sampled, to show where one request spent its time across
 components. Do not add a metric label to get that view.
-
-## Where things live
-
-### Rust
-
-- Add each name as a `pub const` suffix in its subsystem's `pub mod` in
-  `lib/runtime/src/metrics/prometheus_names.rs`. Then regenerate the Python mirror with
-  `cargo run -p dynamo-codegen --bin gen-python-prometheus-names`. Do not edit
-  `lib/bindings/python/src/dynamo/prometheus_names.py` by hand; the
-  `committed_python_matches_generated` test fails when it is stale.
-- Create metrics with `.metrics().create_*` on the runtime, namespace, component, or
-  endpoint (`lib/runtime/src/metrics.rs`). Pass only the suffix: the API prepends
-  `dynamo_component_`, or the prefix given to `create_metric_with_options`. A full
-  `dynamo_...` name gets the prefix twice.
-- The API adds the `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and
-  `worker_id` labels and rejects them as your own labels. In the `*vec` methods, the
-  argument named `const_labels` holds the variable label names.
-- A histogram created with `None` buckets gets the `prometheus` crate defaults: 11 edges from
-  0.005 to 10, sized for seconds. Pass buckets that fit the unit and the alert thresholds
-  (**L7**).
-- The frontend's own families are in `lib/llm/src/http/service/metrics.rs`. Use the bounded
-  enums there (`Status`, `ErrorType`, `Endpoint`) for label values.
-- Test that the code updates a metric by rendering the registry with `prometheus_expfmt()`,
-  as `lib/llm/tests/admission_dp_rank.rs` does.
-
-### Python
-
-- Python cannot create runtime-registered metrics. Create `prometheus_client` metrics in a
-  dedicated `CollectorRegistry`, and expose it with the helpers in
-  `components/src/dynamo/common/utils/prometheus.py`. Register it on both the exposition
-  callback and the typed (OTLP) callback; registering only one leaves the metrics out of
-  OTLP export.
-- Name constants shared with Rust are in `dynamo.prometheus_names`, which is generated from
-  the Rust file. Add a shared name in Rust first.
-- `prometheus_client` adds `_total` to a counter's exported name. Apply **N3** to the
-  exported name.
-- Where SGLang's multiprocess mode needs it, import `prometheus_client` inside the function,
-  with a comment that says why.
-- Test end to end with `find_metric_samples` in `tests/utils/prometheus.py`, which tells an
-  absent series from a zero one.
-
-### Go (operator)
-
-- Operator metrics are `client_golang` vectors with `Namespace: "dynamo_operator"` in
-  `deploy/operator/internal/observability/metrics.go`, registered once in `InitMetrics`.
-
-## Existing names that break these rules
-
-These metrics break a naming, type, or registration rule. Their owners have not yet decided
-between a deprecating rename and a recorded exception. Do not copy them, and do not rename
-them as a side effect of another change. The exemption covers these existing names only: a new
-metric that repeats one of their defects must follow the rules.
-
-| Metric | Rule |
-|--------|------|
-| `dynamo_tokio_worker_mean_poll_time_ns` | N2 |
-| `dynamo_frontend_detokenize_total_us` | N2, N3 |
-| `dynamo_frontend_detokenize_token_count` | N3 |
-| `dynamo_component_kv_cache_events_applied`, `dynamo_kvrouter_kv_cache_events_applied` | N3 |
-| `dynamo_component_kv_cache_event_warnings`, `dynamo_kvrouter_kv_cache_event_warnings` | N3 |
-| `dynamo_router_overhead_*_ms` | N2 |
-| `kvbm_matched_tokens` | N1, N3 |
-| `dynamo_component_gpu_cache_usage_percent` | N2 |
-| `dynamo_component_kv_cache_hit_rate` | R2 |
-| `dynamo_operator_resources_total` | N4 |
-
-Other existing names in `prometheus_names.rs` and elsewhere also break these rules, such as
-the frontend's `dynamo_frontend_worker_*` gauges, which carry `worker_id` and `dp_rank`
-(**L5**). They are not precedents either.
