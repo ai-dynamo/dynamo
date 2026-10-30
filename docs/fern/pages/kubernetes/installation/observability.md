@@ -72,7 +72,7 @@ When enabled, the chart creates these PodMonitors:
 | PodMonitor | Selects | Scrapes |
 |---|---|---|
 | `dynamo-frontend` | `component-type: frontend` | port `http` (`frontendPath`, default `/metrics`) |
-| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar, also `frontendPath`), port `engine-metrics` when `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics=true` (sidecar-mode engine metrics, path from `engineMetricsPath`, default `/metrics`), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar, also `frontendPath`), port `engine-metrics` when present (sidecar-mode engine metrics, path from `engineMetricsPath`, default `/metrics`; `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics=false` removes the endpoint), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
 | `dynamo-planner` | `component-type: planner` | port `metrics` |
 | `dynamo-router` | `component-type: default` | port 9090 (`DYN_SYSTEM_PORT`), addressed by relabeling rather than a named container port |
 

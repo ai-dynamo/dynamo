@@ -79,7 +79,7 @@ DGDs created by operator 1.6.0 or later. For an older DGD, see
 `sglang.launch_server` serves `/metrics` on `--port` only when `--enable-metrics` is set, and binds
 it to the address in `--host`. The example manifests pass both flags, bind `0.0.0.0`, and declare
 port `30000` as `engine-metrics`, the name the platform chart's `dynamo-worker` PodMonitor scrapes
-when `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is enabled. Chart settings, the
+unless `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is set to `false`. Chart settings, the
 labels Prometheus adds, and verification steps are in
 [Scrape Engine Metrics in Sidecar Mode](../../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
 

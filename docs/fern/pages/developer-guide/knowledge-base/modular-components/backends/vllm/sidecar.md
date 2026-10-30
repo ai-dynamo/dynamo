@@ -103,7 +103,7 @@ index to the side-channel port.
 Both `vllm-rs serve` and `vllm serve` expose Prometheus metrics at `/metrics` on their HTTP port,
 `8000` by default, bound to the address in `--host`. The example manifests bind `0.0.0.0` and
 declare the port as `engine-metrics`, the name the platform chart's `dynamo-worker` PodMonitor
-scrapes when `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is enabled. Chart settings,
+scrapes unless `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is set to `false`. Chart settings,
 the labels Prometheus adds, and verification steps are in
 [Scrape Engine Metrics in Sidecar Mode](../../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
 

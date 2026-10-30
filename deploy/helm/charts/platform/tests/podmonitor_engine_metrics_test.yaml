@@ -8,21 +8,9 @@ templates:
   - charts/dynamo-operator/templates/prometheus.yaml
 
 tests:
-  - it: adds no engine endpoint by default
+  - it: adds the engine-metrics endpoint by default
     set:
       dynamo-operator.dynamo.metrics.podMonitors.enabled: true
-    asserts:
-      - notContains:
-          path: spec.podMetricsEndpoints
-          content:
-            port: engine-metrics
-          any: true
-        documentIndex: 1
-
-  - it: adds the engine-metrics endpoint when enabled
-    set:
-      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
-      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
     asserts:
       - lengthEqual:
           path: spec.podMetricsEndpoints
@@ -63,10 +51,25 @@ tests:
                 targetLabel: model
         documentIndex: 1
 
+  - it: omits the engine endpoint when engineMetrics is false
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: false
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 4
+        documentIndex: 1
+      - notContains:
+          path: spec.podMetricsEndpoints
+          content:
+            port: engine-metrics
+          any: true
+        documentIndex: 1
+
   - it: honors the configured scrape path
     set:
       dynamo-operator.dynamo.metrics.podMonitors.enabled: true
-      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
       dynamo-operator.dynamo.metrics.podMonitors.engineMetricsPath: /prometheus/metrics
     asserts:
       - equal:
@@ -77,7 +80,6 @@ tests:
   - it: keeps the engine endpoint ahead of the NIXL endpoints
     set:
       dynamo-operator.dynamo.metrics.podMonitors.enabled: true
-      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
       dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry: true
     asserts:
       - lengthEqual:

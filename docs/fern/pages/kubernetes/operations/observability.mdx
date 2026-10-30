@@ -200,7 +200,8 @@ In [sidecar mode](../../developer-guide/knowledge-base/concepts/system-architect
 the Dynamo runtime and the inference engine are separate containers in the worker pod. The
 `dynamo-worker` PodMonitor scrapes the runtime's `system` port as usual, so the `dynamo_component_*`
 families arrive with `container="runtime"`. The engine's own families (`vllm:*`, `sglang:*`) stay in
-the engine container and need a second endpoint, which is off by default.
+the engine container and need a second endpoint, which the chart adds for every pod that declares
+the engine metrics port.
 
 <Steps toc={true}>
 <Step title="Expose the engine metrics port" id="expose-the-engine-metrics-port">
@@ -228,12 +229,14 @@ sidecar pages. The example manifests under `lib/sidecar/<engine>/deploy/` alread
 Declaring the port changes the pod template, so an existing deployment rolls its workers.
 
 </Step>
-<Step title="Enable the endpoint in the platform chart" id="enable-the-engine-metrics-endpoint">
+<Step title="Check the endpoint in the platform chart" id="enable-the-engine-metrics-endpoint">
 
-Set `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics=true` on the platform chart. The
-endpoint scrapes `/metrics` on the `engine-metrics` port every 5 seconds;
+The platform chart's `dynamo-worker` PodMonitor includes the `engine-metrics` endpoint by default
+(`dynamo-operator.dynamo.metrics.podMonitors.engineMetrics`, default `true`). The endpoint scrapes
+`/metrics` on the `engine-metrics` port every 5 seconds;
 `dynamo-operator.dynamo.metrics.podMonitors.engineMetricsPath` changes the path for an engine that
-serves it elsewhere.
+serves it elsewhere. Set `engineMetrics=false` to drop the endpoint for the whole installation. The
+declared port is the per-pod switch, so nothing else is needed for a pod that declares it.
 
 Engine series keep their native labels, such as `model_name` and vLLM's `engine`. The endpoint adds
 `dynamo_namespace`, joined from the pod's `nvidia.com/dynamo-namespace` and
@@ -243,6 +246,14 @@ not set it. It does not add `dynamo_component`, `dynamo_endpoint`, or `worker_id
 series carry `dynamo_namespace` in its sanitized underscore form, so join the two families on
 `namespace` and `pod`, which they share, and tell them apart by `container`. See
 [Sidecar mode](../../reference/observability/metric-labels.mdx#sidecar-mode) in the label reference.
+
+<Note>
+Engine metrics are available for direct Prometheus queries, but this endpoint does not yet make the
+Planner's engine-metric queries work in sidecar mode. Those queries still select `dynamo_endpoint`
+and, when a component is specified, `dynamo_component`, which these engine series do not carry, so
+they return no data even though the scrape is healthy. Consumer compatibility is tracked in
+[DEP #16468](https://github.com/ai-dynamo/dynamo/issues/16468).
+</Note>
 
 </Step>
 <Step title="Verify the engine target" id="verify-the-engine-target">

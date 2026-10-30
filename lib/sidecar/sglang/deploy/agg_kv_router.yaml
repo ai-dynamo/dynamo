@@ -41,7 +41,7 @@ spec:
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.22
-          # Scraped by the platform chart's dynamo-worker PodMonitor when podMonitors.engineMetrics=true.
+          # Scraped by the platform chart's dynamo-worker PodMonitor (podMonitors.engineMetrics, default true).
           ports:
           - name: engine-metrics
             containerPort: 30000

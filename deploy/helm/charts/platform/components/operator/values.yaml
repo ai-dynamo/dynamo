@@ -175,8 +175,9 @@ dynamo:
       # -- Scrape engine-native metrics (vllm:*, sglang:*) directly from the engine
       # container in sidecar mode. The engine container must declare a port named
       # "engine-metrics" and bind its HTTP server to the pod IP; pods without that
-      # named port are ignored, so integrated-mode workers are unaffected.
-      engineMetrics: false
+      # named port are ignored, so integrated-mode workers are unaffected. Set to
+      # false to drop the endpoint for the whole installation.
+      engineMetrics: true
       # -- Path scraped on the engine-metrics port.
       engineMetricsPath: /metrics
 
