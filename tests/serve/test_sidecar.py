@@ -111,11 +111,9 @@ def _disaggregated_payloads(
             decode_metrics=decode_metrics,
             transfer_metrics=transfer_metrics,
         ),
-        # Cancel mid-decode: decode stops early and prefill ends idle.
+        # Cancel mid-decode: decode stops early and the deployment recovers.
         *http_cancellation_payloads(
-            decode_metrics,
-            max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS,
-            idle_metrics=(prefill_metrics,),
+            decode_metrics, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
         ),
     ]
 
