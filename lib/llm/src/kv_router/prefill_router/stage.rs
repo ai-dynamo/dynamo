@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `PrefillRouter` as a [`StageRouter`], and `generate_v2` composed from it.
+//! `PrefillRouter` as a [`StageRouter`], and the helpers the operator's
+//! `generate` is composed from.
 //!
-//! `generate_v2` is the operator's request path rebuilt from `schedule`,
-//! `preview`, `dispatch` and small helpers. It is meant to replace `generate`.
+//! `generate` calls `preview` and `dispatch` directly. In place of
+//! `schedule` it calls the steps `schedule` is made of (`resolve_binding`,
+//! `require_direct_prefill_worker`, `select_prefill_worker`) so that a worker
+//! selection error is logged as a prefill failure and the earlier steps are
+//! not.
 
 use std::sync::Arc;
 
@@ -13,8 +17,7 @@ use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     pipeline::{
-        AsyncEngineContextProvider, Context, ManyOut, ResponseStream, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, ResponseStream, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -25,8 +28,7 @@ use super::{
     ActivationSnapshot, BYPASS_REMOTE_PREFILL_ANNOTATION, PrefillBinding, PrefillCompletion,
     PrefillLifecycleState, PrefillOutcome, PrefillRouter, PreparedPrefill, apply_prefill_dispatch,
     conditional_bypass::ConditionalDisaggDecodeDecision, extract_bootstrap_info,
-    independent_prefill_context, prefill_activation_pending_error, prefill_need,
-    strip_terminal_disaggregated_params,
+    independent_prefill_context, prefill_activation_pending_error,
 };
 use crate::{
     kv_router::{
@@ -82,11 +84,11 @@ pub(crate) struct PrefillDispatched {
 }
 
 /// How far prefill got before decode can start.
-struct PrefillProgress {
-    outcome: PrefillOutcome,
-    topology_constraints: Option<RoutingConstraints>,
+pub(super) struct PrefillProgress {
+    pub(super) outcome: PrefillOutcome,
+    pub(super) topology_constraints: Option<RoutingConstraints>,
     /// Prefill still running in the background; decode merges its completion.
-    completion: Option<PrefillTask>,
+    pub(super) completion: Option<PrefillTask>,
 }
 
 #[async_trait]
@@ -105,16 +107,7 @@ impl StageRouter for PrefillRouter {
             return Ok(PrefillPlan::Untargeted);
         };
 
-        // Keyed on the prefill mode, not the decode set's, and checked after
-        // the binding loads because that is where the prefill mode lives.
-        let preselected_worker = request.routing.as_ref().and_then(|r| r.prefill_worker_id);
-        if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
-            return Err(anyhow::anyhow!(
-                "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
-            ));
-        }
-
+        require_direct_prefill_worker(&binding, request)?;
         self.select_prefill_worker(binding, request).await
     }
 
@@ -201,105 +194,10 @@ impl StageRouter for PrefillRouter {
 }
 
 impl PrefillRouter {
-    /// `generate` composed from [`StageRouter`] calls and helpers.
-    ///
-    /// Behaves like `generate`, though not bit for bit: schedule failures are
-    /// not logged as prefill failures. It is not wired into the pipeline yet.
-    #[allow(dead_code)]
-    pub(crate) async fn generate_v2(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        let (mut req, context) = request.into_parts();
-        let engine_ctx = context.context();
-
-        strip_client_bypass_marker(&mut req);
-        if is_query_only(&req) || !self.activation_gate(context.id())? {
-            return next.generate(context.map(|_| req)).await;
-        }
-        ensure_tracker(&mut req);
-        let session_affinity = session_affinity(&context)?;
-
-        let request = context.map(|_| req);
-        if let PrefillPreview::LocalDecode(decision) = self.preview(&request).await? {
-            return self.dispatch_local_decode(request, decision).await;
-        }
-        let (req, context) = request.into_parts();
-
-        let tracker = req.tracker.clone();
-        let prefill_phase_barrier = tracker
-            .as_ref()
-            .expect("tracker is set above")
-            .set_phase(RequestPhase::Prefill)
-            .await;
-        let prefill_request = prefill_request(&req, &context, session_affinity)?;
-        let prefill_engine_ctx = prefill_request.context();
-
-        let plan = self.schedule(&prefill_request).await?;
-        if matches!(plan, PrefillPlan::Untargeted) {
-            return next.generate(context.map(|_| req)).await;
-        }
-        let progress = match self.dispatch(prefill_request, plan).await {
-            Ok(mut dispatched) => {
-                if let (Some(state), Some(booking)) =
-                    (req.migration_state.as_ref(), dispatched.booking.take())
-                {
-                    state.store_prefill_release(booking);
-                }
-                self.await_prefill(dispatched, tracker, prefill_phase_barrier)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
-        .inspect_err(log_prefill_failure)?;
-
-        // A prefill request can terminate before the backend establishes a KV
-        // handoff, for example on EOS at the one-token context step. That
-        // response is the whole answer.
-        let outcome = match progress.outcome {
-            PrefillOutcome::Terminal { output } => {
-                let output = strip_terminal_disaggregated_params(*output);
-                return Ok(ResponseStream::new(
-                    Box::pin(stream::once(async move { output })),
-                    engine_ctx,
-                ));
-            }
-            outcome => outcome,
-        };
-
-        // NVBugs 5969206: decode routing proceeds even if the client context
-        // is gone, so an in-flight KV transfer still has a receiver.
-        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!(
-                "Context {} killed/stopped after prefill, allowing decode routing for KV transfer",
-                engine_ctx.id()
-            );
-        }
-
-        // On the bootstrap path this waits until the prefill task has finished
-        // routing, so the prefill worker is attributed correctly.
-        if let Some(ref tracker) = req.tracker {
-            let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-        }
-
-        let decode_req = self.build_decode_request(req, outcome, progress.topology_constraints);
-        let output = prefill_need(&decode_req.annotations);
-        let decode = next.generate(context.map(|_| decode_req));
-        match progress.completion {
-            Some(completion) => {
-                completion
-                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
-                    .await
-            }
-            None => decode.await,
-        }
-    }
-
     /// The first activation check, before any routing work. `Ok(true)` serves
     /// the request through prefill, `Ok(false)` passes it to decode, and an
     /// error fails it closed while a prefill target is still activating.
-    fn activation_gate(&self, request_id: &str) -> Result<bool> {
+    pub(super) fn activation_gate(&self, request_id: &str) -> Result<bool> {
         // Hot path: an active router never takes the target lock.
         if self.lifecycle_state() == PrefillLifecycleState::Active {
             return Ok(true);
@@ -326,7 +224,7 @@ impl PrefillRouter {
     /// The binding to serve through, resolved from a locked snapshot when the
     /// lock-free load finds none because the target was replaced. `None`
     /// means there is no prefill target.
-    fn resolve_binding(&self) -> Result<Option<Arc<PrefillBinding>>> {
+    pub(super) fn resolve_binding(&self) -> Result<Option<Arc<PrefillBinding>>> {
         if let Some(binding) = self.binding.load_full() {
             return Ok(Some(binding));
         }
@@ -374,7 +272,7 @@ impl PrefillRouter {
 
     /// Send a request that conditional disaggregation kept local to its
     /// admitted decode worker, marked so the worker runs prefill itself.
-    async fn dispatch_local_decode(
+    pub(super) async fn dispatch_local_decode(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         decision: ConditionalDisaggDecodeDecision,
@@ -411,7 +309,7 @@ impl PrefillRouter {
     /// Wait for prefill as far as decode needs. With early bootstrap info the
     /// rest of prefill runs in the background; otherwise drain the stream to a
     /// handoff or a terminal output.
-    async fn await_prefill(
+    pub(super) async fn await_prefill(
         &self,
         dispatched: PrefillDispatched,
         tracker: Option<Arc<RequestTracker>>,
@@ -471,26 +369,26 @@ impl PrefillRouter {
 
 /// Conditional-disagg bypass is a router-owned decision. Drop any
 /// client-supplied marker so a client cannot skip remote prefill.
-fn strip_client_bypass_marker(req: &mut PreprocessedRequest) {
+pub(super) fn strip_client_bypass_marker(req: &mut PreprocessedRequest) {
     req.annotations
         .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
 }
 
 /// Query-only requests are advisory worker lookups owned by the decode
 /// `RoutingHost` in every activation state.
-fn is_query_only(req: &PreprocessedRequest) -> bool {
+pub(super) fn is_query_only(req: &PreprocessedRequest) -> bool {
     req.get_annotation_value("query_instance_id").is_some()
 }
 
 /// Create a tracker for routing decisions when the upstream `DeltaGenerator`
 /// did not provide one.
-fn ensure_tracker(req: &mut PreprocessedRequest) {
+pub(super) fn ensure_tracker(req: &mut PreprocessedRequest) {
     if req.tracker.is_none() {
         req.tracker = Some(Arc::new(RequestTracker::new()));
     }
 }
 
-fn session_affinity(context: &Context<()>) -> Result<Option<Arc<SessionAffinityId>>> {
+pub(super) fn session_affinity(context: &Context<()>) -> Result<Option<Arc<SessionAffinityId>>> {
     context
         .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
         .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))
@@ -498,7 +396,7 @@ fn session_affinity(context: &Context<()>) -> Result<Option<Arc<SessionAffinityI
 
 /// The prefill leg: a one-token copy of the request on its own cancellation
 /// context, carrying the session affinity.
-fn prefill_request(
+pub(super) fn prefill_request(
     req: &PreprocessedRequest,
     context: &Context<()>,
     session_affinity: Option<Arc<SessionAffinityId>>,
@@ -515,7 +413,25 @@ fn prefill_request(
     Ok(prefill_context)
 }
 
-fn log_prefill_failure(error: &anyhow::Error) {
+/// Direct routing mode serves only a prefill worker the request names, set
+/// by an external router such as the EPP. Keyed on the prefill mode, not the
+/// decode set's, and checked after the binding loads because that is where
+/// the prefill mode lives.
+pub(super) fn require_direct_prefill_worker(
+    binding: &PrefillBinding,
+    request: &PreprocessedRequest,
+) -> Result<()> {
+    let preselected_worker = request.routing.as_ref().and_then(|r| r.prefill_worker_id);
+    if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
+        anyhow::bail!(
+            "Prefill worker ID required in Direct routing mode but none found in request. \
+             Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn log_prefill_failure(error: &anyhow::Error) {
     if match_error_chain(
         error.as_ref(),
         &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
