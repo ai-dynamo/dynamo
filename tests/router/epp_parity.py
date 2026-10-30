@@ -23,6 +23,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import signal
 import socket
 import sys
 import tempfile
@@ -73,7 +74,13 @@ EXT_PROC_PROTO_ROOT = (
 WORKER_CONTAINER_NAME = "mocker"
 WORKER_A_CONTAINER_NAME = "mocker-a"
 WORKER_B_CONTAINER_NAME = "mocker-b"
+PREFILL_CONTAINER_NAME = "mocker-prefill"
+DECODE_CONTAINER_NAME = "mocker-decode"
 PROVIDER_CONTAINER_NAME = "kv-indexer"
+PRIORITY_HOLD_DEADLINE_S = 10.0
+PRIORITY_QUEUE_LIMIT = 2
+PRIORITY_POLICY_CLASS = "default"
+HELD_STREAM_JOIN_S = 2.0
 FRONTEND_CONTAINER_NAME = "frontend"
 EPP_CONTAINER_NAME = "epp"
 KV_INDEXER_QUERY_ENDPOINT = "kv_indexer_query"
@@ -95,7 +102,9 @@ WORKER_INSTANCE_ID_HEADER = "x-dynamo-worker-instance-id"
 DP_RANK_HEADER = "x-dynamo-dp-rank"
 ROUTING_MODE_HEADER = "x-dynamo-routing-mode"
 DESTINATION_ENDPOINT_HEADER = "x-gateway-destination-endpoint"
+PREFILL_INSTANCE_ID_HEADER = "x-dynamo-prefill-instance-id"
 AGGREGATED_ROUTING_MODE = "aggregated"
+DISAGGREGATED_ROUTING_MODE = "disaggregated"
 READINESS_DEADLINE_S = 45.0
 PROVIDER_QUERY_SETTLE_S = 0.25
 WORKER_BLOCK_SIZE = 16
@@ -198,6 +207,18 @@ class RouteObservation:
     token_ids: list[int]
     routing_mode: str | None = None
     destination: str | None = None
+    prefill_worker_id: int | None = None
+
+
+@dataclass(frozen=True)
+class QueueRejectionOutcome:
+    """Typed EPP ImmediateResponse queue-limit rejection, not a route."""
+
+    status_code: int
+    body: str
+    policy_class: str
+    current: int
+    limit: int
 
 
 def resolve_pod_identity() -> PodIdentity:
@@ -1212,9 +1233,7 @@ def merge_request_headers(
                     f"duplicate or conflicting reserved request header {raw_name!r}"
                 )
             if name in seen_extra:
-                raise AssertionError(
-                    f"duplicate extra request header {raw_name!r}"
-                )
+                raise AssertionError(f"duplicate extra request header {raw_name!r}")
             seen_extra.add(name)
             merged[name] = value
     return list(merged.items())
@@ -1329,6 +1348,105 @@ def _extract_unique_routing_headers(responses: list[Any]) -> dict[str, Any]:
         "routing_mode": routing_mode,
         "destination": destination,
     }
+
+
+def _optional_unique_header(collected: dict[str, list[str]], name: str) -> str | None:
+    values = collected.get(name.lower(), [])
+    if not values:
+        return None
+    unique = set(values)
+    if len(values) != 1 or len(unique) != 1:
+        raise AssertionError(
+            f"EPP stream has duplicate or ambiguous {name} header mutations: "
+            f"{values}"
+        )
+    value = values[0].strip()
+    if not value:
+        raise AssertionError(f"EPP {name} header mutation is empty")
+    return value
+
+
+def _extract_held_routing_headers(responses: list[Any]) -> dict[str, Any]:
+    """Accept disaggregated or aggregated held-stream mutations."""
+    collected = _collect_set_headers(responses)
+    worker_id = _parse_u64_header(
+        WORKER_INSTANCE_ID_HEADER,
+        _require_unique_header(collected, WORKER_INSTANCE_ID_HEADER),
+    )
+    dp_rank = _parse_u32_header(
+        DP_RANK_HEADER, _require_unique_header(collected, DP_RANK_HEADER)
+    )
+    routing_mode = _require_unique_header(collected, ROUTING_MODE_HEADER)
+    destination = _require_unique_header(collected, DESTINATION_ENDPOINT_HEADER)
+    prefill_raw = _optional_unique_header(collected, PREFILL_INSTANCE_ID_HEADER)
+    prefill_worker_id = (
+        _parse_u64_header(PREFILL_INSTANCE_ID_HEADER, prefill_raw)
+        if prefill_raw is not None
+        else None
+    )
+    if routing_mode == DISAGGREGATED_ROUTING_MODE:
+        if prefill_worker_id is None:
+            raise AssertionError(
+                "held EPP disaggregated mutation missing "
+                f"{PREFILL_INSTANCE_ID_HEADER}"
+            )
+    elif routing_mode == AGGREGATED_ROUTING_MODE:
+        if prefill_worker_id is not None:
+            raise AssertionError(
+                "held EPP aggregated mutation unexpectedly set "
+                f"{PREFILL_INSTANCE_ID_HEADER}={prefill_worker_id}"
+            )
+    else:
+        raise AssertionError(
+            f"held EPP {ROUTING_MODE_HEADER} is {routing_mode!r}"
+        )
+    return {
+        "worker_id": worker_id,
+        "dp_rank": dp_rank,
+        "routing_mode": routing_mode,
+        "destination": destination,
+        "prefill_worker_id": prefill_worker_id,
+    }
+
+
+def _typed_queue_rejection_display() -> str:
+    return (
+        f'router policy class "{PRIORITY_POLICY_CLASS}" '
+        f"queue requests limit reached "
+        f"(current={PRIORITY_QUEUE_LIMIT}, limit={PRIORITY_QUEUE_LIMIT})"
+    )
+
+
+def _typed_queue_rejection_outcome(response: Any) -> QueueRejectionOutcome:
+    """Validate native ImmediateResponse HTTP 503 + QueueRejection Display."""
+    immediate = response.immediate_response
+    if not immediate.HasField("status"):
+        raise AssertionError("held EPP ImmediateResponse has no HTTP status")
+    status_code = int(immediate.status.code)
+    if status_code != 503:
+        raise AssertionError(
+            f"held EPP ImmediateResponse is HTTP {status_code}, not typed 503: "
+            f"{bytes(immediate.body)[:300]!r}"
+        )
+    try:
+        body = bytes(immediate.body).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssertionError(
+            "held EPP ImmediateResponse body is not UTF-8"
+        ) from exc
+    expected = _typed_queue_rejection_display()
+    if expected not in body:
+        raise AssertionError(
+            "held EPP ImmediateResponse is not the typed queue rejection "
+            f"{expected!r}: {body[:300]!r}"
+        )
+    return QueueRejectionOutcome(
+        status_code=status_code,
+        body=body,
+        policy_class=PRIORITY_POLICY_CLASS,
+        current=PRIORITY_QUEUE_LIMIT,
+        limit=PRIORITY_QUEUE_LIMIT,
+    )
 
 
 class ExtProcParityDriver:
@@ -1503,6 +1621,319 @@ class ExtProcParityDriver:
         finally:
             stream.close()
             channel.close()
+
+    def open_held_stream(
+        self,
+        payload: dict[str, Any],
+        *,
+        path: str,
+        request_id: str,
+        timeout_s: float = EXT_PROC_TIMEOUT_S,
+        headers: Mapping[str, str] | None = None,
+        accept_queue_rejection: bool = False,
+    ) -> "HeldExtProcStream":
+        """Send headers/body and keep the stream after the routing mutation."""
+        return HeldExtProcStream(
+            self._modules,
+            payload,
+            path=path,
+            request_id=request_id,
+            timeout_s=timeout_s,
+            headers=headers,
+            accept_queue_rejection=accept_queue_rejection,
+        )
+
+
+class HeldExtProcStream:
+    """Owned ext_proc stream that holds a native prefill reservation."""
+
+    def __init__(
+        self,
+        modules: _ExtProcModules,
+        payload: dict[str, Any],
+        *,
+        path: str,
+        request_id: str,
+        timeout_s: float,
+        headers: Mapping[str, str] | None,
+        accept_queue_rejection: bool = False,
+    ) -> None:
+        header_pairs = [
+            (":method", "POST"),
+            (":path", path),
+            (":authority", "127.0.0.1"),
+            ("content-type", "application/json"),
+            *merge_request_headers(request_id, headers),
+        ]
+        body = json.dumps(payload).encode("utf-8")
+        self._modules = modules
+        self._timeout_s = timeout_s
+        self._stream = None
+        self._channel = None
+        self._response_iter = None
+        self._reader = None
+        self._responses: list[Any] = []
+        self._inbox: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._reader_error: BaseException | None = None
+        self._pre_cancel_errors: list[BaseException] = []
+        self._owner_cancelled = False
+        self._closed = False
+        self._accept_queue_rejection = accept_queue_rejection
+        self.observation: RouteObservation | None = None
+        self.queue_rejection: QueueRejectionOutcome | None = None
+        self.released = False
+        try:
+            self._stream = _RequestStream()
+            self._channel = _loopback_epp_channel(timeout_s)
+            pb2 = modules.pb2
+            stub = modules.grpc.ExternalProcessorStub(self._channel)
+            self._response_iter = stub.Process(self._stream, timeout=timeout_s)
+            self._reader = threading.Thread(
+                target=self._read_loop,
+                name="held-ext-proc-reader",
+                daemon=True,
+            )
+            self._reader.start()
+            self._stream.send(
+                pb2.ProcessingRequest(
+                    protocol_config=pb2.ProtocolConfiguration(
+                        request_body_mode=FULL_DUPLEX_STREAMED,
+                        response_body_mode=FULL_DUPLEX_STREAMED,
+                    ),
+                    request_headers=pb2.HttpHeaders(
+                        headers=_header_map(pb2, header_pairs),
+                        end_of_stream=False,
+                    ),
+                )
+            )
+            self._stream.send(
+                pb2.ProcessingRequest(
+                    request_body=pb2.HttpBody(
+                        body=body,
+                        end_of_stream=True,
+                    )
+                )
+            )
+        except BaseException as exc:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                raise cleanup from exc
+            raise
+
+    def _read_loop(self) -> None:
+        iterator = self._response_iter
+        try:
+            while True:
+                try:
+                    response = next(iterator)
+                except StopIteration:
+                    self._inbox.put(("end", None))
+                    return
+                self._inbox.put(("response", response))
+        except BaseException as exc:
+            self._inbox.put(("error", exc))
+
+    def _take_inbox(self, timeout_s: float) -> tuple[str, Any]:
+        if self._reader_error is not None:
+            raise self._reader_error
+        try:
+            kind, payload = self._inbox.get(timeout=max(timeout_s, 0.0))
+        except queue.Empty as exc:
+            raise TimeoutError("held EPP stream is still pending") from exc
+        if kind == "error":
+            self._reader_error = payload
+            raise payload
+        return kind, payload
+
+    def _consume_response(
+        self, response: Any
+    ) -> RouteObservation | QueueRejectionOutcome | None:
+        self._responses.append(response)
+        if response.HasField("immediate_response"):
+            if not self._accept_queue_rejection:
+                raise AssertionError(
+                    "held EPP returned ImmediateResponse: "
+                    f"{response.immediate_response.details}"
+                )
+            if self.observation is not None or self.queue_rejection is not None:
+                raise AssertionError(
+                    "held EPP ImmediateResponse arrived after a routing outcome"
+                )
+            self.queue_rejection = _typed_queue_rejection_outcome(response)
+            return self.queue_rejection
+        status = _request_body_mutation_status(response)
+        if status is None:
+            return None
+        if self.queue_rejection is not None:
+            raise AssertionError(
+                "held EPP body mutation arrived after ImmediateResponse"
+            )
+        if status != "terminal_streamed":
+            raise AssertionError(
+                "held EPP first RequestBody mutation is not a terminal "
+                f"streamed_response: {status}"
+            )
+        token_ids = decode_epp_token_data(
+            _extract_unique_terminal_request_body(
+                self._modules.pb2, self._responses
+            )
+        )
+        headers = _extract_held_routing_headers(self._responses)
+        self.observation = RouteObservation(
+            worker_id=headers["worker_id"],
+            dp_rank=headers["dp_rank"],
+            token_ids=token_ids,
+            routing_mode=headers["routing_mode"],
+            destination=headers["destination"],
+            prefill_worker_id=headers["prefill_worker_id"],
+        )
+        return self.observation
+
+    def wait_routing_mutation(
+        self, timeout_s: float | None = None
+    ) -> RouteObservation | QueueRejectionOutcome:
+        if self.observation is not None:
+            return self.observation
+        if self.queue_rejection is not None:
+            return self.queue_rejection
+        deadline = time.monotonic() + (
+            self._timeout_s if timeout_s is None else timeout_s
+        )
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining < 0 and self._inbox.empty():
+                raise TimeoutError("held EPP stream is still pending")
+            kind, payload = self._take_inbox(max(remaining, 0.0))
+            if kind == "end":
+                raise AssertionError(
+                    "held EPP stream ended before a token mutation"
+                )
+            if kind != "response":
+                raise AssertionError(f"held EPP reader sent {kind!r}")
+            observation = self._consume_response(payload)
+            if observation is not None:
+                return observation
+
+    def poll_routing_mutation(
+        self, timeout_s: float
+    ) -> RouteObservation | QueueRejectionOutcome | None:
+        try:
+            return self.wait_routing_mutation(timeout_s)
+        except TimeoutError:
+            return None
+
+    def release(self) -> None:
+        if self.released:
+            return
+        pb2 = self._modules.pb2
+        self._stream.send(
+            pb2.ProcessingRequest(
+                response_headers=pb2.HttpHeaders(
+                    headers=_header_map(
+                        pb2,
+                        [
+                            (":status", "200"),
+                            ("content-type", "text/event-stream"),
+                        ],
+                    ),
+                    end_of_stream=False,
+                )
+            )
+        )
+        self._stream.send(
+            pb2.ProcessingRequest(
+                response_body=pb2.HttpBody(
+                    body=SYNTHETIC_EXT_PROC_SSE.encode("utf-8"),
+                    end_of_stream=True,
+                )
+            )
+        )
+        self._stream.close()
+        deadline = time.monotonic() + min(self._timeout_s, PRIORITY_HOLD_DEADLINE_S)
+        while time.monotonic() < deadline:
+            kind, payload = self._take_inbox(deadline - time.monotonic())
+            if kind == "end":
+                self.released = True
+                return
+            if kind != "response":
+                raise AssertionError(f"held EPP drain sent {kind!r}")
+            self._responses.append(payload)
+        raise TimeoutError("held EPP release drain is still pending")
+
+    def _rpc_status(self, exc: BaseException) -> Any:
+        code = getattr(exc, "code", None)
+        if not callable(code):
+            return None
+        try:
+            return code()
+        except Exception:
+            return None
+
+    def _is_owner_initiated_cancel(self, exc: BaseException) -> bool:
+        return (
+            self._owner_cancelled
+            and self._rpc_status(exc) == grpc.StatusCode.CANCELLED
+        )
+
+    def close(self) -> None:
+        errors: list[BaseException] = []
+        if self._closed:
+            if self._pre_cancel_errors:
+                raise self._pre_cancel_errors[0]
+            if self._reader_error is not None and not self._is_owner_initiated_cancel(
+                self._reader_error
+            ):
+                raise self._reader_error
+            return
+        self._closed = True
+        if self._reader_error is not None:
+            self._pre_cancel_errors.append(self._reader_error)
+        while True:
+            try:
+                kind, payload = self._inbox.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "error" and payload is not None:
+                self._pre_cancel_errors.append(payload)
+                self._reader_error = payload
+        errors.extend(self._pre_cancel_errors)
+        call = self._response_iter
+        try:
+            if call is not None and hasattr(call, "cancel"):
+                if call.cancel() is True:
+                    self._owner_cancelled = True
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            if self._channel is not None:
+                self._channel.close()
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            if self._stream is not None:
+                self._stream.close()
+        except BaseException as exc:
+            errors.append(exc)
+        reader = self._reader
+        if reader is not None:
+            reader.join(timeout=HELD_STREAM_JOIN_S)
+            if reader.is_alive():
+                errors.append(TimeoutError("held EPP reader did not exit"))
+        while True:
+            try:
+                kind, payload = self._inbox.get_nowait()
+            except queue.Empty:
+                break
+            if kind != "error" or payload is None:
+                continue
+            if self._is_owner_initiated_cancel(payload):
+                continue
+            self._reader_error = payload
+            if payload not in errors:
+                errors.append(payload)
+        if errors:
+            raise errors[0]
 
 
 def _with_query_instance_id(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1809,7 +2240,9 @@ def _parse_frontend_generation_route(body: str) -> RouteObservation:
                 "Frontend generation stream has a non-JSON data field"
             ) from exc
         if not isinstance(chunk, dict):
-            raise AssertionError("Frontend generation stream data field is not an object")
+            raise AssertionError(
+                "Frontend generation stream data field is not an object"
+            )
         if "error" in chunk:
             raise AssertionError("Frontend generation stream contained an error chunk")
         nvext_chunk = chunk.get("nvext")
@@ -3109,19 +3542,22 @@ class EppFrontendRoutingParityStack:
             if close_error is None:
                 close_error = err
         failures = list(self.kube_api.failures) if self.kube_api is not None else []
+        if not failures and close_error is None:
+            return None
+        details = []
         if failures:
-            api_error = AssertionError(
+            details.append(
                 "Loopback Kubernetes API recorded unexpected requests: "
                 + "; ".join(failures)
             )
-            if exc_type is None:
-                if close_error is not None:
-                    raise api_error from close_error
-                raise api_error
-            return None
-        if close_error is not None and exc_type is None:
-            raise close_error
-        return None
+        if close_error is not None:
+            details.append(f"{type(close_error).__name__}: {close_error}")
+        cleanup_error = RuntimeError("; ".join(details))
+        if exc is not None:
+            raise cleanup_error from exc
+        if close_error is not None:
+            raise cleanup_error from close_error
+        raise cleanup_error
 
     def _shutdown_kube_api_manager(self) -> None:
         owner = self.kube_api
@@ -3266,3 +3702,436 @@ class EppFrontendRoutingParityStack:
             if config.get("kv_event_publishing_enabled") is not True:
                 return False
         return True
+
+
+PRIORITY_POLICY_YAML = """default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: standard
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 1
+    prefill_busy_threshold_frac: 0.0
+    request_queue_limit_per_worker: 2
+"""
+
+
+class EppFrontendPriorityParityStack:
+    """One prefill + one decode, local indexers, owned prefill pause gate."""
+
+    def __init__(self, request, tmp_path: Path, model_name: str) -> None:
+        self.request = request
+        self.tmp_path = tmp_path
+        self.model_name = model_name
+        self.identity = resolve_pod_identity()
+        self._stack = ExitStack()
+        self._lock: FileLock | None = None
+        self._kube_api_manager = None
+        self._kube_api_manager_process = None
+        self.kube_api: LoopbackKubeAPIOwner | None = None
+        self.kubeconfig: Path | None = None
+        self.namespace: str | None = None
+        self.frontend_port: int | None = None
+        self.prefill = None
+        self.decode = None
+        self.driver: ExtProcParityDriver | None = None
+        self.frontend_url: str | None = None
+        self.frontend = None
+        self.trace_path: Path | None = None
+        self.policy_path: Path | None = None
+        self.epp_process = None
+        self.worker_ids: dict[str, int] = {}
+        self._paused_pid: int | None = None
+        self._allocated_ports: list[int] = []
+        self._http_threads: list[tuple[threading.Thread, str]] = []
+        self.pod_destination: str | None = None
+
+    def __enter__(self) -> EppFrontendPriorityParityStack:
+        try:
+            return self._start()
+        except BaseException:
+            self._stack.close()
+            raise
+
+    def _start(self) -> EppFrontendPriorityParityStack:
+        from tests.router.helper import generate_random_suffix
+        from tests.router.mocker_process import DisaggMockerProcess
+
+        self._lock = acquire_epp_session_lock()
+        self._stack.callback(self._lock.release)
+        assert_epp_ports_free()
+        allocated = allocate_ports(4, DynamoPortRange.ROUTER.value)
+        self._allocated_ports = allocated
+        self.request.addfinalizer(lambda: deallocate_ports(list(allocated)))
+        api_port, frontend_port, prefill_http, decode_http = allocated
+        self.frontend_port = frontend_port
+        self.frontend_url = f"http://127.0.0.1:{frontend_port}"
+        self.pod_destination = f"127.0.0.1:{prefill_http}"
+        kubeconfig = write_loopback_kubeconfig(
+            self.tmp_path / "kubeconfig-priority",
+            "127.0.0.1",
+            api_port,
+            self.identity.pod_namespace,
+        )
+        self.kubeconfig = kubeconfig
+        manager = LoopbackKubeAPIManager(
+            ctx=_SPAWN_CTX,
+            shutdown_timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S,
+        )
+        try:
+            manager.start()
+        except BaseException as exc:
+            _shutdown_unregistered_manager(manager, exc)
+            raise
+        self._kube_api_manager = manager
+        self._kube_api_manager_process = manager._process
+        self._stack.callback(self._shutdown_kube_api_manager)
+        self.kube_api = LoopbackKubeAPIOwner(
+            manager.LoopbackKubeAPI(self.identity.pod_namespace, api_port)
+        )
+        self.kube_api.start()
+        proto_modules = _ExtProcModules(self.tmp_path / "ext_proc_pb_priority")
+        self._stack.callback(proto_modules.close)
+        self.driver = ExtProcParityDriver(proto_modules)
+        self.policy_path = self.tmp_path / "priority-queue-policy.yaml"
+        self.policy_path.write_text(PRIORITY_POLICY_YAML, encoding="utf-8")
+        self.trace_path = self.tmp_path / "frontend-request-trace.jsonl"
+        namespace = f"dyn-epp-pri-{generate_random_suffix()}"
+        self.namespace = namespace
+        prefill_env = loopback_process_env(
+            kubeconfig, self.identity, PREFILL_CONTAINER_NAME
+        )
+        decode_env = loopback_process_env(
+            kubeconfig, self.identity, DECODE_CONTAINER_NAME
+        )
+        worker_args = {
+            "speedup_ratio": 10.0,
+            "block_size": WORKER_BLOCK_SIZE,
+            "dp_size": WORKER_DP_SIZE,
+            "enable_prefix_caching": True,
+            "max_num_seqs": 1,
+        }
+        self.prefill = DisaggMockerProcess(
+            self.request,
+            namespace,
+            "prefill",
+            mocker_args=worker_args,
+            num_mockers=1,
+            store_backend="kubernetes",
+            request_plane="tcp",
+            env_overrides=prefill_env,
+        )
+        self.decode = DisaggMockerProcess(
+            self.request,
+            namespace,
+            "decode",
+            mocker_args=worker_args,
+            num_mockers=1,
+            store_backend="kubernetes",
+            request_plane="tcp",
+            env_overrides=decode_env,
+        )
+        self.kube_api.add_ready_container(
+            identity=self.identity,
+            dynamo_namespace=namespace,
+            container_name=PREFILL_CONTAINER_NAME,
+            http_port=prefill_http,
+        )
+        self.kube_api.add_ready_container(
+            identity=self.identity,
+            dynamo_namespace=namespace,
+            container_name=DECODE_CONTAINER_NAME,
+            http_port=decode_http,
+        )
+        self._stack.enter_context(self.prefill)
+        self._stack.enter_context(self.decode)
+        self._wait_disagg_catalog()
+        self.request.addfinalizer(self.resume_owned_prefill)
+        consumer = first_selection_router_env(
+            use_remote_indexer=False, use_kv_events=True
+        )
+        consumer["DYN_ROUTER_POLICY_CONFIG"] = str(self.policy_path)
+        frontend_env = loopback_process_env(
+            kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
+        )
+        frontend_env.update(consumer)
+        frontend_env.update(
+            {
+                "DYN_REQUEST_TRACE": "1",
+                "DYN_REQUEST_TRACE_RECORDS": "router_selection",
+                "DYN_REQUEST_TRACE_SINKS": "file",
+                "DYN_REQUEST_TRACE_FILE_PATH": str(self.trace_path),
+                "DYN_REQUEST_TRACE_FILE_FORMAT": "jsonl",
+                "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS": "10",
+            }
+        )
+        frontend = FrontendRouterProcess(
+            self.request,
+            WORKER_BLOCK_SIZE,
+            frontend_port,
+            namespace,
+            "kubernetes",
+            request_plane="tcp",
+            event_plane="zmq",
+            router_mode="kv",
+            min_initial_workers=1,
+            use_remote_indexer=False,
+            extra_env=frontend_env,
+        )
+        frontend.display_name = f"dynamo-frontend-priority-{frontend_port}"
+        frontend.log_dir = f"{self.request.node.name}/priority-frontend"
+        self.frontend = frontend
+        self._stack.callback(self.join_owned_http_threads)
+        self._stack.enter_context(frontend)
+        assert_epp_ports_free()
+        epp_env = loopback_process_env(kubeconfig, self.identity, EPP_CONTAINER_NAME)
+        epp_env.update(consumer)
+        epp_env.update(
+            {
+                "DYN_NAMESPACE": namespace,
+                "DYN_LOG": "debug",
+                "RUST_LOG": "debug",
+            }
+        )
+        epp = RuntimeEppProcess(
+            self.request,
+            binary=epp_binary_path(),
+            grpc_port=EPP_GRPC_PORT,
+            health_port=EPP_HEALTH_PORT,
+            extra_env=epp_env,
+            timeout=PROCESS_TIMEOUT_S,
+            kubeconfig=kubeconfig,
+        )
+        epp.display_name = "dynamo-runtime-epp-priority"
+        epp.log_dir = f"{self.request.node.name}/priority-epp"
+        self._stack.enter_context(epp)
+        self.epp_process = epp
+        wait_for_frontend_models(self.frontend_url)
+        return self
+
+    def _wait_disagg_catalog(self) -> None:
+        deadline = time.monotonic() + PROCESS_TIMEOUT_S
+        while time.monotonic() < deadline:
+            listed = self.kube_api.listed_metadata()
+            prefill = catalog_generate_instances(
+                listed, namespace=self.namespace, component="prefill"
+            )
+            decode = catalog_generate_instances(
+                listed, namespace=self.namespace, component="backend"
+            )
+            if len(prefill) == 1 and len(decode) == 1:
+                self.worker_ids = {
+                    "prefill": next(iter(prefill)),
+                    "decode": next(iter(decode)),
+                }
+                return
+            time.sleep(0.25)
+        raise TimeoutError("prefill/decode generate workers did not register")
+
+    def catalog_snapshot(self) -> dict[str, int]:
+        listed = self.kube_api.listed_metadata()
+        prefill = catalog_generate_instances(
+            listed, namespace=self.namespace, component="prefill"
+        )
+        decode = catalog_generate_instances(
+            listed, namespace=self.namespace, component="backend"
+        )
+        if len(prefill) != 1 or len(decode) != 1:
+            raise AssertionError(
+                f"disagg catalog drifted: prefill={sorted(prefill)} "
+                f"decode={sorted(decode)}"
+            )
+        return {
+            "prefill": next(iter(prefill)),
+            "decode": next(iter(decode)),
+        }
+
+    def pause_owned_prefill(self, deadline: float) -> None:
+        proc = self.prefill.owned_popen
+        self._paused_pid = proc.pid
+        os.kill(proc.pid, signal.SIGSTOP)
+        import psutil
+
+        stopped = {psutil.STATUS_STOPPED}
+        tracing_stop = getattr(psutil, "STATUS_TRACING_STOP", None)
+        if tracing_stop is not None:
+            stopped.add(tracing_stop)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining < 0:
+                raise AssertionError(
+                    f"owned prefill pid {self._paused_pid} did not stop "
+                    "before the hold deadline"
+                )
+            current = self.prefill.owned_popen
+            if current.pid != self._paused_pid:
+                raise AssertionError(
+                    f"owned prefill pid changed while stopping: "
+                    f"{current.pid} != {self._paused_pid}"
+                )
+            if current.poll() is not None:
+                raise AssertionError(
+                    f"owned prefill pid {current.pid} exited while stopping: "
+                    f"{current.poll()}"
+                )
+            try:
+                status = psutil.Process(current.pid).status()
+            except psutil.Error as exc:
+                raise AssertionError(
+                    f"owned prefill pid {current.pid} exited while stopping"
+                ) from exc
+            if status in stopped:
+                return
+            time.sleep(min(0.05, remaining))
+
+    def resume_owned_prefill(self) -> None:
+        if self._paused_pid is None or self.prefill is None:
+            return
+        proc = getattr(self.prefill._process, "proc", None)
+        if proc is None:
+            self._paused_pid = None
+            return
+        if proc.pid != self._paused_pid:
+            raise AssertionError(
+                f"owned prefill pid changed while held: "
+                f"{proc.pid} != {self._paused_pid}"
+            )
+        if proc.poll() is None:
+            os.kill(proc.pid, signal.SIGCONT)
+        self._paused_pid = None
+
+    def frontend_pending_prefill(self, timeout_s: float = 2.0) -> float | None:
+        if self.frontend_url is None:
+            raise RuntimeError("priority stack has not started")
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(
+                f"{self.frontend_url}/metrics", timeout=max(timeout_s, 0.05)
+            )
+        if response.status_code != 200:
+            raise AssertionError(
+                f"frontend /metrics returned HTTP {response.status_code}"
+            )
+        pending = None
+        for line in response.text.splitlines():
+            if line.startswith("#"):
+                continue
+            if "router_queue_pending_requests" not in line:
+                continue
+            if 'worker_type="prefill"' not in line:
+                continue
+            pending = float(line.rsplit(" ", 1)[-1])
+        return pending
+
+    def selection_records(self) -> list[dict[str, Any]]:
+        if self.trace_path is None or not self.trace_path.is_file():
+            return []
+        records = []
+        for line in self.trace_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            parsed = json.loads(line)
+            if not isinstance(parsed, dict):
+                continue
+            selection = parsed.get("selection")
+            if isinstance(selection, dict):
+                records.append(selection)
+        return records
+
+    def epp_log_bytes(self) -> int:
+        log_path = getattr(self.epp_process, "log_path", None)
+        if not log_path:
+            raise AssertionError("owned EPP process has no log_path")
+        path = Path(log_path)
+        if not path.is_file():
+            return 0
+        return path.stat().st_size
+
+    def epp_queue_rejection_errors(self, *, after_bytes: int = 0) -> list[str]:
+        log_path = getattr(self.epp_process, "log_path", None)
+        if not log_path:
+            raise AssertionError("owned EPP process has no log_path")
+        path = Path(log_path)
+        if self.epp_process is None or path != Path(self.epp_process.log_path):
+            raise AssertionError("EPP rejection proof is not the owned process log")
+        if not path.is_file():
+            return []
+        data = path.read_bytes()
+        if after_bytes > len(data):
+            return []
+        text = data[after_bytes:].decode("utf-8", errors="ignore")
+        tail = (
+            f"queue requests limit reached (current={PRIORITY_QUEUE_LIMIT}, "
+            f"limit={PRIORITY_QUEUE_LIMIT})"
+        )
+        class_quoted = f'router policy class "{PRIORITY_POLICY_CLASS}"'
+        class_escaped = f'router policy class \\"{PRIORITY_POLICY_CLASS}\\"'
+        matches = []
+        for line in text.splitlines():
+            if tail not in line:
+                continue
+            if class_quoted not in line and class_escaped not in line:
+                continue
+            matches.append(line)
+        return matches
+
+    def track_http_thread(self, thread: threading.Thread, label: str) -> None:
+        self._http_threads.append((thread, label))
+
+    def stop_owned_frontend(self) -> None:
+        frontend = self.frontend
+        if frontend is None:
+            return
+        frontend.__exit__(None, None, None)
+
+    def join_owned_http_threads(self) -> None:
+        errors: list[BaseException] = []
+        deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        for thread, label in list(self._http_threads):
+            thread.join(timeout=max(deadline - time.monotonic(), 0.0))
+            if thread.is_alive():
+                errors.append(
+                    RuntimeError(f"owned FE HTTP thread still running: {label}")
+                )
+        if errors:
+            raise errors[0]
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        resume_error = None
+        try:
+            self.resume_owned_prefill()
+        except Exception as err:
+            resume_error = err
+        close_error = None
+        try:
+            self._stack.close()
+        except Exception as err:
+            close_error = err
+        failures = list(self.kube_api.failures) if self.kube_api is not None else []
+        if resume_error is None and close_error is None and not failures:
+            return None
+        details = []
+        if failures:
+            details.append(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(failures)
+            )
+        if resume_error is not None:
+            details.append(f"{type(resume_error).__name__}: {resume_error}")
+        if close_error is not None:
+            details.append(f"{type(close_error).__name__}: {close_error}")
+        cleanup_error = RuntimeError("; ".join(details))
+        if exc is not None:
+            raise cleanup_error from exc
+        cause = resume_error or close_error
+        if cause is not None:
+            raise cleanup_error from cause
+        raise cleanup_error
+
+
+EppFrontendPriorityParityStack._shutdown_kube_api_manager = (
+    EppFrontendRoutingParityStack._shutdown_kube_api_manager
+)

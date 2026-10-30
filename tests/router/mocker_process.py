@@ -607,6 +607,7 @@ class DisaggMockerProcess:
             terminate_all_matching_process_names=False,
             display_name=f"dynamo-mocker-{worker_type}",
         )
+        self._command = command
         logger.info(
             "Created %s mocker process with %s worker(s), endpoint: %s",
             worker_type,
@@ -617,6 +618,25 @@ class DisaggMockerProcess:
     @property
     def bootstrap_ports(self) -> list[int]:
         return self._bootstrap_ports
+
+    @property
+    def owned_popen(self):
+        """Return this wrapper's live python -m dynamo.mocker Popen."""
+        proc = getattr(self._process, "proc", None)
+        if proc is None or proc.poll() is not None:
+            raise AssertionError(f"{self.worker_type} mocker owned Popen is not live")
+        argv = [str(item) for item in (proc.args or [])]
+        if "-m" not in argv or "dynamo.mocker" not in argv:
+            raise AssertionError(
+                f"{self.worker_type} owned Popen argv is not "
+                f"python -m dynamo.mocker: {argv}"
+            )
+        if argv != [str(item) for item in self._command]:
+            raise AssertionError(
+                f"{self.worker_type} owned Popen argv drifted from the "
+                f"wrapper command: {argv}"
+            )
+        return proc
 
     def __enter__(self):
         logger.info(

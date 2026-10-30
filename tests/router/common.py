@@ -4465,6 +4465,10 @@ def _route_mismatch_message(
     )
 
 
+class SessionAffinityParityMismatch(AssertionError):
+    """Observed FE versus EPP session-affinity first-selection gap."""
+
+
 def assert_route_observations_match(
     left,
     right,
@@ -5058,9 +5062,7 @@ def _overlap_blocks(scores: Mapping[str, Any]) -> dict[tuple[int, int], int]:
 
 
 def _active_requests(loads: list[Mapping[str, Any]]) -> dict[tuple[int, int], int]:
-    return {
-        (row["worker_id"], row["dp_rank"]): row["active_requests"] for row in loads
-    }
+    return {(row["worker_id"], row["dp_rank"]): row["active_requests"] for row in loads}
 
 
 def _dp0_worker_load_rows(
@@ -5079,9 +5081,7 @@ def _dp0_worker_load_rows(
     for row in loads:
         key = (row["worker_id"], row["dp_rank"])
         if key in seen:
-            raise AssertionError(
-                f"{case_name}: duplicate potential_load row {key}"
-            )
+            raise AssertionError(f"{case_name}: duplicate potential_load row {key}")
         seen[key] = row
     expected = {(worker_a, 0), (worker_b, 0)}
     if set(seen) != expected:
@@ -5168,9 +5168,7 @@ def _assert_zero_active_load(
 ) -> None:
     for namespace, table in tables.items():
         rows = table["rows"]
-        if rows is None or any(
-            rows[key]["active_requests"] != 0 for key in rows
-        ):
+        if rows is None or any(rows[key]["active_requests"] != 0 for key in rows):
             raise AssertionError(
                 f"{case_name}: active load is not exactly both DP0 workers "
                 f"at zero for cache_namespace={namespace!r}: {rows}"
@@ -5363,8 +5361,7 @@ def run_frontend_epp_cache_salt_parity(stack, case: FirstSelectionCase) -> None:
             if all(
                 table["rows"] is not None
                 and all(
-                    table["rows"][key]["active_requests"] == 0
-                    for key in table["rows"]
+                    table["rows"][key]["active_requests"] == 0 for key in table["rows"]
                 )
                 for namespace, table in last_tables.items()
             ):
@@ -5534,9 +5531,7 @@ def run_frontend_epp_routing_constraints_parity(
         loads = stack.provider_potential_loads(cold_tokens, timeout_s=remaining)
         last_blocks = _overlap_blocks(scores)
         last_loads = loads
-        rows = _dp0_worker_load_rows(
-            loads, worker_a, worker_b, "preferred-taint-cold"
-        )
+        rows = _dp0_worker_load_rows(loads, worker_a, worker_b, "preferred-taint-cold")
         if rows is None:
             time.sleep(0.05)
             continue
@@ -5563,12 +5558,8 @@ def run_frontend_epp_routing_constraints_parity(
         )
     preferred_frozen = _provider_cache_snapshot(stack)
 
-    prefer_a = RoutingConstraints(
-        preferred_taints={ZONE_A_TAINT: preferred_weight}
-    )
-    prefer_b = RoutingConstraints(
-        preferred_taints={ZONE_B_TAINT: preferred_weight}
-    )
+    prefer_a = RoutingConstraints(preferred_taints={ZONE_A_TAINT: preferred_weight})
+    prefer_b = RoutingConstraints(preferred_taints={ZONE_B_TAINT: preferred_weight})
     weight_a = prefer_a.preferred_taints.get(ZONE_A_TAINT)
     weight_b = prefer_b.preferred_taints.get(ZONE_B_TAINT)
     if weight_a is None or abs(float(weight_a) - preferred_weight) > 1e-5:
@@ -5692,9 +5683,7 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
             request_id=unique_request_id("epp-session-seed-a"),
             headers=session_headers,
         )
-        _assert_catalog_valid_route(
-            epp_seed, stack.worker_ids, "epp-session-seed-a"
-        )
+        _assert_catalog_valid_route(epp_seed, stack.worker_ids, "epp-session-seed-a")
         if epp_seed.worker_id != worker_a:
             raise AssertionError(
                 "EPP session seed did not select catalog worker A: "
@@ -5714,9 +5703,7 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            loads = stack.provider_potential_loads(
-                baseline_a, timeout_s=remaining
-            )
+            loads = stack.provider_potential_loads(baseline_a, timeout_s=remaining)
             if not _exact_dp0_zero_active(
                 loads, worker_a, worker_b, "session-establish"
             ):
@@ -5734,9 +5721,7 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
                 "session establishment events did not settle after worker A bind"
             )
 
-        bound_before = _stable_provider_query_baseline(
-            stack, arm="fe-session-prefix-b"
-        )
+        bound_before = _stable_provider_query_baseline(stack, arm="fe-session-prefix-b")
         bound = stack.collect_frontend_route(
             case_b.payload,
             path=case_b.path,
@@ -5768,17 +5753,13 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
         after_control = _wait_for_provider_query_increase(
             stack, control_before, arm="fe-nosession-prefix-b"
         )
-        _assert_catalog_valid_route(
-            control, stack.worker_ids, "fe-nosession-prefix-b"
-        )
+        _assert_catalog_valid_route(control, stack.worker_ids, "fe-nosession-prefix-b")
         if control.worker_id != worker_b:
             raise AssertionError(
                 "FE no-session control did not prefer worker B on prefix B: "
                 f"{control.worker_id} != {worker_b}"
             )
-        epp_before = _stable_provider_query_baseline(
-            stack, arm="epp-session-prefix-b"
-        )
+        epp_before = _stable_provider_query_baseline(stack, arm="epp-session-prefix-b")
         if epp_before < after_control:
             raise AssertionError(
                 "epp-session-prefix-b: provider counter decreased between arms "
@@ -5790,12 +5771,8 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
             request_id=unique_request_id("epp-session-prefix-b"),
             headers=session_headers,
         )
-        _wait_for_provider_query_increase(
-            stack, epp_before, arm="epp-session-prefix-b"
-        )
-        _assert_catalog_valid_route(
-            epp_bound, stack.worker_ids, "epp-session-prefix-b"
-        )
+        _wait_for_provider_query_increase(stack, epp_before, arm="epp-session-prefix-b")
+        _assert_catalog_valid_route(epp_bound, stack.worker_ids, "epp-session-prefix-b")
         assert_ordered_token_ids_match(
             bound.token_ids,
             control.token_ids,
@@ -5815,6 +5792,26 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
             _provider_cache_snapshot(stack),
             "session-prefix-b",
         )
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if (
+            bound.worker_id == worker_a
+            and epp_bound.worker_id == worker_b
+            and bound.dp_rank == 0
+            and epp_bound.dp_rank == 0
+        ):
+            raise SessionAffinityParityMismatch(
+                _route_mismatch_message(
+                    bound,
+                    epp_bound,
+                    left_label="frontend.session",
+                    right_label="epp.session",
+                    case_name="session-prefix-b",
+                )
+            )
         assert_route_observations_match(
             bound,
             epp_bound,
@@ -5830,3 +5827,721 @@ def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -
             "Loopback Kubernetes API recorded unexpected requests: "
             + "; ".join(stack.kube_api.failures)
         )
+
+
+########################################################
+# Frontend / Runtime EPP priority queue conformance
+########################################################
+
+
+def frontend_epp_priority_case(model_name: str) -> dict[str, Any]:
+    return {
+        "path": "/v1/completions",
+        "payload": {
+            "model": model_name,
+            "prompt": "priority queue stem " * 8 + ("held prefill body " * 8),
+            "stream": True,
+            "max_tokens": 1,
+        },
+    }
+
+
+def _priority_request_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _start_frontend_generation(
+    stack,
+    payload,
+    *,
+    path: str,
+    request_id: str,
+    headers,
+    deadline: float,
+    label: str,
+):
+    from tests.router.epp_parity import (
+        PRIORITY_HOLD_DEADLINE_S,
+        _frontend_sse_data_events,
+        merge_request_headers,
+    )
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AssertionError(f"{label}: FE hold budget exhausted before HTTP start")
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            merged = dict(merge_request_headers(request_id, headers))
+            merged["x-dynamo-request-id"] = request_id
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(
+                    f"{stack.frontend_url}{path}",
+                    json=payload,
+                    headers=merged,
+                    timeout=remaining + PRIORITY_HOLD_DEADLINE_S,
+                    stream=True,
+                )
+                outcome["status"] = response.status_code
+                outcome["text"] = response.text
+                if response.status_code != 200:
+                    return
+                events = _frontend_sse_data_events(response.text)
+                for event in events[:-1]:
+                    try:
+                        chunk = json.loads(event)
+                    except json.JSONDecodeError as exc:
+                        raise AssertionError(
+                            f"{label}: FE generation stream has a "
+                            "non-JSON data field"
+                        ) from exc
+                    if not isinstance(chunk, dict):
+                        raise AssertionError(
+                            f"{label}: FE generation stream data field "
+                            "is not an object"
+                        )
+                    if "error" in chunk:
+                        raise AssertionError(
+                            f"{label}: FE generation stream contained "
+                            "an error chunk"
+                        )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    stack.track_http_thread(thread, label)
+    return thread, outcome
+
+
+def _wait_prefill_booking(
+    stack, request_id: str, deadline: float, expected_prefill: int
+):
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        for record in stack.selection_records():
+            if (
+                record.get("request_id") != request_id
+                or record.get("worker_type") != "prefill"
+            ):
+                continue
+            ids = []
+            for row in record.get("candidates") or []:
+                if isinstance(row, (list, tuple)) and row:
+                    ids.append(int(row[0]))
+            if expected_prefill not in ids:
+                raise AssertionError(
+                    f"FE booking for {request_id} is not eligible prefill "
+                    f"{expected_prefill}: {record}"
+                )
+            return record
+        time.sleep(0.05)
+    raise AssertionError(
+        f"FE booking trace missing for request_id={request_id}: "
+        f"{stack.selection_records()}"
+    )
+
+
+def _wait_pending_prefill(stack, expected: float, deadline: float, case_name: str):
+    last = None
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        last = stack.frontend_pending_prefill(timeout_s=min(2.0, remaining))
+        if last == expected:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: frontend prefill pending is {last}, expected {expected}"
+    )
+
+
+def _priority_inputs(kind: str):
+    low_body = {"agent_hints": {"priority": 1, "strict_priority": 0}}
+    high_body = {"agent_hints": {"priority": 8, "strict_priority": 1}}
+    if kind == "body_strict":
+        return low_body, high_body, {}, {}
+    if kind == "header_strict":
+        return (
+            {"agent_hints": {"priority": 1, "strict_priority": 1}},
+            {"agent_hints": {"priority": 1, "strict_priority": 0}},
+            {"x-dynamo-request-strict-priority": "0"},
+            {"x-dynamo-request-strict-priority": "1"},
+        )
+    if kind == "header_normal":
+        return (
+            {"agent_hints": {"priority": 100, "strict_priority": 0}},
+            {"agent_hints": {"priority": 1, "strict_priority": 0}},
+            {"x-dynamo-request-priority": "1"},
+            {"x-dynamo-request-priority": "100"},
+        )
+    raise AssertionError(f"unknown priority kind {kind}")
+
+
+def _close_priority_held_streams(*handles) -> None:
+    errors: list[BaseException] = []
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise errors[0]
+
+
+def _raise_priority_cleanup(body_error, close_error) -> None:
+    if close_error is not None:
+        cleanup = RuntimeError(f"{type(close_error).__name__}: {close_error}")
+        if body_error is not None:
+            raise cleanup from body_error
+        raise cleanup
+    if body_error is not None:
+        raise body_error
+
+
+def _stop_frontend_and_join_http(stack) -> None:
+    errors: list[BaseException] = []
+    try:
+        stack.stop_owned_frontend()
+    except BaseException as exc:
+        errors.append(exc)
+    try:
+        stack.join_owned_http_threads()
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise errors[0]
+
+
+def _finish_fe_priority_hold(stack, body_error) -> None:
+    cleanup = None
+    try:
+        stack.resume_owned_prefill()
+    except BaseException as exc:
+        cleanup = exc
+    try:
+        _stop_frontend_and_join_http(stack)
+    except BaseException as exc:
+        if cleanup is None:
+            cleanup = exc
+    if cleanup is not None:
+        raise RuntimeError(f"{type(cleanup).__name__}: {cleanup}") from (
+            body_error if body_error is not None else cleanup
+        )
+    if body_error is not None:
+        raise body_error
+
+
+def _assert_priority_catalog(stack, catalog: dict[str, int], when: str) -> None:
+    current = stack.catalog_snapshot()
+    if current != catalog or current != stack.worker_ids:
+        raise AssertionError(
+            f"catalog/lease changed {when}: {current} vs {catalog} "
+            f"/ {stack.worker_ids}"
+        )
+
+
+def _post_fe_priority_sentinel(
+    stack,
+    case: dict[str, Any],
+    payload: dict[str, Any],
+    sentinel_id: str,
+    deadline: float,
+    case_name: str,
+):
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT, merge_request_headers
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AssertionError(f"{case_name}: FE hold budget exhausted before sentinel")
+    headers = dict(merge_request_headers(sentinel_id, None))
+    headers["x-dynamo-request-id"] = sentinel_id
+    with requests.Session() as session:
+        session.trust_env = False
+        sentinel = session.post(
+            f"{stack.frontend_url}{case['path']}",
+            json=payload,
+            headers=headers,
+            timeout=remaining,
+        )
+    if sentinel.status_code != 503:
+        raise AssertionError(
+            f"{case_name}: FE sentinel is HTTP {sentinel.status_code}, "
+            f"not typed 503: {sentinel.text[:300]}"
+        )
+    if (
+        "limit reached" not in sentinel.text
+        or f"current={PRIORITY_QUEUE_LIMIT}" not in sentinel.text
+        or f"limit={PRIORITY_QUEUE_LIMIT}" not in sentinel.text
+    ):
+        raise AssertionError(
+            f"{case_name}: FE sentinel is not the typed queue limit: "
+            f"{sentinel.text[:300]}"
+        )
+    return sentinel
+
+
+def _poll_held_admission(handle, timeout_s: float):
+    try:
+        return handle.wait_routing_mutation(timeout_s=timeout_s)
+    except TimeoutError:
+        return None
+
+
+def _classify_epp_sentinel_outcome(
+    outcome, case_name: str, catalog, blocker_obs
+) -> str:
+    from tests.router.epp_parity import QueueRejectionOutcome, RouteObservation
+
+    if isinstance(outcome, QueueRejectionOutcome):
+        return "typed"
+    if not (
+        isinstance(outcome, RouteObservation)
+        and outcome.routing_mode == "aggregated"
+    ):
+        raise AssertionError(
+            f"{case_name}: EPP sentinel is neither typed 503 nor "
+            f"aggregated fallback: {outcome!r}"
+        )
+    if outcome.worker_id != catalog["decode"]:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel worker_id is "
+            f"{outcome.worker_id}, not catalog decode {catalog['decode']}"
+        )
+    if outcome.dp_rank != 0:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel dp_rank is "
+            f"{outcome.dp_rank}, not DP0"
+        )
+    if outcome.token_ids != blocker_obs.token_ids:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel token_ids differ from "
+            "blocker"
+        )
+    if outcome.prefill_worker_id is not None:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel reserved prefill "
+            f"{outcome.prefill_worker_id}"
+        )
+    return "aggregated"
+
+
+def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
+    """Compare FE/EPP admission under a held 1P+1D queue of two."""
+    from tests.router.epp_parity import (
+        PRIORITY_HOLD_DEADLINE_S,
+        PRIORITY_POLICY_CLASS,
+        PRIORITY_QUEUE_LIMIT,
+    )
+
+    case = frontend_epp_priority_case(model_name)
+    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs(kind)
+    catalog = stack.catalog_snapshot()
+    if catalog != stack.worker_ids:
+        raise AssertionError(
+            f"catalog changed before hold: {catalog} vs {stack.worker_ids}"
+        )
+    blocker_id = _priority_request_id()
+    low_id = _priority_request_id()
+    high_id = _priority_request_id()
+    sentinel_id = _priority_request_id()
+    low_payload = _with_nvext(case["payload"], **low_nvext)
+    high_payload = _with_nvext(case["payload"], **high_nvext)
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    stack.pause_owned_prefill(deadline)
+    fe_error = None
+    try:
+        _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        blocker_thread, blocker = _start_frontend_generation(
+            stack,
+            case["payload"],
+            path=case["path"],
+            request_id=blocker_id,
+            headers=None,
+            deadline=deadline,
+            label=f"{kind}-blocker",
+        )
+        _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
+        low_thread, low_out = _start_frontend_generation(
+            stack,
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+            deadline=deadline,
+            label=f"{kind}-low",
+        )
+        high_thread, high_out = _start_frontend_generation(
+            stack,
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+            deadline=deadline,
+            label=f"{kind}-high",
+        )
+        _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, kind)
+        _assert_priority_catalog(stack, catalog, "before FE sentinel")
+        _post_fe_priority_sentinel(
+            stack, case, low_payload, sentinel_id, deadline, kind
+        )
+        _assert_priority_catalog(stack, catalog, "during FE hold")
+        stack.resume_owned_prefill()
+        join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover = join_deadline - time.monotonic()
+        for thread in (blocker_thread, low_thread, high_thread):
+            thread.join(timeout=max(leftover, 0.0))
+            leftover = join_deadline - time.monotonic()
+        for label, outcome in (
+            ("blocker", blocker),
+            ("low", low_out),
+            ("high", high_out),
+        ):
+            if "error" in outcome:
+                raise AssertionError(f"{kind} FE {label} failed: {outcome['error']}")
+            if outcome.get("status") != 200:
+                raise AssertionError(
+                    f"{kind} FE {label} HTTP {outcome.get('status')}: "
+                    f"{str(outcome.get('text', ''))[:300]}"
+                )
+        fe_order = []
+        for record in stack.selection_records():
+            if record.get("worker_type") != "prefill":
+                continue
+            rid = record.get("request_id")
+            if rid in {low_id, high_id} and rid not in fe_order:
+                fe_order.append(rid)
+        if fe_order != [high_id, low_id]:
+            raise AssertionError(
+                f"{kind}: FE admission order {fe_order} is not high then low"
+            )
+    except BaseException as exc:
+        fe_error = exc
+    _finish_fe_priority_hold(stack, fe_error)
+
+    epp_low = None
+    epp_high = None
+    epp_blocker = None
+    epp_sentinel = None
+    body_error = None
+    close_error = None
+    try:
+        epp_blocker = stack.driver.open_held_stream(
+            case["payload"],
+            path=case["path"],
+            request_id=_priority_request_id(),
+        )
+        blocker_obs = epp_blocker.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        if blocker_obs.routing_mode != "disaggregated":
+            raise AssertionError(
+                f"{kind}: EPP blocker is {blocker_obs.routing_mode}, "
+                "not a held prefill reservation"
+            )
+        if blocker_obs.prefill_worker_id != catalog["prefill"]:
+            raise AssertionError(
+                f"{kind}: EPP blocker did not reserve prefill "
+                f"{catalog['prefill']}: {blocker_obs.prefill_worker_id}"
+            )
+        _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
+        log_cursor = stack.epp_log_bytes()
+        epp_low = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+        )
+        epp_high = stack.driver.open_held_stream(
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+        )
+        epp_sentinel = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=sentinel_id,
+            accept_queue_rejection=True,
+        )
+        sentinel_outcome = epp_sentinel.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        sentinel_kind = _classify_epp_sentinel_outcome(
+            sentinel_outcome, kind, catalog, blocker_obs
+        )
+        errors = stack.epp_queue_rejection_errors(after_bytes=log_cursor)
+        if not errors:
+            raise AssertionError(
+                f"{kind}: EPP sentinel {sentinel_kind} without owned "
+                f"policy class {PRIORITY_POLICY_CLASS!r} "
+                f"current={PRIORITY_QUEUE_LIMIT}/limit="
+                f"{PRIORITY_QUEUE_LIMIT} debug error"
+            )
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                f"{kind}: EPP low/high admitted before blocker release"
+            )
+        epp_blocker.release()
+        admitted = None
+        pending = None
+        admit_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        while time.monotonic() < admit_deadline:
+            remaining = min(0.2, admit_deadline - time.monotonic())
+            _poll_held_admission(epp_high, remaining)
+            _poll_held_admission(epp_low, remaining)
+            if epp_high.observation is not None and epp_low.observation is None:
+                admitted, pending = "high", "low"
+                break
+            if epp_low.observation is not None and epp_high.observation is None:
+                admitted, pending = "low", "high"
+                break
+            if epp_low.observation is not None and epp_high.observation is not None:
+                raise AssertionError(f"{kind}: both EPP streams admitted at once")
+        if (admitted, pending) not in {("high", "low"), ("low", "high")}:
+            raise AssertionError(
+                f"{kind}: EPP first admission is {admitted} then {pending}, "
+                "not exactly one of high-then-low or low-then-high"
+            )
+        first = epp_high if admitted == "high" else epp_low
+        leftover = epp_low if pending == "low" else epp_high
+        first.release()
+        leftover_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover_obs = None
+        while leftover_obs is None and time.monotonic() < leftover_deadline:
+            leftover_obs = _poll_held_admission(
+                leftover, leftover_deadline - time.monotonic()
+            )
+        if leftover_obs is None:
+            raise AssertionError(
+                f"{kind}: EPP leftover {pending} never admitted"
+            )
+        for label, obs in (
+            (admitted, first.observation),
+            (pending, leftover_obs),
+        ):
+            if obs is None:
+                raise AssertionError(f"{kind}: EPP {label} has no observation")
+            if obs.routing_mode != "disaggregated":
+                raise AssertionError(
+                    f"{kind}: EPP {label} is {obs.routing_mode}, "
+                    "not a held prefill reservation"
+                )
+            if obs.prefill_worker_id != catalog["prefill"]:
+                raise AssertionError(
+                    f"{kind}: EPP {label} did not reserve prefill "
+                    f"{catalog['prefill']}: {obs.prefill_worker_id}"
+                )
+            if obs.dp_rank != 0:
+                raise AssertionError(
+                    f"{kind}: EPP {label} dp_rank is {obs.dp_rank}, not DP0"
+                )
+            if obs.token_ids != blocker_obs.token_ids:
+                raise AssertionError(
+                    f"{kind}: EPP {label} token_ids differ from blocker"
+                )
+        leftover.release()
+        if epp_sentinel.queue_rejection is None:
+            epp_sentinel.release()
+        _assert_priority_catalog(stack, catalog, "after EPP admission")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if admitted != "high" or pending != "low":
+            raise AssertionError(
+                f"{kind}: EPP admission order is {admitted} then {pending}, "
+                "not high then low"
+            )
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            _close_priority_held_streams(
+                epp_blocker, epp_low, epp_high, epp_sentinel
+            )
+        except BaseException as exc:
+            close_error = exc
+    _raise_priority_cleanup(body_error, close_error)
+
+
+def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
+    """Compare FE typed 503 to the EPP third-waiter outcome."""
+    from tests.router.epp_parity import (
+        PRIORITY_HOLD_DEADLINE_S,
+        PRIORITY_POLICY_CLASS,
+        PRIORITY_QUEUE_LIMIT,
+    )
+
+    case = frontend_epp_priority_case(model_name)
+    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs(
+        "body_strict"
+    )
+    catalog = stack.catalog_snapshot()
+    if catalog != stack.worker_ids:
+        raise AssertionError(
+            f"catalog changed before hold: {catalog} vs {stack.worker_ids}"
+        )
+    blocker_id = _priority_request_id()
+    low_id = _priority_request_id()
+    high_id = _priority_request_id()
+    sentinel_id = _priority_request_id()
+    low_payload = _with_nvext(case["payload"], **low_nvext)
+    high_payload = _with_nvext(case["payload"], **high_nvext)
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    stack.pause_owned_prefill(deadline)
+    fe_error = None
+    try:
+        _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        blocker_thread, blocker = _start_frontend_generation(
+            stack,
+            case["payload"],
+            path=case["path"],
+            request_id=blocker_id,
+            headers=None,
+            deadline=deadline,
+            label="sentinel-blocker",
+        )
+        _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
+        low_thread, low_out = _start_frontend_generation(
+            stack,
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+            deadline=deadline,
+            label="sentinel-low",
+        )
+        high_thread, high_out = _start_frontend_generation(
+            stack,
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+            deadline=deadline,
+            label="sentinel-high",
+        )
+        _wait_pending_prefill(
+            stack, float(PRIORITY_QUEUE_LIMIT), deadline, "sentinel"
+        )
+        _assert_priority_catalog(stack, catalog, "before FE sentinel")
+        fe_sentinel = _post_fe_priority_sentinel(
+            stack, case, low_payload, sentinel_id, deadline, "sentinel"
+        )
+        _assert_priority_catalog(stack, catalog, "during FE hold")
+        stack.resume_owned_prefill()
+        join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover = join_deadline - time.monotonic()
+        for thread in (blocker_thread, low_thread, high_thread):
+            thread.join(timeout=max(leftover, 0.0))
+            leftover = join_deadline - time.monotonic()
+        for label, outcome in (
+            ("blocker", blocker),
+            ("low", low_out),
+            ("high", high_out),
+        ):
+            if "error" in outcome or outcome.get("status") != 200:
+                raise AssertionError(
+                    f"sentinel FE {label} did not complete after CONT: "
+                    f"{outcome}"
+                )
+    except BaseException as exc:
+        fe_error = exc
+    _finish_fe_priority_hold(stack, fe_error)
+
+    epp_low = None
+    epp_high = None
+    epp_blocker = None
+    epp_sentinel = None
+    body_error = None
+    close_error = None
+    try:
+        epp_blocker = stack.driver.open_held_stream(
+            case["payload"],
+            path=case["path"],
+            request_id=_priority_request_id(),
+        )
+        blocker_obs = epp_blocker.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        if (
+            blocker_obs.routing_mode != "disaggregated"
+            or blocker_obs.prefill_worker_id != catalog["prefill"]
+        ):
+            raise AssertionError(
+                "sentinel EPP blocker is not a held prefill reservation: "
+                f"{blocker_obs}"
+            )
+        _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
+        log_cursor = stack.epp_log_bytes()
+        epp_low = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+        )
+        epp_high = stack.driver.open_held_stream(
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+        )
+        epp_sentinel = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=sentinel_id,
+            accept_queue_rejection=True,
+        )
+        sentinel_outcome = epp_sentinel.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        sentinel_kind = _classify_epp_sentinel_outcome(
+            sentinel_outcome, "sentinel", catalog, blocker_obs
+        )
+        if not stack.epp_queue_rejection_errors(after_bytes=log_cursor):
+            raise AssertionError(
+                f"sentinel EPP {sentinel_kind} without owned "
+                f"policy class {PRIORITY_POLICY_CLASS!r} "
+                f"current={PRIORITY_QUEUE_LIMIT}/limit="
+                f"{PRIORITY_QUEUE_LIMIT} debug error"
+            )
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                "sentinel EPP low/high admitted before blocker release"
+            )
+        _assert_priority_catalog(stack, catalog, "after EPP admission")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if sentinel_kind != "typed":
+            raise AssertionError(
+                "FE typed 503 versus EPP aggregated fallback: FE HTTP "
+                f"{fe_sentinel.status_code} with {fe_sentinel.text[:200]!r}; "
+                f"EPP {sentinel_outcome.routing_mode!r}"
+            )
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            _close_priority_held_streams(
+                epp_blocker, epp_low, epp_high, epp_sentinel
+            )
+        except BaseException as exc:
+            close_error = exc
+    _raise_priority_cleanup(body_error, close_error)

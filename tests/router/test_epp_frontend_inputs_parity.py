@@ -11,6 +11,7 @@ selector together with runtime_epp, not generic runtime-image coverage.
 
 import pytest
 
+from tests.router.common import SessionAffinityParityMismatch
 from tests.utils.constants import ROUTER_MODEL_NAME
 
 pytestmark = [
@@ -26,11 +27,23 @@ pytestmark = [
 
 @pytest.mark.parametrize(
     "family",
-    ("cache_salt", "routing_constraints", "session_id"),
+    (
+        "cache_salt",
+        "routing_constraints",
+        pytest.param(
+            "session_id",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=SessionAffinityParityMismatch,
+                reason=(
+                    "Runtime EPP session affinity parity gap: "
+                    "https://github.com/ai-dynamo/dynamo/issues/16592"
+                ),
+            ),
+        ),
+    ),
 )
-def test_epp_frontend_inputs_parity(
-    request, predownload_tokenizers, tmp_path, family
-):
+def test_epp_frontend_inputs_parity(request, predownload_tokenizers, tmp_path, family):
     """Compare native Frontend and Runtime EPP on cache salt, taints, and session."""
     from tests.router.common import (
         frontend_epp_cache_salt_case,
@@ -76,3 +89,23 @@ def test_epp_frontend_inputs_parity(
         session_affinity_ttl_secs=300,
     ) as stack:
         run_frontend_epp_session_id_parity(stack, cases)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("body_strict", "header_strict", "header_normal", "sentinel_fallback"),
+)
+def test_epp_frontend_priority_parity(request, predownload_tokenizers, tmp_path, kind):
+    """Compare FE/EPP queue admission under a held 1P+1D prefill slot."""
+    from tests.router.common import (
+        run_frontend_epp_priority_parity,
+        run_frontend_epp_priority_sentinel_fallback,
+    )
+    from tests.router.epp_parity import EppFrontendPriorityParityStack
+
+    _ = predownload_tokenizers
+    with EppFrontendPriorityParityStack(request, tmp_path, ROUTER_MODEL_NAME) as stack:
+        if kind == "sentinel_fallback":
+            run_frontend_epp_priority_sentinel_fallback(stack, ROUTER_MODEL_NAME)
+            return
+        run_frontend_epp_priority_parity(stack, ROUTER_MODEL_NAME, kind)
