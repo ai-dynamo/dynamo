@@ -390,10 +390,12 @@ impl
     /// 7. Load the binding. If the target was replaced since the gate, resolve
     ///    it again with the same `Pending`/`Untargeted` rules.
     /// 8. Check Direct routing mode again against the reloaded binding.
-    /// 9. Select the prefill worker, then dispatch to it. KV routing books the
-    ///    worker before sending; built-in modes choose while sending. With
-    ///    early bootstrap info, prefill continues in a background task.
-    ///    Otherwise, drain the prefill stream to a handoff or a terminal output.
+    /// 9. Select the prefill worker, then dispatch to it. Selection books a KV
+    ///    worker or takes a built-in mode's reservations; dispatch prepares the
+    ///    request for the worker it is sent to, which a built-in mode can move
+    ///    if the selected worker is gone. With early bootstrap info, prefill
+    ///    continues in a background task. Otherwise, drain the prefill stream
+    ///    to a handoff or a terminal output.
     /// 10. A terminal prefill output is the whole response, and decode is skipped.
     /// 11. Set the Decode phase. On the bootstrap path, this waits until the
     ///     prefill task has finished routing.
@@ -1341,6 +1343,73 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn schedule_selects_a_built_in_prefill_worker() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-prefill-schedule")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+        let endpoint_id = endpoint.id();
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let load_context = crate::kv_router::RoutingLoadContext::start(
+            client.clone(),
+            crate::kv_router::RouterLoadSource::Aggregated,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::RoundRobin)
+                .load_context(load_context)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let router = fresh_decode_router();
+        router.binding.store(Some(Arc::new(PrefillBinding {
+            target_id: WorkerSetTargetId::Committed {
+                group: "builtin-prefill-schedule/prefill/generate".to_string(),
+                generation: 1,
+            },
+            endpoint_id,
+            router: host,
+            prefill_router_mode: RouterMode::RoundRobin,
+        })));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+
+        // A built-in prefill mode now selects its worker at `schedule`, like
+        // KV routing, instead of choosing it while sending.
+        let plan = router
+            .schedule(&SingleIn::new(inference_request()))
+            .await
+            .unwrap();
+        let stage::PrefillPlan::Booked { route, .. } = plan else {
+            panic!("a built-in prefill binding must select its worker at schedule");
+        };
+        assert_eq!(route.target().worker_id, worker_id);
+        assert!(route.attempt_release().is_none());
+        route.abort(None).await;
+
         drop(router);
         runtime.shutdown();
     }
