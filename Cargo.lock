@@ -2676,7 +2676,6 @@ dependencies = [
  "chrono",
  "criterion",
  "crossbeam-queue",
- "crossbeam-utils",
  "dashmap",
  "derive_builder",
  "dynamo-kv-events",
@@ -2684,13 +2683,13 @@ dependencies = [
  "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-truthy",
  "dynamo-zmq",
  "fastrand",
  "flume",
  "futures-util",
- "indexmap 2.14.0",
  "once_cell",
  "ordered-float 4.6.0",
  "parking_lot",
@@ -2700,11 +2699,9 @@ dependencies = [
  "rstest 0.18.2",
  "rstest_reuse",
  "rustc-hash 2.1.2",
- "seqlock",
  "serde",
  "serde_json",
  "serde_yaml",
- "slotmap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3270,6 +3267,29 @@ dependencies = [
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tonic-health 0.14.6",
+]
+
+[[package]]
+name = "dynamo-slot-tracker"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-utils",
+ "dashmap",
+ "dynamo-kv-hashing",
+ "dynamo-router-protocol",
+ "dynamo-tokens",
+ "fastrand",
+ "indexmap 2.14.0",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "seqlock",
+ "serde",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

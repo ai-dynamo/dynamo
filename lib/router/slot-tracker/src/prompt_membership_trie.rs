@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
-use crate::protocols::WorkerWithDpRank;
+use crate::prelude::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
 
@@ -90,7 +90,7 @@ impl PromptTrieNode {
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     fn live_children(&self) -> Vec<SharedNode> {
         self.children
             .values()
@@ -551,7 +551,7 @@ impl PromptMembershipTrie {
         worker_hashes
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     pub(super) fn is_empty(&self) -> bool {
         let root = self.root.read();
         root.live_children().is_empty()

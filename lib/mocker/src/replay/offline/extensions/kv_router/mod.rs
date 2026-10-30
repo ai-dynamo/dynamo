@@ -21,6 +21,7 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
+use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::scheduling::{
     OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
     ScheduleMode, SchedulingContext, WorkerPlacement,

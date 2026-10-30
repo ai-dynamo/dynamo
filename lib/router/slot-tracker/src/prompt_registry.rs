@@ -19,9 +19,9 @@ use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
-use crate::plugins::worker_selection::WorkerCapacity;
-use crate::protocols::WorkerWithDpRank;
-use crate::scheduling::policy_config::FullRankCounts;
+use crate::busy::FullRankCounts;
+use crate::prelude::WorkerWithDpRank;
+use dynamo_router_protocol::load::WorkerCapacity;
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -222,7 +222,7 @@ impl WorkerLoadTable {
 /// Holds the load table's read lock, so ranks are not added or removed while it is
 /// alive. Each lookup copies that rank's latest load, so load updates from other tasks
 /// can land between two lookups.
-pub(crate) struct WorkerLoadReader<'a> {
+pub struct WorkerLoadReader<'a> {
     loads: ShardedLockReadGuard<'a, WorkerLoadTable>,
     decay_now: Instant,
 }
@@ -230,7 +230,7 @@ pub(crate) struct WorkerLoadReader<'a> {
 impl WorkerLoadReader<'_> {
     /// `worker`'s load as a projection without a token sequence sees it, or `None` for a
     /// rank the table does not hold.
-    pub(crate) fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadProjection> {
+    pub fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadProjection> {
         self.loads
             .get(worker)
             .map(|load| load.projection(self.decay_now, 0))
@@ -389,7 +389,7 @@ impl PromptRegistry {
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the same pass also judges each rank's projection against the busy
     /// thresholds it carries and counts the ranks without room per worker.
-    pub(super) fn project_worker_loads_into(
+    pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
@@ -457,7 +457,8 @@ impl PromptRegistry {
         }));
     }
 
-    pub(super) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         WorkerLoadReader {
             loads: self.loads.read(),
             decay_now,
@@ -528,8 +529,8 @@ impl PromptRegistry {
         );
     }
 
-    #[cfg(any(test, feature = "bench"))]
-    pub(super) fn is_block_index_empty(&self) -> bool {
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    pub fn is_block_index_empty(&self) -> bool {
         self.membership.is_empty()
     }
 }
@@ -541,10 +542,10 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
 
     use super::*;
-    use crate::protocols::WorkerWithDpRank;
-    use crate::sequences::prefill_tracker::AnchoredPrefillSnapshot;
-    use crate::sequences::single::{PromptMembershipRemove, PromptMembershipStore};
-    use crate::sequences::topology::RemovedWorkerState;
+    use crate::prefill_tracker::AnchoredPrefillSnapshot;
+    use crate::prelude::WorkerWithDpRank;
+    use crate::single::{PromptMembershipRemove, PromptMembershipStore};
+    use crate::topology::RemovedWorkerState;
 
     fn worker(worker_id: u64, dp_rank: u32) -> WorkerWithDpRank {
         WorkerWithDpRank::new(worker_id, dp_rank)
@@ -820,7 +821,7 @@ mod tests {
 
     #[test]
     fn projection_pass_counts_full_ranks_against_each_ranks_capacity() {
-        use crate::scheduling::BusyThresholds;
+        use crate::busy::BusyThresholds;
 
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);

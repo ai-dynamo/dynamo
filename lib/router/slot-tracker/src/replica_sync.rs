@@ -14,11 +14,11 @@ use super::multi_worker::{
 };
 use super::prompt_registry::WorkerLoadSnapshot;
 use super::single::PrefillCompletion;
-use crate::protocols::{
+use crate::booking::SchedulerBookingDescriptor;
+use crate::prelude::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
-use crate::scheduling::queue::SchedulerBookingDescriptor;
 
 #[derive(Default)]
 struct ReplicaBatchEffects {

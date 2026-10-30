@@ -258,13 +258,7 @@ impl RuntimePolicyControl {
     }
 }
 
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchedulerBookingDescriptor {
-    pub request_id: String,
-    pub worker: WorkerWithDpRank,
-    pub attempt_id: AttemptId,
-}
+pub use dynamo_slot_tracker::booking::SchedulerBookingDescriptor;
 
 #[derive(Debug)]
 enum SchedulerCleanupTarget {

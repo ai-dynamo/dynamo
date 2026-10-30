@@ -29,7 +29,7 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::protocols::PrefillLoadHint;
+use crate::prelude::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
 ///
@@ -55,7 +55,7 @@ pub(super) struct RequestState {
 
 /// What marking a request's prefill complete changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrefillCompletion {
+pub enum PrefillCompletion {
     /// The request is unknown or its prefill was already complete.
     Unchanged,
     /// The request left the prefill phase without holding prompt load.

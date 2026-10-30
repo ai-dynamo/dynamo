@@ -33,12 +33,13 @@ use super::single::{
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
-use crate::plugins::worker_selection::WorkerCapacity;
-use crate::protocols::{
+use crate::booking::SchedulerBookingDescriptor;
+use crate::busy::FullRankCounts;
+use crate::prelude::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::policy_config::FullRankCounts;
-use crate::scheduling::{AttemptId, queue::SchedulerBookingDescriptor};
+use dynamo_router_protocol::attempt::AttemptId;
+use dynamo_router_protocol::load::WorkerCapacity;
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -95,7 +96,7 @@ fn active_request_expiry_duration_from_lookup(
 
 /// Complete scheduler-owned load for one worker rank.
 ///
-/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](crate::protocols::ActiveLoad)
+/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](crate::prelude::ActiveLoad)
 /// protocol. Scheduler publishers always own both active-load fields, while remote wire updates may
 /// contain only a subset of fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,14 +197,14 @@ impl SequencePublishQueueError {
 
 /// Throttles repeated failure logs to one per interval, counting what it suppressed.
 #[derive(Default)]
-pub(crate) struct RateLimitedFailureLog {
+pub struct RateLimitedFailureLog {
     last_logged_at: Option<Instant>,
     suppressed_since_last_log: u64,
 }
 
 impl RateLimitedFailureLog {
     /// Record one failure; returns the failures since the last log when this one should log.
-    pub(crate) fn record(&mut self, now: Instant) -> Option<u64> {
+    pub fn record(&mut self, now: Instant) -> Option<u64> {
         let should_log = self.last_logged_at.is_none_or(|last_logged_at| {
             now.saturating_duration_since(last_logged_at) >= SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL
         });
@@ -299,9 +300,12 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SequenceTrackerOptions {
-    pub(crate) replica_worker_policy: ReplicaWorkerPolicy,
-    pub(crate) expiry_duration: Option<Duration>,
+/// Stage operation the router drives; documented with the kernel contract in step 6.
+pub struct SequenceTrackerOptions {
+    /// How this tracker treats replicated bookings.
+    pub replica_worker_policy: ReplicaWorkerPolicy,
+    /// Override for the active-request expiry; `None` keeps the default.
+    pub expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -461,7 +465,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Builds a tracker from resolved replica-admission and expiry policies.
-    pub(crate) fn new_with_options(
+    pub fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,
@@ -498,7 +502,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    /// Test hook: panics unless every tracked request and block has been released.
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     pub fn assert_completely_drained(&self, decay_now: Instant) {
         let active_blocks = self.active_blocks();
         assert!(
@@ -797,7 +802,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
-    pub(crate) fn add_request_admitted(
+    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    pub fn add_request_admitted(
         &self,
         req: SequenceRequest,
         decay_now: Instant,
@@ -851,14 +857,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    pub(crate) fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
+    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    pub fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
 
     /// Return the live booking for `request_id`, so callers can fence later
     /// lifecycle steps to this attempt.
-    #[cfg(feature = "standalone-slot-tracker")]
-    pub(crate) fn request_booking(&self, request_id: &str) -> Option<SchedulerBookingDescriptor> {
+    pub fn request_booking(&self, request_id: &str) -> Option<SchedulerBookingDescriptor> {
         let booking = self.request_index.booking_for(request_id)?;
         Some(SchedulerBookingDescriptor {
             request_id: request_id.to_string(),
@@ -867,7 +873,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
-    pub(crate) fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.request_index.booking_for(&booking.request_id)
             == Some(RequestBooking {
                 worker: booking.worker,
@@ -878,7 +885,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Republish the ordered completion event for `booking` while it is still
     /// the live booking; serialized with free/rebook through the worker's
     /// sequence lock.
-    pub(crate) fn publish_prefill_completed_if_booking(
+    pub fn publish_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> bool {
@@ -957,7 +964,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// This is safe for delayed cleanup that captured a worker when it acquired
     /// the booking. An ownership mismatch or already-freed request is a no-op.
-    pub(crate) fn free_if_worker(
+    pub fn free_if_worker(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -970,7 +977,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Release only the scheduler booking owned by one request attempt.
-    pub(crate) fn free_if_booking(
+    pub fn free_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -987,7 +994,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Expire one request attempt locally without publishing a replica `Free` event.
-    pub(crate) fn expire_if_booking(
+    pub fn expire_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -1126,7 +1133,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Mark prefill complete if `attempt_id` still owns the booking, and publish the
     /// ordered completion event for every phase change, so peer routers move the
     /// request to decode even when it held no prompt load.
-    pub(crate) fn mark_prefill_completed_if_booking(
+    pub fn mark_prefill_completed_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -1172,7 +1179,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
     /// This is a no-op when the request no longer has a live worker booking.
-    pub(crate) fn publish_prefill_completed(&self, request_id: &RequestId) {
+    pub fn publish_prefill_completed(&self, request_id: &RequestId) {
         if !self.replica_sync {
             return;
         }
@@ -1229,7 +1236,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    pub(crate) fn add_output_blocks_if_booking(
+    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    pub fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -1267,7 +1275,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Get the number of workers.
     #[cfg(test)]
-    pub(crate) fn num_workers(&self) -> usize {
+    pub fn num_workers(&self) -> usize {
         self.workers.read().slots.len()
     }
 
@@ -1315,7 +1323,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the pass also counts the ranks past its busy thresholds per worker.
-    pub(crate) fn project_worker_loads_into(
+    pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
@@ -1331,7 +1339,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
-    pub(crate) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+    pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         self.prompt_registry.worker_load_reader(decay_now)
     }
 
@@ -1647,12 +1655,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::protocols::{
-        ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, PrefillLoadHint,
-        compute_block_hash_for_seq, compute_seq_hash_for_block,
+    use crate::NoopSequencePublisher;
+    use crate::prefill_tracker::PrefillTimeLoadError;
+    use crate::prelude::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
+    use dynamo_kv_hashing::routing::{
+        BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
-    use crate::sequences::prefill_tracker::PrefillTimeLoadError;
-    use crate::test_utils::NoopSequencePublisher;
 
     /// Verifies that a positive expiry override is accepted.
     #[test]

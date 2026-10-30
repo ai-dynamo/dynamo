@@ -16,13 +16,13 @@ readme = "README.md"
 default = []
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
 runtime-protocols = ["dep:dynamo-runtime"]
-bench = ["dynamo-router-protocol/bench", "dynamo-kv-indexer/bench"]
+bench = ["dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench"]
 profile = ["dynamo-kv-indexer/profile"]
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:dynamo-zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq", "dep:dynamo-zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing"]
+testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing"]
 
 [dependencies]
 # repo
@@ -30,6 +30,7 @@ dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
 dynamo-zmq = { workspace = true, optional = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }
@@ -41,14 +42,12 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }
-indexmap = { workspace = true }
 ordered-float = { workspace = true }
 once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"
 futures-util = { workspace = true }
 prometheus = { workspace = true, optional = true }
-seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34"
@@ -63,13 +62,11 @@ zeroize = { workspace = true }
 
 # dependencies
 crossbeam-queue = "0.3"
-crossbeam-utils = "0.8"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 
 rustc-hash = "2.1.1"
-slotmap = "1"
 
 # standalone-indexer (optional)
 axum = { version = "=0.8.4", default-features = false, features = [
@@ -86,6 +83,7 @@ tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }
+dynamo-slot-tracker = { workspace = true, features = ["testing"] }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rstest = "0.18.2"

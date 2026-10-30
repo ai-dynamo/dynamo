@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::single::ActiveSequences;
 #[cfg(test)]
 use super::single::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
-use crate::protocols::{DpRank, WorkerId, WorkerWithDpRank};
+use crate::prelude::{DpRank, WorkerId, WorkerWithDpRank};
 
 /// Resource-safety bound for rank ranges advertised by one worker.
 pub const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
@@ -503,7 +503,7 @@ mod tests {
                 Some(vec![1, 2, 3]),
                 None,
                 true,
-                Some(crate::protocols::PrefillLoadHint {
+                Some(crate::prelude::PrefillLoadHint {
                     initial_effective_prefill_tokens: 12,
                     expected_prefill_duration: None,
                 }),

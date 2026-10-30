@@ -1,0 +1,39 @@
+[package]
+name = "dynamo-slot-tracker"
+description = "Bookings per rank in, load and fullness per request out: the Dynamo router's slot tracker stage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+bench = ["dynamo-router-protocol/bench"]
+testing = ["dynamo-router-protocol/testing"]
+
+[dependencies]
+dynamo-router-protocol = { workspace = true }
+anyhow = { workspace = true }
+crossbeam-utils = "0.8"
+dashmap = { workspace = true }
+dynamo-tokens = { workspace = true }
+fastrand = "2"
+indexmap = { workspace = true }
+parking_lot = { workspace = true }
+rustc-hash = "2.1.1"
+seqlock = { workspace = true }
+serde = { workspace = true }
+slotmap = "1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

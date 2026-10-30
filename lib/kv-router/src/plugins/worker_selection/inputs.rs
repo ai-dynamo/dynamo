@@ -524,6 +524,16 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
+impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
+    fn active_prefill_tokens(&self) -> usize {
+        self.active_prefill_tokens
+    }
+
+    fn active_decode_blocks(&self) -> usize {
+        self.active_decode_blocks
+    }
+}
+
 impl WorkerLoadInput {
     /// Convert an observed load projection into a `LOAD` row.
     pub(crate) fn from_projection(load: WorkerLoadProjection) -> Self {
