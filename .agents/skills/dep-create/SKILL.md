@@ -133,7 +133,7 @@ gh issue comment <number> --repo ai-dynamo/dynamo --body-file /tmp/plan.md
 ### Retroactive DEP
 
 For work already merged without a DEP, file with `dep:implementing`
-or `dep:done` and reference the existing PRs.
+or `dep:completed` and reference the existing PRs.
 
 ## Notes
 
