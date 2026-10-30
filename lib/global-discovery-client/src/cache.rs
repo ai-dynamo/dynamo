@@ -40,7 +40,7 @@ pub struct RouterCache {
 }
 
 impl RouterCache {
-    /// Reads `GET /routers` now and then every `interval`, until `cancel`
+    /// Reads `GET /routers` immediately, then every `interval`, until `cancel`
     /// fires or the cache is dropped. The set starts empty, so nothing waits
     /// on the first read. Call it inside a Tokio runtime.
     ///
@@ -134,6 +134,19 @@ async fn refresh(
             return;
         }
     };
+    // Publish the set before marking it current, so a reader never sees
+    // `Current` next to the previous set.
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    routers.send_if_modified(|current| {
+        if *current == listed {
+            return false;
+        }
+        added = described(listed.difference(current));
+        removed = described(current.difference(&listed));
+        *current = listed;
+        true
+    });
     let mut recovered = false;
     freshness.send_if_modified(|current| {
         if *current == Freshness::Current {
@@ -146,28 +159,19 @@ async fn refresh(
     if recovered {
         tracing::info!("listing Global Routers again");
     }
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    routers.send_if_modified(|current| {
-        if *current == listed {
-            return false;
-        }
-        added = ids(listed.difference(current));
-        removed = ids(current.difference(&listed));
-        *current = listed;
-        true
-    });
     if !added.is_empty() || !removed.is_empty() {
         tracing::info!(?added, ?removed, "Global Router set changed");
     }
 }
 
-fn ids<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String> {
-    let mut ids = routers
-        .map(|router| router.replica.0.clone())
+/// Each router as `<id>=<url>`, sorted, so a URL change under the same ID
+/// shows in the log.
+fn described<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String> {
+    let mut described = routers
+        .map(|router| format!("{}={}", router.replica.0, router.url))
         .collect::<Vec<_>>();
-    ids.sort();
-    ids
+    described.sort();
+    described
 }
 
 /// The error and each of its causes, joined with `: `.
@@ -220,6 +224,26 @@ mod tests {
             replica: RouterReplicaId(id.to_owned()),
             url: format!("http://{id}:9000/").parse().unwrap(),
         }
+    }
+
+    fn ids<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String> {
+        let mut ids = routers
+            .map(|router| router.replica.0.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn error_chain_joins_every_cause() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("request failed")]
+        struct Outer(#[source] std::io::Error);
+        let error = Outer(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert_eq!(error_chain(&error), "request failed: connection refused");
     }
 
     async fn next_set(routers: &mut watch::Receiver<HashSet<RouterReplica>>) -> Vec<String> {
