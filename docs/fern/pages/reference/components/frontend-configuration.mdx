@@ -981,19 +981,35 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
 
 ### Endpoint path customization
 
-All endpoint paths can be overridden via environment variables:
+Endpoint paths are overridden via environment variables. An override only takes
+effect when its route is registered, so the routes that are off by default need
+their feature enabled as well as the path set.
 
-| Env Var | Default Path |
-|---------|-------------|
-| `DYN_HTTP_SVC_CHAT_PATH_ENV` | `/v1/chat/completions` |
-| `DYN_HTTP_SVC_CMP_PATH_ENV` | `/v1/completions` |
-| `DYN_HTTP_SVC_EMB_PATH_ENV` | `/v1/embeddings` |
-| `DYN_HTTP_SVC_RESPONSES_PATH_ENV` | `/v1/responses` |
-| `DYN_HTTP_SVC_MODELS_PATH_ENV` | `/v1/models` |
-| `DYN_HTTP_SVC_ANTHROPIC_PATH_ENV` | `/v1/messages` |
-| `DYN_HTTP_SVC_HEALTH_PATH_ENV` | `/health` |
-| `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
-| `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
+| Env Var | Default Path | Takes effect when |
+|---------|-------------|-------------------|
+| `DYN_HTTP_SVC_CHAT_PATH` | `/v1/chat/completions` | Always |
+| `DYN_HTTP_SVC_CMP_PATH` | `/v1/completions` | Always |
+| `DYN_HTTP_SVC_EMB_PATH` | `/v1/embeddings` | Always |
+| `DYN_HTTP_SVC_RESPONSES_PATH` | `/v1/responses` | Always |
+| `DYN_HTTP_SVC_MODELS_PATH` | `/v1/models` | Always |
+| `DYN_HTTP_SVC_CLASSIFY_PATH` | `/v1/classify` | Always |
+| `DYN_HTTP_SVC_RERANK_PATH` | `/v1/rerank` | Always |
+| `DYN_HTTP_SVC_POOLING_PATH` | `/v1/pooling` | Always |
+| `DYN_HTTP_SVC_ANTHROPIC_PATH` | `/v1/messages` | `--enable-anthropic-api` (`DYN_ENABLE_ANTHROPIC_API`) |
+| `DYN_HTTP_SVC_VLLM_GENERATE_PATH` | `/inference/v1/generate` | `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` |
+| `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` | `/generate` | `DYN_SGLANG_ENABLE_GENERATE` |
+| `DYN_HTTP_SVC_FILES_PATH` | `/v1/files` | `--batch-gateway-url` (`DYN_BATCH_GATEWAY_URL`) |
+| `DYN_HTTP_SVC_BATCHES_PATH` | `/v1/batches` | `--batch-gateway-url` (`DYN_BATCH_GATEWAY_URL`) |
+| `DYN_HTTP_SVC_HEALTH_PATH` | `/health` | Always |
+| `DYN_HTTP_SVC_LIVE_PATH` | `/live` | Always |
+| `DYN_HTTP_SVC_METRICS_PATH` | `/metrics` | Always |
+
+<Note>
+`/v1/files` and `/v1/batches` are served only when `--batch-gateway-url`
+(`DYN_BATCH_GATEWAY_URL`) is set. The frontend then proxies them to that gateway at the
+paths above. The in-process Batch API is a placeholder with no flag to enable it, and its
+handlers return `501`.
+</Note>
 
 ## Deprecated
 
