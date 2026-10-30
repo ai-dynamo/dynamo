@@ -28,6 +28,7 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .responses_history import responses_tools_request
+from .sglang_deepseek import resolve_deepseek_spec
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -305,6 +306,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
+_w_deepseek_spec: str | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -359,12 +361,13 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    deepseek_spec: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
-    global _w_structural_tag_scope, _w_structural_tag_schema
+    global _w_structural_tag_scope, _w_structural_tag_schema, _w_deepseek_spec
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -376,6 +379,7 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
+    _w_deepseek_spec = deepseek_spec
 
 
 def _preprocess_worker(
@@ -395,6 +399,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        deepseek_spec=_w_deepseek_spec,
     )
 
     n = request.get("n", 1)
@@ -565,6 +570,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        deepseek_spec: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -592,6 +598,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.deepseek_spec = deepseek_spec
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -696,6 +703,7 @@ class SglangProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
+                deepseek_spec=self.deepseek_spec,
             )
 
             if self.debug_perf:
@@ -1189,6 +1197,7 @@ class SglangEngineFactory:
             tokenizer.chat_template = chat_template
 
         eos_token_ids = _model_eos_token_ids(tokenizer, local_dir)
+        deepseek_spec = resolve_deepseek_spec(local_dir)
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
@@ -1243,6 +1252,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    deepseek_spec,
                 ),
             )
             futures = [
@@ -1282,6 +1292,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            deepseek_spec=deepseek_spec,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

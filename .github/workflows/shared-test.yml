@@ -377,6 +377,23 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
+      - name: Test pinned DeepSeek recipe adapters (CPU-only)
+        if: ${{ inputs.framework == 'sglang' && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipe_deps="${RUNNER_TEMP}/sglang-recipe-deps"
+          python3 -m pip install --disable-pip-version-check --no-deps --target "${recipe_deps}" \
+            deepseek-recipe==0.2.0 tokenizers==0.23.2
+          while read -r revision digest; do
+            PYTHONPATH="${recipe_deps}${PYTHONPATH:+:${PYTHONPATH}}" \
+              python3 .github/scripts/run_sglang_recipe_tests.py \
+              --revision "${revision}" --sha256 "${digest}"
+          done <<'ADAPTERS'
+          e22a53085994a68aaecbd7a109c8de6da32baeda eda71e11b717121a3d22a9b3dd0c65eb5f10e47a3b43107ac5f79ce5436f5684
+          a77998e15718b659135b0728e050468b5db6d648 4988310b364d007ecc9f0e41a2a9ddb1d1aa9d30ebdd8b79df18e7d217c9365a
+          ADAPTERS
       - name: Upload Coverage Data (CPU-only)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.cpu-only-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
