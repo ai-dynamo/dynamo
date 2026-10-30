@@ -547,7 +547,6 @@ mod tests {
         // Static peers ride along; discovery never removes them.
         let with_peer = [&CORE[..], &DISCOVERY[..], &["--peer", "http://gf-c:8000"]].concat();
         assert_eq!(transport(&with_peer).unwrap(), grpc(&["http://gf-c:8000"]));
-        // Discovery needs this replica's own URL, and the URL needs discovery.
         assert!(transport(&[&CORE[..], &DISCOVERY[..2]].concat()).is_err());
         assert!(transport(&[&CORE[..], &DISCOVERY[2..]].concat()).is_err());
     }

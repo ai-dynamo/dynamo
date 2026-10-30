@@ -248,12 +248,15 @@ impl ReplicaHub {
     fn sweep_at(&self, now: Instant) {
         let mut stale = Vec::new();
         self.open.retain(|request_id, booking| {
-            if now.saturating_duration_since(booking.opened_at) < self.booking_expiry {
-                return true;
+            let age = now.saturating_duration_since(booking.opened_at);
+            if !booking.admitted {
+                // Its add may still be queued for the partition; the expiry
+                // interval starts at admission. One the core never takes (it
+                // dropped the event) is forgotten after two intervals.
+                return age < self.booking_expiry * 2
+                    || self.backlog.contains_key(&booking.partition);
             }
-            // Not admitted because its add is still waiting for the
-            // partition: not the core's silence, so not expired.
-            if !booking.admitted && self.backlog.contains_key(&booking.partition) {
+            if age < self.booking_expiry {
                 return true;
             }
             if booking.progressed {
@@ -374,7 +377,7 @@ impl ReplicaHub {
     fn free_in_core(&self, frees: Vec<(RoutingPartitionId, ActiveSequenceEvent)>, why: &str) {
         let mut released = 0u64;
         for (partition, free) in frees {
-            if self.deliver(&partition, free) {
+            if self.deliver(&partition, free, true) {
                 released += 1;
             }
         }
@@ -385,7 +388,12 @@ impl ReplicaHub {
     /// partition has no backlog, else behind the backlog, which one task
     /// per partition drains as the channel takes it. `false` if the
     /// partition is unknown or gone.
-    fn deliver(&self, partition: &RoutingPartitionId, event: ActiveSequenceEvent) -> bool {
+    fn deliver(
+        &self,
+        partition: &RoutingPartitionId,
+        event: ActiveSequenceEvent,
+        cleanup: bool,
+    ) -> bool {
         let Some(inbound) = self
             .partitions
             .get(partition)
@@ -396,7 +404,9 @@ impl ReplicaHub {
         };
         match self.backlog.entry(partition.clone()) {
             Entry::Occupied(mut queued) => {
-                if queued.get().len() >= self.backlog_capacity {
+                // A free the hub synthesizes for a booking it holds is never
+                // dropped: there is one per tracked booking, already bounded.
+                if !cleanup && queued.get().len() >= self.backlog_capacity {
                     self.counters.events_dropped.fetch_add(1, Relaxed);
                     return false;
                 }
@@ -538,7 +548,7 @@ impl ReplicaHub {
                     },
                 );
             }
-            if !self.deliver(&partition, event) && added {
+            if !self.deliver(&partition, event, false) && added {
                 self.open.remove(&request_id);
             }
         }
@@ -663,8 +673,14 @@ impl ReplicaRequestLeaseObserver for ReplicaHub {
 impl ReplicaHub {
     /// The core took the mirrored booking `request_id`.
     fn booking_admitted(&self, request_id: &str) {
+        self.admit_at(request_id, Instant::now());
+    }
+
+    /// The expiry interval of a mirrored booking starts when the core takes it.
+    fn admit_at(&self, request_id: &str, now: Instant) {
         if let Some(mut open) = self.open.get_mut(request_id) {
             open.admitted = true;
+            open.opened_at = now;
         }
     }
 
@@ -749,26 +765,27 @@ mod tests {
         hub.open.insert("taken".to_owned(), booking(false));
         hub.open.insert("dropped".to_owned(), booking(false));
         hub.open.insert("busy".to_owned(), booking(false));
-        hub.booking_admitted("taken");
-        hub.booking_admitted("busy");
+        hub.admit_at("taken", start);
+        hub.admit_at("busy", start);
         hub.booking_progressed("busy");
         assert_eq!(hub.stats().bookings_tracked, 3);
 
         hub.sweep_at(start + hub.booking_expiry / 2);
         assert_eq!(hub.stats().bookings_tracked, 3);
 
-        // Old enough: the admitted one is freed in the core, the one the
-        // core never took is only forgotten, and the one that progressed
-        // gets another interval.
+        // Old enough: the admitted one is freed in the core, the one that
+        // progressed gets another interval, and the one the core has not
+        // taken waits for its admission.
         hub.sweep_at(start + hub.booking_expiry);
-        assert_eq!(hub.stats().bookings_tracked, 1);
+        assert_eq!(hub.stats().bookings_tracked, 2);
         let free = channels.inbound_rx.recv().await.unwrap();
         assert_eq!(free.request_id, "taken");
         assert!(matches!(free.data, ActiveSequenceEventData::Free));
         assert!(channels.inbound_rx.try_recv().is_err());
         assert_eq!(hub.stats().bookings_released, 1);
 
-        // No further progress: the second interval ends it.
+        // Two intervals: the busy one made no further progress and is
+        // freed; the never-admitted one is forgotten.
         hub.sweep_at(start + hub.booking_expiry * 2);
         assert_eq!(hub.stats().bookings_tracked, 0);
         assert_eq!(channels.inbound_rx.recv().await.unwrap().request_id, "busy");
@@ -791,18 +808,17 @@ mod tests {
             lora_name: None,
         };
         for request in ["a", "b", "c", "d"] {
-            assert!(hub.deliver(&partition, event(request)));
+            assert!(hub.deliver(&partition, event(request), false));
         }
-        // The channel holds two and the backlog the next two; a fifth is
-        // dropped and counted.
-        assert!(!hub.deliver(&partition, event("e")));
+        assert!(!hub.deliver(&partition, event("e"), false));
         assert_eq!(hub.stats().events_dropped, 1);
+        assert!(hub.deliver(&partition, event("cleanup"), true));
 
         let mut seen = Vec::new();
-        while seen.len() < 4 {
+        while seen.len() < 5 {
             seen.push(channels.inbound_rx.recv().await.unwrap().request_id);
         }
-        assert_eq!(seen, ["a", "b", "c", "d"]);
+        assert_eq!(seen, ["a", "b", "c", "d", "cleanup"]);
         tokio::time::timeout(Duration::from_secs(2), async {
             while hub.backlog.contains_key(&partition) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
