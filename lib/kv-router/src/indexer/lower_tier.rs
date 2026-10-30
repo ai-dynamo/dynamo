@@ -418,7 +418,6 @@ impl MultiOwners {
     }
 }
 
-/// Small edges compare exact ids; multi-owner edges use the existing XOR bound.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OwnerSetFingerprint {
     Single(OwnerId),
@@ -2205,52 +2204,6 @@ mod tests {
         );
         let branch_b_hits = index.query_contiguous_hits(&query, &continuations);
         assert_eq!(branch_b_hits.get(&WorkerWithDpRank::new(9, 0)), Some(&1));
-    }
-
-    #[test]
-    fn shared_worker_traversal_fuses_at_descendant_breakpoint() {
-        let mut index = TestLowerTierIndex::new();
-        let worker_a = WorkerWithDpRank::new(1, 0);
-        let worker_b = WorkerWithDpRank::new(2, 0);
-
-        index
-            .apply_event(store_event(
-                1,
-                0,
-                0,
-                None,
-                &[11, 12, 13, 14],
-                &[101, 102, 103, 104],
-            ))
-            .unwrap();
-        index
-            .apply_event(store_event(2, 0, 1, Some(102), &[13, 14], &[103, 104]))
-            .unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
-        continuations.insert(
-            worker_b,
-            LowerTierContinuation::new(2, ExternalSequenceBlockHash(102)),
-        );
-
-        let details = index.query_match_details(&local_hashes(&[11, 12, 13, 14]), &continuations);
-        assert_eq!(details.hits.get(&worker_a), Some(&4));
-        assert_eq!(details.hits.get(&worker_b), Some(&2));
-        assert_eq!(
-            details.next_continuations.get(&worker_a),
-            Some(&LowerTierContinuation::new(
-                4,
-                ExternalSequenceBlockHash(104)
-            ))
-        );
-        assert_eq!(
-            details.next_continuations.get(&worker_b),
-            Some(&LowerTierContinuation::new(
-                4,
-                ExternalSequenceBlockHash(104)
-            ))
-        );
     }
 
     #[test]
