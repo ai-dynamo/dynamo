@@ -88,7 +88,6 @@ pub async fn follow_relays(
     }
 }
 
-/// Follows both load streams over one Relay connection, retrying them together.
 async fn subscribe(
     pool: PoolId,
     model: String,
