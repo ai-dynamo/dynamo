@@ -56,6 +56,8 @@ class SubstrateEnvironment(BaseEnvironment):
         template_map: dict[str, str] | None = None,
         atespace: str = "ate-env",
         ate_cli: str = "kubectl-ate",
+        ate_endpoint: str | None = None,
+        ate_token_file: str | None = None,
         workdir: str = "/testbed",
         ready_timeout: float = 180,
         transfer_timeout: float = 600,
@@ -69,6 +71,8 @@ class SubstrateEnvironment(BaseEnvironment):
         self._kube_context = kube_context
         self._egress_policy = Path(egress_policy).resolve()
         self._ate_cli = ate_cli
+        self._ate_endpoint = ate_endpoint
+        self._ate_token_file = ate_token_file
         self._atespace = atespace
         self._workdir = workdir
         self._ready_timeout = ready_timeout
@@ -201,8 +205,14 @@ class SubstrateEnvironment(BaseEnvironment):
 
     async def _create_egress_policy(self):
         # The env API has no policy RPC. Use the upstream control-plane CLI.
+        cli_flags = []
+        if self._ate_endpoint:
+            cli_flags.extend(["--endpoint", self._ate_endpoint])
+        if self._ate_token_file:
+            cli_flags.extend(["--token-file", self._ate_token_file])
         proc = await asyncio.create_subprocess_exec(
             self._ate_cli,
+            *cli_flags,
             "--context",
             self._kube_context,
             "create",

@@ -76,7 +76,11 @@ spec:
     env:
     - name: PYTHONPATH
       value: /work/example:/work/pi-plugin/harbor
-    - name: MODEL_API_KEY
+    - name: KUBECONFIG
+      value: /work/kubeconfig
+    - name: SUBSTRATE_ENV_API
+      value: ate-env-api.ate-env.svc:7777
+    - name: DYNAMO_API_KEY
       valueFrom:
         secretKeyRef:
           name: harbor-model-api

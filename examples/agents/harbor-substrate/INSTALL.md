@@ -175,13 +175,24 @@ Install the pinned execution dependencies in a separate environment:
 
 ```bash
 python3 -m venv .local/checks
-.local/checks/bin/pip install -r requirements.txt pytest pytest-asyncio pyyaml
-PYTHONPATH="$EXAMPLE_DIR:$PI_PLUGIN_DIR/harbor" .local/checks/bin/python -m pytest \
-  --noconftest -c pytest.ini test_pi_trajectory.py test_tutorial.py
+.local/checks/bin/pip install -r requirements.txt pytest pytest-asyncio
 ```
 
-`test_guest.py` also exercises the actual env guest protocol, file modes,
-symlinks, command failures, and cancellation. Build and start the patched
-`ate-env-guest` with workspace `/`, bind it to loopback, and set
-`ATE_ENV_GUEST_TARGET` to its address before running that test file. These
-checks do not replace the tutorial's Kubernetes one-trial validation.
+`test_guest.py` exercises the actual env guest protocol, file modes, symlinks,
+command failures, and cancellation. In one workstation terminal, build and
+start the patched guest on loopback:
+
+```bash
+(cd deps/env && go build -o "$EXAMPLE_DIR/.local/ate-env-guest" ./cmd/ate-env-guest)
+.local/ate-env-guest -workspace / -listen 127.0.0.1:17777
+```
+
+In another terminal, run the tests from the example directory:
+
+```bash
+ATE_ENV_GUEST_TARGET=127.0.0.1:17777 .local/checks/bin/python -m pytest \
+  --noconftest -c pytest.ini test_guest.py
+```
+
+Stop the guest with Ctrl+C after the tests. These checks do not replace the
+tutorial's Kubernetes one-trial validation.
