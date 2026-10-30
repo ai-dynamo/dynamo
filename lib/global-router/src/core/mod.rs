@@ -28,8 +28,8 @@ use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::queue::SchedulerBookingDescriptor;
 use dynamo_kv_router::scheduling::RouterPolicyConfig;
 use dynamo_kv_router::services::selection::{
-    CatalogReconciler, HostReplication, PromptRequest, SelectAndReserveRequest, SelectionHost,
-    SelectionService, SelectionServiceBuilder,
+    CatalogReconciler, HostReplication, PromptRequest, SelectAndReserveRequest, SelectRequest,
+    SelectionHost, SelectionService, SelectionServiceBuilder,
 };
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -54,6 +54,9 @@ pub enum CorePolicy {
 pub struct CoreSelector {
     service: Arc<SelectionService>,
     frontends: Cursors<PoolId>,
+    /// Whether the policy reads the core's bookings. Round-robin does not,
+    /// so its picks are advisory selections with nothing booked or freed.
+    books: bool,
 }
 
 impl CoreSelector {
@@ -76,6 +79,7 @@ impl CoreSelector {
         Ok(Self {
             service: Arc::new(service),
             frontends: Cursors::default(),
+            books: !matches!(policy, CorePolicy::RoundRobin),
         })
     }
 
@@ -140,11 +144,16 @@ impl RequestSelector for CoreSelector {
         if candidates.is_empty() {
             return None;
         }
-        let selected = match self
-            .service
-            .select_and_reserve(booking(request.model, candidates.iter().copied()))
-            .await
-        {
+        let selected = if self.books {
+            self.service
+                .select_and_reserve(booking(request.model, candidates.iter().copied()))
+                .await
+        } else {
+            self.service
+                .select(advisory(request.model, candidates.iter().copied()))
+                .await
+        };
+        let selected = match selected {
             Ok(selected) => selected,
             Err(error) => {
                 tracing::warn!(model = request.model, %error, "the router core selected no pool");
@@ -153,7 +162,9 @@ impl RequestSelector for CoreSelector {
         };
         // Taken before the pool lookup so a worker the frontend cannot map
         // back is freed, not leaked.
-        let reservation = Reservation::new(self.service.clone(), selected.selection_id);
+        let reservation = self
+            .books
+            .then(|| Reservation::new(self.service.clone(), selected.selection_id));
         let Some(pool) = candidates
             .into_iter()
             .find(|pool| worker_id(&pool.id) == selected.worker_id)
@@ -168,8 +179,32 @@ impl RequestSelector for CoreSelector {
         let target = target(&self.frontends, pool)?;
         Some(Selection {
             target,
-            lifecycle: Some(Box::new(reservation)),
+            lifecycle: reservation
+                .map(|reservation| Box::new(reservation) as Box<dyn RequestLifecycle>),
         })
+    }
+}
+
+/// A pick among `candidates` that books nothing: no queue admission, no
+/// reservation, no sequence tracking, nothing to free.
+fn advisory<'a>(model: &str, candidates: impl Iterator<Item = &'a Pool>) -> SelectRequest {
+    let booking = booking(model, candidates);
+    SelectRequest {
+        model_name: booking.model_name,
+        routing_group: booking.routing_group,
+        selection_id: None,
+        prompt: booking.prompt,
+        router_config_override: None,
+        expected_output_tokens: None,
+        priority_jump: None,
+        strict_priority: None,
+        session_id: None,
+        session_context: None,
+        affinity_target: None,
+        pinned_worker: None,
+        allowed_worker_ids: booking.allowed_worker_ids,
+        routing_constraints: booking.routing_constraints,
+        advisory: true,
     }
 }
 
@@ -343,7 +378,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("{} did not settle at {booked} booked", pool.name));
     }
 
-    /// The pool `selector` routes a `model` request to, with the booking
+    /// The pool `selector` routes a `model` request to, with any booking
     /// freed again before returning, as the current selectors count nothing
     /// per selection.
     async fn picks(selector: &CoreSelector, model: &str, candidates: &[&Pool]) -> Option<PoolId> {
@@ -351,9 +386,11 @@ mod tests {
             .route(&RoutingRequest::new(model), candidates)
             .await?;
         let pool = selection.target.pool;
-        let booked = selector.booked(pool);
-        drop(selection.lifecycle);
-        booked_settles(selector, pool, booked - 1).await;
+        if let Some(lifecycle) = selection.lifecycle {
+            let booked = selector.booked(pool);
+            drop(lifecycle);
+            booked_settles(selector, pool, booked - 1).await;
+        }
         Some(pool.id.clone())
     }
 
@@ -412,6 +449,24 @@ mod tests {
         assert_eq!(rounds(&from_core, 2), rounds(&from_current, 2));
         assert_eq!(from_core[0], from_core[2]);
         assert_ne!(from_core[0], from_core[1]);
+    }
+
+    #[tokio::test]
+    async fn round_robin_books_nothing() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let green = pool("green", "qwen", &["http://green-0:8000"]);
+        let (core, _catalog) =
+            selector(CorePolicy::RoundRobin, &[blue.clone(), green.clone()]).await;
+        let held = [
+            core.route(&RoutingRequest::new("qwen"), &[&blue, &green])
+                .await
+                .unwrap(),
+            core.route(&RoutingRequest::new("qwen"), &[&blue, &green])
+                .await
+                .unwrap(),
+        ];
+        assert!(held.iter().all(|selection| selection.lifecycle.is_none()));
+        assert_eq!((core.booked(&blue), core.booked(&green)), (0, 0));
     }
 
     #[tokio::test]
