@@ -72,7 +72,8 @@ pub use operation::{
 };
 
 use super::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+    AcquireStep, AffinityError, AffinityLease, Hold, ReplicaApplyOutcome, SessionAffinity,
+    SessionAffinityConfig,
 };
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
@@ -584,9 +585,15 @@ impl SelectionCore {
             held.hold(event, tokio::time::Instant::now());
             return;
         }
-        held.discard_superseded(&event);
         let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
-        let outcome = table.apply_replica_update(event.session_id, target, version);
+        let outcome = table.apply_replica_update(event.session_id.clone(), target, version);
+        // A local request is binding the session; keep the peer binding in case
+        // it is cancelled, and retry on the next drain.
+        if outcome == ReplicaApplyOutcome::IgnoredInitializing {
+            held.hold(event, tokio::time::Instant::now());
+        } else {
+            held.discard_superseded(&event);
+        }
         tracing::trace!(
             worker_id,
             ?outcome,

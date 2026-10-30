@@ -8,8 +8,6 @@
 
 use tokio::time::Instant;
 
-use crate::services::selection::affinity::ReplicaApplyOutcome;
-
 use super::*;
 
 /// Total held bindings across partitions, the same bound as one binding channel.

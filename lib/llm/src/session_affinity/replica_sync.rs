@@ -152,14 +152,19 @@ impl ReplicaUpdateApplier {
             held.hold(update, Instant::now());
             return true;
         }
-        if held
+        // A local request is binding the session; keep the peer binding in case
+        // it is cancelled, and retry on the next discovery change.
+        if apply_update(&table, update.clone(), Duration::ZERO)
+            == ReplicaApplyOutcome::IgnoredInitializing
+        {
+            held.hold(update, Instant::now());
+        } else if held
             .sessions
             .get(&update.session_id)
             .is_some_and(|(pending, _)| pending.version() <= update.version())
         {
             held.sessions.remove(&update.session_id);
         }
-        apply_update(&table, update, Duration::ZERO);
         true
     }
 
@@ -578,6 +583,9 @@ mod tests {
         assert!(applier.apply_held());
         assert_eq!(bound("held"), Some(1));
         assert_eq!(applier.held.lock().sessions.len(), 1);
+        // A refresh for the now-discovered worker is also ignored; it stays held.
+        assert!(applier.apply(8, update("initializing", 1, 7)));
+        assert_eq!(applier.held.lock().sessions.len(), 1);
 
         // The peer binding survives a local initialization that is cancelled.
         drop(initializing);
@@ -585,10 +593,11 @@ mod tests {
         assert_eq!(bound("initializing"), Some(1));
         assert!(applier.held.lock().sessions.is_empty());
 
-        // Applied bindings keep only the TTL left after waiting.
+        // Applied bindings keep only the TTL left after waiting; the refresh
+        // that arrived at six seconds started a new one.
         tokio::time::advance(Duration::from_secs(4)).await;
         assert_eq!(bound("held"), None);
-        assert_eq!(bound("initializing"), None);
+        assert_eq!(bound("initializing"), Some(1));
         assert_eq!(bound("newer"), None);
     }
 

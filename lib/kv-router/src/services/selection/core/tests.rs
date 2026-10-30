@@ -4202,6 +4202,9 @@ async fn held_binding_survives_a_cancelled_local_initialization() {
     let initializing = table.try_acquire("s", None).unwrap();
     peer.upsert_worker(worker(1)).await.unwrap();
     assert_eq!(peer.held_bindings.lock().len(), 1);
+    // A refresh for the now-discovered worker is also ignored; it stays held.
+    peer.dispatch_affinity_event(peer_binding("s", 1, 1));
+    assert_eq!(peer.held_bindings.lock().len(), 1);
     drop(initializing);
     peer.upsert_worker(worker(1)).await.unwrap();
     assert_eq!(bound_worker(&peer, "s"), Some(1));
