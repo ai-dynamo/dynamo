@@ -582,7 +582,7 @@ def test_init_kv_event_publish_passes_engine_owned_mm_identity(
 
     monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
     monkeypatch.setattr(
-        publisher_mod, "sglang_uses_engine_owned_mm_identity", lambda: engine_owned
+        publisher_mod, "sglang_has_wide_mm_pad_values", lambda: engine_owned
     )
     monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
     monkeypatch.setattr(

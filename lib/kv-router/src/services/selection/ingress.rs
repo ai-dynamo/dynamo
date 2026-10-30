@@ -124,7 +124,8 @@ impl KvEventIngress for ZmqDirectIngress {
                     && ranks.contains(&rank)
                     && old_endpoints.get(&rank) == endpoints.get(&rank)
                     && previous.replay_endpoint == record.replay_endpoint
-                    && previous.engine_owned_mm_identity == record.engine_owned_mm_identity
+                    && previous.engine_owned_mm_identity.unwrap_or(false)
+                        == record.engine_owned_mm_identity.unwrap_or(false)
                 {
                     retained.insert(rank);
                 } else if listener_present {

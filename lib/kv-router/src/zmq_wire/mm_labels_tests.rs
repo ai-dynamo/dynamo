@@ -334,11 +334,13 @@ async fn image_is_excluded_with_its_descendants() {
     // Removals of excluded blocks never reach the index.
     let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
     assert_eq!(removed_ids(&evict), vec![E_T]);
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+    indexes.apply(A, &evict).await;
 
     let stats = normalizer.engine_mm_stats();
     assert_eq!(stats.excluded_unmapped, 2);
     assert_eq!(stats.excluded_parent, 1);
-    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
 }
 
 /// A store dropped entirely becomes an empty removal so the event id sequence
@@ -386,10 +388,9 @@ async fn fully_excluded_store_is_a_noop_for_an_unseen_worker() {
     assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
 }
 
-/// Exclusion state is advisory: with none remembered, a descendant of an
-/// excluded block reaches the index, which rejects it for its unknown parent.
+/// Exhausted exclusion state must not send unknown-parent stores to an index.
 #[tokio::test]
-async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
+async fn exclusion_overflow_drops_descendants_and_preserves_text_eviction() {
     let mut normalizer = engine_owned_normalizer().with_engine_mm_excluded_capacity(0);
     let mut indexes = Indexes::new();
     let first = run(
@@ -410,26 +411,26 @@ async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
         2,
         stored(Some(E_IX), &[block(E_KX, text(300))]),
     );
-    assert!(
-        store_data(&child).is_some(),
-        "not dropped without exclusion state"
-    );
-    let event = router_event(A, &child);
-    assert!(indexes.radix.apply_event(event.clone()).is_err());
-    let _ = indexes.crtc.apply_event_and_wait(event).await;
+    assert!(is_noop(&child));
+    indexes.apply(A, &child).await;
 
     let query = request_hashes(&[text(100), routing_pad(LABEL_U, BLOCK), text(300)]);
     assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
+    let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, E_T]));
+    let event = router_event(A, &evict);
+    // Unknown removals are reported, but must not prevent the text eviction.
+    assert_eq!(
+        indexes.radix.apply_event(event.clone()),
+        Err(crate::protocols::KvCacheEventError::BlockNotFound)
+    );
+    indexes.crtc.apply_event_and_wait(event).await.unwrap();
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
 }
 
-/// The DC relay's producer is stricter than the router's indexes: a store under
-/// an unknown parent is a source protocol fault there (the relay host then
-/// rejects the source). Exclusion state therefore matters to the relay, so it
-/// must not overflow while the engine still holds the excluded blocks.
+/// Overflow must preserve the relay source and subsequent root text updates.
 #[test]
-fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
+fn exclusion_overflow_preserves_the_relay_source() {
     use crate::indexer::cuckoo::{CkfConfig, DcCkfState};
-    use crate::protocols::KvCacheEventError;
 
     let events = |excluded_capacity: usize| {
         let mut normalizer =
@@ -449,9 +450,22 @@ fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
             2,
             stored(Some(E_IX), &[block(E_KX, text(300))]),
         );
-        [first, child]
+        let text_root = run(
+            &mut normalizer,
+            A,
+            3,
+            stored(None, &[block(0xc0de, text(500))]),
+        );
+        assert_eq!(store_data(&first).unwrap().blocks.len(), 1);
+        assert!(is_noop(&child));
+        assert_eq!(
+            store_data(&text_root).unwrap().blocks[0].block_hash.0,
+            0xc0de
+        );
+        let evict = run(&mut normalizer, A, 4, removed(&[E_IX, E_KX, E_T, 0xc0de]));
+        [first, child, text_root, evict]
     };
-    let relay_errors = |events: [PlacementEvent; 2]| -> Vec<Option<KvCacheEventError>> {
+    let relay_errors = |events: [PlacementEvent; 4]| {
         let mut relay = DcCkfState::new(CkfConfig::new(64)).expect("relay producer");
         events
             .iter()
@@ -461,14 +475,79 @@ fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
                     .first_error()
                     .copied()
             })
-            .collect()
+            .collect::<Vec<_>>()
     };
 
-    assert_eq!(relay_errors(events(1 << 10)), vec![None, None]);
-    assert_eq!(
-        relay_errors(events(0)),
-        vec![None, Some(KvCacheEventError::ParentBlockNotFound)]
+    assert_eq!(relay_errors(events(1 << 10)), vec![None; 4]);
+    assert_eq!(relay_errors(events(0)), vec![None; 4]);
+}
+
+/// A replayed text store suppressed after overflow was already indexed. Its
+/// removal must still pass through, even though the replay itself is a no-op.
+#[tokio::test]
+async fn overflow_does_not_hide_evictions_of_previously_indexed_text() {
+    let mut normalizer = engine_owned_normalizer().with_engine_mm_excluded_capacity(0);
+    let mut indexes = Indexes::new();
+    let root = run(
+        &mut normalizer,
+        A,
+        1,
+        stored(None, &[block(E_T, text(100))]),
     );
+    let continuation = || stored(Some(E_T), &[block(E_KX, text(300))]);
+    let child = run(&mut normalizer, A, 2, continuation());
+    indexes.apply(A, &root).await;
+    indexes.apply(A, &child).await;
+    let query = request_hashes(&[text(100), text(300)]);
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
+
+    let image = run(
+        &mut normalizer,
+        A,
+        3,
+        stored(None, &[block(E_IX, image(IMAGE_X, BLOCK))]),
+    );
+    assert!(is_noop(&image));
+    let replay = run(&mut normalizer, A, 4, continuation());
+    assert!(is_noop(&replay));
+    indexes.apply(A, &replay).await;
+    let evict = run(&mut normalizer, A, 5, removed(&[E_KX]));
+    assert_eq!(removed_ids(&evict), vec![E_KX]);
+    indexes.apply(A, &evict).await;
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
+}
+
+#[test]
+fn cache_clear_resets_overflow_only_for_the_affected_worker_rank() {
+    let mut normalizer = engine_owned_normalizer().with_engine_mm_excluded_capacity(0);
+    let scopes = [worker(A), WorkerWithDpRank::new(A, 1), worker(A + 1)];
+    for scope in scopes {
+        run_on(
+            &mut normalizer,
+            scope,
+            1,
+            stored(
+                None,
+                &[block(E_T, text(100)), block(E_IX, image(IMAGE_X, BLOCK))],
+            ),
+        );
+    }
+    run_on(&mut normalizer, scopes[0], 2, cleared());
+    run_on(
+        &mut normalizer,
+        scopes[0],
+        3,
+        stored(None, &[block(E_T, text(100))]),
+    );
+    for scope in scopes {
+        let event = run_on(
+            &mut normalizer,
+            scope,
+            4,
+            stored(Some(E_T), &[block(E_KX, text(300))]),
+        );
+        assert_eq!(store_data(&event).is_some(), scope == scopes[0]);
+    }
 }
 
 #[test]
@@ -492,6 +571,47 @@ fn multimodal_values_that_fit_in_u32_are_still_classified() {
         "the block with multimodal values is cut"
     );
     assert_eq!(normalizer.engine_mm_stats().excluded_unmapped, 1);
+}
+
+#[tokio::test]
+async fn malformed_multimodal_stores_do_not_suppress_text_eviction() {
+    for excluded_parent in [false, true] {
+        let mut normalizer = engine_owned_normalizer();
+        let mut indexes = Indexes::new();
+        let text_store = run(
+            &mut normalizer,
+            A,
+            1,
+            stored(None, &[block(E_T, text(100))]),
+        );
+        indexes.apply(A, &text_store).await;
+        let malformed = if excluded_parent {
+            run(
+                &mut normalizer,
+                A,
+                2,
+                stored(None, &[block(E_IX, image(IMAGE_X, BLOCK))]),
+            );
+            stored(Some(E_IX), &[block(E_T, text(100)), block(E_T, text(300))])
+        } else {
+            stored(
+                None,
+                &[
+                    block(E_T, text(100)),
+                    block(E_IX, image(IMAGE_X, BLOCK)),
+                    block(E_T, text(300)),
+                ],
+            )
+        };
+        let rejected = run(&mut normalizer, A, 3, malformed);
+        assert!(is_noop(&rejected));
+        indexes.apply(A, &rejected).await;
+        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+        let evict = run(&mut normalizer, A, 4, removed(&[E_T]));
+        assert_eq!(removed_ids(&evict), vec![E_T]);
+        indexes.apply(A, &evict).await;
+        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
+    }
 }
 
 /// Without the engine-owned flag, every value that did not fit in `u32`

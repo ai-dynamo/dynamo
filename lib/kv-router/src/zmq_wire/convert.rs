@@ -13,6 +13,17 @@ use crate::protocols::{
 
 use super::types::{BlockHashValue, Locality, RawKvEvent};
 
+pub(super) fn has_duplicate_block_hashes(
+    block_hashes: &[BlockHashValue],
+    parent_block_hash: Option<BlockHashValue>,
+) -> bool {
+    let mut seen = HashSet::with_capacity(block_hashes.len() + 1);
+    if let Some(parent) = parent_block_hash {
+        seen.insert(parent.into_u64());
+    }
+    block_hashes.iter().any(|h| !seen.insert(h.into_u64()))
+}
+
 /// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
     raw: RawKvEvent,
@@ -85,31 +96,24 @@ pub fn convert_event(
             session_id,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
-            {
-                let mut seen = HashSet::with_capacity(block_hashes.len() + 1);
-                if let Some(parent) = parent_block_hash {
-                    seen.insert(parent.into_u64());
-                }
-                let has_duplicate = block_hashes.iter().any(|h| !seen.insert(h.into_u64()));
-                if has_duplicate {
-                    tracing::warn!(
+            if has_duplicate_block_hashes(&block_hashes, parent_block_hash) {
+                tracing::warn!(
+                    event_id,
+                    "Self-referencing block detected: duplicate hash in store event; dropping"
+                );
+                // Return an empty Removed instead of Cleared to avoid nuking
+                // the worker's entire index state. An empty Removed is a no-op
+                // in the radix tree (zero iterations, returns Ok(())).
+                return Some(PlacementEvent::new(
+                    Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                    KvCacheEvent {
                         event_id,
-                        "Self-referencing block detected: duplicate hash in store event; dropping"
-                    );
-                    // Return an empty Removed instead of Cleared to avoid nuking
-                    // the worker's entire index state. An empty Removed is a no-op
-                    // in the radix tree (zero iterations, returns Ok(())).
-                    return Some(PlacementEvent::new(
-                        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
-                        KvCacheEvent {
-                            event_id,
-                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                block_hashes: vec![],
-                            }),
-                            dp_rank,
-                        },
-                    ));
-                }
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: vec![],
+                        }),
+                        dp_rank,
+                    },
+                ));
             }
 
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];

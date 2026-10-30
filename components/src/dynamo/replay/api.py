@@ -84,6 +84,7 @@ class _CommonReplayOptions(TypedDict, total=False):
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
+    conversation_affinity: dict[str, Any] | None
     agentic_lanes: int | None
     agentic_snapshot: dict[str, Any] | None
     agentic_warmup: bool
@@ -393,6 +394,7 @@ def run_trace_replay(
     agentic_snapshot=None,
     agentic_warmup=False,
     agentic_profile=None,
+    conversation_affinity=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -420,9 +422,6 @@ def run_trace_replay(
     _planner_warmup_observations=None,
     # Internal: a retune sweep replays the baseline and every candidate with
     # the canonical router seed and ordinal request ids (common random numbers).
-    # With an SLA-mode planner the pinned AISimulate is not guaranteed to be
-    # bitwise reproducible across processes (its forward-pass sample store
-    # iterates in hash order).
     _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
@@ -441,6 +440,10 @@ def run_trace_replay(
     ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
     workload controls on the existing offline trace path. Native validation owns
     their schemas and lifecycle constraints.
+
+    ``conversation_affinity`` enables native hard binding for AgentX conversations:
+    ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
+    offline KV-router replay with fixed workers; omission preserves normal routing.
 
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
@@ -480,6 +483,7 @@ def run_trace_replay(
         "agentic_snapshot": agentic_snapshot,
         "agentic_warmup": agentic_warmup,
         "agentic_profile": agentic_profile,
+        "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,
@@ -507,6 +511,10 @@ def run_trace_replay(
             "use report_jsonl_path for online request records"
         )
     if planner_config is not None:
+        if conversation_affinity is not None:
+            raise ValueError(
+                "conversation_affinity requires fixed workers, without a Planner"
+            )
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
         # offline planner run (matches the CLI's guardrails).

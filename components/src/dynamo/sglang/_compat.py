@@ -23,6 +23,7 @@ Runtime data-contract notes (not code-level shims):
 import argparse
 import importlib
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -379,32 +380,27 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
-    """Whether this SGLang build and processor derive multimodal pad values from engine-owned identity.
+def sglang_has_wide_mm_pad_values() -> bool:
+    """Detect the wide event-token format introduced by sglang#43043.
 
-    sgl-project/sglang#43043 added ``MultimodalDataItem.pad_values`` as a
-    class-level field, but only Kimi-family processors call ``set_identity``
-    to populate it from engine-owned state. All other processors (Qwen, etc.)
-    still derive pad values from caller-provided ``mm_hashes``, so disabling
-    caller hashes for them would silently regress their MM routing to
-    text-prefix-only. Check the active processor's module to distinguish.
-
-    When ``mm_processor`` is ``None`` (processor not yet available), the
-    function is conservative: it returns ``True`` on a post-43043 build so
-    that callers err toward safety rather than forwarding hashes that the
-    engine may reject.
+    Both caller hashes and engine-owned identities produce wide values.
     """
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
         from sglang.srt.managers.schedule_batch import MultimodalDataItem
     except ImportError:
         return False
-    if "pad_values" not in MultimodalDataItem.__struct_fields__:
+    return "pad_values" in MultimodalDataItem.__struct_fields__
+
+
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether the active processor rejects caller-supplied image identities."""
+    if not sglang_has_wide_mm_pad_values():
         return False
-    # Post-43043 SGLang: only Kimi-family processors own mm identity.
-    if mm_processor is not None:
-        return "kimi" in type(mm_processor).__module__
-    return True  # conservative: unknown processor on a wide-pad build
+    # Unknown processors on wide-pad builds must not receive identity overrides.
+    return mm_processor is None or bool(
+        getattr(mm_processor, "uses_wide_image_identity", False)
+    )
 
 
 def supports_external_mm_hashes(engine: Any) -> bool:
@@ -468,6 +464,37 @@ def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     if "cache_salt" not in kwargs:
         raise ValueError("cache_salt is not supported by the installed SGLang engine")
     return kwargs
+
+
+@lru_cache(maxsize=1)
+def _kv_events_config_has_format() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "format" in KVEventsConfig.model_fields
+
+
+def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | None:
+    """Publish enabled KV events in the "dynamo" format unless one is set.
+
+    The format carries the LoRA adapter name that the router hashes adapter
+    blocks by. SGLang 0.5.19 in the XPU image has no format option; remove the
+    check when the XPU pin is upgraded to 0.5.22+.
+    """
+    if not kv_events_config:
+        return kv_events_config
+    try:
+        config = json.loads(kv_events_config)
+    except json.JSONDecodeError:
+        return kv_events_config
+    if (
+        not isinstance(config, dict)
+        or config.get("publisher", "null") == "null"
+        or "format" in config
+        or not _kv_events_config_has_format()
+    ):
+        return kv_events_config
+    config["format"] = "dynamo"
+    return json.dumps(config)
 
 
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
@@ -537,4 +564,5 @@ __all__ = [
     "supports_require_reasoning",
     "supports_external_mm_hashes",
     "sglang_uses_engine_owned_mm_identity",
+    "sglang_has_wide_mm_pad_values",
 ]

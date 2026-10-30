@@ -89,6 +89,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
             liveness: None,
             expected_rank: None,
             engine_owned_mm_identity: false,
+            recovery: None,
         }),
         false,
         *dp_rank,

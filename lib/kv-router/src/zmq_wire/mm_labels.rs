@@ -23,10 +23,11 @@ use crate::protocols::{
     KvCacheEventData, MM_PAD_SHIFT_VALUE, PlacementEvent, StorageTier, WorkerWithDpRank,
 };
 
+use super::convert::has_duplicate_block_hashes;
 use super::types::{BlockHashValue, RawKvEvent, WIDE_TOKEN_SENTINEL};
 
-/// Bound on the exclusion set. Losing entries never indexes an excluded block:
-/// its descendants then fail the indexer's parent lookup.
+/// Bound on per-block exclusion state. Overflow switches the affected rank to
+/// root stores until its cache is cleared, keeping unknown parents out of relays.
 const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
@@ -35,7 +36,7 @@ type Key = (WorkerWithDpRank, StorageTier, u64);
 pub struct EngineMmStats {
     /// Blocks dropped because their hashed tokens hold multimodal values.
     pub excluded_unmapped: u64,
-    /// Blocks dropped because their parent was dropped.
+    /// Blocks dropped because their parent was excluded or exclusion state overflowed.
     pub excluded_parent: u64,
     /// Exclusion entries not recorded because the set was full.
     pub excluded_overflow: u64,
@@ -46,6 +47,8 @@ pub(super) struct EngineMmState {
     engine_owned: bool,
     excluded: FxHashSet<Key>,
     excluded_capacity: usize,
+    /// One latch per affected source worker/rank, independent of its block count.
+    overflowed_workers: FxHashSet<WorkerWithDpRank>,
     pub(super) stats: EngineMmStats,
 }
 
@@ -55,6 +58,7 @@ impl EngineMmState {
             engine_owned,
             excluded: FxHashSet::default(),
             excluded_capacity: DEFAULT_EXCLUDED_CAPACITY,
+            overflowed_workers: FxHashSet::default(),
             stats: EngineMmStats::default(),
         }
     }
@@ -99,10 +103,20 @@ impl EngineMmState {
             return true;
         };
 
+        if parent_block_hash.is_some() && self.overflowed_workers.contains(&worker) {
+            self.stats.excluded_parent += block_hashes.len() as u64;
+            // This may repeat a text store indexed before overflow. Do not mark
+            // its ids excluded: its eventual removal must still reach the index.
+            return false;
+        }
+
         if !self.excluded.is_empty()
             && let Some(parent) = parent_block_hash.map(BlockHashValue::into_u64)
             && self.excluded.contains(&(worker, tier, parent))
         {
+            if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
+                return false;
+            }
             self.stats.excluded_parent += block_hashes.len() as u64;
             for hash in block_hashes.iter() {
                 self.exclude((worker, tier, hash.into_u64()));
@@ -123,6 +137,11 @@ impl EngineMmState {
         });
 
         if let Some(block_idx) = cut {
+            // Validate before truncation can hide a repeated text id and mark
+            // it excluded, which would suppress that text block's eviction.
+            if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
+                return false;
+            }
             self.stats.excluded_unmapped += (block_hashes.len() - block_idx) as u64;
             for hash in block_hashes.drain(block_idx..) {
                 self.exclude((worker, tier, hash.into_u64()));
@@ -155,6 +174,7 @@ impl EngineMmState {
     /// Forget all state for a worker after the engine cleared its cache.
     pub(super) fn clear(&mut self, worker: WorkerWithDpRank) {
         self.excluded.retain(|(known, _, _)| *known != worker);
+        self.overflowed_workers.remove(&worker);
     }
 
     fn exclude(&mut self, key: Key) {
@@ -162,6 +182,14 @@ impl EngineMmState {
             self.excluded.insert(key);
         } else if !self.excluded.contains(&key) {
             self.stats.excluded_overflow += 1;
+            if self.overflowed_workers.insert(key.0) {
+                tracing::warn!(
+                    worker_id = key.0.worker_id,
+                    dp_rank = key.0.dp_rank,
+                    capacity = self.excluded_capacity,
+                    "Multimodal exclusion state is full; accepting only root stores until cache clear"
+                );
+            }
         }
     }
 }

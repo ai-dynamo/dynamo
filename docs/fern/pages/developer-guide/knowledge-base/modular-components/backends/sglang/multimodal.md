@@ -46,8 +46,13 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. To fetch media over the cluster's internal network, set
-> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
@@ -86,7 +91,7 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-SGLang RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
+On SGLang 0.5.22, which Dynamo currently pins, RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo uses the same token in the routing view:
 
 1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
@@ -104,6 +109,18 @@ legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
 Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
+
+### Newer SGLang Image Identities
+
+SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
+
+On these builds, Dynamo accepts the wide values in KV events and indexes only complete text blocks before the first image or video block. The media block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache, but image- and video-aware routing is unavailable. This applies both to URL passthrough and to `--frontend-decoding`.
+
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must register those sources with `engine_owned_mm_identity: true`; the field defaults to `false` for legacy sources. Without the flag, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+
+Exclusion tracking is bounded to 1,048,576 block IDs per event normalizer across cache tiers. If it fills up, Dynamo logs a warning and accepts only stores with no parent for the affected worker rank until an `AllBlocksCleared` event. Existing text evictions continue to apply. This fallback can miss additional text-prefix hits, but prevents an unknown-parent store from invalidating the relay's worker state.
+
+### Launch an Aggregated Deployment
 
 Launch an aggregated deployment with multimodal KV routing:
 
@@ -126,7 +143,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 
 ### Version Requirements
 
-The Dynamo SGLang image includes both routing prerequisites:
+The pinned Dynamo SGLang image includes these routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
 - SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.22.
@@ -137,7 +154,7 @@ from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300
 Without it, requests still complete but fall back to text-prefix-only routing.
 Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
-Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
+Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. On compatible builds, a repeated request should select the same worker with high block overlap. Builds using the newer identities only predict the text-prefix overlap described above.
 
 For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
 

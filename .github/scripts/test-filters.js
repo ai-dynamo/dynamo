@@ -170,6 +170,11 @@ const testCases = [
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
   },
   {
+    file: '.github/workflows/pre-merge.yml',
+    expect: { examples: true },
+    desc: 'a change to the Recipe Check job definition runs Recipe Check'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
