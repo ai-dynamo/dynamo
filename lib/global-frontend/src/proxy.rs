@@ -155,10 +155,7 @@ async fn forward(
     // `lifecycle` is what the selector holds for the request. It is dropped
     // wherever this handler or the response stream is, which ends the
     // request for the selector too.
-    let Some(Selection {
-        target,
-        mut lifecycle,
-    }) = proxy.selector.route(&request, &candidates).await
+    let Some(Selection { target, lifecycle }) = proxy.selector.route(&request, &candidates).await
     else {
         metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
@@ -218,16 +215,9 @@ async fn forward(
     remove_hop_headers(&mut headers);
     // The stream keeps the request counted in flight, and times it, until it
     // ends or the client drops it; dropping it closes the pool connection.
-    // The first chunk means the pool has started answering.
-    let mut answering = false;
     let body = upstream.bytes_stream().map(move |chunk| {
         let _in_flight = &in_flight;
-        if !answering {
-            answering = true;
-            if let Some(lifecycle) = &mut lifecycle {
-                lifecycle.prefill_complete();
-            }
-        }
+        let _lifecycle = &lifecycle;
         if let Some(timing) = &mut timing {
             timing.chunk(&chunk);
         }

@@ -60,10 +60,7 @@ pub trait PoolSelector: Send + Sync {
 /// What a selector holds for one request from its pool choice until the
 /// request ends. Dropping it ends the request wherever the selector counts
 /// it.
-pub trait RequestLifecycle: Send {
-    /// The pool has started answering: its first response bytes arrived.
-    fn prefill_complete(&mut self) {}
-}
+pub trait RequestLifecycle: Send {}
 
 /// A pool choice, with whatever the selector holds for the request.
 pub struct Selection<'a> {

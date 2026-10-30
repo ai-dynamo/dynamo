@@ -30,7 +30,6 @@ use dynamo_kv_router::services::selection::{
     SelectionServiceBuilder,
 };
 use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::selector::{Cursors, RequestLifecycle, RequestSelector, Selection, reachable, target};
@@ -222,8 +221,6 @@ fn registry() -> Result<dynamo_kv_router::services::selection::RouterPluginRegis
 pub struct Reservation {
     service: Arc<SelectionService>,
     selection_id: Option<String>,
-    /// The prefill-complete call, if made, so the free runs after it.
-    reported: Option<JoinHandle<()>>,
 }
 
 impl Reservation {
@@ -234,35 +231,19 @@ impl Reservation {
         Self {
             service,
             selection_id,
-            reported: None,
         }
     }
 
     /// Frees the booking now and waits for it. Dropping frees it in the
     /// background instead.
     pub async fn release(mut self) {
-        if let Some(reported) = self.reported.take() {
-            let _ = reported.await;
-        }
         if let Some(selection_id) = self.selection_id.take() {
             free(&self.service, &selection_id).await;
         }
     }
 }
 
-impl RequestLifecycle for Reservation {
-    fn prefill_complete(&mut self) {
-        let Some(selection_id) = self.selection_id.clone() else {
-            return;
-        };
-        let service = self.service.clone();
-        self.reported = spawn(async move {
-            if let Err(error) = service.prefill_complete(&selection_id).await {
-                tracing::debug!(%selection_id, %error, "prefill complete was not recorded");
-            }
-        });
-    }
-}
+impl RequestLifecycle for Reservation {}
 
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -270,13 +251,7 @@ impl Drop for Reservation {
             return;
         };
         let service = self.service.clone();
-        let reported = self.reported.take();
-        spawn(async move {
-            if let Some(reported) = reported {
-                let _ = reported.await;
-            }
-            free(&service, &selection_id).await;
-        });
+        spawn(async move { free(&service, &selection_id).await });
     }
 }
 
@@ -288,13 +263,12 @@ async fn free(service: &SelectionService, selection_id: &str) {
 
 /// Runs `task` on the current runtime; a drop outside one, as at process
 /// exit, has no runtime to free on.
-fn spawn(task: impl Future<Output = ()> + Send + 'static) -> Option<JoinHandle<()>> {
+fn spawn(task: impl Future<Output = ()> + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => Some(runtime.spawn(task)),
-        Err(_) => {
-            tracing::debug!("no runtime to finish a router core booking on");
-            None
+        Ok(runtime) => {
+            runtime.spawn(task);
         }
+        Err(_) => tracing::debug!("no runtime to finish a router core booking on"),
     }
 }
 
@@ -356,10 +330,7 @@ mod tests {
             .await?;
         let pool = selection.target.pool;
         let booked = selector.booked(pool);
-        if let Some(mut lifecycle) = selection.lifecycle {
-            lifecycle.prefill_complete();
-            drop(lifecycle);
-        }
+        drop(selection.lifecycle);
         booked_settles(selector, pool, booked - 1).await;
         Some(pool.id.clone())
     }
@@ -539,9 +510,7 @@ mod tests {
         assert_eq!(selection.target.pool.id, green.id);
         assert_eq!((core.booked(&blue), core.booked(&green)), (1, 1));
 
-        let mut lifecycle = selection.lifecycle.unwrap();
-        lifecycle.prefill_complete();
-        drop(lifecycle);
+        drop(selection.lifecycle);
         booked_settles(&core, &green, 0).await;
         on_blue.release().await;
         assert_eq!((core.booked(&blue), core.booked(&green)), (0, 0));
