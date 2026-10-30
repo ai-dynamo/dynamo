@@ -30,7 +30,7 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
 use super::selector::{
-    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs,
+    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs, WorkerLoadInputExt,
     WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{

@@ -13,81 +13,12 @@ use super::{
     WorkerSelector, select_reference, source_prefix_blocks,
 };
 use crate::kv_hints::KvTransferScope;
+use crate::plugins::worker_selection::DefaultWorkerPicker;
 use crate::plugins::worker_selection::SelectionConfig;
 use crate::plugins::worker_selection::WorkerTransferInput;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest};
-
-#[cfg(any(test, feature = "bench"))]
-fn softmax_sample_entries<T: Copy>(
-    entries: Vec<(T, f64)>,
-    temperature: f64,
-    sample: f64,
-) -> (T, f64) {
-    assert!(!entries.is_empty(), "Empty logits for softmax sampling");
-
-    let mut probabilities = Vec::with_capacity(entries.len());
-    let row = softmax_sample_index(
-        &entries,
-        |(_, cost)| *cost,
-        temperature,
-        sample,
-        &mut probabilities,
-    );
-    entries[row]
-}
-
-fn softmax_sample_index<T>(
-    entries: &[T],
-    cost: impl Fn(&T) -> f64,
-    temperature: f64,
-    sample: f64,
-    probabilities: &mut Vec<f64>,
-) -> usize {
-    assert!(!entries.is_empty(), "Empty entries for softmax sampling");
-    debug_assert_ne!(temperature, 0.0);
-
-    let (min_cost, max_cost) = entries
-        .iter()
-        .map(&cost)
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), cost| {
-            (lo.min(cost), hi.max(cost))
-        });
-
-    probabilities.clear();
-    if min_cost == max_cost {
-        probabilities.resize(entries.len(), 1.0 / entries.len() as f64);
-    } else {
-        let range = max_cost - min_cost;
-        let magnitude = if range.is_finite() {
-            1.0
-        } else {
-            min_cost.abs().max(max_cost.abs())
-        };
-        let min_normalized = min_cost / magnitude;
-        let scale = -1.0 / ((max_cost / magnitude - min_normalized) * temperature);
-        let max_scaled = min_normalized * scale;
-        probabilities.extend(
-            entries
-                .iter()
-                .map(|entry| (cost(entry) / magnitude * scale - max_scaled).exp()),
-        );
-    }
-
-    let sum: f64 = probabilities.iter().sum();
-    for probability in probabilities.iter_mut() {
-        *probability /= sum;
-    }
-    let mut cumulative = 0.0;
-    for (row, probability) in probabilities.iter().enumerate() {
-        cumulative += probability;
-        if sample <= cumulative {
-            return row;
-        }
-    }
-    entries.len() - 1
-}
 
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
@@ -116,19 +47,6 @@ struct DefaultScoringContext {
     has_tier_overlap_blocks: bool,
 }
 
-pub(super) struct DefaultWorkerPicker {
-    // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
-    softmax_scratch: Mutex<DefaultSoftmaxScratch>,
-    #[cfg(any(test, feature = "bench"))]
-    deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
-}
-
-#[derive(Default)]
-struct DefaultSoftmaxScratch {
-    entries: Vec<(WorkerWithDpRank, f64)>,
-    probabilities: Vec<f64>,
-}
-
 impl std::fmt::Debug for DefaultWorkerSelector {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -142,7 +60,7 @@ impl std::fmt::Debug for DefaultWorkerSelector {
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
         #[cfg(any(test, feature = "bench"))]
-        let deterministic_rng = self.picker.deterministic_rng.clone();
+        let deterministic_rng = self.picker.rng().cloned();
         Self::from_parts(
             self.kv_router_config.clone(),
             self.worker_type,
@@ -180,7 +98,7 @@ impl DefaultWorkerSelector {
         worker_type: &'static str,
         #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
-        let picker = DefaultWorkerPicker::from_parts(
+        let picker = DefaultWorkerPicker::with_rng(
             #[cfg(any(test, feature = "bench"))]
             deterministic_rng,
         );
@@ -480,15 +398,6 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     }
 }
 
-impl DefaultWorkerPicker {
-    pub(super) fn new() -> Self {
-        Self::from_parts(
-            #[cfg(any(test, feature = "bench"))]
-            None,
-        )
-    }
-}
-
 #[inline(always)]
 pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     scorer: &DefaultWorkerScorer<&SelectionConfig>,
@@ -550,97 +459,21 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         )
     };
 
-    #[cfg(any(test, feature = "bench"))]
-    if let Some(rng) = &picker.deterministic_rng {
+    let mut pick = picker.begin(temperature);
+    if picker.is_deterministic() {
+        // Seeded picks replay only over a fixed candidate order.
         let mut candidates = Vec::new();
         eligibility.for_each_eligible_worker_rank(workers, |worker, _| candidates.push(worker));
         candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
-        if candidates.is_empty() {
-            return None;
+        for worker in candidates {
+            pick.offer(worker, get_score(worker, &workers[&worker.worker_id]));
         }
-
-        let mut rng = rng.lock();
-        let get_candidate_score = |worker| get_score(worker, &workers[&worker.worker_id]);
-        if temperature == 0.0 {
-            let mut best_worker = None;
-            let mut best_cost = f64::INFINITY;
-            let mut tie_count = 0;
-            for worker in candidates {
-                let cost = get_candidate_score(worker);
-                if cost < best_cost {
-                    best_worker = Some(worker);
-                    best_cost = cost;
-                    tie_count = 1;
-                } else if cost == best_cost {
-                    tie_count += 1;
-                    if rng.usize(0..tie_count) == 0 {
-                        best_worker = Some(worker);
-                    }
-                }
-            }
-            return best_worker.map(|worker| (worker, best_cost));
-        }
-
-        let entries = candidates
-            .into_iter()
-            .map(|worker| (worker, get_candidate_score(worker)))
-            .collect();
-        return Some(softmax_sample_entries(entries, temperature, rng.f64()));
-    }
-
-    if temperature == 0.0 {
-        let mut best_worker = None;
-        let mut best_cost = f64::INFINITY;
-        let mut tie_count = 0;
-        eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
-            let cost = get_score(worker, config);
-            if cost < best_cost {
-                best_worker = Some(worker);
-                best_cost = cost;
-                tie_count = 1;
-            } else if cost == best_cost {
-                tie_count += 1;
-                if fastrand::usize(0..tie_count) == 0 {
-                    best_worker = Some(worker);
-                }
-            }
-        });
-        return best_worker.map(|worker| (worker, best_cost));
-    }
-
-    let mut scratch = picker.softmax_scratch.lock();
-    scratch.entries.clear();
-    eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
-        scratch.entries.push((worker, get_score(worker, config)));
-    });
-    if scratch.entries.is_empty() {
-        None
     } else {
-        let DefaultSoftmaxScratch {
-            entries,
-            probabilities,
-        } = &mut *scratch;
-        let row = softmax_sample_index(
-            entries,
-            |(_, cost)| *cost,
-            temperature,
-            fastrand::f64(),
-            probabilities,
-        );
-        Some(entries[row])
+        eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+            pick.offer(worker, get_score(worker, config));
+        });
     }
-}
-
-impl DefaultWorkerPicker {
-    fn from_parts(
-        #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    ) -> Self {
-        Self {
-            softmax_scratch: Mutex::default(),
-            #[cfg(any(test, feature = "bench"))]
-            deterministic_rng,
-        }
-    }
+    pick.finish()
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
@@ -753,12 +586,6 @@ mod tests {
             .min_active_prefill_tokens,
             0
         );
-    }
-
-    #[test]
-    fn softmax_sample_orders_extreme_finite_costs() {
-        let result = softmax_sample_entries(vec![(0, -f64::MAX), (1, f64::MAX)], 1.0, 0.6);
-        assert_eq!(result.0, 0);
     }
 
     #[test]

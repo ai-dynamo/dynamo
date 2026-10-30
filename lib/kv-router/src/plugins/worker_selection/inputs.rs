@@ -3,25 +3,30 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerWithDpRank};
-use crate::sequences::WorkerLoadProjection;
-use rustc_hash::FxHashMap;
 use std::ops::BitOr;
 
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+
+use super::shared_cache::SharedCacheHits;
+
 /// Host-owned row materialized once for the union of component input requirements.
-/// One eligible rank's input columns: the row a [`CandidateRowSource`](crate::plugins::worker_selection::CandidateRowSource)
-/// yields and a policy's views read. Only the kernel fills it.
+/// One eligible rank's input columns: the row a [`CandidateRank`](super::CandidateRank)
+/// yields and a policy's views read. The kernel fills it; a column outside the row's
+/// `inputs` holds its default and no view exposes it.
 pub struct CandidateData {
-    pub(crate) worker: WorkerWithDpRank,
-    pub(crate) inputs: WorkerInputs,
+    pub worker: WorkerWithDpRank,
+    /// The columns this row holds.
+    pub inputs: WorkerInputs,
     /// Device, host, and disk overlap in tokens, for the best eligible cache reuse a
     /// tracked request reports; zero for untracked requests. A `u32` packs beside
     /// `inputs`, keeping the row at 128 bytes.
-    pub(crate) raw_cached_tokens: u32,
-    pub(crate) cache: WorkerCacheData,
-    pub(crate) load: WorkerLoadInput,
-    pub(crate) transfer: Option<WorkerTransferInput>,
-    pub(crate) preferred_taint_multiplier: Option<f64>,
+    pub raw_cached_tokens: u32,
+    pub cache: WorkerCacheData,
+    pub load: WorkerLoadInput,
+    /// `Some` once the fetch column is filled, which needs the request's transfer candidates.
+    pub transfer: Option<WorkerTransferInput>,
+    /// The request's preference for this rank's taints, when asked for and not pinned.
+    pub preferred_taint_multiplier: Option<f64>,
 }
 
 /// Static worker info by view row. Hosts look it up only when a component asks, so rows
@@ -217,13 +222,13 @@ impl BitOr for WorkerInputs {
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
-pub(crate) struct CacheSnapshot<'a> {
-    pub(crate) shared_hits: Option<&'a SharedCacheHits>,
-    pub(crate) has_tier_matches: bool,
+pub struct CacheSnapshot<'a> {
+    pub shared_hits: Option<&'a SharedCacheHits>,
+    pub has_tier_matches: bool,
 }
 
 /// Rows and request-wide cache facts owned by a reader outside worker selection.
-pub(crate) struct WorkerInputRows {
+pub struct WorkerInputRows {
     inputs: WorkerInputs,
     rows: Vec<CandidateData>,
     // Index-aligned with `rows`. The rows outlive the worker map, so they carry each rank's
@@ -234,7 +239,7 @@ pub(crate) struct WorkerInputRows {
 }
 
 impl WorkerInputRows {
-    pub(crate) fn new(
+    pub fn new(
         inputs: WorkerInputs,
         rows: Vec<CandidateData>,
         capacities: Vec<WorkerCapacity>,
@@ -255,7 +260,7 @@ impl WorkerInputRows {
     }
 
     /// Rows for a reader that declared no inputs.
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             inputs: WorkerInputs::NONE,
             rows: Vec::new(),
@@ -266,7 +271,7 @@ impl WorkerInputRows {
     }
 
     /// Lend the rows as a view restricted to the declared inputs.
-    pub(crate) fn read<R>(&self, read: impl FnOnce(WorkerCandidates<'_>) -> R) -> R {
+    pub fn read<R>(&self, read: impl FnOnce(WorkerCandidates<'_>) -> R) -> R {
         let cache_snapshot = CacheSnapshot {
             shared_hits: self.shared_hits.as_ref(),
             has_tier_matches: self.has_tier_matches,
@@ -293,12 +298,12 @@ impl std::fmt::Debug for WorkerInputRows {
 
 /// Numeric cache row retained in host buffers between selections.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct WorkerCacheData {
-    pub(crate) effective_overlap_blocks: f64,
-    pub(crate) estimated_cached_tokens: usize,
-    pub(crate) device_overlap_blocks: f64,
-    pub(crate) host_overlap_blocks: f64,
-    pub(crate) disk_overlap_blocks: f64,
+pub struct WorkerCacheData {
+    pub effective_overlap_blocks: f64,
+    pub estimated_cached_tokens: usize,
+    pub device_overlap_blocks: f64,
+    pub host_overlap_blocks: f64,
+    pub disk_overlap_blocks: f64,
 }
 
 /// Borrowed worker overlaps and shared-cache facts from one lookup snapshot.
@@ -349,11 +354,12 @@ impl<'a> WorkerCacheInputs<'a> {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
-    pub(crate) available: bool,
-    pub(crate) active_prefill_tokens: usize,
-    pub(crate) active_decode_blocks: usize,
-    pub(crate) decode_cost_blocks: f64,
-    pub(crate) active_requests: usize,
+    /// Whether the host observed a projection for this rank; false flags a default row.
+    pub available: bool,
+    pub active_prefill_tokens: usize,
+    pub active_decode_blocks: usize,
+    pub decode_cost_blocks: f64,
+    pub active_requests: usize,
 }
 
 // Every policy copies these rows per candidate per selection. `active_decode_blocks` took the
@@ -367,19 +373,6 @@ const _: () = assert!(size_of::<CandidateData>() == 128);
 
 pub use dynamo_router_protocol::load::{DEFAULT_MAX_BATCHED_TOKENS, WorkerCapacity};
 
-/// Reads a worker's advertised capacity from its runtime config. Lives beside
-/// [`WorkerConfigLike`] because the wire crate does not know the config trait.
-pub trait WorkerCapacityExt {
-    /// Read the capacity a worker advertises in its runtime config.
-    fn of<C: WorkerConfigLike>(config: &C) -> Self;
-}
-
-impl WorkerCapacityExt for WorkerCapacity {
-    fn of<C: WorkerConfigLike>(config: &C) -> Self {
-        Self::new(config.max_num_batched_tokens(), config.total_kv_blocks())
-    }
-}
-
 /// Static facts about one worker rank: its identity and the capacity its runtime config
 /// advertises. Every component can read it without declaring an input group. It changes
 /// only when the worker registers again.
@@ -392,11 +385,6 @@ pub struct WorkerInfo {
 impl WorkerInfo {
     pub fn new(worker: WorkerWithDpRank, capacity: WorkerCapacity) -> Self {
         Self { worker, capacity }
-    }
-
-    /// Read a rank's info from its worker's runtime config.
-    pub fn of<C: WorkerConfigLike>(worker: WorkerWithDpRank, config: &C) -> Self {
-        Self::new(worker, WorkerCapacity::of(config))
     }
 
     /// Worker ID and data-parallel rank.
@@ -416,7 +404,7 @@ impl WorkerInfo {
         self.capacity.total_kv_blocks()
     }
 
-    /// Both advertised values, as [`crate::scheduling::BusyThresholds::has_room`] takes them.
+    /// Both advertised values, as a fullness check takes them.
     pub fn capacity(&self) -> WorkerCapacity {
         self.capacity
     }
@@ -424,7 +412,9 @@ impl WorkerInfo {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerTransferInput {
-    pub(crate) source_prefix_blocks: Option<u32>,
+    /// Blocks of the prompt a fetch source holds beyond this rank's local prefix, when one
+    /// was chosen for the rank.
+    pub source_prefix_blocks: Option<u32>,
 }
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
@@ -538,53 +528,13 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
-impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
+impl dynamo_router_protocol::load::RankLoad for WorkerLoadInput {
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
 
     fn active_decode_blocks(&self) -> usize {
         self.active_decode_blocks
-    }
-}
-
-impl WorkerLoadInput {
-    /// Convert an observed load projection into a `LOAD` row.
-    pub(crate) fn from_projection(load: WorkerLoadProjection) -> Self {
-        Self {
-            available: true,
-            active_prefill_tokens: load.active_prefill_tokens,
-            active_decode_blocks: load.active_decode_blocks,
-            decode_cost_blocks: load.potential_decode_blocks() as f64,
-            active_requests: load.active_requests,
-        }
-    }
-
-    /// The `LOAD` row for `worker`: its projection in `loads` when the host observed one,
-    /// otherwise `unobserved()` flagged unavailable. Worker selection, the policy-class
-    /// queue, and offline replay all build rows here or in [`Self::from_observed`], so they
-    /// read the same row for the same worker by construction.
-    pub(crate) fn for_worker(
-        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
-        worker: WorkerWithDpRank,
-        unobserved: impl FnOnce() -> WorkerLoadProjection,
-    ) -> Self {
-        Self::from_observed(loads.get(&worker).copied(), unobserved)
-    }
-
-    /// The `LOAD` row for a rank's observed projection, or `unobserved()` flagged
-    /// unavailable when there is none.
-    pub(crate) fn from_observed(
-        load: Option<WorkerLoadProjection>,
-        unobserved: impl FnOnce() -> WorkerLoadProjection,
-    ) -> Self {
-        match load {
-            Some(load) => Self::from_projection(load),
-            None => Self {
-                available: false,
-                ..Self::from_projection(unobserved())
-            },
-        }
     }
 }
 

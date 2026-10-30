@@ -6,12 +6,14 @@ use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
 
-#[cfg(any(test, feature = "bench"))]
-use super::DefaultWorkerPicker;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
-use crate::plugins::worker_selection::SelectionConfig;
-use crate::protocols::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerWithDpRank};
-use crate::scheduling::types::WorkerSelectionPolicyError;
+#[cfg(any(test, feature = "bench"))]
+use crate::plugins::worker_selection::DefaultWorkerPicker;
+use crate::plugins::worker_selection::{
+    SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
+    WorkerSelectionPolicyError,
+};
 
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInputs,
@@ -2185,22 +2187,12 @@ mod row_source_tests {
     }
 
     fn context() -> WorkerSelectionContext<'static> {
-        WorkerSelectionContext {
-            request_id: Some("stage"),
-            isl_tokens: 64,
-            request_blocks: 4,
-            block_size: 16,
-            track_prefill_tokens: true,
-            pinned_worker: None,
-            router_temperature_override: None,
-            session_context: None,
-            affinity_target: None,
-            expected_output_tokens: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            shared_cache_hits: None,
-            has_tier_matches: true,
-        }
+        let context = WorkerSelectionContext::new(64, 16)
+            .with_request_id(Some("stage"))
+            .with_prefill_tracking(true)
+            .with_tier_matches(true);
+        assert_eq!(context.request_blocks(), 4);
+        context
     }
 
     fn rank(worker_id: u64, raw_cached_tokens: u32, device_overlap_blocks: f64) -> Rank {

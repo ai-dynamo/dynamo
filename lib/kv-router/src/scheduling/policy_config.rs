@@ -750,7 +750,7 @@ pub(crate) fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::worker_selection::WorkerLoadInput;
+    use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
     use crate::sequences::WorkerLoadProjection;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {

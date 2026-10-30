@@ -5,9 +5,14 @@
 
 mod config;
 mod context;
+mod error;
 pub(crate) mod inputs;
+#[cfg(any(test, feature = "bench"))]
+mod reference_picker;
 mod runtime;
 pub(crate) mod selection_config;
+mod shared_cache;
+mod trace;
 
 pub(crate) use runtime::RuntimePolicyState;
 pub use runtime::{
@@ -15,13 +20,17 @@ pub use runtime::{
 };
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, WorkerCacheData, WorkerInputRows};
+pub use error::WorkerSelectionPolicyError;
 pub use inputs::{
-    CandidateData, ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate,
-    WorkerCandidates, WorkerCapacity, WorkerCapacityExt, WorkerInfo, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerTransferInput,
+    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInput,
+    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerInfo,
+    WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerTransferInput,
 };
+#[cfg(any(test, feature = "bench"))]
+pub use reference_picker::{DefaultPick, DefaultWorkerPicker};
 pub use selection_config::{SelectionConfig, SharedCacheType};
+pub use shared_cache::SharedCacheHits;
+pub use trace::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec};
 
 pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
@@ -29,11 +38,9 @@ pub use super::registry::{
 };
 pub use crate::scheduling::selector::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
-    SelectionFailure, WorkerSelectionPolicy,
+    SelectionFailure, WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt, WorkerSelectionPolicy,
 };
-pub use crate::scheduling::{
-    SessionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
-};
+pub use crate::scheduling::{SessionContext, WorkerSelectionInputTrigger};
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
 

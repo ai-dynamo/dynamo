@@ -10,28 +10,33 @@ use std::{cell::OnceCell, collections::HashMap};
 #[cfg(any(test, feature = "bench"))]
 use std::cell::Cell;
 
+mod derive;
 mod policy;
 #[cfg(any(test, feature = "bench"))]
 mod reference;
+
+pub use derive::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 
 #[cfg(any(test, feature = "bench"))]
 pub use reference::DefaultWorkerSelector;
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+#[cfg(any(test, feature = "bench"))]
+use crate::plugins::worker_selection::DefaultWorkerPicker;
 pub use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
     WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
 #[cfg(any(test, feature = "bench"))]
-use reference::{DefaultWorkerPicker, DefaultWorkerScorer, pick_default_worker};
+use reference::{DefaultWorkerScorer, pick_default_worker};
 
 use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerCapacityExt,
-    WorkerInputRows, WorkerTransferInput,
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInputRows,
+    WorkerTransferInput,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
@@ -287,9 +292,8 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
 
     /// The policy's view of the request, pinned to what eligibility imposes.
     pub(super) fn context(&self) -> WorkerSelectionContext<'a> {
-        let mut context = WorkerSelectionContext::from_request(self.request, self.block_size);
-        context.pinned_worker = self.eligibility.pinned_worker();
-        context
+        selection_context(self.request, self.block_size)
+            .with_pinned_worker(self.eligibility.pinned_worker())
     }
 
     /// The request's fetch sources for the targets in `scope`, built on the
@@ -503,6 +507,26 @@ impl<C: WorkerConfigLike> CandidateRowSource for SelectionRowSource<'_, C> {
             self.request.unobserved_worker_load()
         })
     }
+}
+
+/// The fields of `request` a policy may read, as [`WorkerSelectionContext`] exposes them.
+fn selection_context(request: &SchedulingRequest, block_size: u32) -> WorkerSelectionContext<'_> {
+    WorkerSelectionContext::new(request.isl_tokens, block_size)
+        .with_request_id(request.mode.request_id())
+        .with_prefill_tracking(request.track_prefill_tokens)
+        .with_pinned_worker(request.pinned_worker)
+        .with_router_temperature_override(
+            request
+                .router_config_override
+                .as_ref()
+                .and_then(|config| config.router_temperature),
+        )
+        .with_session_context(request.session_context.as_ref())
+        .with_affinity_target(request.affinity_target)
+        .with_expected_output_tokens(request.expected_output_tokens)
+        .with_priority(request.priority_jump, request.strict_priority)
+        .with_shared_cache_hits(request.shared_cache_hits.as_ref())
+        .with_tier_matches(request.has_tier_matches())
 }
 
 /// Request-wide cache facts shared by every row built from `request`.

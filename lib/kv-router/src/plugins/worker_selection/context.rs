@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::SessionContext;
+use dynamo_router_protocol::session::SessionContext;
+use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerWithDpRank};
+
 use super::inputs::CacheSnapshot;
-use crate::protocols::{SharedCacheHits, WorkerAffinityTarget, WorkerWithDpRank};
-use crate::scheduling::SchedulingRequest;
+use super::shared_cache::SharedCacheHits;
 
 /// The view of one scheduling request that filters, scorers, and pickers may read.
 ///
@@ -28,27 +29,86 @@ pub struct WorkerSelectionContext<'a> {
 }
 
 impl<'a> WorkerSelectionContext<'a> {
-    /// Kernel-side constructor: copy the fields a policy may read out of `request`.
-    pub(crate) fn from_request(request: &'a SchedulingRequest, block_size: u32) -> Self {
+    /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
+    /// field at its default: no request id, no pin, no session, no affinity target, no
+    /// expected output length, zero priority, no shared-cache hits, no tier matches, and
+    /// prefill-load tracking off. The kernel sets what the request carries with the `with_*`
+    /// methods; a test builds exactly the view it needs.
+    pub fn new(isl_tokens: usize, block_size: u32) -> Self {
         Self {
-            request_id: request.mode.request_id(),
-            isl_tokens: request.isl_tokens,
-            request_blocks: request.request_blocks(block_size),
+            request_id: None,
+            isl_tokens,
+            request_blocks: isl_tokens.div_ceil(block_size as usize) as u64,
             block_size,
-            track_prefill_tokens: request.track_prefill_tokens,
-            pinned_worker: request.pinned_worker,
-            router_temperature_override: request
-                .router_config_override
-                .as_ref()
-                .and_then(|config| config.router_temperature),
-            session_context: request.session_context.as_ref(),
-            affinity_target: request.affinity_target,
-            expected_output_tokens: request.expected_output_tokens,
-            priority_jump: request.priority_jump,
-            strict_priority: request.strict_priority,
-            shared_cache_hits: request.shared_cache_hits.as_ref(),
-            has_tier_matches: request.has_tier_matches(),
+            track_prefill_tokens: false,
+            pinned_worker: None,
+            router_temperature_override: None,
+            session_context: None,
+            affinity_target: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            shared_cache_hits: None,
+            has_tier_matches: false,
         }
+    }
+
+    pub fn with_request_id(mut self, request_id: Option<&'a str>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+
+    pub fn with_prefill_tracking(mut self, track_prefill_tokens: bool) -> Self {
+        self.track_prefill_tokens = track_prefill_tokens;
+        self
+    }
+
+    /// The exact worker and rank the host imposes: an explicit pin or an eligible
+    /// exclusive-affinity target.
+    pub fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
+        self
+    }
+
+    pub fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
+        self.router_temperature_override = temperature;
+        self
+    }
+
+    pub fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
+        self.session_context = session_context;
+        self
+    }
+
+    pub fn with_affinity_target(mut self, affinity_target: Option<WorkerAffinityTarget>) -> Self {
+        self.affinity_target = affinity_target;
+        self
+    }
+
+    pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
+        self.expected_output_tokens = expected_output_tokens;
+        self
+    }
+
+    pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.priority_jump = priority_jump;
+        self.strict_priority = strict_priority;
+        self
+    }
+
+    pub fn with_shared_cache_hits(
+        mut self,
+        shared_cache_hits: Option<&'a SharedCacheHits>,
+    ) -> Self {
+        self.shared_cache_hits = shared_cache_hits;
+        self
+    }
+
+    /// Whether any rank reported per-tier overlap, so cache columns read device overlap
+    /// from the tier blocks rather than the effective estimate.
+    pub fn with_tier_matches(mut self, has_tier_matches: bool) -> Self {
+        self.has_tier_matches = has_tier_matches;
+        self
     }
 
     /// Request-wide cache facts shared by every candidate row.

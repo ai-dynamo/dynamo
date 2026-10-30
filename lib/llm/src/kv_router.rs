@@ -21,6 +21,7 @@ use dynamo_kv_router::{
     },
     kv_hints::KvHint,
     plugins::worker_selection::WorkerInfo,
+    plugins::worker_selection::WorkerInfoExt,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,

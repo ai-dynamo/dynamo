@@ -101,6 +101,16 @@ impl WorkerCapacity {
     }
 }
 
+/// A rank's booked load as a fullness check reads it. The slot tracker's projection
+/// implements it, and so does worker selection's load column built from that projection,
+/// so one check serves both without either stage naming the other.
+pub trait RankLoad {
+    /// Tokens active in the rank's prefill stage.
+    fn active_prefill_tokens(&self) -> usize;
+    /// KV blocks the rank's active requests hold.
+    fn active_decode_blocks(&self) -> usize;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

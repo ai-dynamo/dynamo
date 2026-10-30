@@ -4,7 +4,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::ops::Range;
 use std::sync::LazyLock;
 
 use dynamo_tokens::Token;
@@ -364,101 +363,15 @@ pub struct SelectionLogFields {
     pub total_kv_blocks: Option<u64>,
 }
 
-/// How many candidates a selection trace retains: the `top_k` lowest-cost rows
-/// plus the selected worker, or every candidate when `top_k` is zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionTraceSpec {
-    pub top_k: usize,
-}
-
-/// A scored candidate: the worker and its total cost after every scorer ran, in
-/// the policy's cost units (scheduler-tracked KV blocks for the builtin policy).
-/// Lower is better.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SelectionTraceRow {
-    pub worker: WorkerWithDpRank,
-    pub cost: f64,
-}
-
-/// Per-candidate costs captured for one worker selection.
-///
-/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
-/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
-/// which is always present.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SelectionTrace {
-    /// Eligible candidates the policy scored, before truncation.
-    pub candidate_count: usize,
-    /// Whether the host pinned the selection to one worker and rank.
-    pub pinned: bool,
-    /// Retained candidates, unordered.
-    pub rows: Vec<SelectionTraceRow>,
-}
+pub use crate::plugins::worker_selection::{
+    SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SharedCacheHits,
+};
 
 pub use dynamo_slot_tracker::wire::{
     ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
     ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
     PrefillEventData, PrefillLoadHint,
 };
-
-/// Shared cache hit information, represented as sorted non-overlapping half-open ranges.
-///
-/// Ranges encode which block positions exist in the external shared KV cache pool.
-/// Using ranges instead of `Vec<bool>` avoids iterating over potentially thousands
-/// of blocks per worker. Typical shared cache patterns produce few contiguous regions,
-/// making `hits_beyond` O(num_ranges) ~ O(1-5).
-#[derive(Debug, Clone, Default)]
-pub struct SharedCacheHits {
-    /// Ranges of block positions that exist in the shared cache.
-    /// Half-open ranges [start, end), sorted and non-overlapping.
-    pub ranges: Vec<Range<u32>>,
-    /// Total number of hits (sum of range lengths).
-    pub total_hits: u32,
-}
-
-impl SharedCacheHits {
-    /// Create from sorted, non-overlapping ranges.
-    pub fn from_ranges(ranges: Vec<Range<u32>>) -> Self {
-        let total_hits = ranges.iter().map(|r| r.end - r.start).sum();
-        Self { ranges, total_hits }
-    }
-
-    /// Create from a boolean hit vector (convenience for tests and simple backends).
-    /// Coalesces consecutive `true` entries into ranges.
-    pub fn from_hits(hits: &[bool]) -> Self {
-        let mut ranges = Vec::new();
-        let mut i = 0;
-        while i < hits.len() {
-            if hits[i] {
-                let start = i as u32;
-                while i < hits.len() && hits[i] {
-                    i += 1;
-                }
-                ranges.push(start..i as u32);
-            } else {
-                i += 1;
-            }
-        }
-        Self::from_ranges(ranges)
-    }
-
-    /// Count hits at positions >= `from_position`.
-    /// O(num_ranges), not O(num_blocks).
-    pub fn hits_beyond(&self, from_position: u32) -> u32 {
-        self.ranges
-            .iter()
-            .map(|r| {
-                if r.end <= from_position {
-                    0
-                } else if r.start >= from_position {
-                    r.end - r.start
-                } else {
-                    r.end - from_position
-                }
-            })
-            .sum()
-    }
-}
 
 pub use dynamo_kv_indexer::overlap::OverlapScores;
 

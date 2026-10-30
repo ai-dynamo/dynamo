@@ -14,14 +14,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use crate::WorkerLoadProjection;
 
-/// A rank's booked load as the fullness check reads it. The slot tracker's own projection
-/// implements it; the router implements it for the selection row built from that projection.
-pub trait RankLoad {
-    /// Tokens active in the rank's prefill stage.
-    fn active_prefill_tokens(&self) -> usize;
-    /// KV blocks the rank's active requests hold.
-    fn active_decode_blocks(&self) -> usize;
-}
+pub use dynamo_router_protocol::load::RankLoad;
 
 impl RankLoad for WorkerLoadProjection {
     fn active_prefill_tokens(&self) -> usize {
