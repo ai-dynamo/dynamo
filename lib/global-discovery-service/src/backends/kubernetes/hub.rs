@@ -93,15 +93,18 @@ impl PoolNaming {
     fn slice(&self, slice: &EndpointSlice) -> Option<SliceEntry> {
         Some(SliceEntry {
             pool: self.pool_key(slice)?,
+            region: mcs::source_region(slice).map(str::to_owned),
             relays: ready_relays(slice),
         })
     }
 }
 
-/// MCS knows only the pool's cluster, so its location is named after it.
-fn location(cluster: &str) -> PoolLocation {
+/// The pool's region is the [`mcs::REGION_LABEL`] that a standard MCS
+/// controller may set on its slices. Without one, as with Karmada, MCS knows
+/// only the pool's cluster, so the region is named after it.
+fn location(cluster: &str, region: Option<&str>) -> PoolLocation {
     PoolLocation {
-        region: cluster.to_owned(),
+        region: region.unwrap_or(cluster).to_owned(),
         availability_zone: None,
         datacenter: None,
     }
@@ -132,6 +135,8 @@ fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
 
 struct SliceEntry {
     pool: PoolKey,
+    /// From [`mcs::source_region`].
+    region: Option<String>,
     relays: Vec<(String, IpAddr)>,
 }
 
@@ -244,6 +249,18 @@ impl PoolIndex {
             .values()
             .min_by_key(|addresses| addresses.first())
             .map(|addresses| addresses.iter().copied().map(address_identity).collect());
+        // Every slice of a pool is a PoolRelay slice from one cluster, so
+        // they should agree on its region. If they do not, as while the MCS
+        // controller relabels them, the first slice in (namespace, name)
+        // order that has the label wins: like the binding, the choice
+        // depends only on the current slices, so every service instance
+        // lists the same region.
+        let region = state
+            .slices
+            .iter()
+            .filter_map(|slice| Some((slice, self.slices.get(slice)?.region.as_deref()?)))
+            .min_by_key(|(slice, _)| *slice)
+            .map(|(_, region)| region);
 
         let state = self.pools.get_mut(key)?;
         let Some(relay_identities) = relay_identities else {
@@ -255,7 +272,7 @@ impl PoolIndex {
         };
         let listing = PoolListing {
             key: key.clone(),
-            location: location(key.cluster_id()),
+            location: location(key.cluster_id(), region),
             model: None,
             capabilities: Vec::new(),
             frontends: Vec::new(),
@@ -284,7 +301,10 @@ mod tests {
     use kube::runtime::watcher;
 
     use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow};
-    use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
+    use super::mcs::{
+        KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL, REGION_LABEL,
+        SERVICE_NAME_LABEL, SOURCE_CLUSTER_LABEL,
+    };
     use super::*;
 
     const SUFFIX: &str = "-pool-relay";
@@ -355,12 +375,44 @@ mod tests {
         slice
     }
 
+    /// A slice of `mocker-pool-relay` from `cluster` as standard MCS imports
+    /// it, with one Ready endpoint, and with `region` as its region label if
+    /// given.
+    fn standard_slice(
+        cluster: &str,
+        suffix: &str,
+        region: Option<&str>,
+        address: &str,
+    ) -> EndpointSlice {
+        let service = format!("mocker{SUFFIX}");
+        let mut slice = slice(cluster, "mocker", suffix, &[(address, true)]);
+        slice.metadata.name = Some(format!("{service}-{suffix}"));
+        let mut labels = BTreeMap::from([
+            (SOURCE_CLUSTER_LABEL.to_owned(), cluster.to_owned()),
+            (SERVICE_NAME_LABEL.to_owned(), service),
+        ]);
+        if let Some(region) = region {
+            labels.insert(REGION_LABEL.to_owned(), region.to_owned());
+        }
+        slice.metadata.labels = Some(labels);
+        slice
+    }
+
     fn key(cluster: &str, dgd: &str) -> PoolKey {
         PoolKey::new(cluster, "dynamo", dgd).unwrap()
     }
 
     fn cache() -> Arc<SliceCache<PoolIndex>> {
         Arc::new(SliceCache::new(naming()))
+    }
+
+    /// A cache of [`standard_slice`]s.
+    fn standard_cache() -> Arc<SliceCache<PoolIndex>> {
+        let standard = PoolNaming {
+            mcs: McsImplementation::Standard,
+            ..naming()
+        };
+        Arc::new(SliceCache::new(standard))
     }
 
     fn sync(cache: &SliceCache<PoolIndex>, slices: Vec<EndpointSlice>) {
@@ -455,6 +507,63 @@ mod tests {
         assert_eq!(listing.location.region, "west");
         assert_eq!(listing.relay_identities, ["ip:10.43.66.175"]);
         assert_eq!(listing.model, None);
+    }
+
+    #[test]
+    fn the_region_label_names_the_pool_region() {
+        let cache = standard_cache();
+        sync(
+            &cache,
+            vec![
+                standard_slice("aws-west", "a1b2c", Some("us-west-2"), "10.43.0.1"),
+                standard_slice("aws-ohio", "d3e4f", None, "10.42.0.1"),
+                standard_slice("aws-texas", "g5h6i", Some(""), "10.41.0.1"),
+            ],
+        );
+        let region = |cluster: &str| {
+            listing(&cache, &key(cluster, "mocker"))
+                .expect("live pool")
+                .location
+                .region
+        };
+        assert_eq!(region("aws-west"), "us-west-2");
+        // Without the label, or with an empty one, the region is named after
+        // the cluster.
+        assert_eq!(region("aws-ohio"), "aws-ohio");
+        assert_eq!(region("aws-texas"), "aws-texas");
+    }
+
+    #[test]
+    fn every_instance_picks_the_same_region_when_slices_disagree() {
+        let pool = key("west", "mocker");
+        let unlabelled = || standard_slice("west", "a1b2c", None, "10.43.0.1");
+        let first_labelled = || standard_slice("west", "d3e4f", Some("us-west-1"), "10.43.0.2");
+        let last_labelled = || standard_slice("west", "g5h6i", Some("us-west-2"), "10.43.0.3");
+        // One instance saw the last slice alone first.
+        let first = standard_cache();
+        sync(&first, vec![last_labelled()]);
+        first.apply(watcher::Event::Apply(unlabelled()));
+        first.apply(watcher::Event::Apply(first_labelled()));
+        // Another started later.
+        let second = standard_cache();
+        sync(
+            &second,
+            vec![unlabelled(), first_labelled(), last_labelled()],
+        );
+        let region = |cache: &SliceCache<PoolIndex>| listing(cache, &pool).unwrap().location.region;
+        // The first slice by name that has the label wins.
+        assert_eq!(region(&first), "us-west-1");
+        assert_eq!(region(&second), "us-west-1");
+
+        // Without that slice, the next labelled one wins. The bound PoolRelay
+        // is unchanged, so the new region alone publishes the pool again.
+        let mut events = first.events.subscribe();
+        first.apply(watcher::Event::Delete(first_labelled()));
+        let WatchEvent::Upserted(upserted) = events.try_recv().unwrap() else {
+            panic!("expected Upserted");
+        };
+        assert_eq!(upserted.location.region, "us-west-2");
+        assert_eq!(upserted.relay_identities, ["ip:10.43.0.1"]);
     }
 
     #[test]
