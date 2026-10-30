@@ -8,6 +8,8 @@
 package multicluster
 
 import (
+	"strings"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -55,9 +57,10 @@ func ServiceNames(dgdName string) []string {
 }
 
 // IsPool reports whether a DGD with these annotations is marked as a Global Router
-// pool. A nil map is supported and is not a pool.
+// pool: `true` in any case, as the DGD's other boolean annotations are read. A nil
+// map is supported and is not a pool.
 func IsPool(annotations map[string]string) bool {
-	return annotations[commonconsts.KubeAnnotationGlobalRouterPool] == "true"
+	return strings.EqualFold(annotations[commonconsts.KubeAnnotationGlobalRouterPool], "true")
 }
 
 // MaxServiceNameLength returns the longest Service name that implementation can

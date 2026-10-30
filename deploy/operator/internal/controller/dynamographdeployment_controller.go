@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
@@ -132,6 +133,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(err, "failed to handle the finalizer")
 		}
 		return ctrl.Result{}, err
+	}
+
+	// A Global Router pool's exports follow its annotation whatever happens to its
+	// workloads below. A failed export never fails the DGD: it is logged, recorded
+	// as an event, and retried.
+	if r.reconcilePoolExports(ctx, dynamoDeployment) {
+		defer func() { result = retryPoolExports(result, err) }()
 	}
 
 	// Reject stored LPX graphs before provider selection or any workload writes.
@@ -265,6 +273,41 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 	}
 	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
 		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
+}
+
+// poolExportRetry is how soon a DGD whose pool exports failed is reconciled again.
+const poolExportRetry = 30 * time.Second
+
+// reconcilePoolExports converges a Global Router pool's ServiceExports and reports
+// whether that failed, so that the DGD is reconciled again. A failure is logged
+// and recorded as a Warning event.
+func (r *DynamoGraphDeploymentReconciler) reconcilePoolExports(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) bool {
+	exports := newDGDServiceExportReconciler(newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate)
+	err := exports.Reconcile(ctx, dgd)
+	if err == nil {
+		return false
+	}
+	log.FromContext(ctx).Error(err, "Failed to reconcile Global Router pool ServiceExports")
+	if r.Recorder != nil {
+		r.Recorder.Eventf(dgd, nil, corev1.EventTypeWarning, "PoolExportFailed", "Export",
+			"Failed to reconcile Global Router pool ServiceExports: %v", err)
+	}
+	return true
+}
+
+// retryPoolExports makes a reconcile run again within poolExportRetry, unless it
+// returned an error, which is retried anyway, or already runs again sooner.
+func retryPoolExports(result ctrl.Result, err error) ctrl.Result {
+	if err != nil {
+		return result
+	}
+	if result.RequeueAfter == 0 || result.RequeueAfter > poolExportRetry {
+		result.RequeueAfter = poolExportRetry
+	}
+	return result
 }
 
 // SetupWithManager sets up the controller with the Manager.

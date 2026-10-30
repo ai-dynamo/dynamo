@@ -19,20 +19,25 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/events"
@@ -79,6 +84,8 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 		foreign        []string
 		wantOwned      []string
 		wantEvents     int
+		// Warnings that every reconcile repeats.
+		repeatedEvents int
 	}{
 		{
 			name:           "a pool exports its PoolRelay and frontend Services",
@@ -138,7 +145,8 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationKarmada,
 			wantOwned:      []string{longName + "-frontend"},
-			wantEvents:     1,
+			wantEvents:     2,
+			repeatedEvents: 1,
 		},
 		{
 			name:           "standard MCS exports the same long names",
@@ -188,9 +196,9 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			g.Expect(reconciler.Reconcile(ctx, dgd)).To(gomega.Succeed())
 			g.Expect(recorder.Events).To(gomega.HaveLen(tc.wantEvents))
 
-			t.Log("Reconcile again: every export is in place, so nothing is announced")
+			t.Log("Reconcile again: every export is in place, so only warnings repeat")
 			g.Expect(reconciler.Reconcile(ctx, dgd)).To(gomega.Succeed())
-			g.Expect(recorder.Events).To(gomega.HaveLen(tc.wantEvents))
+			g.Expect(recorder.Events).To(gomega.HaveLen(tc.wantEvents + tc.repeatedEvents))
 
 			t.Log("Check which exports the DGD controls, and that a user's export is untouched")
 			for _, name := range multicluster.ServiceNames(dgd.Name) {
@@ -268,5 +276,60 @@ func TestMapServiceExportToDGDRequests(t *testing.T) {
 		export.Namespace = "dynamo"
 		export.Name = tc.export
 		g.Expect(reconciler.mapServiceExportToDGDRequests(ctx, export)).To(gomega.Equal(tc.want), tc.export)
+	}
+}
+
+func TestReconcilePoolExportsRetriesWithoutFailingTheDGD(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Mark a DGD as a pool, and refuse every ServiceExport create, as an admission policy would")
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "llama", Namespace: "dynamo", UID: uuid.NewUUID()}
+	dgd.Annotations = map[string]string{consts.KubeAnnotationGlobalRouterPool: "true"}
+	refused := interceptor.Funcs{
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			return apierrors.NewForbidden(
+				schema.GroupResource{Group: multicluster.ServiceExportGVK.Group, Resource: "serviceexports"},
+				"llama-pool-relay", errors.New("denied by policy"))
+		},
+	}
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:   newServiceExportTestClient(scheme, refused, dgd),
+		Recorder: recorder,
+		Config: &configv1alpha1.OperatorConfiguration{
+			MultiCluster: configv1alpha1.MultiClusterConfiguration{
+				MCSImplementation: configv1alpha1.MCSImplementationStandard,
+			},
+		},
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{MultiClusterExport: true}},
+	}
+
+	t.Log("The failure asks for a retry and is recorded as a warning, without an error that would fail the DGD")
+	g.Expect(reconciler.reconcilePoolExports(ctx, dgd)).To(gomega.BeTrue())
+	g.Expect(recorder.Events).To(gomega.HaveLen(1))
+	g.Expect(<-recorder.Events).To(gomega.HavePrefix(corev1.EventTypeWarning + " PoolExportFailed"))
+
+	t.Log("Exports that succeed ask for no retry")
+	reconciler.Client = newServiceExportTestClient(scheme, interceptor.Funcs{}, dgd)
+	g.Expect(reconciler.reconcilePoolExports(ctx, dgd)).To(gomega.BeFalse())
+}
+
+func TestRetryPoolExports(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	for _, tc := range []struct {
+		name   string
+		result ctrl.Result
+		err    error
+		want   ctrl.Result
+	}{
+		{name: "a reconcile that would not run again retries the exports", want: ctrl.Result{RequeueAfter: poolExportRetry}},
+		{name: "a later retry comes sooner", result: ctrl.Result{RequeueAfter: time.Hour}, want: ctrl.Result{RequeueAfter: poolExportRetry}},
+		{name: "a sooner retry stays", result: ctrl.Result{RequeueAfter: time.Second}, want: ctrl.Result{RequeueAfter: time.Second}},
+		{name: "an error is retried anyway", err: errors.New("failed"), want: ctrl.Result{}},
+	} {
+		t.Log(tc.name)
+		g.Expect(retryPoolExports(tc.result, tc.err)).To(gomega.Equal(tc.want), tc.name)
 	}
 }

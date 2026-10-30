@@ -35,7 +35,6 @@ type componentProgram struct {
 	restartProgress *componentRestartProgressResolver
 	workloads       *componentWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
-	serviceExports  *dgdServiceExportReconciler
 	lwsEnabled      bool
 }
 
@@ -57,7 +56,6 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		restartProgress: newComponentRestartProgressResolver(r.Client),
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		serviceExports:  newDGDServiceExportReconciler(newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
@@ -158,13 +156,6 @@ func (p *componentProgram) Reconcile(
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
-	}
-
-	// A Global Router pool's exports follow its workloads, so a failed export does
-	// not hold them back.
-	if err := p.serviceExports.Reconcile(ctx, req.DGD); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to reconcile Global Router pool ServiceExports")
-		return programResult, fmt.Errorf("failed to reconcile Global Router pool ServiceExports: %w", err)
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil

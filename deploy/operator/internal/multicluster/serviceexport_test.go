@@ -21,6 +21,7 @@ func TestIsPool(t *testing.T) {
 	}{
 		{name: "no annotations"},
 		{name: "marked", annotations: map[string]string{commonconsts.KubeAnnotationGlobalRouterPool: "true"}, want: true},
+		{name: "marked in another case", annotations: map[string]string{commonconsts.KubeAnnotationGlobalRouterPool: "True"}, want: true},
 		{name: "marked false", annotations: map[string]string{commonconsts.KubeAnnotationGlobalRouterPool: "false"}},
 		{name: "not a boolean", annotations: map[string]string{commonconsts.KubeAnnotationGlobalRouterPool: "yes"}},
 	} {

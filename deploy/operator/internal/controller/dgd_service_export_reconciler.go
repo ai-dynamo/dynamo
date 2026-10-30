@@ -75,6 +75,9 @@ func (r *dgdServiceExportReconciler) Reconcile(
 		if pool && !exportable {
 			logger.Error(nil, "Service name is too long to export through this MCS implementation; shorten the DGD name",
 				"service", name, "implementation", implementation, "maxLength", maxLength)
+			r.recorder.Eventf(dgd, nil, corev1.EventTypeWarning, "ServiceNameTooLong", "Export",
+				"Service %s is longer than the %d characters %s can import, so it is not exported; shorten the DGD name",
+				name, maxLength, implementation)
 		}
 
 		var err error

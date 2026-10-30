@@ -40,7 +40,6 @@ type groveProgram struct {
 	lpxRestartProgress *lpxRestartProgressResolver
 	workloads          *groveWorkloadsReconciler
 	scalingAdapters    *dgdScalingAdaptersReconciler
-	serviceExports     *dgdServiceExportReconciler
 	topology           *dgdGroveTopologyConditionReconciler
 	gate               features.Gate
 	lpx                *dgdLPXHandoff
@@ -107,7 +106,6 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.DockerSecretRetriever,
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		serviceExports:  newDGDServiceExportReconciler(newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
 		gate:            r.RuntimeConfig.Gate,
 		lpx:             &dgdLPXHandoff{client: r.Client},
@@ -246,13 +244,6 @@ func (p *groveProgram) Reconcile(
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
-	}
-
-	// A Global Router pool's exports follow its workloads, so a failed export does
-	// not hold them back.
-	if err := p.serviceExports.Reconcile(ctx, req.DGD); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to reconcile Global Router pool ServiceExports")
-		return programResult, fmt.Errorf("failed to reconcile Global Router pool ServiceExports: %w", err)
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
