@@ -122,37 +122,6 @@ init container is needed in the engine. Both containers must use the same UID
 to access the service socket. A vLLM container restart leaves the service,
 Guard, and pool running.
 
-```mermaid
-flowchart LR
-    R["Dynamo frontend / KV router"]
-    subgraph P0["Worker 0 Pod · node A"]
-        E0["main container<br/>Dynamo / vLLM + in-engine KVCR"]
-        subgraph S0["kvcr-services container"]
-            G0["KVCR service / Guard"]
-            A0["kv_state_agent"]
-        end
-        M0["Guard-only pool volume<br/>/dev/shm/kvcr"]
-        G0 -->|"SCM_RIGHTS over /run/kvcr socket<br/>Pool + listener FDs"| E0
-        G0 -->|"allocates"| M0
-        E0 -->|"maps pool FD"| M0
-    end
-    E1["Worker 1 Pod · node B<br/>Same engine / Guard / pool arrangement<br/>No state agent"]
-    R -->|"requests"| E0
-    R -->|"requests"| E1
-    E0 -.->|"residency metadata"| A0
-    A0 -.->|"routing state"| R
-    E0 <-->|"KV payload: NIXL / UCX"| E1
-
-    classDef engine fill:#1565c033,stroke:#42a5f5
-    classDef guard fill:#76b90026,stroke:#76b900
-    classDef volume fill:#80808026,stroke:#888888
-    class E0,E1,R engine
-    class G0,A0 guard
-    class M0 volume
-    style P0 fill:transparent,stroke:#888888
-    style S0 fill:#76b90010,stroke:#76b900
-```
-
 Both engines report residency to worker 0's state agent. Each Guard can serve
 its preserved pool after its engine exits. The FD handoff
 does not let a replacement service adopt a live engine's pool; the coupled
@@ -210,6 +179,72 @@ way to restore those bindings; this change does not add a recovery controller.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.
+
+## Guard HugePages
+
+KVCR 0.2.0 tries native HugeTLB backing first, then transparent huge pages
+(THP), then base pages. HugeTLB allocation and THP advice are best-effort;
+check Guard logs for fallback warnings rather than assuming huge pages were
+obtained. See the [KVCR memory-service guide](https://github.com/ai-dynamo/kvcr/blob/7ce17c358b867bd89f40a4a42bee9c76839506d0/docs/dev-guide.md).
+
+### Native hugetlbfs
+
+Have the cluster administrator reserve huge pages on eligible nodes. Add a
+`HugePages-2Mi` emptyDir mounted **only in `kvcr-services`**, with matching
+`hugepages-2Mi` requests and limits. Kubernetes creates the mount; no `hostPath`,
+privileged mount command, or permission-setting init container is needed.
+See [Kubernetes HugePages configuration](https://kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/).
+
+Merge these additions into the worker's `podTemplate.spec` in
+`agg-memory-service.yaml`; retain its existing containers, resources, and volumes:
+
+```yaml
+containers:
+- name: kvcr-services
+  resources:
+    requests:
+      hugepages-2Mi: 3Gi
+    limits:
+      hugepages-2Mi: 3Gi
+  volumeMounts:
+  - name: kvcr-hugepages
+    mountPath: /hugepages
+volumes:
+- name: kvcr-hugepages
+  emptyDir:
+    medium: HugePages-2Mi
+```
+
+This illustrates a 2 GiB pool with headroom: budget for the additional 100 MiB
+journal per Guard, page-size rounding, and recovery snapshots. Adjust the
+reservation for larger pools. For 1 GiB pages, change both resource keys to
+`hugepages-1Gi` and the volume medium to `HugePages-1Gi`.
+
+The mount path is arbitrary. KVCR discovers writable hugetlbfs mounts from
+`/proc/self/mounts`, tries larger page sizes first, and creates its `kvcr`
+subdirectory there; no mount-path CLI option is needed. For non-root containers,
+use a suitable Pod `fsGroup` so Guard can write the volume, and retain the same
+UID in Guard and vLLM for socket access. The engine needs neither this mount nor
+a hugepage reservation for the already-backed pool received by FD.
+
+Keep the existing `/dev/shm/kvcr` volume, `--pool-dir`, and ordinary memory
+budget for runtime fallback. A Pod whose hugepage request cannot be scheduled
+stays Pending; KVCR's fallback only applies after it starts. To skip native
+HugeTLB, add `--disable-hugepages` to the service command in `services.sh`.
+That flag does not disable THP.
+
+### Transparent HugePages
+
+No extra Kubernetes volume or `hugepages-*` resource is needed: retain the
+default memory-backed emptyDir at `/dev/shm/kvcr`. On Linux with Python 3.12+,
+KVCR attempts aligned mappings with `MADV_HUGEPAGE`; Guard also attempts
+`MADV_COLLAPSE` on supported kernels (Linux 6.1+). THP remains part of ordinary
+memory accounting, not the pre-reserved HugeTLB resource.
+
+THP availability depends on the host kernel and its tmpfs/shmem policy. Have
+the cluster administrator configure those at node level; do not change host
+sysfs settings from the deployment. Advice or collapse can fail and leave base
+pages in use. See the [Linux THP guide](https://www.kernel.org/doc/html/v6.7/admin-guide/mm/transhuge.html).
 
 ## Verify Guard recovery
 
