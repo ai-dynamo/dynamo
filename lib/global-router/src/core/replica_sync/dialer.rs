@@ -119,7 +119,7 @@ async fn stream_peer(
     let _connected = Connected::new(hub);
     loop {
         match frames.message().await.context("read a frame")? {
-            Some(frame) => hub.apply(frame, service),
+            Some(frame) => hub.apply_from(peer, frame, service),
             None => bail!("the peer closed the stream"),
         }
     }
