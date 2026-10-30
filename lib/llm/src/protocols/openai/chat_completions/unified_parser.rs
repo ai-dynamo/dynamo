@@ -1340,9 +1340,8 @@ pub(crate) fn fanout_llm_metrics_position(choices: &[ChatChoiceStream]) -> Optio
 /// An empty streaming choice for `index`, used as the base every emitted chunk is
 /// filled in from.
 ///
-/// `logprobs` is dropped on purpose: once parsing rewrites a choice, the emitted text
-/// no longer lines up token-for-token with the backend's raw stream, so per-token
-/// logprobs would be attached to the wrong characters.
+/// It carries no `logprobs`: `choices_for` moves a source chunk's raw-token logprobs
+/// onto exactly one of the choices parsed from it.
 pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
     #[allow(deprecated)]
     ChatChoiceStream {
@@ -2163,7 +2162,8 @@ impl ChoiceState {
     ///
     /// `role` / `refusal` ride on the first choice owned by the current source
     /// response; queued reasoning keeps its earlier source envelope. The terminating
-    /// `finish_reason` stays after every emitted delta.
+    /// `finish_reason` stays after every emitted delta. The source chunk's `logprobs`
+    /// move once to its last choice: they score generated tokens, not parsed text.
     pub(crate) fn choices_for(
         &mut self,
         original: &ChatChoiceStream,
@@ -2295,6 +2295,21 @@ impl ChoiceState {
             }
             choice.finish_reason = self.normalize_finish_reason(finish_reason);
             choices.push(choice);
+        }
+
+        // Queued reasoning arrived before this chunk, so this chunk's logprobs must
+        // not ride ahead of it on an earlier choice.
+        if let Some(logprobs) = original.logprobs.take() {
+            let last_is_queued = choices
+                .len()
+                .checked_sub(1)
+                .is_some_and(|last| self.qwen_reasoning_choice_positions.contains(&last));
+            if choices.is_empty() || last_is_queued {
+                choices.push(empty_choice(index));
+            }
+            if let Some(choice) = choices.last_mut() {
+                choice.logprobs = Some(logprobs);
+            }
         }
 
         choices
