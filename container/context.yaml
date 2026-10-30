@@ -107,6 +107,18 @@ vllm:
     # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
     # the runtime image — see the codec-purge follow-up.)
     baseline_sbom: cuda@2ab6381d
+  # Opt-in runtime variants (render.py --variant <name>). Each entry overlays the
+  # matching device block above; keys not set here keep the default values.
+  variants:
+    # NIM vLLM enterprise base: vllm/vllm-openai plus the NIM server stack.
+    # Not shipped from this repo; built by enterprise-ci.yml. The
+    # self-baseline subtracts the whole base so compliance only attributes what
+    # the Dynamo build adds.
+    enterprise:
+      cuda13.0:
+        runtime_image: nvcr.io/nim/nvidia/vllm-enterprise-base
+        runtime_image_tag: 1.7.0-cuda13
+        baseline_sbom: vllm-enterprise-base@589bc3cf
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu

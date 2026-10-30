@@ -134,17 +134,42 @@ def _assert_python_carriers_absent(ships_cv2: bool) -> None:
     are marked ``installs_extra_dependencies``. An unmodified image must not have
     them, or a green multimodal run says nothing about what customers receive.
 
-    vLLM's codec-free OpenCV is checked by _assert_cv2_carries_no_codec.
+    vLLM's codec-free OpenCV is checked by _assert_cv2_carries_no_codec, and a
+    PyAV the base image ships by _assert_pyav_carries_no_codec.
     """
-    carriers = [("av", "PyAV")]
-    if not ships_cv2:
-        carriers.append(("cv2", "opencv-python"))
-    for module, package in carriers:
-        spec = importlib.util.find_spec(module)
-        assert spec is None, (
-            f"{package} is installed ({module} at {spec.origin}); an unmodified "
-            "runtime image is expected to ship without it"
-        )
+    if ships_cv2:
+        return
+    spec = importlib.util.find_spec("cv2")
+    assert spec is None, (
+        f"opencv-python is installed (cv2 at {spec.origin}); an unmodified "
+        "runtime image is expected to ship without it"
+    )
+
+
+def _assert_pyav_carries_no_codec() -> None:
+    """Reject a PyAV whose FFmpeg registers an excluded decoder.
+
+    The NIM enterprise base ships PyAV built against its own LGPL FFmpeg, so
+    presence alone is not a violation; what PyAV can decode is.
+    """
+    if importlib.util.find_spec("av") is None:
+        return
+    import av
+
+    assert av.codecs_available, (
+        "PyAV reports no codecs at all; the probe is broken and the exclusion "
+        "check below would pass vacuously"
+    )
+    present = []
+    for name in _EXCLUDED_DECODERS:
+        try:
+            av.Codec(name, "r")
+        except Exception:
+            continue
+        present.append(name)
+    assert (
+        not present
+    ), f"PyAV ({av.__file__}) can decode excluded format(s): {', '.join(present)}"
 
 
 def _assert_cv2_carries_no_codec() -> None:
@@ -266,6 +291,7 @@ def _check_image(ships_cv2: bool = False) -> None:
     _assert_required_codecs_present(surfaces)
     _assert_no_software_codecs(surfaces)
     _assert_python_carriers_absent(ships_cv2)
+    _assert_pyav_carries_no_codec()
     if ships_cv2:
         _assert_cv2_carries_no_codec()
     _assert_bundled_libavcodecs_carry_no_software_codecs()

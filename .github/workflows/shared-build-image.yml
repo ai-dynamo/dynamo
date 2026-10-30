@@ -72,6 +72,11 @@ on:
         required: false
         type: boolean
         default: false
+      runtime_variant:
+        description: 'render.py --variant (e.g. enterprise). Empty = default image.'
+        required: false
+        type: string
+        default: ''
       sanitized_ref_name:
         description: 'Sanitized git ref name for branch-tagged images'
         required: false
@@ -444,11 +449,17 @@ jobs:
       - name: Generate Dockerfile
         id: gen-dockerfile
         shell: bash
+        env:
+          RUNTIME_VARIANT: ${{ inputs.runtime_variant }}
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
           MAKE_EFA_FLAG=""
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             MAKE_EFA_FLAG="--make-efa"
+          fi
+          VARIANT_FLAG=""
+          if [ -n "${RUNTIME_VARIANT}" ]; then
+            VARIANT_FLAG="--variant=${RUNTIME_VARIANT}"
           fi
           # If CUDA version is empty, use empty arg to fallback to default (eg. for planner)
           if [ "${{ matrix.cuda_version }}" == "" ]; then
@@ -463,6 +474,7 @@ jobs:
               --platform=${{ inputs.platform }} \
               ${CUDA_FLAG} \
               ${MAKE_EFA_FLAG} \
+              ${VARIANT_FLAG} \
               --show-result \
               --output-short-filename
           # Emit the baseline SBOM stem (arch-independent) for the
@@ -607,6 +619,8 @@ jobs:
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}
+          runtime_variant: ${{ inputs.runtime_variant }}
+          extra_build_args: ${{ inputs.extra_build_args }}
           artifact_retention_days: ${{ inputs.artifact_retention_days }}
           # Source archival is opt-in per top-level caller (see the
           # `archive_sources` input above). PR / on-demand leave it false;

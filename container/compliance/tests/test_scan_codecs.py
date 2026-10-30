@@ -58,6 +58,36 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
     }
 
 
+def test_nim_ffmpeg_is_a_nim_exception(tmp_path: Path):
+    """NIM's FFmpeg libraries are waived as NIM's, not allowed as ours."""
+    for rel in (
+        "usr/local/lib/libavcodec-nimlgpl.so.63",
+        "usr/local/lib/libswscale-nimlgpl.so.10",
+    ):
+        _touch(tmp_path, rel)
+    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert violations == [] and allowed == []
+    assert {e["path"] for e in exceptions} == {
+        "/usr/local/lib/libavcodec-nimlgpl.so.63",
+        "/usr/local/lib/libswscale-nimlgpl.so.10",
+    }
+
+
+def test_unsuffixed_usr_local_codec_lib_is_denied(tmp_path: Path):
+    """allow_paths covers only the _dynamo libraries under /usr/local/lib."""
+    for rel in (
+        "usr/local/lib/libavcodec.so.62",
+        "usr/local/lib/libswscale.so.9",
+    ):
+        _touch(tmp_path, rel)
+    violations, _exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert allowed == []
+    assert {v["path"] for v in violations} == {
+        "/usr/local/lib/libavcodec.so.62",
+        "/usr/local/lib/libswscale.so.9",
+    }
+
+
 def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
     # allow_paths re-permits the suffixed names by /usr/local path prefix only.
     # The same soname vendored by a wheel is still a violation — otherwise the
@@ -206,7 +236,7 @@ def test_fail_on_findings_exit_code(tmp_path: Path):
 
 
 def test_clean_tree_passes(tmp_path: Path):
-    _touch(tmp_path, "usr/local/lib/libavcodec.so.62")  # ours -> allowed
+    _touch(tmp_path, "usr/local/lib/libavcodec_dynamo.so.63")  # ours -> allowed
     assert main(["--root", str(tmp_path), "--fail-on-findings"]) == 0
 
 
