@@ -136,6 +136,17 @@ Content-Type: application/json
 `data_parallel_size` is 1; a multi-rank worker that sets it stays `incomplete`
 because the replay protocol carries no rank.
 
+For raw SGLang sources using the [wide-token event format](../backends/sglang/multimodal.md#newer-sglang-image-identities), set the boolean `engine_owned_mm_identity` to `true` in the worker record on each selector replica. It applies to all of that worker's DP ranks and defaults to `false`. To update an already registered SGLang worker:
+
+```http
+PATCH /workers/1
+Content-Type: application/json
+
+{"engine_owned_mm_identity": true}
+```
+
+Omitting the field in a patch leaves its value unchanged; pass `false` to disable it. Changing its effective value resets the worker's listeners and indexed cache state, as described under [Worker Restarts](#worker-restarts).
+
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
 record. If the model or routing group changes, the worker is removed from the
@@ -176,10 +187,13 @@ sequence watermark or invalidate old cache ownership.
 
 With KV events enabled, `POST /workers` or `PATCH /workers/{worker_id}` for an
 existing schedulable worker reconciles its indexer registration rank by rank: a rank
-whose event endpoint and replay endpoint are unchanged keeps its listener, its
+whose event endpoint, replay endpoint, and effective `engine_owned_mm_identity`
+value are unchanged keeps its listener, its
 sequence watermark, and its indexed blocks, so capacity or topology updates do not
-drain the cache view. A rank whose endpoint changed gets a new listener with a fresh
-watermark. Because an unchanged update keeps the old watermark, it does not recover a
+drain the cache view. An omitted identity setting and explicit `false` are equivalent.
+A changed endpoint or effective identity setting clears that rank's indexed blocks
+and creates a listener with a fresh watermark. Because an unchanged update keeps
+the old watermark, it does not recover a
 publisher that restarted at the same address: for that, call
 `DELETE /workers/{worker_id}`, wait for the response, then `POST /workers` with the
 current record, or register the restarted publisher under a new `kv_events_endpoint`.

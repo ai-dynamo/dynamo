@@ -21,8 +21,8 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > - Aggregated Qwen3-VL and Qwen3.5 workers on CUDA support VP8 and VP9 with
 >   `--frontend-decoding`. Dynamo's Rust frontend decodes and transfers the
 >   sampled frames; SGLang still runs model-specific preprocessing and vision
->   encoding. The multimodal router launcher uses this path for exact
->   video-aware KV routing.
+>   encoding. The multimodal router launcher uses this path for video-aware KV
+>   routing on [compatible SGLang builds](#newer-sglang-image-identities).
 > - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
 >   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
 >   decode before the vision encoder produces embeddings.
@@ -114,19 +114,31 @@ This legacy path needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang
 
 SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
 
+The compatibility behavior below requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
+
 On these builds, Dynamo accepts wide values in KV events. When an event lacks usable routing labels, Dynamo indexes only complete text blocks before the first block whose hash includes image or video tokens. That block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache. This fallback applies both to URL passthrough and to `--frontend-decoding`.
 
-Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must register those sources with `engine_owned_mm_identity: true`; the field defaults to `false` for legacy sources. The flag enables routing-label translation and exclusion of unmapped wide-format media tokens. Without it, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. It enables routing-label translation and exclusion of unmapped wide-format media tokens. Without it, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
 
 ### Routing Labels
 
-**Experimental.** Image-aware routing with wide placeholders requires a SGLang build implementing the routing-label interface proposed in [sgl-project/sglang#45737](https://github.com/sgl-project/sglang/pull/45737), together with Dynamo's label-aware event normalizer. The pinned SGLang 0.5.22 image does not provide this interface; support for `mm_hashes` alone is insufficient. Label support does not establish GPU qualification for a model or serving topology.
+**Experimental.** Media-aware routing with wide placeholders requires both [Dynamo's routing-label support](https://github.com/ai-dynamo/dynamo/pull/17082) and a SGLang build implementing the interface proposed in [sgl-project/sglang#45737](https://github.com/sgl-project/sglang/pull/45737). The pinned SGLang 0.5.22 image does not provide this interface; support for `mm_hashes` alone is insufficient. Label support does not establish GPU qualification for a model or serving topology.
 
-The Dynamo worker detects the `mm_routing_labels` argument on `Engine.async_generate` and sends the frontend's ordered media hashes through that field instead of `mm_hashes`. Labels describe Dynamo's routing view; SGLang retains its own cache identity. SGLang's `dynamo` event format reports labels in `mm_routing_spans`: a list of spans per block, with each span represented as `[start, length, label]`. Offsets and lengths count tokens within that block, and the label is the hexadecimal media hash. For example, `[0, 16, "00000000000000ab"]` labels the first 16 tokens of a block.
+The Dynamo worker detects the `mm_routing_labels` argument on `Engine.async_generate` and sends the frontend's ordered media hashes through that field instead of `mm_hashes`. Labels are sent only when the frontend can reconstruct the complete media token layout. Processor overrides, caller-provided UUIDs, or an unresolved layout can leave the request on text-prefix routing. Labels describe Dynamo's routing view; SGLang retains its own cache identity.
+
+SGLang's `dynamo` event format reports labels in `mm_routing_spans`: a list of spans per block, aligned with `block_hashes`, with each span represented as `[start, length, label]`. Offsets and lengths count tokens within that block. Dynamo's frontend emits each already-computed 64-bit media hash as 16 hexadecimal digits; an event producer must echo that hash. Dynamo accepts labels that parse as hexadecimal `u64` values, rather than arbitrary opaque strings. Non-hexadecimal or overflowing labels leave their spans unmapped. For example, `"mm_routing_spans": [[], [[0, 16, "00000000000000ab"]]]` labels the first 16 tokens of the second block; the first block has no labeled spans.
 
 When KV event publishing is enabled and the installed SGLang exposes a format option, Dynamo's compatibility helper selects `"format": "dynamo"` in the worker's `--kv-events-config` if no format was specified. An explicit format is preserved. Selecting `"format": "default"` omits the routing spans and leaves wide-placeholder media on text-prefix routing. The format option by itself does not supply the routing-label interface in an older engine.
 
+For a manual worker launch, pass the following JSON to `--kv-events-config`, choosing an available publisher port:
+
+```json
+{"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:29090", "format": "dynamo"}
+```
+
 For each valid span, Dynamo substitutes its existing routing pad before hashing the block. The normalizer assigns routing IDs derived from Dynamo's block chain and translates engine parent links and removals to those IDs. This keeps request and event routing keys aligned without changing SGLang's cache keys or copying KV tensors. Missing spans, or spans that overlap, extend outside their block, or cover text tokens, retain the conservative fallback above. Eagle/NextN bigram events do not support label translation and retain text-prefix routing. The aggregated routing path described here does not establish support for the separate encode-worker E/PD or E/P/D handoff.
+
+Translated IDs describe routing overlap. KV transfer using these image/video block IDs in router hints has not been validated by this integration.
 
 Both image URL passthrough and `--frontend-decoding` can supply routing labels. With passthrough, the label hashes the complete URL, including query parameters. Different signed URLs for the same image can miss a reusable cache entry; changed content at the same URL can produce a false cache prediction. Frontend decoding hashes the decoded image content instead and avoids those URL-specific identity differences. Both paths retain Dynamo's existing 30-bit routing-pad collision limitation. Routing overlap is a prediction: SGLang still decides whether its cache entry matches the actual request.
 
