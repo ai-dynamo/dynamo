@@ -27,6 +27,7 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 | `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
 | `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
+| `dynamo_global_frontend_*` | Global Frontend (`global-frontend`), which forwards each request to a pool frontend | `/metrics` on `--port` (default 8000) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
@@ -51,6 +52,18 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
 
 <ParamField path="dynamo_frontend_queued_requests" type="gauge" deprecated={true}>
   Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
+</ParamField>
+
+<ParamField path="dynamo_frontend_awaiting_first_token_requests" type="gauge">
+  **Experimental.** Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. Unit: requests. Labeled by `model`. Requests producing output tokens are `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`; the clamp covers the two gauges being sampled a moment apart.
+</ParamField>
+
+<ParamField path="dynamo_frontend_inflight_input_tokens" type="gauge">
+  **Experimental.** Known prompt tokens of in-flight requests. Unit: tokens. Labeled by `model` and `state`: `awaiting_first_token` (the requests in `dynamo_frontend_awaiting_first_token_requests`) or `generating`. Summing over `state` gives all in-flight prompt tokens. A request still being tokenized contributes zero.
+</ParamField>
+
+<ParamField path="dynamo_frontend_input_tokens_total" type="counter">
+  **Experimental.** Prompt tokens of admitted requests, counted at tokenization, including requests that fail or are cancelled before producing output. Unit: tokens. Labeled by `model`. Unlike the sum of `dynamo_frontend_input_sequence_tokens`, which is observed at the first output token, this counts every admitted request when it is tokenized.
 </ParamField>
 
 <ParamField path="dynamo_frontend_disconnected_clients" type="gauge">
@@ -310,18 +323,68 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
   Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
-The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+The shared TCP request plane exposes the following `dynamo_work_handler_*` metrics. They are
+independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
 
-<ParamField path="dynamo_rejection_request_total" type="counter">
-  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
+<ParamField path="dynamo_work_handler_pool_active_tasks" type="gauge">
+  Current TCP request handlers holding worker-pool permits, from dispatch until downstream handling finishes.
 </ParamField>
 
-<ParamField path="dynamo_engine_request" type="gauge">
-  Current requests being handled by the engine.
+<ParamField path="dynamo_work_handler_pool_capacity" type="gauge">
+  Configured capacity of the TCP worker pool.
 </ParamField>
 
-<ParamField path="dynamo_request_queue" type="gauge">
-  Current requests queued in Dynamo, not yet in the engine.
+<ParamField path="dynamo_work_handler_queue_depth" type="gauge">
+  Current requests in the bounded TCP work queue awaiting dispatcher pickup.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_queue_capacity" type="gauge">
+  Configured capacity of the bounded TCP work queue.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_enqueue_rejected_total" type="counter">
+  Cumulative requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_permit_wait_seconds" type="histogram">
+  Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup.
+</ParamField>
+
+The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
+See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend)
+for gate behavior.
+
+The `dp_rank` label contains the rank ID, such as `"4"`, or `"unspecified"` for unranked requests.
+Sum across all `dp_rank` values for worker totals.
+
+<ParamField path="dynamo_backend_admission_engine_request_count" type="gauge">
+  Requests admitted to the engine that have not finished. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_engine_request_waiting_count" type="gauge">
+  Admitted requests still awaiting their first generated token or completion. Label: `dp_rank`.
+  Replaces `dynamo_backend_admission_engine_wait_count`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_queue_count" type="gauge">
+  Requests waiting outside the engine in gate queues. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_receive_total" type="counter">
+  All requests received by the gate, counted once regardless of outcome. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_admit_total" type="counter">
+  Requests passed into the engine. Labels: `dp_rank` and `source`.
+  `source="direct"` means admitted without queueing; `source="queue"` means admitted after queueing.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_rejection_total" type="counter">
+  Requests the gate could neither admit nor queue. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_cancellation_total" type="counter">
+  Requests cancelled before engine admission. Label: `dp_rank`.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.
@@ -484,6 +547,34 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 </ParamField>
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
+
+## Global Frontend metrics
+
+Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the pool's region. No label comes from the request body.
+
+<ParamField path="dynamo_global_frontend_requests_total" type="counter">
+  **Experimental.** Requests forwarded to each pool. Labeled by `pool`, `region`, `local` and `status`. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. A Dynamo pool frontend sends its headers once a worker has the request, so a request the client gives up on while a worker queues it counts under its status, not as `cancelled`. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_rejected_requests_total" type="counter">
+  **Experimental.** Requests the Global Frontend answered without forwarding them. Labeled by `error_type`, with the frontend's values: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no pool serves the model) or `unavailable` (no pool can take the request). A body over `DYN_HTTP_BODY_LIMIT_MB` gets 413 before it is read and is not counted.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_time_to_first_byte_seconds" type="histogram">
+  **Experimental.** Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this is the pool's first event, usually the first token, so it approximates the time to first token as the client sees it, including the round trip to a pool in another region. If the pool frontend sends SSE keep-alives before the first token, the first keep-alive counts as the first byte: at the `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` interval when set, or after 15 seconds for a request whose output a reasoning parser may hold back. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_time_to_first_token_seconds` defaults.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_request_duration_seconds" type="histogram">
+  **Experimental.** Time from the Global Frontend receiving a request to the end of its pool's successful (2xx) response, or to the client leaving. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_request_duration_seconds` defaults.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_response_errors_total" type="counter">
+  **Experimental.** Successful responses whose body broke off before it ended, for example because the pool frontend restarted mid-stream. The client's response ends early. Labeled by `pool` and `region`.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_inflight_requests" type="gauge">
+  **Experimental.** Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Labeled by `pool` and `region`; read at scrape time, so a pool removed from the configuration loses its series.
+</ParamField>
 
 ## Related
 

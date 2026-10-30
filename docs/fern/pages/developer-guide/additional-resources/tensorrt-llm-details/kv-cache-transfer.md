@@ -39,6 +39,18 @@ TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV
 
 The precedence above matches TensorRT-LLM 1.3.0rc22; check `CacheTransceiverConfig._resolve_default_backend` in `tensorrt_llm/llmapi/llm_args.py`.
 
+### Transceiver Runtime
+
+Starting with TensorRT-LLM 1.4.0rc1, `cache_transceiver_config.transceiver_runtime` defaults to `PYTHON`, which supports only NIXL. A worker that resolves to UCX, MOONCAKE, or MPI fails at startup unless it uses the C++ transceiver, whether the backend is set directly or through `DEFAULT` and the environment variables above. The C++ transceiver requires KV cache manager v1:
+
+```yaml
+cache_transceiver_config:
+  backend: UCX
+  transceiver_runtime: CPP
+kv_cache_config:
+  use_kv_cache_manager_v2: false
+```
+
 The two paths produce different transceivers, which is how you tell them apart at runtime: direct UCX logs `UcxConnectionManager`, while NIXL with UCX underneath logs `NixlTransferAgent ... using NIXL backend: UCX`. Read the worker's startup log for the transceiver class rather than inferring it from the configuration.
 
 ## AWS EFA

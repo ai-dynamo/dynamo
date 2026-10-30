@@ -6,7 +6,7 @@ subtitle: Host-side per-process VRAM / PCIe / CPU exporter for engine-startup pr
 ---
 
 <Note>
-  This tool is **local-only**. [`dynamo_local_resource_monitor.py`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/dynamo_local_resource_monitor.py) runs on the host machine (not inside a container) and attributes GPU/CPU/IO usage to individual Dynamo processes by PID. It is not part of a Kubernetes deployment. For the setup walkthrough and design rationale, see the [Local Resource Monitor guide](local-resource-monitor-guide.md).
+  This tool is **local-only**. [`dynamo_local_resource_monitor.py`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/dynamo_local_resource_monitor.py) runs on the host machine (not inside a container) and attributes GPU/CPU/IO usage to individual Dynamo processes by PID. It is not part of a Kubernetes deployment. For the setup walkthrough and design rationale, see the [Local Resource Monitor guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/observability/local-resource-monitor-guide.md).
 </Note>
 
 The monitor samples per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes, labeled by GPU, PID, and process name. It always exposes Prometheus metrics at `/metrics`; when the dashboard dependencies are installed, the same endpoint also serves a WebSocket dashboard at `/`.
@@ -106,6 +106,6 @@ All metrics use the `dynamo_` prefix. Unlike the runtime's `dynamo_component_*` 
 
 ## Related
 
-- [Local Resource Monitor guide](local-resource-monitor-guide.md) — setup, Prometheus profile gating, and the WebSocket dashboard.
+- [Local Resource Monitor guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/observability/local-resource-monitor-guide.md) — setup, Prometheus profile gating, and the WebSocket dashboard.
 - [Metrics Catalog](metrics-catalog.mdx) — the runtime's `dynamo_*` metrics.
 - [Environment Variables](environment-variables.mdx) — runtime observability configuration.

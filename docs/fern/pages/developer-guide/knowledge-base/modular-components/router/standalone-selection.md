@@ -76,6 +76,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
 | `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
 | `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` | `300` | Override the absolute request age at which the standalone slot tracker may reclaim stale active state. |
+| `DYN_ZMQ_IO_THREADS` | `4` | I/O threads per shared ZMQ context. KV-event, replay, and replica-sync sockets share contexts of up to 1023 sockets each, the libzmq limit. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.

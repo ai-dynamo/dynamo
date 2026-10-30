@@ -12,6 +12,11 @@ pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
+        // shortcut: v1 Harmony's <|call|> conflicts with XGrammar stop-token handling.
+        // Remove once v1 fixes https://github.com/mlc-ai/xgrammar/issues/701.
+        if matches!(parser_name, "harmony" | "gpt_oss") {
+            return None;
+        }
         dynamo_parsers::tool_calling::parsers::get_tool_parser_map()
             .get(parser_name)
             .and_then(|config| config.structural_tag_builder.as_ref())

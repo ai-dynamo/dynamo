@@ -6,6 +6,10 @@ use std::process::Command;
 #[test]
 fn executable_exposes_native_grpc_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"))
+        .env(
+            "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY",
+            "test-only-affinity-secret",
+        )
         .arg("--help")
         .output()
         .expect("run dynamo-trtllm-sidecar --help");
@@ -28,6 +32,9 @@ fn executable_exposes_native_grpc_configuration() {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
     assert!(stdout.contains("DYN_SIDECAR_GRPC_ENDPOINT"));
+    assert!(stdout.contains("TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY"));
+    assert!(!stdout.contains("test-only-affinity-secret"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("test-only-affinity-secret"));
 }
 
 #[test]

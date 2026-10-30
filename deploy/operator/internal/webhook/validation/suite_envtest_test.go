@@ -18,9 +18,12 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -64,6 +67,9 @@ var (
 	// Fixture barriers observe the same cache used by webhook validation.
 	admissionReader client.Reader
 
+	// Hardware that the v1beta2 defaulter discovers; tests set it before each case.
+	admissionHardware = &fakeHardwareDiscoverer{}
+
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
@@ -90,7 +96,37 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 		OperatorVersion:   opts.OperatorVersion,
 		OperatorPrincipal: opts.OperatorPrincipal,
 		Gate:              admissionGate,
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			Hardware: admissionHardware,
+		},
 	})
+}
+
+// fakeHardwareDiscoverer stands in for the cluster's GPU discovery. Cases run sequentially,
+// so a plain mutex-guarded value is enough.
+type fakeHardwareDiscoverer struct {
+	mu    sync.Mutex
+	found gpu.GPUInfo
+	err   error
+}
+
+func (f *fakeHardwareDiscoverer) set(found gpu.GPUInfo, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.found, f.err = found, err
+}
+
+func (f *fakeHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	found := f.found
+	return &found, f.err
+}
+
+func setAdmissionH100Topology() {
+	admissionHardware.set(gpu.GPUInfo{
+		System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8,
+	}, nil)
 }
 
 type mutableFeatureGate struct {
@@ -121,8 +157,13 @@ type admissionTestCase struct {
 	terminating        bool
 	username           string
 
+	// beforeUpdate runs after the old state is seeded and before the update is submitted. Use
+	// it to change what the webhooks see between the two writes, such as hardware discovery.
+	beforeUpdate func(*testing.T)
+
 	wantSchemaError   string
 	wantCELError      string
+	wantStatusError   string
 	wantAdmissionErrs []string
 	wantWebhookErrors []string
 	wantWarnings      []string
@@ -164,6 +205,10 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 			old = beginTermination(t, seedClient, old)
 		}
 
+		if test.beforeUpdate != nil {
+			test.beforeUpdate(t)
+		}
+
 		t.Log("Submit the update request through the Kubernetes API server")
 		warnings.clear()
 		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
@@ -175,7 +220,16 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 	t.Log("Compare the API server admission result with the table expectations")
 	wantErrors := expectedAdmissionErrors(t, test)
 	wantErrors = rewriteExpectedNamespace(wantErrors, originalNamespace, env.Namespace())
-	assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	if test.wantStatusError != "" {
+		wantStatusError := rewriteExpectedNamespace(
+			[]string{test.wantStatusError},
+			originalNamespace,
+			env.Namespace(),
+		)[0]
+		assertAdmissionStatusError(t, err, wantStatusError)
+	} else {
+		assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	}
 	wantWarnings := rewriteExpectedNamespace(test.wantWarnings, originalNamespace, env.Namespace())
 	if got := warnings.list(); !slices.Equal(got, wantWarnings) {
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
@@ -250,6 +304,8 @@ func admissionResource(t *testing.T, kind string) string {
 		return "dynamographdeployments"
 	case "DynamoGraphDeploymentRequest":
 		return "dynamographdeploymentrequests"
+	case "DynamoGraphDeploymentRun":
+		return "dynamographdeploymentruns"
 	default:
 		t.Fatalf("unsupported admission kind %q", kind)
 		return ""
@@ -274,6 +330,10 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return nvidiacomv1alpha1.DynamoGraphDeploymentRequestGVK
 	case *nvidiacomv1beta1.DynamoGraphDeploymentRequest:
 		return nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentRequest:
+		return nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentRun:
+		return nvidiacomv1beta2.DynamoGraphDeploymentRunGVK
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return schema.GroupVersionKind{}
@@ -460,7 +520,7 @@ func createTestClusterTopology(t *testing.T, env *operatorenv.TestEnv) {
 
 	t.Log("Create the DGD table's immutable cluster topology")
 	topology := &grovev1alpha1.ClusterTopologyBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Name: "grove-topology",
 		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
@@ -509,6 +569,9 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if test.wantCELError != "" {
 		categories++
 	}
+	if test.wantStatusError != "" {
+		categories++
+	}
 	if len(test.wantAdmissionErrs) != 0 {
 		categories++
 	}
@@ -528,6 +591,20 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 		return test.wantAdmissionErrs
 	}
 	return test.wantWebhookErrors
+}
+
+func assertAdmissionStatusError(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("admission error = nil, want status error containing %q", want)
+	}
+	statusError, ok := err.(interface{ Status() metav1.Status })
+	if !ok {
+		t.Fatalf("admission error = %T %v, want Kubernetes status error", err, err)
+	}
+	if message := statusError.Status().Message; !strings.Contains(message, want) {
+		t.Fatalf("admission status error = %q, want substring %q", message, want)
+	}
 }
 
 func assertAdmissionErrors(t *testing.T, err error, want []string, notWant string) {

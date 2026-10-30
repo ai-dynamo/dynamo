@@ -154,7 +154,7 @@ class GMSStorageClient:
         max_workers: int,
         use_absolute_shard_paths: bool = False,
     ) -> list[AllocationEntry]:
-        placements = write_device_shards(
+        placements, _ = write_device_shards(
             [
                 (va, allocation.aligned_size)
                 for allocation, va in zip(allocations_info, va_list, strict=True)

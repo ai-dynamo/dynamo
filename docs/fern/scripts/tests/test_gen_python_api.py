@@ -20,7 +20,7 @@ to return that same list -- one full static-discovery pass per pytest run.
 ``conftest.py`` next to this file owns the ``sys.path`` shim that makes the
 top-level imports of ``api_discovery`` / ``api_rendering`` /
 ``gen_python_api`` resolve, so this module keeps every import at the top
-and stays clean under the repo's flake8 config.
+and stays clean under the repo's ruff config.
 
 Invocation from an isolated environment (bypasses the repo's Python
 resolution, which is unrelated to this generator)::
