@@ -598,10 +598,11 @@ mod tests {
         assert_eq!(occupancy.slots, 23.0 / 128.0);
         assert_eq!(occupancy.kv, Some(0.46));
         assert_eq!(occupancy.load, 0.46);
-        let peers = peers.lock().unwrap();
-        assert_eq!(peers.len(), 2);
-        assert_eq!(peers[0], peers[1]);
-        drop(peers);
+        {
+            let peers = peers.lock().unwrap();
+            assert_eq!(peers.len(), 2);
+            assert_eq!(peers[0], peers[1]);
+        }
 
         client.abort();
         let _ = client.await;
