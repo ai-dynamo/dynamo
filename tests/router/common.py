@@ -26,6 +26,7 @@ from tests.router.helper import (
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
+    unique_request_id,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
@@ -4177,8 +4178,6 @@ def run_frontend_epp_token_parity(
     after unchanged-request parity succeeds and requires the same comparator
     to reject the live mismatch.
     """
-    from tests.router.epp_parity import unique_request_id
-
     if not cases:
         raise AssertionError("token parity requires at least one actual request case")
 
@@ -4206,7 +4205,7 @@ def run_frontend_epp_token_parity(
             len(frontend_tokens),
         )
 
-    kube_api = getattr(stack, "kube_api", None)
+    kube_api = stack.kube_api
     if kube_api is not None and kube_api.failures:
         raise AssertionError(
             "Loopback Kubernetes API recorded unexpected requests: "
@@ -4344,9 +4343,6 @@ def run_frontend_epp_tools_token_parity(
     rejected. The declaration case also collects original, tools-omitted, and
     changed-schema bodies on each arm so a silent ignore of tools cannot pass.
     """
-    # epp_parity pulls gRPC; common.py is imported by unrelated router tests.
-    from tests.router.epp_parity import unique_request_id
-
     if not cases:
         raise AssertionError(
             "tools token parity requires at least one actual request case"
@@ -4532,7 +4528,9 @@ def assert_route_observations_differ(
     )
 
 
-def _assert_catalog_valid_route(observation, worker_ids: dict[str, int], case_name: str) -> None:
+def _assert_catalog_valid_route(
+    observation, worker_ids: dict[str, int], case_name: str
+) -> None:
     if observation.dp_rank != 0:
         raise AssertionError(
             f"{case_name}: expected aggregated dp_rank=0, got {observation.dp_rank}"
@@ -4662,7 +4660,6 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
     from tests.router.epp_parity import (
         READINESS_DEADLINE_S,
         collect_frontend_query_token_ids,
-        unique_request_id,
     )
     from tests.router.helper import send_request_via_python_kv_router
 
@@ -4830,7 +4827,10 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                 preferred_blocks = blocks.get((preferred, 0), 0)
                 other_blocks = blocks.get((other, 0), 0)
                 complete_blocks = len(tokens) // 16
-                if preferred_blocks < complete_blocks or preferred_blocks <= other_blocks:
+                if (
+                    preferred_blocks < complete_blocks
+                    or preferred_blocks <= other_blocks
+                ):
                     ready = False
                     continue
                 remaining = deadline - time.monotonic()
@@ -4848,9 +4848,7 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                         "45s readiness budget"
                     ) from exc
                 last_loads[case.label] = loads
-                by_worker = {
-                    (row["worker_id"], row["dp_rank"]): row for row in loads
-                }
+                by_worker = {(row["worker_id"], row["dp_rank"]): row for row in loads}
                 preferred_load = by_worker.get((preferred, 0))
                 other_load = by_worker.get((other, 0))
                 if preferred_load is None or other_load is None:
@@ -4889,10 +4887,10 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
     stack.token_ids_by_label = token_ids_by_label
 
 
-def run_frontend_epp_first_selection_parity(stack, cases: list[FirstSelectionCase]) -> None:
+def run_frontend_epp_first_selection_parity(
+    stack, cases: list[FirstSelectionCase]
+) -> None:
     """Compare live FE query-only and first EPP selections on a frozen snapshot."""
-    from tests.router.epp_parity import unique_request_id
-
     if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
         raise AssertionError("first-selection parity requires opposite A/B cases")
 
@@ -5009,7 +5007,9 @@ def run_frontend_epp_first_selection_parity(stack, cases: list[FirstSelectionCas
             request_id=unique_request_id("epp-neg-route-b"),
         )
         _wait_for_provider_query_increase(stack, epp_before, arm="negative-epp")
-        _assert_catalog_valid_route(frontend_route, stack.worker_ids, "negative-frontend")
+        _assert_catalog_valid_route(
+            frontend_route, stack.worker_ids, "negative-frontend"
+        )
         _assert_catalog_valid_route(epp_route, stack.worker_ids, "negative-epp")
         assert_route_observations_differ(
             frontend_route,
