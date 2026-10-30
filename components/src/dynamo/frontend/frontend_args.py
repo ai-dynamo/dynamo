@@ -222,6 +222,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    profiling_config: Optional[str] = None
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -295,6 +296,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        # An empty DYN_PROFILING_CONFIG disables profiling; a bad file fails here,
+        # before the runtime and engine are built.
+        self.profiling_config = self.profiling_config or None
+        if self.profiling_config is not None:
+            from .profiling.hosting import load_config
+
+            load_config(self.profiling_config)
         if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"
@@ -642,6 +650,14 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump config to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--profiling-config",
+            env_var="DYN_PROFILING_CONFIG",
+            default=None,
+            help="Opt-in on-demand profiling coordinator configuration JSON (Linux).",
         )
 
         add_argument(
