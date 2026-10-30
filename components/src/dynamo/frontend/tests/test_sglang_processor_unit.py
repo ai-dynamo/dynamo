@@ -893,6 +893,70 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
 class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Function
     """Test OpenAI tool dict to SGLang Tool conversion."""
 
+    @pytest.mark.parametrize(
+        "function_flag, tool_flag, expected",
+        [
+            (None, None, None),
+            (True, None, True),
+            (False, None, False),
+            (None, True, True),
+            (None, False, False),
+            (False, True, False),
+            (True, False, True),
+        ],
+    )
+    def test_defer_loading_reaches_template(self, function_flag, tool_flag, expected):
+        tool = {"type": "function", "function": {"name": "lookup"}}
+        if function_flag is not None:
+            tool["function"]["defer_loading"] = function_flag
+        if tool_flag is not None:
+            tool["defer_loading"] = tool_flag
+        original = copy.deepcopy(tool)
+        dumped = convert_tools([tool])[0].model_dump()
+        assert dumped["function"].get("defer_loading") is expected
+        assert ("defer_loading" in dumped["function"]) == (expected is not None)
+        assert tool == original
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_named_choice_renders_deferred_tool_eagerly(self, nested):
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+        if nested:
+            tool["function"]["defer_loading"] = True
+        else:
+            tool["defer_loading"] = True
+        sglang_tools = convert_tools(
+            [tool, {"type": "function", "function": {"name": "other"}}]
+        )
+        original = [value.model_dump() for value in sglang_tools]
+        selected = sglang_prepost_module._filter_template_tools(
+            {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
+            sglang_tools=sglang_tools,
+            exclude_tools_when_tool_choice_none=True,
+        )
+        assert len(selected) == 1
+        assert selected[0]["function"]["name"] == "lookup"
+        assert "defer_loading" not in selected[0]
+        assert "defer_loading" not in selected[0]["function"]
+        assert selected[0]["function"]["parameters"] == tool["function"]["parameters"]
+        assert [value.model_dump() for value in sglang_tools] == original
+        for choice in ("auto", "required"):
+            visible = sglang_prepost_module._filter_template_tools(
+                {"tool_choice": choice},
+                sglang_tools=sglang_tools,
+                exclude_tools_when_tool_choice_none=True,
+            )
+            assert len(visible) == 2
+            assert visible[0]["function"]["defer_loading"] is True
+
     def test_none_returns_none(self):
         assert convert_tools(None) is None
 
@@ -6315,3 +6379,84 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_preprocess_preserves_responses_native_tools(native, choice, exclude):
+    seen = []
+    template = (
+        "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+        if native
+        else ""
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
+
+    class CapturingTokenizer:
+        chat_template = template
+
+        def get_chat_template(self, chat_template=None, tools=None):
+            return chat_template or (template if tools else default)
+
+        def apply_chat_template(self, messages, **kwargs):
+            seen.append(
+                (
+                    kwargs.get("tools"),
+                    kwargs.get("chat_template")
+                    or self.get_chat_template(tools=kwargs.get("tools")),
+                )
+            )
+            return [1]
+
+    function = {"name": "read", "parameters": {"type": "object"}}
+    catalog = [
+        {
+            "type": "namespace",
+            "name": "fs",
+            "description": "Files",
+            "defer_loading": True,
+            "tools": [function],
+        }
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Read a file"}],
+        "tool_choice": choice,
+        "tools": [{"type": "function", "function": function}],
+    }
+    request["responses_native_tools"] = {
+        "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
+        "template_tools": catalog,
+        "messages": request["messages"],
+        "tool_choice": choice,
+    }
+    result = preprocess_chat_request(
+        request,
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        exclude_tools_when_tool_choice_none=exclude,
+    )
+    excluded = choice == "none" and exclude
+    assert result.request["tools"][0]["function"]["name"] == (
+        "fs.read" if native and not excluded else "read"
+    )
+    rendered_tools, selected_template = seen[0]
+    assert selected_template == (default if excluded else template)
+    if excluded:
+        assert rendered_tools is None
+    elif native:
+        assert rendered_tools == catalog
+    else:
+        assert rendered_tools[0]["type"] == "function"
+        assert rendered_tools[0]["function"]["name"] == "read"
+    assert request["tools"][0]["function"]["name"] == "read"

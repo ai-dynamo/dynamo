@@ -9,3 +9,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+dynamo-global-common = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+url = { workspace = true }
