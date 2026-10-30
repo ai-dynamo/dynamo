@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-memory copies of the service's lists, refreshed on an interval. A failed
-//! refresh keeps the last list and marks it stale, so a discovery outage does
-//! not drop what a caller already knows.
+//! In-memory copies of the service's lists, refreshed on an interval:
+//! [`RouterCache`] for `GET /routers` and [`PoolCache`] for `GET /pools`. A
+//! failed refresh keeps the last list and marks it stale, so a discovery
+//! outage does not drop what a caller already knows.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::future::Future;
 use std::time::Duration;
 
-use dynamo_global_common::RouterReplica;
+use dynamo_global_common::{PoolKey, PoolListing, PoolsResponse, RouterReplica};
 use tokio::sync::watch;
 use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -144,6 +146,171 @@ async fn refresh_routers(
     }
 }
 
+/// The pools from `GET /pools` by key, refreshed until cancelled or dropped.
+///
+/// The service may list only some pools (`complete: false`), for example while
+/// it starts. A complete list replaces the known pools. A partial list adds new
+/// pools and updates changed ones, but keeps known pools that are missing, so
+/// pools are removed only on a complete list. A cache that knows no pools
+/// takes a partial list too: some pools beat none.
+#[derive(Debug)]
+#[must_use = "dropping the cache stops its refresh task"]
+pub struct PoolCache {
+    pools: watch::Receiver<HashMap<PoolKey, PoolListing>>,
+    freshness: watch::Receiver<Freshness>,
+    _task: AbortOnDropHandle<()>,
+}
+
+impl PoolCache {
+    /// Reads `GET /pools` immediately, then every `interval`, until `cancel`
+    /// fires or the cache is dropped. The pools start empty, so nothing waits
+    /// on the first read. Call it inside a Tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// If `interval` is zero.
+    pub fn spawn(
+        client: GlobalDiscoveryClient,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self::spawn_from(client, interval, cancel)
+    }
+
+    fn spawn_from(
+        source: impl PoolSource + 'static,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) -> Self {
+        let mut ticks = ticks(interval);
+        let (pools, pools_rx) = watch::channel(HashMap::new());
+        let (freshness, freshness_rx) = watch::channel(Freshness::Unread);
+        let task = tokio::spawn(async move {
+            // Assumed complete, so a first list that is partial is logged.
+            let mut complete = true;
+            cancel
+                .run_until_cancelled(async {
+                    loop {
+                        ticks.tick().await;
+                        refresh_pools(&source, &pools, &freshness, &mut complete).await;
+                    }
+                })
+                .await;
+        });
+        Self {
+            pools: pools_rx,
+            freshness: freshness_rx,
+            _task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    /// The known pools. A refresh that adds, updates and removes nothing
+    /// publishes nothing. The channel closes when the cache stops.
+    pub fn subscribe(&self) -> watch::Receiver<HashMap<PoolKey, PoolListing>> {
+        self.pools.clone()
+    }
+
+    /// Whether the last refresh succeeded. A partial list is a success: it is
+    /// what the service knows.
+    pub fn freshness(&self) -> Freshness {
+        self.freshness.borrow().clone()
+    }
+}
+
+/// What a [`PoolCache`] reads. The client implements it; tests use a fake.
+trait PoolSource: Send + Sync {
+    fn pools(&self) -> impl Future<Output = Result<PoolsResponse, DiscoveryClientError>> + Send;
+}
+
+impl PoolSource for GlobalDiscoveryClient {
+    fn pools(&self) -> impl Future<Output = Result<PoolsResponse, DiscoveryClientError>> + Send {
+        GlobalDiscoveryClient::pools(self)
+    }
+}
+
+/// `was_complete` is whether the last list read was complete.
+async fn refresh_pools(
+    source: &impl PoolSource,
+    pools: &watch::Sender<HashMap<PoolKey, PoolListing>>,
+    freshness: &watch::Sender<Freshness>,
+    was_complete: &mut bool,
+) {
+    let PoolsResponse {
+        pools: listed,
+        complete,
+    } = match source.pools().await {
+        Ok(response) => response,
+        Err(error) => {
+            let reason = error_chain(&error);
+            if mark_stale(freshness, &reason) {
+                let known = pools.borrow().len();
+                tracing::warn!(error = %reason, known, "cannot list pools; keeping the known ones");
+            }
+            return;
+        }
+    };
+    // If the service lists a key twice, the last listing wins.
+    let listed = listed
+        .into_iter()
+        .map(|pool| (pool.key.clone(), pool))
+        .collect::<HashMap<_, _>>();
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    let changed = pools.send_if_modified(|known| {
+        // A partial list can miss a pool that still exists, so only a
+        // complete one shows that a missing pool is gone.
+        if complete {
+            known.retain(|key, _| {
+                let kept = listed.contains_key(key);
+                if !kept {
+                    removed.push(key.to_string());
+                }
+                kept
+            });
+        }
+        for (key, pool) in listed {
+            match known.entry(key) {
+                Entry::Vacant(entry) => {
+                    added.push(entry.key().to_string());
+                    entry.insert(pool);
+                }
+                Entry::Occupied(mut entry) => {
+                    if *entry.get() != pool {
+                        updated.push(entry.key().to_string());
+                        entry.insert(pool);
+                    }
+                }
+            }
+        }
+        !(added.is_empty() && updated.is_empty() && removed.is_empty())
+    });
+    // Marked current only once the pools are published, so a reader never
+    // sees `Current` next to the previous pools.
+    if mark_current(freshness) {
+        tracing::info!("listing pools again");
+    }
+    // Logged when it flips, even if no pool changes: a service whose
+    // Kubernetes watch keeps failing serves a partial list for as long as it
+    // fails, and the cache keeps any pool removed meanwhile.
+    if complete != *was_complete {
+        *was_complete = complete;
+        if complete {
+            tracing::info!("Global Discovery lists every pool; removing the pools it leaves out");
+        } else {
+            tracing::info!(
+                "Global Discovery lists only some pools; keeping the pools it leaves out"
+            );
+        }
+    }
+    if changed {
+        for names in [&mut added, &mut updated, &mut removed] {
+            names.sort();
+        }
+        tracing::info!(?added, ?updated, ?removed, complete, "pool list changed");
+    }
+}
+
 /// Ticks immediately, then every `interval`. A refresh that overruns delays
 /// the next tick instead of causing a burst. Built before the task is
 /// spawned, so a zero interval panics in the caller.
@@ -208,7 +375,7 @@ fn error_chain(error: &dyn Error) -> String {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use dynamo_global_common::RouterReplicaId;
+    use dynamo_global_common::{Capacity, PoolLocation, RouterReplicaId};
     use reqwest::StatusCode;
 
     use super::*;
@@ -347,5 +514,169 @@ mod tests {
                 CancellationToken::new(),
             );
         });
+    }
+
+    /// A pool source whose answer the test sets; `None` is an outage.
+    #[derive(Clone, Default)]
+    struct FakePools(Arc<Mutex<Option<PoolsResponse>>>);
+
+    impl FakePools {
+        /// Lists each pool as `(DGD name, workers)`.
+        fn answer(&self, complete: bool, pools: &[(&str, u32)]) {
+            let pools = pools
+                .iter()
+                .map(|&(name, workers)| pool(name, workers))
+                .collect();
+            *self.0.lock().unwrap() = Some(PoolsResponse { pools, complete });
+        }
+
+        fn fail(&self) {
+            *self.0.lock().unwrap() = None;
+        }
+    }
+
+    impl PoolSource for FakePools {
+        async fn pools(&self) -> Result<PoolsResponse, DiscoveryClientError> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| DiscoveryClientError::Status {
+                    url: "http://discovery/pools".parse().unwrap(),
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    body: "discovery is down".to_owned(),
+                })
+        }
+    }
+
+    fn pool(name: &str, workers: u32) -> PoolListing {
+        PoolListing {
+            key: PoolKey::new("aws-west", "dynamo", name).unwrap(),
+            location: PoolLocation {
+                region: "us-west-2".to_owned(),
+                availability_zone: None,
+                datacenter: None,
+            },
+            model: Some("Qwen/Qwen3-0.6B".to_owned()),
+            capabilities: Vec::new(),
+            frontends: Vec::new(),
+            capacity: vec![Capacity {
+                sku: "H100".to_owned(),
+                workers,
+            }],
+            relay_identities: Vec::new(),
+        }
+    }
+
+    /// Each pool as `name=workers`, sorted.
+    fn pool_workers(pools: &HashMap<PoolKey, PoolListing>) -> Vec<String> {
+        let mut pools = pools
+            .values()
+            .map(|pool| format!("{}={}", pool.key.dgd_name(), pool.capacity[0].workers))
+            .collect::<Vec<_>>();
+        pools.sort();
+        pools
+    }
+
+    async fn next_pools(pools: &mut watch::Receiver<HashMap<PoolKey, PoolListing>>) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(5), pools.changed())
+            .await
+            .expect("the pools did not change")
+            .unwrap();
+        pool_workers(&pools.borrow_and_update())
+    }
+
+    fn spawn_pool_cache(source: &FakePools) -> PoolCache {
+        PoolCache::spawn_from(
+            source.clone(),
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_complete_list_replaces_the_known_pools() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8), ("b", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8", "b=8"]);
+
+        source.answer(true, &[("b", 16), ("c", 8)]);
+        assert_eq!(next_pools(&mut pools).await, ["b=16", "c=8"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_partial_list_removes_nothing_until_a_complete_one() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8), ("b", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8", "b=8"]);
+
+        // Adds c and updates a, but keeps b, which may still exist.
+        source.answer(false, &[("a", 16), ("c", 8)]);
+        assert_eq!(next_pools(&mut pools).await, ["a=16", "b=8", "c=8"]);
+
+        // A partial list with nothing new publishes nothing.
+        source.answer(false, &[("c", 8)]);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!pools.has_changed().unwrap());
+
+        // The next complete list without b removes it.
+        source.answer(true, &[("a", 16), ("c", 8)]);
+        assert_eq!(next_pools(&mut pools).await, ["a=16", "c=8"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_last_listing_of_a_key_wins() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8), ("a", 16)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=16"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_cache_takes_a_partial_list() {
+        let source = FakePools::default();
+        source.answer(false, &[("a", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8"]);
+        assert_eq!(cache.freshness(), Freshness::Current);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_pools_through_an_outage_and_reports_them_stale() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8)]);
+        let cancel = CancellationToken::new();
+        let cache = PoolCache::spawn_from(source.clone(), Duration::from_secs(1), cancel.clone());
+        assert_eq!(cache.freshness(), Freshness::Unread);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8"]);
+
+        source.fail();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(pool_workers(&pools.borrow()), ["a=8"]);
+        assert_eq!(
+            cache.freshness(),
+            Freshness::Stale(
+                "http://discovery/pools returned 503 Service Unavailable: discovery is down"
+                    .to_owned()
+            )
+        );
+
+        // Recovery clears it, and an unchanged list publishes nothing.
+        source.answer(true, &[("a", 8)]);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(cache.freshness(), Freshness::Current);
+        assert!(!pools.has_changed().unwrap());
+
+        // Cancelling stops the refresh and closes the channel.
+        cancel.cancel();
+        let closed = tokio::time::timeout(Duration::from_secs(5), pools.changed()).await;
+        assert!(closed.expect("the channel did not close").is_err());
     }
 }

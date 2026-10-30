@@ -92,8 +92,9 @@ impl GlobalDiscoveryClient {
     /// it lists every pool.
     ///
     /// A partial list (`complete: false`) can miss pools that still exist, so
-    /// a caller that keeps a list should remove pools only on a complete one.
-    /// If any entry does not parse, the whole call fails.
+    /// a caller that keeps a list should remove pools only on a complete one,
+    /// as [`crate::PoolCache`] does. If any entry does not parse, the whole
+    /// call fails.
     pub async fn pools(&self) -> Result<PoolsResponse, DiscoveryClientError> {
         let url = &self.pools_url;
         let response = self.send(self.http.get(url.clone()), url).await?;
