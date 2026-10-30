@@ -2160,6 +2160,7 @@ impl ModelInfoType {
 struct HFConfig {
     /// denotes the mixin to the flattened data model which can be present
     /// in the config.json file
+    #[serde(default)]
     architectures: Vec<String>,
 
     /// general model type
@@ -2767,6 +2768,91 @@ mod tests {
             0
         );
         assert_eq!(nofile.rlim_cur, SOFT);
+    }
+
+    #[test]
+    fn test_config_json_without_architectures() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.json");
+        let mut config = serde_json::json!({
+            "model_type": "mistral", "bos_token_id": 1, "eos_token_id": [2, 3],
+            "max_position_embeddings": 32768, "vocab_size": 32000
+        });
+        // Reproduce a mixed-format checkpoint without loading model weights.
+        std::fs::write(dir.path().join("params.json"), "{}")?;
+        std::fs::write(dir.path().join("tekken.json"), "{}")?;
+        for architectures in [
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::json!(["MistralForCausalLM"])),
+        ] {
+            if let Some(architectures) = architectures {
+                config["architectures"] = architectures;
+            }
+            std::fs::write(&path, serde_json::to_vec(&config)?)?;
+            let card = ModelDeploymentCard::from_local_path(dir.path(), None)?;
+            let info = card.model_info.as_ref().unwrap().get_model_info()?;
+            assert_eq!(info.model_type(), "mistral");
+            assert_eq!(info.bos_token_id(), Some(1));
+            assert_eq!(info.eos_token_ids(), vec![2, 3]);
+            assert_eq!(info.max_position_embeddings(), Some(32768));
+            assert_eq!(info.vocab_size(), Some(32000));
+            assert_eq!(card.architectural_max_context_length, Some(32768));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_without_architectures_generation_overrides() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            br#"{
+            "model_type": "multimodal",
+            "text_config": {
+                "bos_token_id": 1, "eos_token_id": 2,
+                "max_position_embeddings": 4096, "vocab_size": 32000
+            }
+        }"#,
+        )?;
+        std::fs::write(
+            dir.path().join("generation_config.json"),
+            br#"{"bos_token_id": 10, "eos_token_id": [20, 21]}"#,
+        )?;
+        let info = HFConfig::from_json_file(&path)?;
+        assert_eq!(info.model_type(), "multimodal");
+        assert_eq!(info.bos_token_id(), Some(10));
+        assert_eq!(info.eos_token_ids(), vec![20, 21]);
+        assert_eq!(info.max_position_embeddings(), Some(4096));
+        assert_eq!(info.vocab_size(), Some(32000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_optional_architectures_validation() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.json");
+        for architectures in [
+            serde_json::json!(null),
+            serde_json::json!("MistralForCausalLM"),
+            serde_json::json!([1]),
+        ] {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "architectures": architectures, "model_type": "mistral", "eos_token_id": 2
+                }))?,
+            )?;
+            assert!(HFConfig::from_json_file(&path).is_err());
+        }
+        std::fs::write(&path, br#"{"eos_token_id": 2}"#)?;
+        let err = HFConfig::from_json_file(&path).err().unwrap();
+        assert!(err.to_string().contains("model_type"), "{err}");
+        std::fs::write(&path, br#"{"model_type": "mistral"}"#)?;
+        let err = HFConfig::from_json_file(&path).err().unwrap();
+        assert!(err.to_string().contains("missing eos_token_id"), "{err}");
+        Ok(())
     }
 
     #[test]
