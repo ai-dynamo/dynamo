@@ -35,6 +35,7 @@ mod embedding_cache;
 mod ingress;
 mod recovery;
 pub mod remote;
+pub(crate) mod reply;
 
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,

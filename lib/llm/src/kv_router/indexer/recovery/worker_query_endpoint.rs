@@ -27,6 +27,8 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::kv_router::indexer::reply::WorkerKvQueryReply;
+
 /// Maximum recovery queries served past the event buffer at once.
 ///
 /// Concurrent misses share one in-flight tree dump inside `LocalKvIndexer`, so this bounds
@@ -143,13 +145,13 @@ pub(super) struct WorkerKvQueryEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
+impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryReply>, anyhow::Error>
     for WorkerKvQueryEngine
 {
     async fn generate(
         &self,
         request: SingleIn<WorkerKvQueryRequest>,
-    ) -> anyhow::Result<ManyOut<WorkerKvQueryResponse>> {
+    ) -> anyhow::Result<ManyOut<WorkerKvQueryReply>> {
         let (request, ctx) = request.into_parts();
 
         tracing::debug!(
@@ -321,10 +323,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 request.worker_id, self.worker_id
             );
             let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
+            return Ok(single_response(response, ctx.context()));
         }
 
         if self.status.is_none() && request.dp_rank != self.dp_rank {
@@ -333,10 +332,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 request.dp_rank, self.dp_rank
             );
             let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
+            return Ok(single_response(response, ctx.context()));
         }
 
         // Check if this request can likely be served from buffer (fast path).
@@ -353,12 +349,10 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 }
                 _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
                     tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
-                    return Ok(ResponseStream::new(
-                        // this response will be dropped on the router side since the request was cancelled,
-                        // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
-                        Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                            "Request cancelled by client".to_string(),
-                        )])),
+                    // this response will be dropped on the router side since the request was cancelled,
+                    // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
+                    return Ok(single_response(
+                        WorkerKvQueryResponse::Error("Request cancelled by client".to_string()),
                         ctx.context(),
                     ));
                 }
@@ -443,10 +437,10 @@ fn permit_guarded_response(
     response: WorkerKvQueryResponse,
     permit: Option<OwnedSemaphorePermit>,
     context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
-) -> ManyOut<WorkerKvQueryResponse> {
-    let stream = stream::iter([response]).map(move |response| {
+) -> ManyOut<WorkerKvQueryReply> {
+    let stream = stream::iter([WorkerKvQueryReply(response)]).map(move |reply| {
         let _permit = &permit;
-        response
+        reply
     });
     ResponseStream::new(Box::pin(stream), context)
 }
@@ -524,8 +518,11 @@ fn filter_state_agent_events(
 fn single_response(
     response: WorkerKvQueryResponse,
     context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
-) -> ManyOut<WorkerKvQueryResponse> {
-    ResponseStream::new(Box::pin(stream::iter(vec![response])), context)
+) -> ManyOut<WorkerKvQueryReply> {
+    ResponseStream::new(
+        Box::pin(stream::iter(vec![WorkerKvQueryReply(response)])),
+        context,
+    )
 }
 
 fn negotiate_tree_dump_failure(
@@ -620,7 +617,7 @@ mod tests {
         let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
         assert!(matches!(
             stream.next().await,
-            Some(WorkerKvQueryResponse::TreeDump { .. })
+            Some(WorkerKvQueryReply(WorkerKvQueryResponse::TreeDump { .. }))
         ));
         assert!(stream.next().await.is_none());
         // The transport encodes and sends before dropping an exhausted stream.

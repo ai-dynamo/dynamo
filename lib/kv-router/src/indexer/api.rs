@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Request-plane DTOs for the worker KV query endpoint and the served indexer endpoints.
-//! They stay in `dynamo-kv-router` because `lib/llm` implements the runtime `MaybeError` on
-//! them; the `MaybeError` newtypes move that out before the DTOs join the stage crate.
+//! `lib/llm` wraps the responses in transparent newtypes that implement the runtime
+//! `MaybeError`; these types carry no runtime dependency and move to the stage crate next.
 
 use serde::{Deserialize, Serialize};
 
@@ -184,22 +184,6 @@ impl MaybeError for WorkerKvQueryResponse {
     }
 }
 
-#[cfg(feature = "runtime-protocols")]
-impl dynamo_runtime::protocols::maybe_error::MaybeError for WorkerKvQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        WorkerKvQueryResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
-        match self {
-            WorkerKvQueryResponse::Error(msg) => {
-                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
-            }
-            _ => None,
-        }
-    }
-}
-
 // -------
 // Standalone indexer query types (request plane)
 // -------
@@ -245,22 +229,6 @@ impl MaybeError for IndexerQueryResponse {
     }
 }
 
-#[cfg(feature = "runtime-protocols")]
-impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        IndexerQueryResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
-        match self {
-            IndexerQueryResponse::Error(msg) => {
-                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Request to record a routing decision on a served approximate-mode indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexerRecordRoutingDecisionRequest {
@@ -290,22 +258,6 @@ impl MaybeError for IndexerRecordRoutingDecisionResponse {
         match self {
             IndexerRecordRoutingDecisionResponse::Error(msg) => {
                 Some(Box::new(std::io::Error::other(msg.clone())))
-            }
-            _ => None,
-        }
-    }
-}
-
-#[cfg(feature = "runtime-protocols")]
-impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerRecordRoutingDecisionResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
-        match self {
-            IndexerRecordRoutingDecisionResponse::Error(msg) => {
-                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
             }
             _ => None,
         }
