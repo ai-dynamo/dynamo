@@ -166,7 +166,7 @@ Forced choices can install guided JSON or family-native structural tags. A mode 
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
 
-Two qualification gaps remain: literal native tool-call openers inside quoted content, and V1 prompt prefill when `</think>` splits after its first `<`. Existing reasoning-marker tests do not cover these cases. See [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577); these gaps alone prove neither a current failure nor a fix.
+Two cases remain unqualified: literal native tool-call openers inside quoted content, and V1 prompt prefill when `</think>` splits after its first `<`. Existing reasoning-marker tests do not cover them; see [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577).
 
 For configurations supported by V1, select `DYN_PARSER_VERSION=1` to use the legacy parser.
 

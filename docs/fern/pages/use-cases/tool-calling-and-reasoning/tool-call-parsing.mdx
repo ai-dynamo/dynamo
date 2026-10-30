@@ -7,7 +7,7 @@ subtitle: Connect Dynamo to external tools and services using Dynamo's built-in 
 
 Tool calling lets Dynamo connect models to external tools and services by returning function arguments for your application to execute. Requests use the `tool_choice` and `tools` parameters. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-tool-call-parser`, `--dyn-chat-processor`, and `--dyn-reasoning-parser`.
 
-See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection, compatible names, and the Qwen exception. The catalog lists parser formats; model/backend qualification is separate.
+See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection, compatible names, and the Qwen exception.
 
 ## Configure Tool Calling
 
@@ -410,17 +410,17 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
   <Accordion title="Muse Glimmer">
     **Parser:** `muse_glimmer` (Dynamo alias `muse`)
 
-    **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists. Library availability does not establish backend guidance support.
+    **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists.
   </Accordion>
 
   <Accordion title="Muse Spark">
     **Parser:** `muse_spark` (alias `muse_spark_open`)
 
-    **Notes:** Recipient-routed ATEM calls with visible `commentary` output. Unified owns the whole response; no V1 tool parser exists. Backend guidance support is separate.
+    **Notes:** Recipient-routed ATEM calls with visible `commentary` output. Unified owns the whole response; no V1 tool parser exists.
   </Accordion>
 
   <Accordion title="Additional Unified registry entries">
-    The pinned library also registers `beam`, `nemotron_v3` / `nemotron3`, and `gpt_oss` / `harmony`. See the [routing table](troubleshooting-tool-calls.md#parser-generation-routing). New library entries do not by themselves qualify model rendering, special-token handling, or engine integration.
+    The pinned library also registers `beam`, `nemotron_v3` / `nemotron3`, and `gpt_oss` / `harmony`. See the [routing table](troubleshooting-tool-calls.md#parser-generation-routing).
   </Accordion>
 
   <Accordion title="Inkling">
