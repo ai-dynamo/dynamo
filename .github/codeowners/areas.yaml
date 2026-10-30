@@ -71,7 +71,9 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
+  - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**
   - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
@@ -894,6 +896,10 @@ shared:
   - planner
   - operator
 - glob: components/src/dynamo/aisimulate/tests/dgd/
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/aisimulate/output/dgdr_run/
   owners:
   - planner
   - operator

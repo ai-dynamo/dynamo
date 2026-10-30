@@ -86,6 +86,7 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true, features = ["protocol-schema"] }
+dynamo-decisions = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
@@ -128,6 +129,7 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zmq = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 
@@ -172,7 +174,7 @@ hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 

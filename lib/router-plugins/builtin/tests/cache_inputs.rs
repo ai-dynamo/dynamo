@@ -56,7 +56,7 @@ impl InputProbe {
     fn check(&self, context: &WorkerSelectionContext<'_>) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Ordinary request context stays available without CACHE.
-        assert_eq!(context.prompt_tokens(), 17);
+        assert_eq!(context.isl_tokens(), 17);
     }
 
     fn check_cache(&self, cache: WorkerCacheInput<'_>) {

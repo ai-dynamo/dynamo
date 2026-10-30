@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Release capture must execute the selected production tree, not post-cut main."""
 
+import io
 import json
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import capture_missing_origin as missing_origin
 import generate_upgrade_fixtures as fixtures
 
 
@@ -55,6 +58,66 @@ class UpgradeCaptureSourceTest(unittest.TestCase):
                 else {"sha": self.official_revision}
             )
         return self.real_output(command, **kwargs)
+
+    def test_missing_release_is_fetched_without_changing_checkout(self):
+        self.worker.write_text("package dynamo // post-release\n")
+        self.git("add", ".")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "development")
+        checkout = self.root / "shallow"
+        self.git("clone", "--depth=1", "--no-tags", self.root.as_uri(), str(checkout))
+        subprocess.run(
+            [
+                "git",
+                "config",
+                f"url.{self.root.as_uri()}.insteadOf",
+                "https://github.com/ai-dynamo/dynamo.git",
+            ],
+            cwd=checkout,
+            check=True,
+        )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "cat-file", "-e", self.revision],
+                cwd=checkout,
+                capture_output=True,
+            ).returncode,
+            0,
+        )
+        path = self.worker.relative_to(self.root).as_posix()
+        with (
+            patch.object(missing_origin, "ROOT", checkout),
+            patch.object(subprocess, "run", wraps=subprocess.run) as commands,
+        ):
+            archive = missing_origin.archive_release(self.revision, [path])
+            with tarfile.open(fileobj=io.BytesIO(archive)) as released:
+                self.assertEqual(released.extractfile(path).read(), b"package dynamo\n")
+            fetches = [
+                c.args[0]
+                for c in commands.call_args_list
+                if c.args[0][:2] == ["git", "fetch"]
+            ]
+            self.assertEqual(
+                fetches,
+                [
+                    [
+                        "git",
+                        "fetch",
+                        "--no-tags",
+                        "https://github.com/ai-dynamo/dynamo.git",
+                        self.revision,
+                    ]
+                ],
+            )
+            commands.reset_mock()
+            self.assertEqual(
+                missing_origin.archive_release(self.revision, [path]), archive
+            )
+            self.assertFalse(
+                any(c.args[0][:2] == ["git", "fetch"] for c in commands.call_args_list)
+            )
+        self.assertEqual(
+            (checkout / path).read_text(), "package dynamo // post-release\n"
+        )
 
     def test_release_capture_rejects_dirty_and_post_cut_production(self):
         with patch.object(
