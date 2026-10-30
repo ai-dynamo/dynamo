@@ -109,17 +109,22 @@ struct Args {
         help_heading = WITH_MCS
     )]
     pool_service_suffix: String,
-    /// Each pool's frontend Service is named `<DGD name><suffix>`.
+    /// Each pool's frontend Service is named `<DGD name><suffix>`. Give a
+    /// suffix that starts with `-` after an `=`: `--frontend-service-suffix=-web`.
     #[arg(
         long,
         default_value = "-frontend",
-        allow_hyphen_values = true,
-        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        value_parser = NonEmptyStringValueParser::new(),
         help_heading = WITH_MCS
     )]
     frontend_service_suffix: String,
     /// The frontend Service's named port for HTTP.
-    #[arg(long, default_value = "http", help_heading = WITH_MCS)]
+    #[arg(
+        long,
+        default_value = "http",
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS
+    )]
     frontend_port_name: String,
     /// Namespace of the Global Router Service.
     #[arg(
@@ -151,15 +156,26 @@ struct Args {
     /// twice the heartbeat interval. Other regions then drop a pool whose
     /// PoolRelay is more than the lease minus two heartbeat intervals late
     /// (5 s with the defaults); its own region allows the lease minus one.
-    #[arg(long, help_heading = WITH_MCS)]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        conflicts_with = "tls_cert_path"
+    )]
     peer_service: Option<String>,
     /// Namespace of `--peer-service`. Defaults to `--router-namespace`.
-    #[arg(long, help_heading = WITH_MCS, requires = "peer_service")]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        requires = "peer_service"
+    )]
     peer_namespace: Option<String>,
     /// The named HTTP port of `--peer-service`.
     #[arg(
         long,
         default_value = "http",
+        value_parser = NonEmptyStringValueParser::new(),
         help_heading = WITH_MCS,
         requires = "peer_service"
     )]
@@ -276,16 +292,34 @@ where
     }
     // Karmada imports no Service with a longer name, and the API server
     // refuses to list one, so the service would never be ready.
-    if let (Some(mcs), Some(service)) = (parsed.pool_discovery.mcs(), &parsed.router_service)
-        && !mcs.can_import(service)
+    if let Some(mcs) = parsed.pool_discovery.mcs() {
+        for (flag, service) in [
+            ("router-service", &parsed.router_service),
+            ("peer-service", &parsed.peer_service),
+        ] {
+            if let Some(service) = service
+                && !mcs.can_import(service)
+            {
+                return Err(command.error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "--{flag} has {} characters, and Karmada imports a Service name of at \
+                         most {KARMADA_MAX_SERVICE_NAME}",
+                        service.len()
+                    ),
+                ));
+            }
+        }
+    }
+    // A copy from another instance must outlive the time between its
+    // refreshes.
+    if parsed.peer_service.is_some()
+        && parsed.lease_duration_secs <= parsed.heartbeat_interval_secs.saturating_mul(2)
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
-            format!(
-                "--router-service has {} characters, and Karmada imports a Service name of at \
-                 most {KARMADA_MAX_SERVICE_NAME}",
-                service.len()
-            ),
+            "with --peer-service, --lease-duration-secs must be more than twice \
+             --heartbeat-interval-secs, so that copies stay alive between refreshes",
         ));
     }
     Ok(parsed)
@@ -368,20 +402,6 @@ async fn mcs_backend(
         );
     };
     let lease = lease(args)?;
-    if args.peer_service.is_some() {
-        if args.tls_cert_path.is_some() {
-            bail!(
-                "--peer-service does not work with --tls-cert-path yet: instances ask each other \
-                 over plain HTTP"
-            );
-        }
-        if lease.duration() <= lease.heartbeat_interval() * 2 {
-            bail!(
-                "with --peer-service, --lease-duration-secs must be more than twice \
-                 --heartbeat-interval-secs, so that copies stay alive between refreshes"
-            );
-        }
-    }
     let registrations = registration_storage(args, lease);
     let client = kubernetes_client()
         .await
@@ -609,8 +629,7 @@ mod tests {
     fn service_suffixes_can_start_with_a_hyphen_but_not_be_empty() {
         let args = parse_args(karmada(&[
             "--pool-service-suffix=-pool-gateway",
-            "--frontend-service-suffix",
-            "-web",
+            "--frontend-service-suffix=-web",
         ]))
         .unwrap();
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
@@ -620,12 +639,64 @@ mod tests {
             assert!(parse_args(karmada(&[empty])).is_err());
         }
         // A suffix left out fails, rather than taking the next flag.
+        for flag in ["--pool-service-suffix", "--frontend-service-suffix"] {
+            let error = parse_args(karmada(&[flag, "--listen=127.0.0.1:18496"])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn frontend_and_peer_flags_cannot_be_empty() {
+        for extra in [
+            ["--frontend-port-name=", "--peer-service=gds"],
+            ["--peer-service=", "--frontend-port-name=http"],
+            ["--peer-service=gds", "--peer-namespace="],
+            ["--peer-service=gds", "--peer-port-name="],
+        ] {
+            let error = parse_args(karmada(&extra)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{extra:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn karmada_refuses_a_peer_service_it_cannot_import() {
+        let name = format!(
+            "--peer-service={}",
+            "p".repeat(KARMADA_MAX_SERVICE_NAME + 1)
+        );
+        let error = parse_args(karmada(&[&name])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+        assert!(error.to_string().contains("--peer-service"), "{error}");
+    }
+
+    #[test]
+    fn peer_sharing_mistakes_are_usage_errors() {
+        // Instances ask each other over plain HTTP.
         let error = parse_args(karmada(&[
-            "--pool-service-suffix",
-            "--listen=127.0.0.1:18496",
+            "--peer-service=gds",
+            "--tls-cert-path=/tls/tls.crt",
+            "--tls-key-path=/tls/tls.key",
         ]))
         .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        // A lease of at most two heartbeats lets copies expire between
+        // refreshes.
+        let error = parse_args(karmada(&[
+            "--peer-service=gds",
+            "--heartbeat-interval-secs=5",
+            "--lease-duration-secs=10",
+        ]))
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            parse_args(karmada(&[
+                "--peer-service=gds",
+                "--heartbeat-interval-secs=5",
+                "--lease-duration-secs=11",
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]
