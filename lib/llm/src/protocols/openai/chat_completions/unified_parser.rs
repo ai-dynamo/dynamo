@@ -249,7 +249,9 @@ impl UnifiedRequestPolicy {
         family: &str,
         inferred: UnifiedParserStartingState,
     ) -> UnifiedParserStartingState {
-        if self.reasoning_disabled && matches!(family, "gemma4" | NEMOTRON_V3_UNIFIED_FAMILY) {
+        if self.reasoning_disabled
+            && matches!(family, "gemma4" | "minimax_m3" | NEMOTRON_V3_UNIFIED_FAMILY)
+        {
             // Gemma's Response state preserves literal thought delimiters and still parses tools.
             // Nemotron 3 defaults to an implicit open thought; `enable_thinking=false` renders
             // a closed `<think></think>` pair instead, so generation starts in the answer.
