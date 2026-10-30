@@ -9,11 +9,13 @@
 //! The CRD schema is defined at:
 //! `deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{
     Api, Client as KubeClient, CustomResource,
-    api::{Patch, PatchParams},
+    api::{Patch, PatchParams, PostParams},
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,10 @@ use crate::discovery::{DiscoveryMetadata, EventScope};
 
 /// Field manager name for server-side apply - identifies this client as the owner of fields it sets
 const FIELD_MANAGER: &str = "dynamo-worker";
+const WRITE_ID_ANNOTATION: &str = "nvidia.com/discovery-write-id";
+const APPLY_ATTEMPTS: u32 = 3;
+const APPLY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+const APPLY_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Spec for DynamoWorkerMetadata custom resource
 /// The `data` field stores the serialized `DiscoveryMetadata` as a JSON blob.
@@ -154,47 +160,97 @@ fn add_current_event_channel_scopes(data: &mut serde_json::Value) -> Result<()> 
     Ok(())
 }
 
-/// Apply (create or update) a DynamoWorkerMetadata CR using server-side apply
+/// Persist a discovery snapshot with bounded retries.
 ///
-/// This function uses Kubernetes server-side apply which:
-/// - Creates the CR if it doesn't exist
-/// - Updates the CR if it does exist
-/// - Is idempotent and safe to call multiple times
-///
-/// # Arguments
-/// * `kube_client` - Kubernetes client
-/// * `namespace` - Namespace to create/update the CR in
-/// * `cr` - The DynamoWorkerMetadata CR to apply
+/// Fresh resourceVersion preconditions fence requests that outlive a timeout.
+/// Each logical write changes an annotation so even a no-op snapshot advances
+/// the version and fences earlier writes. An error can still mean the server
+/// committed the snapshot without acknowledging it.
 pub async fn apply_cr(
     kube_client: &KubeClient,
     namespace: &str,
     cr: &DynamoWorkerMetadata,
 ) -> Result<()> {
     let api: Api<DynamoWorkerMetadata> = Api::namespaced(kube_client.clone(), namespace);
-
     let cr_name = cr
         .metadata
         .name
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| anyhow::anyhow!("CR must have a name"))?;
+    let mut candidate = cr.clone();
+    candidate
+        .metadata
+        .annotations
+        .get_or_insert_default()
+        .insert(WRITE_ID_ANNOTATION.into(), uuid::Uuid::new_v4().to_string());
 
-    // force() allows us to take ownership of this field even if another controller owns it
-    // in practice the CR will only have one writer (the pod owner)
-    let params = PatchParams::apply(FIELD_MANAGER).force();
+    for attempt in 1..=APPLY_ATTEMPTS {
+        let result = tokio::time::timeout(APPLY_ATTEMPT_TIMEOUT, async {
+            let current = api.get_opt(cr_name).await?;
+            candidate.metadata.resource_version = current
+                .as_ref()
+                .and_then(|current| current.metadata.resource_version.clone());
+            if current.is_some() {
+                api.patch(
+                    cr_name,
+                    &PatchParams::apply(FIELD_MANAGER).force(),
+                    &Patch::Apply(&candidate),
+                )
+                .await
+            } else {
+                // A delayed create cannot overwrite a newer, already-created snapshot.
+                api.create(
+                    &PostParams {
+                        field_manager: Some(FIELD_MANAGER.into()),
+                        ..Default::default()
+                    },
+                    &candidate,
+                )
+                .await
+            }
+        })
+        .await;
 
-    let patch = Patch::Apply(cr);
-    let applied = api.patch(cr_name, &params, &patch).await.map_err(|e| {
-        anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}: {e}")
-    })?;
-
-    tracing::info!(
-        namespace,
-        cr_name,
-        resource_version = ?applied.metadata.resource_version,
-        "Applied DynamoWorkerMetadata CR"
-    );
-
-    Ok(())
+        let error = match result {
+            Ok(Ok(applied)) => {
+                tracing::info!(
+                    namespace,
+                    cr_name,
+                    resource_version = ?applied.metadata.resource_version,
+                    "Applied DynamoWorkerMetadata CR"
+                );
+                return Ok(());
+            }
+            Ok(Err(error)) => {
+                let retryable = match &error {
+                    kube::Error::Api(response) => {
+                        matches!(response.code, 408 | 409 | 429 | 500..=599)
+                    }
+                    kube::Error::HyperError(_) | kube::Error::Service(_) => true,
+                    _ => false,
+                };
+                if !retryable {
+                    return Err(error).with_context(|| {
+                        format!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}")
+                    });
+                }
+                anyhow::Error::from(error)
+            }
+            Err(error) => {
+                anyhow::Error::from(error).context("discovery persistence attempt timed out")
+            }
+        };
+        if attempt == APPLY_ATTEMPTS {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to apply DynamoWorkerMetadata {namespace}/{cr_name} after {attempt} attempts"
+                )
+            });
+        }
+        tracing::warn!(namespace, cr_name, attempt, error = %error, "Retrying discovery persistence");
+        tokio::time::sleep(APPLY_RETRY_DELAY).await;
+    }
+    unreachable!("at least one persistence attempt")
 }
 
 #[cfg(test)]
