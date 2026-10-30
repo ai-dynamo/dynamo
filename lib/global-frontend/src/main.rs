@@ -10,7 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
-use dynamo_global_frontend::{PoolSnapshot, app, follow_relays, measure_round_trips, serve};
+use dynamo_global_frontend::{
+    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+};
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
     RoundRobinSelector,
@@ -57,7 +59,8 @@ struct Args {
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
     /// The region this process runs in, named as `--pool` names clusters.
-    /// `affinity` tries pools in it first.
+    /// `affinity` tries pools in it first, and metrics tell requests kept in
+    /// it from the rest.
     #[arg(long, required_if_eq("router_policy", "affinity"))]
     region: Option<String>,
     /// A pool's PoolRelay, which streams the pool's load, as
@@ -155,10 +158,8 @@ async fn main() -> Result<()> {
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
     }
-    if args.router_policy != RouterPolicy::Affinity
-        && (args.region.is_some() || !args.pool_relays.is_empty())
-    {
-        tracing::warn!("--region and --pool-relay are used only by --router-policy affinity");
+    if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
+        tracing::warn!("--pool-relay is used only by --router-policy affinity");
     }
 
     let shutdown = CancellationToken::new();
@@ -178,6 +179,7 @@ async fn main() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let in_flight = Arc::new(InFlightTracker::new());
+    let metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
@@ -212,7 +214,7 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let app = app(pools, selector, in_flight, http);
+    let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await

@@ -444,6 +444,131 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
 		},
+		// Helper images do not describe Dynamo versions; selecting a Dynamo role restores the contract.
+		{
+			name: "beta untyped helper accepts a non-semver image without override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "beta untyped helper image can change without override",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "beta assigning a Dynamo role requires a runtime version",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "beta untyped helper still requires an image",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers[0].image: Required value: is required"},
+		},
+		{
+			name: "alpha untyped helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha untyped helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "alpha assigning a Dynamo role requires a runtime version",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "alpha untyped helper still requires an image",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
+		},
+		{
+			name: "alpha custom-type helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha custom-type helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
+		},
 		{
 			name: "component custom image requires runtime version override",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -1733,9 +1858,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "role pod templates reject native sidecars in unsupported multinode layouts",
+			name: "role pod templates with a leader runtime are admitted without backendFramework",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = admissionTRTLLMBackend
+				dgd.Spec.BackendFramework = ""
 				worker := betaWorkerComponent(dgd)
 				setBetaExplicitMultinodeRoleTemplates(worker, 4)
 				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
@@ -1743,7 +1868,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
 		},
 		{
 			name: "role pod templates require a 1.6 or later Planner",
@@ -4131,7 +4255,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
 	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
-	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {
 		tests = append(tests,
 			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
@@ -4912,6 +5036,10 @@ func multinodeSidecarDGDForAdmission(t *testing.T, backend string, alpha, roles,
 		if workerRuntime {
 			main.Args = append(main.Args, "--data-parallel-hybrid-lb", "--data-parallel-size", "4", "--data-parallel-size-local", "2")
 		}
+	case admissionTRTLLMBackend:
+		// The authored launch is an opaque shell script around mpirun and trtllm-serve.
+		main.Command = []string{"/bin/bash", "-c"}
+		main.Args = []string{"mpirun -n 2 bash -c 'trtllm-llmapi-launch trtllm-serve model --grpc --grpc-protocol openengine --extra_llm_api_options /config/config.yaml'"}
 	default:
 		t.Fatalf("unsupported multinode sidecar backend %q", backend)
 	}

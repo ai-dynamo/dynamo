@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
-use dynamo_global_frontend::PoolSnapshot;
+use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const MODEL: &str = "echo-model";
+/// The region of the Global Frontend and of every pool.
+const REGION: &str = "us-east-2";
 
 /// A running HTTP server. Dropping it stops the server.
 struct Server {
@@ -142,7 +144,7 @@ async fn scripted_pool_frontend(sse: &'static str) -> (Server, Arc<Mutex<Vec<Hea
 
 fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
     let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
-    Pool::new(&key, model, "us-east-2", vec![frontend.clone()])
+    Pool::new(&key, model, REGION, vec![frontend.clone()])
 }
 
 /// A running Global Frontend, and the catalog it routes over.
@@ -167,7 +169,8 @@ async fn global_frontend_with(
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
     let (listener, url) = bind().await;
     let cancel = CancellationToken::new();
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client());
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
     tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
@@ -211,6 +214,46 @@ async fn ok_json(response: reqwest::Response) -> Value {
     let body = response.text().await.unwrap();
     assert_eq!(status, StatusCode::OK, "{body}");
     serde_json::from_str(&body).unwrap()
+}
+
+/// The Global Frontend's metrics once `ready` holds for them, scraping
+/// until it does: a response's metrics settle just after its client has
+/// read it.
+async fn metrics_when(global: &Url, ready: impl Fn(&str) -> bool) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let response = client()
+                .get(global.join("metrics").unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["content-type"], prometheus::TEXT_FORMAT);
+            let metrics = response.text().await.unwrap();
+            if ready(&metrics) {
+                return metrics;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the metrics did not settle")
+}
+
+/// The value of `metric`'s series whose labels include `labels`, in
+/// Prometheus's text format.
+fn sample(metrics: &str, metric: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    metrics
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .find_map(|line| {
+            let (series, value) = line.rsplit_once(' ')?;
+            let (name, series_labels) = series.split_once('{').unwrap_or((series, ""));
+            let matches = name == metric
+                && labels
+                    .iter()
+                    .all(|(key, value)| series_labels.contains(&format!("{key}=\"{value}\"")));
+            matches.then(|| value.parse().unwrap())
+        })
 }
 
 /// The `data:` payloads of an SSE body, up to `[DONE]`.
@@ -395,6 +438,85 @@ async fn unreachable_pools_are_unavailable() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let no_response = [("pool", "ohio/dynamo/blue"), ("status", "no_response")];
+    let requests = "dynamo_global_frontend_requests_total";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, requests, &no_response) == Some(1.0)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_client_leaving_before_the_pool_answers_counts_as_cancelled() {
+    // A pool that queues every request and never answers.
+    let queueing = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(std::future::pending::<&'static str>),
+    ))
+    .await;
+    let global = global_frontend(vec![pool("blue", MODEL, &queueing.url)]).await;
+
+    let request = client()
+        .post(global.server.url.join("v1/chat/completions").unwrap())
+        .json(&chat(MODEL, "hi", true))
+        .timeout(Duration::from_millis(200))
+        .send()
+        .await;
+    assert!(request.unwrap_err().is_timeout());
+
+    let cancelled = [("pool", "ohio/dynamo/blue"), ("status", "cancelled")];
+    let requests = "dynamo_global_frontend_requests_total";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, requests, &cancelled) == Some(1.0)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn metrics_count_requests_by_pool() {
+    let pool_frontend = echo_pool_frontend().await;
+    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", true),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.text().await.unwrap();
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat("unknown", "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let blue = [("pool", "ohio/dynamo/blue"), ("region", REGION)];
+    let duration = "dynamo_global_frontend_request_duration_seconds_count";
+    let metrics = metrics_when(&global.server.url, |metrics| {
+        sample(metrics, duration, &blue) == Some(1.0)
+    })
+    .await;
+    let ok = [blue[0], blue[1], ("local", "true"), ("status", "200")];
+    let counts = [
+        ("dynamo_global_frontend_requests_total", &ok[..]),
+        (
+            "dynamo_global_frontend_time_to_first_byte_seconds_count",
+            &blue,
+        ),
+        (
+            "dynamo_global_frontend_rejected_requests_total",
+            &[("error_type", "not_found")],
+        ),
+    ];
+    for (metric, labels) in counts {
+        assert_eq!(sample(&metrics, metric, labels), Some(1.0), "{metric}");
+    }
+    let in_flight = "dynamo_global_frontend_inflight_requests";
+    assert_eq!(sample(&metrics, in_flight, &blue), Some(0.0));
 }
 
 #[tokio::test]
@@ -501,6 +623,11 @@ async fn requests_count_in_flight_until_their_response_ends() {
     })
     .await
     .expect("the request stayed in flight after the client left");
+    let duration = "dynamo_global_frontend_request_duration_seconds_count";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, duration, &[("pool", "ohio/dynamo/blue")]) == Some(1.0)
+    })
+    .await;
 }
 
 #[tokio::test]

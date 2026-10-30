@@ -15,10 +15,11 @@ use std::collections::HashSet;
 use super::{KvReplayMetadata, KvRouterPlacement};
 use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
-use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterControls};
+use crate::replay::{ConversationAffinityConfig, ReplayPrefillLoadEstimator, ReplayRouterControls};
 
 /// Round-robin placement with an optional Dynamo Planner scaling policy.
 pub(in crate::replay) struct RoundRobinReplayComposition {
+    affinity_enabled: bool,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
 }
@@ -26,6 +27,9 @@ pub(in crate::replay) struct RoundRobinReplayComposition {
 impl RoundRobinReplayComposition {
     pub(in crate::replay) fn new(scaling_policy: Option<Box<dyn ReplayScalingPolicy>>) -> Self {
         Self {
+            affinity_enabled: crate::replay::replay_scope()
+                .conversation_affinity
+                .is_some(),
             scaling_enabled: scaling_policy.is_some(),
             scaling_policy,
         }
@@ -46,6 +50,11 @@ impl ReplayComposition for RoundRobinReplayComposition {
             )));
         }
         validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)?;
+        if self.affinity_enabled {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+                "conversation affinity requires the Dynamo KV router".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -91,6 +100,7 @@ enum KvTopologyConfig {
 /// KV-aware placement plus an optional Dynamo Planner scaling policy.
 pub(in crate::replay) struct KvReplayComposition {
     topology: KvTopologyConfig,
+    conversation_affinity: Option<ConversationAffinityConfig>,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
@@ -121,6 +131,7 @@ impl KvReplayComposition {
                 args: Box::new(args),
                 num_workers,
             },
+            conversation_affinity: scope.conversation_affinity,
             router_config,
             prefill_load_estimator,
             scaling_policy,
@@ -149,6 +160,7 @@ impl KvReplayComposition {
                 num_prefill_workers,
                 num_decode_workers,
             },
+            conversation_affinity: scope.conversation_affinity,
             router_config,
             prefill_load_estimator,
             scaling_policy,
@@ -182,6 +194,11 @@ impl ReplayComposition for KvReplayComposition {
             )));
         }
         validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
+        if self.conversation_affinity.is_some() && self.scaling_enabled {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+                "conversation affinity requires static worker pools".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -201,7 +218,8 @@ impl ReplayComposition for KvReplayComposition {
             topology.len(),
             self.determinism.selector_seed(),
         )?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
         self.register_router_control(WorkerType::Aggregated, &placement);
         Ok(placement)
     }
@@ -248,7 +266,8 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing prefill KV Router placement")?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -257,7 +276,8 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
         self.register_router_control(WorkerType::Prefill, &prefill);
         self.register_router_control(WorkerType::Decode, &decode);
         Ok((prefill, decode))
@@ -430,6 +450,22 @@ mod tests {
             error
                 .to_string()
                 .contains("requires scaling provider \"none\"")
+        );
+        let composition = crate::replay::with_replay_scope(
+            crate::replay::ReplayScope {
+                conversation_affinity: Some(Default::default()),
+                ..Default::default()
+            },
+            || RoundRobinReplayComposition::new(None),
+        )
+        .unwrap();
+        // Validation must retain the setting after its construction scope ends.
+        assert!(
+            composition
+                .validate_spec(&spec(ProviderSpec::no_scaling()))
+                .unwrap_err()
+                .to_string()
+                .contains("requires the Dynamo KV router")
         );
     }
 

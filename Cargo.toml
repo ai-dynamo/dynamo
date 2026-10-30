@@ -78,6 +78,7 @@ dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
 dynamo-protocols = { version = "=8.4.0" }
+dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }
 
 # Published on crates.io. To see all available versions:
