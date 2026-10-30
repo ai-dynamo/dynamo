@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The memory backend: one process keeps every registration. It needs no
-//! Kubernetes, so it suits tests and a first deployment. A restarted process
-//! starts empty and fills as PoolRelays register again, so its lists are
-//! `Estimated` until one lease has passed: by then every live pool has
-//! registered again. Router replicas come from configuration until routers
-//! register too. Run one replica: each keeps only the registrations it
-//! receives.
+//! Kubernetes, so it suits tests and a first deployment. The MCS backend keeps
+//! its registrations here too. A restarted process starts empty and fills as
+//! PoolRelays register again, so its lists are `Estimated` until one lease has
+//! passed: by then every live pool has registered again. Router replicas come
+//! from configuration until routers register too. Run one replica: each keeps
+//! only the registrations it receives.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,9 +27,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 
+/// The longest an expired registration waits for the sweep. Watchers, such
+/// as the MCS backend's join, drop a pool only when the sweep removes it.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(1);
+
 /// Pool registrations in memory. A pool expires the lease duration after its
 /// last registration. Reads skip an expired pool at once; a sweep removes it,
-/// with a `Removed` event, within one heartbeat interval.
+/// with a `Removed` event, within [`SWEEP_EVERY`] or one heartbeat interval,
+/// whichever is shorter.
 ///
 /// Any caller may register any pool: V1 assumes a trusted network, and
 /// several PoolRelay replicas may register the same pool. The latest
@@ -95,7 +100,7 @@ impl MemoryPoolStore {
             tokio::spawn(sweep(
                 Arc::clone(&self.pools),
                 self.events.clone(),
-                self.lease.heartbeat_interval(),
+                self.lease.heartbeat_interval().min(SWEEP_EVERY),
                 self.started.checked_add(self.lease.duration()),
                 self.stop.clone(),
             ));

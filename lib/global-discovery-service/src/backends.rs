@@ -6,4 +6,5 @@
 
 pub mod kubernetes;
 pub mod memory;
+pub mod registered;
 mod stream;

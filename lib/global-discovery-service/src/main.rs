@@ -7,7 +7,7 @@
 //! - `--pool-discovery`: where the pool and router lists come from. Either
 //!   the registrations PoolRelays send (`registrations`), or the
 //!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
-//!   the standard way (`mcs`).
+//!   the standard way (`mcs`), joined with registrations.
 //! - `--registration-storage`: where registrations are kept. Only `memory`
 //!   for now.
 //!
@@ -30,10 +30,11 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::kubernetes::{
-    ExportedService, KARMADA_MAX_SERVICE_NAME, McsImplementation, McsPoolDirectory,
-    McsReplicaDirectory,
+    ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
+    McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
+use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
@@ -82,23 +83,17 @@ struct Args {
     #[arg(long, value_enum, default_value_t = PoolDiscovery::Registrations)]
     pool_discovery: PoolDiscovery,
     /// Where registrations are kept.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = RegistrationStorage::Memory,
-        help_heading = WITH_REGISTRATIONS
-    )]
+    #[arg(long, value_enum, default_value_t = RegistrationStorage::Memory)]
     registration_storage: RegistrationStorage,
     /// How often a PoolRelay registers again.
-    #[arg(long, default_value_t = 5, help_heading = WITH_REGISTRATIONS)]
+    #[arg(long, default_value_t = 5)]
     heartbeat_interval_secs: u64,
     /// How long a registration lasts. Longer than the heartbeat interval, and
     /// at most a day.
     #[arg(
         long,
         default_value_t = 15,
-        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS),
-        help_heading = WITH_REGISTRATIONS
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS)
     )]
     lease_duration_secs: u64,
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
@@ -113,6 +108,23 @@ struct Args {
         help_heading = WITH_MCS
     )]
     pool_service_suffix: String,
+    /// Each pool's frontend Service is named `<DGD name><suffix>`. Give a
+    /// suffix that starts with `-` after an `=`: `--frontend-service-suffix=-web`.
+    #[arg(
+        long,
+        default_value = "-frontend",
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS
+    )]
+    frontend_service_suffix: String,
+    /// The frontend Service's named port for HTTP.
+    #[arg(
+        long,
+        default_value = "http",
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS
+    )]
+    frontend_port_name: String,
     /// Namespace of the Global Router Service.
     #[arg(
         long,
@@ -149,9 +161,9 @@ enum PoolDiscovery {
     /// The pools PoolRelays register (`POST /pools`), while their leases
     /// last. Router replicas come from `--router`.
     Registrations,
-    /// The pools whose PoolRelay Services Karmada imports, and the replicas
-    /// of the router Service, from EndpointSlices named the Karmada way.
-    /// Takes no registrations.
+    /// The pools whose PoolRelay Services Karmada imports, joined with their
+    /// registrations, and the replicas of the router Service, from
+    /// EndpointSlices named the Karmada way.
     Karmada,
     /// As `karmada`, from EndpointSlices with the standard
     /// `multicluster.kubernetes.io` labels.
@@ -260,7 +272,22 @@ where
             ),
         ));
     }
+    // A Service name must not match both suffixes.
+    if parsed.pool_discovery.mcs().is_some()
+        && let Err(error) = frontend_service(&parsed).check(&parsed.pool_service_suffix)
+    {
+        return Err(command.error(ErrorKind::ArgumentConflict, error));
+    }
     Ok(parsed)
+}
+
+/// The pool frontend Service that `--frontend-service-suffix` and
+/// `--frontend-port-name` describe.
+fn frontend_service(args: &Args) -> FrontendService {
+    FrontendService {
+        suffix: args.frontend_service_suffix.clone(),
+        port_name: args.frontend_port_name.clone(),
+    }
 }
 
 #[tokio::main]
@@ -288,13 +315,21 @@ async fn main() -> Result<()> {
         .context("serve the Global Discovery Service")
 }
 
+fn lease(args: &Args) -> Result<Lease> {
+    Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
+        .context("check --heartbeat-interval-secs and --lease-duration-secs")
+}
+
+/// Where registrations go, as `--registration-storage` says.
+fn registration_storage(args: &Args, lease: Lease) -> Arc<MemoryPoolStore> {
+    match args.registration_storage {
+        RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
+    }
+}
+
 /// Pools from registrations; router replicas from `--router`.
 fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
-    let lease = Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
-        .context("check --heartbeat-interval-secs and --lease-duration-secs")?;
-    let registrations = match args.registration_storage {
-        RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
-    };
+    let registrations = registration_storage(args, lease(args)?);
     if args.routers.is_empty() {
         tracing::warn!(
             "no --router given, so GET /routers lists no Global Router replica for PoolRelays to \
@@ -310,8 +345,11 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     })
 }
 
-/// Pools from the PoolRelay Services that MCS imports, and router replicas
-/// from the router Service's.
+/// Pools from what MCS imports, joined with registrations: a pool is listed
+/// while MCS imports a Ready PoolRelay endpoint for it and one of its
+/// PoolRelays has registered within the lease. MCS gives the addresses; the
+/// registration gives the model, capabilities, capacity and location. Router
+/// replicas come from the router Service's imports.
 async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
@@ -323,22 +361,29 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
              --router-port-name"
         );
     };
+    let lease = lease(args)?;
+    let registrations = registration_storage(args, lease);
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
+    let imported = McsPoolDirectory::new(
+        client.clone(),
+        mcs,
+        args.pool_service_suffix.clone(),
+        frontend_service(args),
+    )
+    .context("check --frontend-service-suffix and --pool-service-suffix")?;
+    let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease);
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
         port_name: port_name.clone(),
     };
+    let registrar: Arc<dyn PoolRegistrar> = registrations;
     Ok(PoolDiscoveryBackend {
-        pools: Arc::new(McsPoolDirectory::new(
-            client.clone(),
-            mcs,
-            args.pool_service_suffix.clone(),
-        )),
+        pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-        registrar: None,
+        registrar: Some(registrar),
     })
 }
 
@@ -430,6 +475,9 @@ mod tests {
             "tls_cert_path",
             "tls_key_path",
             "pool_discovery",
+            "registration_storage",
+            "heartbeat_interval_secs",
+            "lease_duration_secs",
             "help",
         ];
         for arg in Args::command().get_arguments() {
@@ -468,41 +516,61 @@ mod tests {
         assert!(parse_args(["gds", ROUTER]).is_ok());
         assert_refused(&karmada(&[ROUTER]), "router", "registrations");
         assert_refused(
-            &karmada(&["--lease-duration-secs", "30"]),
-            "lease-duration-secs",
-            "registrations",
-        );
-        assert_refused(
-            &karmada(&["--registration-storage", "memory"]),
-            "registration-storage",
-            "registrations",
-        );
-        assert_refused(
             &["gds", "--router-service", "global-router"],
             "router-service",
             "karmada or mcs",
         );
         assert_refused(
-            &["gds", "--pool-service-suffix=-relay"],
-            "pool-service-suffix",
+            &["gds", "--frontend-service-suffix=-web"],
+            "frontend-service-suffix",
             "karmada or mcs",
+        );
+        // Every --pool-discovery value takes registrations.
+        assert!(
+            parse_args(karmada(&[
+                "--lease-duration-secs",
+                "30",
+                "--registration-storage",
+                "memory"
+            ]))
+            .is_ok()
         );
         // Flags left at their defaults are not refused, whatever their heading.
         assert!(parse_args(karmada(&[])).is_ok());
     }
 
     #[test]
-    fn pool_service_suffix_can_start_with_a_hyphen_but_not_be_empty() {
-        let args = parse_args(karmada(&["--pool-service-suffix=-pool-gateway"])).unwrap();
-        assert_eq!(args.pool_service_suffix, "-pool-gateway");
-        // An empty suffix would make every imported Service a pool.
-        assert!(parse_args(karmada(&["--pool-service-suffix="])).is_err());
-        // A suffix left out fails, rather than taking the next flag.
-        let error = parse_args(karmada(&[
-            "--pool-service-suffix",
-            "--listen=127.0.0.1:18496",
+    fn service_suffixes_can_start_with_a_hyphen_but_not_be_empty() {
+        let args = parse_args(karmada(&[
+            "--pool-service-suffix=-pool-gateway",
+            "--frontend-service-suffix=-web",
         ]))
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(args.pool_service_suffix, "-pool-gateway");
+        assert_eq!(args.frontend_service_suffix, "-web");
+        // An empty suffix would make every imported Service a pool.
+        for empty in ["--pool-service-suffix=", "--frontend-service-suffix="] {
+            assert!(parse_args(karmada(&[empty])).is_err());
+        }
+        // A suffix left out fails, rather than taking the next flag.
+        for flag in ["--pool-service-suffix", "--frontend-service-suffix"] {
+            let error = parse_args(karmada(&[flag, "--listen=127.0.0.1:18496"])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_frontend_and_pool_suffixes_must_differ() {
+        // The default PoolRelay suffix, `-pool-relay`, ends with `-relay`.
+        let error = parse_args(karmada(&["--frontend-service-suffix=-relay"])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert!(parse_args(karmada(&["--frontend-service-suffix=-web"])).is_ok());
+    }
+
+    #[test]
+    fn frontend_port_name_cannot_be_empty() {
+        let error = parse_args(karmada(&["--frontend-port-name="])).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
     }
 

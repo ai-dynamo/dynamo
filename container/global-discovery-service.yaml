@@ -4,16 +4,23 @@
 # Global Discovery Service with pools from Karmada, applied directly to the hub
 # cluster (not through Karmada). Replace IMAGE with the pushed image, for example:
 #   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service.yaml | kubectl apply -f -
-# It needs only read access to EndpointSlices. It lists the pools whose
-# `<DGD name>-pool-relay` Services Karmada imports, and the replicas of the
-# Global Router Service named by the --router-* arguments: set those to the
-# router's namespace, its Service and the port PoolRelays connect to.
+# It needs only read access to EndpointSlices. PoolRelays register their pools
+# with it (POST /pools), and it lists a pool while its registration is live and
+# Karmada imports a Ready endpoint of its `<DGD name>-pool-relay` Service. The
+# pool's frontends are the Ready endpoints of its `<DGD name>-frontend` Service,
+# exported the same way. It also lists the replicas of the Global Router
+# Service named by the --router-* arguments: set those to the router's
+# namespace, its Service and the port PoolRelays connect to.
 #
 # It reads the imported slices with the pod's credentials, so this cluster
-# needs a ServiceImport for each pool's PoolRelay Service and for the router
-# Service. To read the Karmada control plane instead, which holds every
-# exported Service's slices, mount its kubeconfig from a Secret, point
+# needs a ServiceImport for each pool's PoolRelay and frontend Services and for
+# the router Service. To read the Karmada control plane instead, which holds
+# every exported Service's slices, mount its kubeconfig from a Secret, point
 # KUBECONFIG at it, and grant the same read access there.
+#
+# With the default --registration-storage=memory, one instance keeps only the
+# registrations it receives, so run one, and have every PoolRelay register
+# with it.
 apiVersion: v1
 kind: Namespace
 metadata:
