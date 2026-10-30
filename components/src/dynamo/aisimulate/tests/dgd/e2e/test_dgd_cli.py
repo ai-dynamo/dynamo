@@ -7,6 +7,7 @@ import json
 import shlex
 import subprocess
 import sys
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,8 @@ _DGD_GOLDEN_CASES = {"aggregated", "disaggregated"}
 
 
 def _assert_dgd_golden(golden: Path, manifests: list[dict[str, Any]]) -> None:
-    if golden.exists() and list(yaml.safe_load_all(golden.read_text())) == manifests:
+    expected = golden.read_text() if golden.exists() else None
+    if expected is not None and list(yaml.safe_load_all(expected)) == manifests:
         return
 
     proposal = golden.with_name(f"{golden.stem}.new{golden.suffix}")
@@ -52,13 +54,23 @@ def _assert_dgd_golden(golden: Path, manifests: list[dict[str, Any]]) -> None:
         )
         for path in paths
     )
-    review_source = golden_arg if golden.exists() else "/dev/null"
+    review_source = golden_arg if expected is not None else "/dev/null"
+    diff = "\n".join(
+        unified_diff(
+            (expected or "").splitlines(),
+            proposal.read_text().splitlines(),
+            fromfile=review_source,
+            tofile=proposal_arg,
+            lineterm="",
+        )
+    )
     pytest.fail(
         f"DGD golden is missing or differs: {golden}\n"
         f"Actual CLI output was written to {proposal}; the golden was not changed.\n"
         f"Review this proposal: diff -u {review_source} {proposal_arg}\n"
         f"Accept only after reviewing this file: mv {proposal_arg} {golden_arg}\n"
-        "Then rerun this case."
+        f"Then rerun this case.\n\n{diff}",
+        pytrace=False,
     )
 
 

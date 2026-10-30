@@ -29,7 +29,9 @@ When a golden is missing or differs semantically, the test writes the actual CLI
 output beside it as `<stem>.new.yaml` and fails. The reviewed golden is never
 rewritten. Golden comparison runs before detailed Candidate assertions so a
 changed model or runtime image also produces a reviewable proposal. The failure
-prints exact per-file diff and acceptance commands. For example:
+includes the unified diff in the test log, so CI review does not depend on
+retaining files from the container. It also prints exact per-file diff and
+acceptance commands. For example:
 
 ```bash
 diff -u \
