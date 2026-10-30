@@ -16,6 +16,7 @@
 //! session affinity table as the request's affinity target.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{RoutingPartitionRef, WorkerId, WorkerType};
 
-use super::directory::PoolDirectory;
+use super::directory::{PoolDirectory, PoolEntry};
 use super::{AffinityConfig, CorePolicy};
 use crate::signals::{PoolOccupancy, PoolSignals};
 
@@ -201,11 +202,11 @@ pub struct HeadroomPicker {
     headroom_factor: f64,
 }
 
-struct Candidate {
+struct Candidate<'a> {
     row: usize,
     worker: WorkerId,
-    /// The pool's region, if the directory knows the worker.
-    region: Option<String>,
+    /// The pool, if the directory knows the worker.
+    entry: Option<&'a PoolEntry>,
     /// How full the pool is; `None` without a fresh report.
     occupancy: Option<PoolOccupancy>,
     /// Occupancy, 1 being full; `None` without a fresh report.
@@ -214,11 +215,11 @@ struct Candidate {
     distance: Option<Duration>,
 }
 
-impl Candidate {
+impl Candidate<'_> {
     /// The candidate in one word for the pick log: region, slots and KV
     /// occupancy, and the round trip in milliseconds; `?` when unknown.
     fn describe(&self) -> String {
-        let region = self.region.as_deref().unwrap_or("?");
+        let region = self.entry.map_or("?", |entry| entry.region.as_str());
         let (slots, kv) = match self.occupancy {
             Some(occupancy) => (
                 format!("{:.2}", occupancy.slots),
@@ -244,8 +245,11 @@ impl HeadroomPicker {
     }
 
     /// The candidates from least to most expensive.
-    fn place(&self, rows: &[ScoredWorkerCandidate]) -> Vec<Candidate> {
-        let pools = self.directory.snapshot();
+    fn place<'a>(
+        &self,
+        pools: &'a HashMap<WorkerId, PoolEntry>,
+        rows: &[ScoredWorkerCandidate],
+    ) -> Vec<Candidate<'a>> {
         let round_trips = self.signals.region_round_trips();
         let mut placed = rows
             .iter()
@@ -257,7 +261,7 @@ impl HeadroomPicker {
                 Candidate {
                     row,
                     worker,
-                    region: entry.map(|entry| entry.region.clone()),
+                    entry,
                     occupancy,
                     load: occupancy.map(|occupancy| occupancy.load),
                     distance: entry.and_then(|entry| {
@@ -285,7 +289,8 @@ impl WorkerPicker for HeadroomPicker {
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        let placed = self.place(input.candidates());
+        let pools = self.directory.snapshot();
+        let placed = self.place(&pools, input.candidates());
         let Some(first) = placed.first() else {
             return Err(WorkerSelectionPolicyError::failed("no candidates"));
         };
@@ -301,7 +306,7 @@ impl WorkerPicker for HeadroomPicker {
             .filter(|candidate| candidate.worker != default.worker)
             .find(|candidate| candidate.load.is_some_and(|load| 1.0 - load > need))
             .unwrap_or(default);
-        tracing::debug!(
+        tracing::trace!(
             candidates = ?placed.iter().map(Candidate::describe).collect::<Vec<_>>(),
             default = default.describe(),
             bound = bound.is_some(),
