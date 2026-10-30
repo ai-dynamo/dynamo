@@ -18,13 +18,17 @@ path = "src/main.rs"
 [dependencies]
 dynamo-global-common = { workspace = true }
 dynamo-global-router = { workspace = true }
+dynamo-global-router-store-dynamodb = { workspace = true }
 # For the PoolRelay protocol and the session header.
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-dynamodb = { workspace = true }
 axum = { workspace = true }
-clap = { version = "4.5.49", features = ["derive"] }
+clap = { version = "4.5.49", features = ["derive", "env"] }
 futures = { workspace = true }
 prometheus = { workspace = true }
 reqwest = { workspace = true }

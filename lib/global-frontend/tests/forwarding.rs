@@ -553,15 +553,16 @@ struct SessionRecorder {
     inner: RoundRobinSelector,
 }
 
+#[async_trait::async_trait]
 impl PoolSelector for SessionRecorder {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let session = request.session.map(str::to_owned);
         self.sessions.lock().unwrap().push(session);
-        self.inner.select(request, candidates)
+        self.inner.select(request, candidates).await
     }
 }
 
@@ -584,6 +585,64 @@ async fn the_selector_sees_the_session() {
     }
     let sessions = recorder.sessions.lock().unwrap();
     assert_eq!(*sessions, [Some("session-123".to_owned()), None]);
+}
+
+#[tokio::test]
+async fn independent_frontends_share_session_affinity() {
+    use dynamo_global_router::affinity::{
+        AffinityConfig, InMemoryAffinityStore, StoreBackedSessionAffinity,
+    };
+    use dynamo_global_router::{AffinitySelector, PoolSignals};
+
+    let blue_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async { axum::Json(json!({"pool": "blue"})) }),
+    ))
+    .await;
+    let green_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async { axum::Json(json!({"pool": "green"})) }),
+    ))
+    .await;
+    let mut blue = pool("blue", MODEL, &blue_server.url);
+    blue.location.region = "east".into();
+    let mut green = pool("green", MODEL, &green_server.url);
+    green.location.region = "west".into();
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let mut globals = Vec::new();
+    for region in ["east", "west"] {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let selector = Arc::new(AffinitySelector::new(
+            Arc::new(PoolSignals::new(in_flight.clone())),
+            region.into(),
+            2.0,
+            Arc::new(
+                StoreBackedSessionAffinity::new(store.clone(), Duration::from_secs(1800)).unwrap(),
+            ),
+            AffinityConfig::default(),
+        ));
+        globals.push(
+            global_frontend_with(vec![blue.clone(), green.clone()], selector, in_flight).await,
+        );
+    }
+    for global in &globals {
+        let response = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "shared-session")
+            .json(&chat(MODEL, "hi", false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok_json(response).await["pool"], "blue");
+    }
+    let response = client()
+        .post(globals[1].server.url.join("v1/chat/completions").unwrap())
+        .json(&chat(MODEL, "hi", false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_json(response).await["pool"], "green");
+    assert_eq!(store.len(), 1);
 }
 
 #[tokio::test]

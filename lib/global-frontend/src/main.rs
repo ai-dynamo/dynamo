@@ -3,6 +3,8 @@
 
 //! Global Frontend. See `dynamo_global_frontend` and the crate's README.
 
+mod affinity;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,8 +25,6 @@ use url::Url;
 
 /// How often the round trip to each pool is measured.
 const ROUND_TRIP_INTERVAL: Duration = Duration::from_secs(30);
-/// How often expired session pins are dropped.
-const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How each request picks a pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -74,8 +74,10 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
-    #[arg(long, default_value_t = 1800)]
+    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]
     session_idle_secs: u64,
+    #[command(flatten)]
+    affinity: affinity::AffinityArgs,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -161,6 +163,9 @@ async fn main() -> Result<()> {
     if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
         tracing::warn!("--pool-relay is used only by --router-policy affinity");
     }
+    if args.router_policy != RouterPolicy::Affinity && args.affinity.uses_dynamodb() {
+        bail!("--affinity-store dynamodb requires --router-policy affinity");
+    }
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -204,14 +209,14 @@ async fn main() -> Result<()> {
                 shutdown.child_token(),
             ));
             let idle = Duration::from_secs(args.session_idle_secs);
-            let selector = Arc::new(AffinitySelector::new(
+            let (affinity, config) = args.affinity.build(idle, shutdown.child_token()).await?;
+            Arc::new(AffinitySelector::new(
                 signals,
                 region,
                 args.headroom_factor,
-                idle,
-            ));
-            tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
-            selector
+                affinity,
+                config,
+            ))
         }
     };
     let app = app(pools, selector, in_flight, http, metrics);
@@ -223,18 +228,6 @@ async fn main() -> Result<()> {
     serve(listener, app, shutdown)
         .await
         .context("serve the Global Frontend")
-}
-
-/// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
-/// path, until `cancel` fires.
-async fn sweep_pins(selector: Arc<AffinitySelector>, cancel: CancellationToken) {
-    let mut ticks = tokio::time::interval(PIN_SWEEP_INTERVAL);
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = ticks.tick() => selector.sweep(),
-        }
-    }
 }
 
 async fn shutdown_signal() -> Result<()> {
@@ -304,5 +297,41 @@ mod tests {
     #[test]
     fn requires_a_pool() {
         assert!(Args::try_parse_from(["global-frontend"]).is_err());
+    }
+
+    #[test]
+    fn persistent_affinity_requires_table_and_shared_scope() {
+        let base = [
+            "global-frontend",
+            "--pool=east/dynamo/blue=qwen@http://blue:8000",
+            "--router-policy=affinity",
+            "--region=east",
+            "--affinity-store=dynamodb",
+        ];
+        assert!(Args::try_parse_from(base).is_err());
+        assert!(
+            Args::try_parse_from([&base[..], &["--affinity-ddb-table=sessions"]].concat()).is_err()
+        );
+        assert!(
+            Args::try_parse_from([&base[..], &["--affinity-scope=production"]].concat()).is_err()
+        );
+        let complete = [
+            &base[..],
+            &[
+                "--affinity-ddb-table=sessions",
+                "--affinity-scope=production",
+                "--affinity-ddb-region=us-east-2",
+                "--affinity-ddb-endpoint=http://127.0.0.1:18000",
+                "--affinity-consistent-reads=false",
+            ],
+        ]
+        .concat();
+        assert!(Args::try_parse_from(&complete).is_ok());
+        assert!(
+            Args::try_parse_from([&complete[..], &["--affinity-timeout-ms=0"]].concat()).is_err()
+        );
+        assert!(
+            Args::try_parse_from([&complete[..], &["--session-idle-secs=0"]].concat()).is_err()
+        );
     }
 }

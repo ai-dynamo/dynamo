@@ -2,112 +2,126 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use dashmap::DashMap;
+use async_trait::async_trait;
 use dynamo_global_common::PoolId;
 
+use super::{AffinityError, AffinityKey, SessionAffinity, WriteOutcome};
 use crate::Pool;
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
 use crate::signals::PoolSignals;
 
-/// Keeps each session's turns on one pool, so the pool's KV cache for the
-/// session is reused, and moves a session only when another pool has much
-/// more room.
+/// Scope and budget for best-effort affinity. The scope and policy must match
+/// across replicas that share bindings, independent of their AWS region.
+#[derive(Clone, Debug)]
+pub struct AffinityConfig {
+    pub scope: String,
+    pub policy: String,
+    /// Total budget for lookup, write, SDK retries and one conflict retry.
+    pub timeout: Duration,
+}
+
+impl Default for AffinityConfig {
+    fn default() -> Self {
+        Self {
+            scope: "default".into(),
+            policy: "headroom-v1".into(),
+            timeout: Duration::from_millis(100),
+        }
+    }
+}
+
+/// Keeps a session on its selected pool, moving only for substantially more
+/// headroom. New sessions start in the nearest region. Affinity never overrides
+/// candidate eligibility, and requests without a session do not access it.
 ///
-/// Pools are compared by how full they are against their own capacity (see
-/// [`PoolSignals::occupancy`]), so pools of any speed or size compare. A
-/// request's default pool is its session's pinned pool, even in another
-/// region, or else the least full pool in the nearest region. It goes
-/// elsewhere only when another pool has more than `headroom_factor` times
-/// the default's spare capacity, to the nearest such pool; a full default
-/// sends it to the nearest pool with any room, and keeps it if none has
-/// room. The session's pin moves with it.
-///
-/// Requests without a session ID are placed the same way and pin nothing.
-/// Pins belong to this process and expire after `idle` without a request;
-/// call [`Self::sweep`] periodically to free them.
-#[derive(Debug)]
+/// Storage failures or deadline expiry leave the request on the best candidate
+/// selected so far. Bindings describe selection, before upstream dispatch. A
+/// write timeout does not prove the write failed and never triggers rollback.
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
     region: String,
     headroom_factor: f64,
-    idle: Duration,
-    pins: DashMap<String, Pin>,
+    affinity: Arc<dyn SessionAffinity>,
+    config: AffinityConfig,
+    unavailable: AtomicBool,
     frontends: Cursors<PoolId>,
 }
 
-#[derive(Debug)]
-struct Pin {
-    pool: PoolId,
-    used: Instant,
-}
-
 impl AffinitySelector {
-    /// `region` is the region of this process, which every request enters.
     pub fn new(
         signals: Arc<PoolSignals>,
         region: String,
         headroom_factor: f64,
-        idle: Duration,
+        affinity: Arc<dyn SessionAffinity>,
+        config: AffinityConfig,
     ) -> Self {
         Self {
             signals,
             region,
             headroom_factor,
-            idle,
-            pins: DashMap::new(),
+            affinity,
+            config,
+            unavailable: AtomicBool::new(false),
             frontends: Cursors::default(),
         }
     }
-
-    /// Sessions with a live pin.
-    pub fn pinned_sessions(&self) -> usize {
-        self.pins.len()
-    }
-
-    fn pin(&self, session: &str, pool: &PoolId) {
-        let used = Instant::now();
-        match self.pins.get_mut(session) {
-            Some(mut pin) => {
-                if pin.pool != *pool {
-                    pin.pool = pool.clone();
-                }
-                pin.used = used;
-            }
-            None => {
-                let pool = pool.clone();
-                self.pins.insert(session.to_owned(), Pin { pool, used });
-            }
-        }
-    }
-
-    /// Drops expired pins. It visits every pin, so run it off the request
-    /// path.
-    pub fn sweep(&self) {
-        self.pins.retain(|_, pin| pin.used.elapsed() <= self.idle);
-    }
 }
 
+#[async_trait]
 impl PoolSelector for AffinitySelector {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let placed = place(candidates, &self.region, &self.signals);
-        let pinned = request.session.and_then(|session| {
-            let pin = self.pins.get(session)?;
-            if pin.used.elapsed() > self.idle {
-                return None;
-            }
-            placed
-                .iter()
-                .find(|candidate| candidate.pool.id == pin.pool)
-        });
-        let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
+        let mut choice = headroom(&placed, placed.first(), self.headroom_factor)?;
         if let Some(session) = request.session {
-            self.pin(session, &choice.pool.id);
+            let key = AffinityKey {
+                scope: self.config.scope.clone(),
+                policy: self.config.policy.clone(),
+                model: request.model.to_owned(),
+                session: session.to_owned(),
+            };
+            let update = async {
+                // At most one retry for a regional conditional-write conflict.
+                for _ in 0..2 {
+                    // A failed lookup propagates before any binding write.
+                    let observed = self.affinity.lookup(&key).await?;
+                    let pinned = observed.pool.as_ref().and_then(|pool| {
+                        placed.iter().find(|candidate| candidate.pool.id == *pool)
+                    });
+                    choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)
+                        .expect("placement candidates are nonempty");
+                    if self.affinity.bind(&key, &observed, &choice.pool.id).await?
+                        == WriteOutcome::Applied
+                    {
+                        return Ok::<(), AffinityError>(());
+                    }
+                }
+                tracing::debug!("affinity updates conflicted; using the selected pool");
+                Ok(())
+            };
+            match tokio::time::timeout(self.config.timeout, update).await {
+                Ok(Ok(())) => {
+                    if self.unavailable.swap(false, Ordering::Relaxed) {
+                        tracing::info!("session affinity storage recovered");
+                    }
+                }
+                Ok(Err(error)) => {
+                    if !self.unavailable.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(%error, "affinity unavailable; using the selected pool");
+                    }
+                }
+                Err(_) => {
+                    if !self.unavailable.swap(true, Ordering::Relaxed) {
+                        tracing::warn!("affinity deadline expired; using the selected pool");
+                    }
+                }
+            }
         }
         target(&self.frontends, choice.pool)
     }
@@ -187,6 +201,7 @@ mod tests {
     use crate::signals::LoadReport;
 
     use super::*;
+    use crate::affinity::{InMemoryAffinityStore, StoreBackedSessionAffinity};
 
     const OHIO: &str = "us-east-2";
     const OREGON: &str = "us-west-2";
@@ -266,126 +281,106 @@ mod tests {
     // Occupancies below are fractions of each pool's own capacity.
 
     fn selector(signals: &Arc<PoolSignals>, idle: Duration) -> AffinitySelector {
-        AffinitySelector::new(signals.clone(), OHIO.into(), 2.0, idle)
+        AffinitySelector::new(
+            signals.clone(),
+            OHIO.into(),
+            2.0,
+            Arc::new(
+                StoreBackedSessionAffinity::new(Arc::new(InMemoryAffinityStore::default()), idle)
+                    .unwrap(),
+            ),
+            AffinityConfig::default(),
+        )
     }
 
-    fn pick(selector: &AffinitySelector, pools: &[Pool], session: Option<&str>) -> String {
+    async fn pick(selector: &AffinitySelector, pools: &[Pool], session: Option<&str>) -> String {
         let candidates = pools.iter().collect::<Vec<_>>();
         let request = RoutingRequest::new("qwen").with_session(session);
-        let target = selector.select(&request, &candidates).unwrap();
+        let target = selector.select(&request, &candidates).await.unwrap();
         target.frontend.host_str().unwrap().to_owned()
     }
 
-    #[test]
-    fn moves_for_twice_the_room_and_does_not_flip_back() {
+    #[tokio::test]
+    async fn moves_for_twice_the_room_and_does_not_flip_back() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // 10% against 2%: 0.9 spare against 0.98, nothing to gain.
         set_occupancy(&pools, &signals, [0.1, 0.02, 0.02, 0.02]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // 50% against 30%: 0.5 spare against 0.7, under twice.
         set_occupancy(&pools, &signals, [0.5, 0.3, 0.3, 0.3]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // 80% against 10%: 0.2 against 0.9, so to the nearest such pool.
         set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
         // Ohio-a recovers to 40% and Ohio-b fills to 60%: 0.4 spare
         // against 0.6 is under twice, so no flip back.
         set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
     }
 
-    #[test]
-    fn fails_over_from_a_full_pool_or_stays_if_all_are_full() {
+    #[tokio::test]
+    async fn fails_over_from_a_full_pool_or_stays_if_all_are_full() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio-a is full; Ohio-b has a little room, Oregon more, but the
         // nearest pool with any room wins.
         set_occupancy(&pools, &signals, [1.2, 0.95, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
         // Every pool is full: moving would only cost a cold prefill.
         set_occupancy(&pools, &signals, [1.1, 1.2, 1.1, 1.3]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
     }
 
-    #[test]
-    fn lets_a_quiet_region_take_load_from_busy_ones() {
+    #[tokio::test]
+    async fn lets_a_quiet_region_take_load_from_busy_ones() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.2, 0.2, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio and Oregon at 90%, Tokyo at 20%: only Tokyo has twice the room.
         set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "tokyo-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "tokyo-a");
         // A new session from Ohio goes there too.
-        assert_eq!(pick(&selector, &pools, Some("t")), "tokyo-a");
+        assert_eq!(pick(&selector, &pools, Some("t")).await, "tokyo-a");
         // With Ohio at 60%, a new session stays local: 0.4 spare against
         // Tokyo's 0.8 is not more than twice.
         set_occupancy(&pools, &signals, [0.6, 0.7, 0.9, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("u")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("u")).await, "ohio-a");
     }
 
-    #[test]
-    fn requests_without_a_session_are_placed_but_not_pinned() {
+    #[tokio::test]
+    async fn requests_without_a_session_are_placed_but_not_pinned() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.5, 0.3, 0.9, 0.0]);
-        assert_eq!(pick(&selector, &pools, None), "ohio-b");
+        assert_eq!(pick(&selector, &pools, None).await, "ohio-b");
         set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.0]);
-        assert_eq!(pick(&selector, &pools, None), "tokyo-a");
-        assert_eq!(selector.pinned_sessions(), 0);
+        assert_eq!(pick(&selector, &pools, None).await, "tokyo-a");
     }
 
-    #[test]
-    fn a_pool_whose_load_is_unknown_counts_as_full() {
+    #[tokio::test]
+    async fn a_pool_whose_load_is_unknown_counts_as_full() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio-a's Relay goes quiet while every other pool is full: the
         // session stays rather than move to a full pool.
         set_occupancy(&pools, &signals, [0.1, 1.0, 1.1, 1.0]);
         signals.forget(&pools[0].id);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // Once a pool has room, the session goes to the nearest such pool.
         set_occupancy(&pools, &signals, [0.1, 1.0, 0.9, 0.2]);
         signals.forget(&pools[0].id);
-        assert_eq!(pick(&selector, &pools, Some("s")), "oregon-a");
-    }
-
-    #[test]
-    fn forgets_idle_pins() {
-        let (pools, signals) = fleet();
-        let selector = selector(&signals, Duration::from_millis(200));
-        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
-        // 0.5 spare against 0.9 is under twice, so the pin holds...
-        set_occupancy(&pools, &signals, [0.5, 0.1, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
-        // ...until it expires, and the session starts over on the emptier pool.
-        std::thread::sleep(Duration::from_millis(250));
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
-        selector.sweep();
-        assert_eq!(selector.pinned_sessions(), 1);
-    }
-
-    #[test]
-    fn sweep_drops_expired_pins() {
-        let (pools, signals) = fleet();
-        let selector = selector(&signals, Duration::ZERO);
-        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        pick(&selector, &pools, Some("s"));
-        assert_eq!(selector.pinned_sessions(), 1);
-        std::thread::sleep(Duration::from_millis(1));
-        selector.sweep();
-        assert_eq!(selector.pinned_sessions(), 0);
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "oregon-a");
     }
 }
