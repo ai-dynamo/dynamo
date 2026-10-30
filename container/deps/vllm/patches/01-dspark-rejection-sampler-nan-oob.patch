@@ -1,0 +1,106 @@
+--- a/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
+@@ -108,7 +108,12 @@
+         mask=blocks_mask,
+         other=float("-inf"),
+     )
++    # PR #50183: NaN local maxes make tl.argmax return an out-of-range block
++    # index (into the padded region), causing an OOB read. Map NaN to -inf
++    # and clamp the block index so it stays in range.
++    local_max = tl.where(local_max != local_max, float("-inf"), local_max)
+     max_block_idx = tl.argmax(local_max, axis=0)
++    max_block_idx = tl.minimum(max_block_idx, vocab_num_blocks - 1)
+     return tl.load(
+         target_local_argmax_ptr + logit_idx * target_local_argmax_stride + max_block_idx
+     ).to(tl.int64)
+@@ -508,6 +513,7 @@
+     # [num_logits, num_blocks]
+     local_residual_mass_ptr,
+     local_residual_mass_stride,
++    vocab_size,
+     vocab_num_blocks,
+     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+     HAS_DRAFT_LOGITS: tl.constexpr,
+@@ -573,6 +579,13 @@
+                     logit_idx,
+                     vocab_num_blocks,
+                     PADDED_VOCAB_NUM_BLOCKS,
++                )
++                # Issue #53029: bounds-validate before the store so an OOB
++                # token id can never escape into the sampled buffer.
++                target_argmax = tl.where(
++                    (target_argmax < 0) | (target_argmax >= vocab_size),
++                    0,
++                    target_argmax,
+                 )
+                 if SYNTHETIC_MODE:
+                     rate = tl.load(synthetic_conditional_rates_ptr + i)
+@@ -822,6 +835,7 @@
+     expanded_idx_mapping_ptr,
+     # [max_num_reqs]
+     temp_ptr,
++    vocab_size,
+     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
+ ):
+     req_idx = tl.program_id(0)
+@@ -848,13 +862,33 @@
+         resampled_local_max_ptr + req_idx * resampled_local_max_stride + block,
+         mask=mask,
+         other=float("-inf"),
++    )
++    # PR #50183: NaN max values (from NaN target logits) make tl.argmax
++    # return an out-of-range block index (into the padded region), causing
++    # an OOB read of resampled_local_argmax. Map NaN to -inf and clamp the
++    # block index so argmax stays in range.
++    resampled_local_max = tl.where(
++        resampled_local_max != resampled_local_max,
++        float("-inf"),
++        resampled_local_max,
+     )
+     resampled_max_block_idx = tl.argmax(resampled_local_max, axis=0)
++    resampled_max_block_idx = tl.minimum(
++        resampled_max_block_idx, resample_num_blocks - 1
++    )
+     resampled = tl.load(
+         resampled_local_argmax_ptr
+         + req_idx * resampled_local_argmax_stride
+         + resampled_max_block_idx,
+     )
++    # Issue #53029: the resample path can produce token id == vocab_size
++    # (or other OOB ids). Bounds-validate at the store and substitute a
++    # valid fallback token (0) so downstream index_select cannot assert.
++    resampled = tl.where(
++        (resampled < 0) | (resampled >= vocab_size),
++        0,
++        resampled,
++    )
+     tl.store(
+         sampled_ptr + req_idx * sampled_stride + num_sampled,
+         resampled,
+@@ -888,6 +922,10 @@
+     use_fp64: bool = False,
+     use_block_verification: bool = False,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
++    assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
++    assert draft_logits is None or (
++        draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
++    )
+     num_reqs = cu_num_logits.shape[0] - 1
+     num_logits, vocab_size = target_logits.shape
+     draft_logits_stride_0 = 0
+@@ -1060,6 +1098,7 @@
+         cumulative_log_p,
+         local_residual_mass,
+         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
++        vocab_size,
+         vocab_num_blocks,
+         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+         HAS_DRAFT_LOGITS=has_draft_logits,
+@@ -1120,6 +1159,7 @@
+         cu_num_logits,
+         expanded_idx_mapping,
+         temperature,
++        vocab_size,
+         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+     )
+     return sampled, num_sampled
