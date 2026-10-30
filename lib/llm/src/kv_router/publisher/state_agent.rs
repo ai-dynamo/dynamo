@@ -651,6 +651,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
             let session_id = placement_event.session_id;
+            let shared_cache_eligible = placement_event.shared_cache_eligible;
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -725,6 +726,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ),
             };
             router_event.session_id = session_id;
+            router_event.shared_cache_eligible = shared_cache_eligible;
             // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
             // admission and one best-effort publish, with no completion acknowledgement.
             // Cleared is stronger and completes every affected tier before publication.
@@ -2072,6 +2074,7 @@ mod tests {
 
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
         RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(block)],
             parent_block_hash: None,
             token_ids: vec![10, 11, 12, 13],
@@ -2671,7 +2674,8 @@ mod tests {
             first.generation,
             1,
             vec![
-                store(first_worker, ResidencyDomain::Worker, None, 101, 11),
+                store(first_worker, ResidencyDomain::Worker, None, 101, 11)
+                    .with_shared_cache_eligibility(true),
                 store(first_worker, ResidencyDomain::CacheOwner, None, 101, 11),
             ],
         )
@@ -2721,6 +2725,8 @@ mod tests {
             ResidencyOwner::Worker(first_worker)
         );
         assert_eq!(events[1].state_source, Some(owner));
+        assert!(events[1].shared_cache_eligible);
+        assert!(!events[2].shared_cache_eligible);
         assert_eq!(
             events[2].residency_owner().unwrap(),
             ResidencyOwner::CacheOwner(owner)

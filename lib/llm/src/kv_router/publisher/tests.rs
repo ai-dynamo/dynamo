@@ -389,6 +389,7 @@ mod test_event_processing {
     fn test_convert_event_block_stored() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
             parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
@@ -425,6 +426,7 @@ mod test_event_processing {
         let token_ids = vec![1, 2, 3, 4];
 
         let base_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -442,6 +444,7 @@ mod test_event_processing {
             session_id: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -502,6 +505,7 @@ mod test_event_processing {
         let wc = Arc::new(AtomicU32::new(0));
 
         let evt1 = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -519,6 +523,7 @@ mod test_event_processing {
             session_id: None,
         };
         let evt2 = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -1797,6 +1802,7 @@ mod tests_startup_helpers {
         let batch = KvEventBatch {
             ts: 0.0,
             events: vec![RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
                 block_hashes: vec![BlockHashValue::Unsigned(64)],
                 parent_block_hash: None,
                 token_ids: vec![4, 5, 6, 7],
@@ -1815,7 +1821,17 @@ mod tests_startup_helpers {
             }],
             data_parallel_rank: Some(0),
         };
-        let payload = rmps::to_vec(&batch).unwrap();
+        let payload =
+            rmps::to_vec_named(&(batch.ts, &batch.events, batch.data_parallel_rank)).unwrap();
+        let decoded: KvEventBatch =
+            rmps::from_slice(&payload).expect("failed to decode ZMQ test event");
+        assert!(matches!(
+            decoded.events.as_slice(),
+            [RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
+                ..
+            }]
+        ));
 
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
             let mut publish_interval =

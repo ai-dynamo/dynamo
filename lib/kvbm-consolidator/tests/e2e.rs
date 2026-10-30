@@ -62,6 +62,7 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
         TestBatch(
             1_000.0,
             vec![RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
                 block_hashes: vec![BlockHashValue::Unsigned(1)],
                 parent_block_hash: None,
                 token_ids: vec![10, 20, 30, 40],
@@ -84,6 +85,7 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
         TestBatch(
             2_000.0,
             vec![RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
                 block_hashes: vec![BlockHashValue::Unsigned(2)],
                 parent_block_hash: Some(BlockHashValue::Unsigned(1)),
                 token_ids: vec![50, 60, 70, 80],

@@ -83,6 +83,7 @@ pub fn convert_event(
             locality: _,
             ownership: _,
             session_id,
+            shared_cache_eligible,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -143,6 +144,13 @@ pub fn convert_event(
             let placement_event = PlacementEvent::new(
                 Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
                 event,
+            )
+            .with_shared_cache_eligibility(
+                shared_cache_eligible
+                    && is_eagle != Some(true)
+                    && block_mm_infos
+                        .as_ref()
+                        .is_none_or(|infos| infos.iter().all(Option::is_none)),
             );
             return Some(match session_id {
                 Some(session_id) => placement_event.with_session_id(session_id),
