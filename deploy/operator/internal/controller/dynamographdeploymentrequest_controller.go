@@ -1498,6 +1498,23 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	return gpu.DiscoveryFailureReason(err)
 }
 
+func huggingFaceTokenEnv(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) []corev1.EnvVar {
+	if ptr.Deref(dgdr.Spec.Unauthenticated, false) {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{
+			Name: "HUGGING_FACE_HUB_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					Name: "hf-token-secret",
+					Key:  "HF_TOKEN",
+				},
+			},
+		},
+	}
+}
+
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
 // It returns true when a DGDR or Job write must be observed before advancing.
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
@@ -1575,30 +1592,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Common environment variables
-		profilerEnv := []corev1.EnvVar{
-			{
-				Name: "HUGGING_FACE_HUB_TOKEN",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						Name: "hf-token-secret",
-						Key:  "HF_TOKEN",
-					},
-				},
-			},
-			// DGDR metadata for setting ownerReferences
-			{
+		profilerEnv := huggingFaceTokenEnv(dgdr)
+
+		// DGDR metadata for setting ownerReferences
+		profilerEnv = append(profilerEnv,
+			corev1.EnvVar{
 				Name:  "DGDR_NAME",
 				Value: dgdr.Name,
 			},
-			{
+			corev1.EnvVar{
 				Name:  "DGDR_NAMESPACE",
 				Value: dgdr.Namespace,
 			},
-			{
+			corev1.EnvVar{
 				Name:  "DGDR_UID",
 				Value: string(dgdr.UID),
 			},
-		}
+		)
 
 		// Build volume mounts
 		volumeMounts := []corev1.VolumeMount{

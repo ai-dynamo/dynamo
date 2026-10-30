@@ -320,6 +320,14 @@ spec:
                     when its tag does not identify the Dynamo runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
+                unauthenticated:
+                  description: |-
+                    Unauthenticated indicates that the model does not require Hugging Face
+                    credentials. When true, the profiling job and the generated
+                    DynamoGraphDeployment omit every hf-token-secret reference entirely, so
+                    their pods start without waiting for the Secret. When absent or false,
+                    both reference the Secret as required and pods block until it exists.
+                  type: boolean
                 useMocker:
                   description: |-
                     UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
@@ -343,7 +351,7 @@ spec:
                 - message: native v1alpha1 requests require backend and profilingConfig
                   rule: has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))
                 - message: v1beta2 is mutually exclusive with native v1alpha1 fields
-                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))'
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.unauthenticated) || has(self.deploymentOverrides))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:
@@ -9355,6 +9363,14 @@ spec:
                       description: TTFT is the Time To First Token target in milliseconds.
                       type: number
                   type: object
+                unauthenticated:
+                  description: |-
+                    Unauthenticated indicates that the model does not require Hugging Face
+                    credentials. When true, the profiling job and the generated
+                    DynamoGraphDeployment omit every hf-token-secret reference entirely, so
+                    their pods start without waiting for the Secret. When absent or false,
+                    both reference the Secret as required and pods block until it exists.
+                  type: boolean
                 v1beta2:
                   description: |-
                     V1Beta2 losslessly preserves a native v1beta2 spec while this object is
@@ -9394,7 +9410,7 @@ spec:
                 - message: exactly one of native v1beta1 fields or v1beta2 must be specified
                   rule: has(self.v1beta2) != has(self.model)
                 - message: v1beta2 is mutually exclusive with native v1beta1 fields
-                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply) || has(self.unauthenticated))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:

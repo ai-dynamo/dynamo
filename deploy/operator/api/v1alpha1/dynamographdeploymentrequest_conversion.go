@@ -321,6 +321,7 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	autoApply := src.AutoApply
 	dst.AutoApply = &autoApply
+	dst.Unauthenticated = src.Unauthenticated
 
 	if src.Backend != "" {
 		dst.Backend = v1beta1.BackendType(src.Backend)
@@ -589,6 +590,7 @@ func ConvertToDynamoGraphDeploymentRequestSpec(src *v1beta1.DynamoGraphDeploymen
 	} else {
 		dst.AutoApply = true // v1beta1 default
 	}
+	dst.Unauthenticated = src.Unauthenticated
 
 	if src.Backend != "" {
 		dst.Backend = string(src.Backend)

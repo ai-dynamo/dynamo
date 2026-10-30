@@ -110,6 +110,10 @@ Only `model` is unconditionally required by the schema. Admission rejects a new 
   Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied.
 </ParamField>
 
+<ParamField path="unauthenticated" type="boolean" default="false">
+  Set to `true` when the model does not require Hugging Face credentials. The profiling job and the generated DGD then omit every `hf-token-secret` reference entirely.
+</ParamField>
+
 ### Profiler image version compatibility
 
 When `spec.image` is omitted, the operator defaults it on creation to

@@ -304,6 +304,10 @@ class DynamoGraphDeploymentRequestNativeSpec(BaseModel):
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )
+    unauthenticated: Optional[bool] = Field(
+        default=None,
+        description="Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.",
+    )
 
 
 class DynamoGraphDeploymentRequestSpec(DynamoGraphDeploymentRequestNativeSpec):

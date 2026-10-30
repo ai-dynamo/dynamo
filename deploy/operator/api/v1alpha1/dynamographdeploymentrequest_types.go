@@ -194,6 +194,14 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Users can then manually create a DGD using the generated spec.
 	AutoApply bool `json:"autoApply,omitempty"`
 
+	// Unauthenticated indicates that the model does not require Hugging Face
+	// credentials. When true, the profiling job and the generated
+	// DynamoGraphDeployment omit every hf-token-secret reference entirely, so
+	// their pods start without waiting for the Secret. When absent or false,
+	// both reference the Secret as required and pods block until it exists.
+	// +optional
+	Unauthenticated *bool `json:"unauthenticated,omitempty"`
+
 	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
 	// Only applicable when AutoApply is true.
 	// +kubebuilder:validation:Optional
@@ -206,7 +214,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // Native v1alpha1 fields and the V1Beta2 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1alpha1 fields or v1beta2 must be specified"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))",message="native v1alpha1 requests require backend and profilingConfig"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.unauthenticated) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
