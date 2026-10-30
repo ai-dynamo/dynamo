@@ -316,6 +316,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
+        transfer_local_prefix_blocks: usize,
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
@@ -325,23 +326,17 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = context
-            .request
-            .shared_cache_hits
-            .as_ref()
-            .map_or(0, |hits| {
-                hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
-            });
+        let shared_beyond_device_blocks = context.shared_cache_hits().map_or(0, |hits| {
+            hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+        });
         // Blocks a fetch would add beyond everything this worker already holds.
         // Raw device overlap: `cache.device_overlap_blocks` may be the effective estimate.
         let fetchable_blocks = row
             .transfer
             .and_then(|transfer| transfer.source_prefix_blocks)
             .map_or(0, |source_blocks| {
-                let local_blocks = context
-                    .request
-                    .transfer_local_prefix_blocks_for(worker)
-                    .saturating_add(cache.disk_overlap_blocks as usize);
+                let local_blocks =
+                    transfer_local_prefix_blocks.saturating_add(cache.disk_overlap_blocks as usize);
                 source_blocks.saturating_sub(u32::try_from(local_blocks).unwrap_or(u32::MAX))
             });
         let remote_blocks = shared_beyond_device_blocks + fetchable_blocks;
@@ -391,7 +386,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -407,10 +402,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_tokens = if context.track_prefill_tokens {
             if load.available {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = context.request.isl_tokens.saturating_sub(cached_tokens);
+                let uncached_tokens = context.isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                context.request.isl_tokens
+                context.isl_tokens()
             }
         } else {
             0
@@ -428,7 +423,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if remote_blocks > 0 {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared or fetchable blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -445,7 +440,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             );
         } else {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -468,8 +463,15 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
+        transfer_local_prefix_blocks: usize,
     ) -> f64 {
-        let base_score = self.worker_logit(context, default_context, row, "Formula");
+        let base_score = self.worker_logit(
+            context,
+            default_context,
+            row,
+            transfer_local_prefix_blocks,
+            "Formula",
+        );
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -517,7 +519,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         );
         return Some((
             worker,
-            scorer.worker_logit(&input.context, default_context, &row, "Pinned formula"),
+            scorer.worker_logit(
+                &input.context,
+                default_context,
+                &row,
+                input.request.transfer_local_prefix_blocks_for(worker),
+                "Pinned formula",
+            ),
         ));
     }
 
@@ -539,6 +547,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
                 config,
                 preferred_taint_multiplier,
             ),
+            input.request.transfer_local_prefix_blocks_for(worker),
         )
     };
 
@@ -694,6 +703,7 @@ mod tests {
                     &workers[&worker.worker_id],
                     None,
                 ),
+                request.transfer_local_prefix_blocks_for(worker),
                 "test",
             )
     }

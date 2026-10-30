@@ -210,17 +210,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         Self {
             request,
             cache_snapshot: cache_snapshot(request),
-            context: WorkerSelectionContext {
-                request,
-                request_blocks: request.request_blocks(block_size),
-                block_size,
-                track_prefill_tokens: request.track_prefill_tokens,
-                pinned_worker: request.pinned_worker,
-                router_temperature_override: request
-                    .router_config_override
-                    .as_ref()
-                    .and_then(|config| config.router_temperature),
-            },
+            context: WorkerSelectionContext::from_request(request, block_size),
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
             kv_transfer_sources: OnceCell::new(),
         }
