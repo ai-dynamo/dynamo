@@ -1429,12 +1429,9 @@ mod tests {
 
     #[tokio::test]
     async fn generate_forwards_bypass_marker_only_to_opted_in_clients() {
+        use crate::kv_router::LlmDispatch;
         use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
-        use dynamo_runtime::{
-            DistributedRuntime, Runtime,
-            distributed::DistributedConfig,
-            pipeline::{PushRouter, StreamingDispatch},
-        };
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -1476,14 +1473,14 @@ mod tests {
         .await
         .unwrap();
         let dispatch = Arc::new(RecordingDecodeDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
-            client,
-            RouterMode::KV,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let host = Arc::new(RoutingHost::new(inner, Arc::new(chooser), None).unwrap());
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::KV)
+                .kv_router(Arc::new(chooser))
+                .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+                .build()
+                .await
+                .unwrap(),
+        );
         // No KV events in this test, so nothing is cached and the net-new ratio is
         // 1.0; a ratio threshold above 1.0 makes the ISL policy bypass every request.
         let router = active_conditional_router_with(KvRouterConfig {
