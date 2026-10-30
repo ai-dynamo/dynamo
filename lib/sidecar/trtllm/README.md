@@ -30,8 +30,8 @@ supported, even when `--context-length` is supplied.
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
 > The standalone launch and deployment examples use
 > `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`, which includes
-> image URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
-> The nightly CI job tests image passthrough against the latest regular upstream nightly;
+> image/video URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
+> The nightly CI job tests image and video passthrough against the latest regular upstream nightly;
 > it also supports manual dispatch. The examples below stay pinned to the validated version.
 
 ## Support matrix

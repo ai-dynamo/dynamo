@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: TRT-LLM Sidecar Upstream Nightly Image
+name: TRT-LLM Sidecar Upstream Nightly Media
 
 on:
   workflow_call:
@@ -19,14 +19,14 @@ permissions:
 
 jobs:
   build:
-    name: Build image integration client
+    name: Build media integration client
     runs-on: prod-builder-v3
     timeout-minutes: 60
     outputs:
       image: ${{ steps.config.outputs.image }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Test nightly selection
+      - name: Test nightly selection and media harness
         run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
       - name: Resolve latest upstream nightly
         id: config
@@ -57,7 +57,11 @@ jobs:
           retention-days: 7
 
   test:
-    name: Upstream TRT-LLM image integration (1 GPU)
+    name: Upstream TRT-LLM ${{ matrix.media }} integration (1 GPU)
+    strategy:
+      fail-fast: false
+      matrix:
+        media: [image, video]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
@@ -84,18 +88,20 @@ jobs:
           set -euo pipefail
           source lib/sidecar/trtllm/launch/common.sh
           trtllm_ensure_openengine_bindings python3
-      - name: Run live image integration test
+      - name: Run live ${{ matrix.media }} integration test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: >-
           python3 lib/sidecar/trtllm/ci/run_image_test.py
           --binary trtllm-image-tests/trtllm-image-tests
           --config trtllm-image-tests/nightly.json
+          --media ${{ matrix.media }}
+          --results test-results/trtllm-nightly-${{ matrix.media }}
       - name: Upload engine logs and test results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: trtllm-nightly-image-results-${{ github.sha }}
-          path: test-results/trtllm-nightly-image/
+          name: trtllm-nightly-${{ matrix.media }}-results-${{ github.sha }}
+          path: test-results/trtllm-nightly-${{ matrix.media }}/
           if-no-files-found: warn
           retention-days: 7

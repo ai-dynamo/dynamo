@@ -377,8 +377,9 @@ planner:
   - '!**/*.rst'
 
 sidecar_trtllm_image:
-  # PR CI runs resolver CPU tests; the GPU test runs independently in nightly CI.
+  # PR CI runs nightly resolver/harness CPU tests; GPU cases run in nightly CI.
   - 'lib/sidecar/trtllm/ci/**'
+  - 'lib/llm/tests/data/media/triangle_240p_10.mp4'
   - '.github/actions/changed-files/**'
   - '.github/filters.yaml'
   - '.github/workflows/pr.yaml'

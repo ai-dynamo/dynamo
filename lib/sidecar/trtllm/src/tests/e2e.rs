@@ -450,8 +450,8 @@ async fn e2e_real_openengine_video() {
         .expect("start against the live video-capable server");
 
     let token_ids = vec![
-        151644, 872, 198, 151652, 151656, 151653, 74785, 279, 7218, 6083, 323, 1181, 5106, 304,
-        825, 2805, 11652, 13, 151645, 198, 151644, 77091, 198,
+        151644, 872, 198, 151652, 151656, 151653, 74785, 279, 6083, 323, 1181, 11379, 304, 419,
+        2766, 13, 151645, 198, 151644, 77091, 198,
     ];
     let mut request = PreprocessedRequest::builder()
         .model(model)
@@ -491,6 +491,22 @@ async fn e2e_real_openengine_video() {
         usage.prompt_tokens, usage.completion_tokens
     );
 
+    if let Ok(path) = std::env::var("TRTLLM_E2E_RESULT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "token_ids": generated,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            }))
+            .expect("serialize video result"),
+        )
+        .expect("write video result");
+    }
+    assert!(
+        usage.completion_tokens > 0,
+        "expected completion token usage"
+    );
     assert!(!generated.is_empty(), "expected video-conditioned output");
     assert!(
         usage.prompt_tokens > token_ids.len() as u32,
