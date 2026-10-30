@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+import kr8s
+
 # The request defaults, prompt and response validation are shared with
 # tests/deploy/test_dgd.py via dgd_utils, a non-test module -- so these tests
 # assert the same response contract as every other deploy test, and a fix to
@@ -159,6 +161,11 @@ def runtime_version_override(image: str) -> str | None:
     return re.split(r"[-+]", version, maxsplit=1)[0]
 
 
+# Kubernetes' message when a container has no previous instance to read, e.g.
+# 'previous terminated container "main" in pod "x" not found'.
+_NO_PREVIOUS_INSTANCE = "previous terminated container"
+
+
 def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     """Return this pod's logs, including the previous container instance.
 
@@ -192,10 +199,9 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
                         logger,
                     )
                 )
-            except _KR8S_VCLUSTER_CONNECTION_ERRORS:
-                raise
-            except Exception as e:  # noqa: BLE001 - no previous instance is normal
-                if not previous:
+            except kr8s.ServerError as e:
+                # A container that never restarted has no previous instance.
+                if not (previous and _NO_PREVIOUS_INSTANCE in str(e)):
                     raise
                 logger.debug(
                     "logs(previous=%s) unavailable for %s/%s: %s",

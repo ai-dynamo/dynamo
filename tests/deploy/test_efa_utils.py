@@ -200,7 +200,9 @@ def _fake_pod(current_reads: list, previous_read: BaseException) -> MagicMock:
     return pod
 
 
-_NO_PREVIOUS = kr8s.ServerError("previous terminated container not found")
+_NO_PREVIOUS = kr8s.ServerError(
+    'previous terminated container "main" in pod "x" not found'
+)
 
 
 @pytest.mark.pre_merge
@@ -230,4 +232,15 @@ def test_read_pod_logs_raises_when_tunnel_stays_down(monkeypatch) -> None:
     )
 
     with pytest.raises(httpx.ConnectError):
+        _read_pod_logs(pod)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_read_pod_logs_raises_other_previous_instance_errors() -> None:
+    """Only a missing previous instance is skipped; other read errors fail the read."""
+    pod = _fake_pod([_LIBFABRIC_LOG], kr8s.ServerError("pods is forbidden"))
+
+    with pytest.raises(kr8s.ServerError, match="forbidden"):
         _read_pod_logs(pod)
