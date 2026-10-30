@@ -630,7 +630,7 @@ fn remote_url_policy_is_enforced_before_engine_dispatch() {
 async fn check_remote_url_policy(allow_remote: bool) {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    advertise_media(&fixture, &["image", "video"]);
+    advertise_media(&fixture, &["image", "video", "audio"]);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
     for (key, media) in [
@@ -665,6 +665,22 @@ async fn check_remote_url_policy(allow_remote: bool) {
         (
             "video_url",
             MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("http://example.com/audio.wav".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("HTTPS://example.com/audio.wav".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::Url("https://example.com/audio.wav".parse().unwrap()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("data:audio/wav;base64,YXVkaW8=".into()),
         ),
     ] {
         let inline = matches!(&media, MultimodalData::RawUrl(url) if url.starts_with("data:"));
