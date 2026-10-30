@@ -5902,6 +5902,7 @@ policy_classes:
                         ExternalSequenceBlockHash(102),
                     ],
                     owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
@@ -6000,6 +6001,7 @@ policy_classes:
                 kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
                     owner_prefix_blocks: vec![(worker.into(), 1)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {

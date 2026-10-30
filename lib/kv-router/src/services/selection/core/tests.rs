@@ -607,6 +607,129 @@ async fn state_agent_workers_are_not_router_hint_sources() {
 }
 
 #[tokio::test]
+async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        BlockHashOptions, ExternalSequenceBlockHash, ResidencyProjection, ResidencyRoutingSnapshot,
+        RouterEvent, RouterHintSourceMetadata, compute_block_hash_for_seq,
+        compute_seq_hash_for_block,
+    };
+
+    let owner = |id| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([id; 16], IdentitySource::Explicit),
+        )
+    };
+    let tokens: Vec<_> = (0..80).collect();
+    let local = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+    let hashes: Vec<_> = local.iter().map(|hash| hash.0).collect();
+    let sequence: Vec<_> = compute_seq_hash_for_block(&local)
+        .into_iter()
+        .map(ExternalSequenceBlockHash)
+        .collect();
+    let core = local_core(test_config(true));
+    for id in [1, 2, 3, 4, 5, 7] {
+        let mut worker = worker_with_kv_events(id);
+        worker.router_hint_worker_type = Some("decode".to_string());
+        core.upsert_worker(worker).await.unwrap();
+    }
+    let entry = core.entry(&default_key()).unwrap();
+    for (id, blocks, tier) in [
+        (1, 10, StorageTier::Device),
+        (2, 15, StorageTier::Device),
+        (3, 10, StorageTier::HostPinned),
+        (5, 20, StorageTier::Device),
+        (7, 5, StorageTier::Device),
+    ] {
+        entry
+            .indexer
+            .apply_event_routed(store_event(id, 0, 1, &[], &hashes[..blocks], tier))
+            .await
+            .unwrap();
+    }
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            7,
+            0,
+            2,
+            &hashes[..5],
+            &hashes[5..10],
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
+    let mut sources = Vec::new();
+    for (id, start, end) in [(11, 10, 15), (12, 15, 20), (13, 0, 5)] {
+        let event = store_event(
+            id,
+            0,
+            1,
+            &hashes[..start],
+            &hashes[start..end],
+            StorageTier::HostPinned,
+        );
+        entry
+            .indexer
+            .apply_event_routed(RouterEvent::with_cache_owner(
+                id,
+                event.event,
+                StorageTier::HostPinned,
+                owner(id as u8),
+            ))
+            .await
+            .unwrap();
+        sources.push((
+            owner(id as u8),
+            RouterHintSourceMetadata {
+                source_control_endpoint: format!("tcp://source-{id}:9000"),
+                worker_type: "decode".to_string(),
+                topology_domains: HashMap::new(),
+            },
+            None,
+        ));
+    }
+    entry
+        .indexer
+        .set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            sources,
+        ));
+    entry.indexer.dump_events().await.unwrap();
+    for (target, source, end) in [
+        (1, 11, 15),
+        (2, 12, 20),
+        (3, 11, 15),
+        (4, 13, 5),
+        (7, 11, 15),
+    ] {
+        let response = reserve_pinned(&core, &format!("target-{target}"), &tokens, target).await;
+        let hint = response.kv_hint.unwrap();
+        let payload: KvSourceLocationsPayload =
+            serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                .unwrap();
+        assert_eq!(
+            payload.source_control_endpoint,
+            format!("tcp://source-{source}:9000")
+        );
+        assert_eq!(payload.block_hashes, sequence[..end]);
+    }
+    let fully_cached = reserve_pinned(&core, "fully-cached", &tokens, 5).await;
+    assert!(fully_cached.kv_hint.is_none());
+    core.shutdown();
+}
+
+#[tokio::test]
 async fn router_hint_needs_capable_workers() {
     let (core, _entry, tokens) = hint_fixture(|_| {}).await;
     let response = reserve_pinned(&core, "plain", &tokens, 2).await;
@@ -3569,6 +3692,7 @@ fn hint_candidates(
             .map(|h| crate::protocols::ExternalSequenceBlockHash(*h))
             .collect(),
         owner_prefix_blocks: owners,
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     }
 }
@@ -3772,6 +3896,52 @@ fn preferred_island_falls_back_to_a_cross_island_source() {
         hint_endpoint(&configs, &cross_island).as_deref(),
         Some("tcp://other-island:23280")
     );
+}
+
+#[test]
+fn continuation_island_preference_uses_only_sources_reachable_from_local_depth() {
+    use crate::kv_hints::KvTransferSourceInterval;
+
+    let mut candidates = hint_candidates(&[101, 102, 103, 104], Vec::new());
+    candidates.source_intervals = vec![
+        KvTransferSourceInterval {
+            source: WorkerWithDpRank::new(8, 0).into(),
+            start: 2,
+            end: 4,
+        },
+        KvTransferSourceInterval {
+            source: WorkerWithDpRank::new(9, 0).into(),
+            start: 1,
+            end: 3,
+        },
+    ];
+    for preferred in [false, true] {
+        let mut target = island_config("tcp://target:23280", "a");
+        if preferred {
+            target.kv_transfer_enforcement =
+                Some(crate::protocols::KvTransferEnforcement::Preferred);
+        }
+        let configs = HashMap::from([
+            (7, target),
+            (8, island_config("tcp://same:23280", "a")),
+            (9, island_config("tcp://cross:23280", "b")),
+        ]);
+        let hint = |local| {
+            transfer_hint_for_selection(
+                &configs,
+                WorkerWithDpRank::new(7, 0),
+                local,
+                Some(&candidates),
+            )
+            .map(|hint| (hint.source_control_endpoint, hint.block_hashes.len()))
+        };
+        assert_eq!(hint(0), None);
+        assert_eq!(
+            hint(1),
+            preferred.then(|| ("tcp://cross:23280".to_string(), 3))
+        );
+        assert_eq!(hint(2), Some(("tcp://same:23280".to_string(), 4)));
+    }
 }
 
 #[test]

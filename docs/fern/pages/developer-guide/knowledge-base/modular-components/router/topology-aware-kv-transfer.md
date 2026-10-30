@@ -150,7 +150,7 @@ User-provided constraints still apply. A decode worker must satisfy all required
 
 ## KV Fetch Hints
 
-When workers advertise router-hint support, as vLLM workers with KVCR do, the router can attach a `kv.fetch` hint to the selected worker. The hint names a peer that holds a longer prefix of the request, so the worker can fetch that KV instead of computing it. A fetch over a slow link, such as TCP between hosts without RDMA, is usually slower than recomputing, so with topology enabled the fetch source must be in the target worker's island: its value for the target's `kv_transfer_domain` must equal the target's value.
+When workers advertise router-hint support, as vLLM workers with KVCR do, the router can attach a `kv.fetch` hint to the selected worker. The hint names a peer that can supply missing KV beyond the worker's local prefix, so the worker can fetch that KV instead of computing it. A fetch over a slow link, such as TCP between hosts without RDMA, is usually slower than recomputing, so with topology enabled the fetch source must be in the target worker's island: its value for the target's `kv_transfer_domain` must equal the target's value.
 
 - The target worker's `kv_transfer_domain` and `kv_transfer_enforcement` apply. This is the reverse of prefill-to-decode routing, where the prefill worker's policy applies.
 - A source with no value for that domain is in no island.
@@ -162,6 +162,12 @@ When workers advertise router-hint support, as vLLM workers with KVCR do, the ro
 Worker selection and the fetch source are one decision. For every candidate, the router finds the source the hint would name under these rules. With the default policy's `shared_cache_multiplier` above `0`, it credits the blocks that source would add, so an idle worker that can fetch a prefix can win over a busy worker that holds it. The selected worker's hint names the source that earned the credit, and a source the target cannot use earns no credit. The credit lowers only the score: booked prefill still counts the fetched blocks, because a fetch can miss.
 
 KVCR caches are hint sources through their cache owners. A vLLM worker publishes its topology with each cache owner it creates, because KVCR runs in the worker's pod. An owner without published topology, for example one created by an older worker, takes the island of the worker it is attached to. An unattached owner without published topology is in no island.
+
+A source may hold only the continuation beyond the target's existing device/host-pinned prefix. It must cover every missing block through the credited end and satisfy the same topology rules as root-prefix sources. For example, a worker holding blocks 1–10 can fetch 11–15 from one source even if that source does not hold 1–10. The hint carries the root-aligned hashes 1–15; the receiver skips blocks it already holds.
+
+For fetch-hint source selection, the router extends the device (L1) prefix through contiguous local host-pinned (L2) blocks first, then considers one remote L2 source. A gap or detached local segment adds no local continuation beyond that gap; it does not discard the device prefix. The router does not resume local L2 after a remote fetch or alternate between local and remote sources. For example, with L1 blocks 1–9, local L2 blocks 12–15, and a remote source holding 10–11, the router credits through block 11, not 15. This keeps the estimate conservative without planning multiple transfer steps. Disk and External overlap still contribute to cache scoring, but neither extends the local frontier used for fetch hints nor supplies a remote source for them.
+
+The router selects one source against the target's original local prefix; it does not combine sources or use hypothetical fetched progress to qualify another source. Continuation discovery requires hint-capable workers and a local event-driven indexer without predict-on-route. It also runs when queued requests refresh their cache lookup.
 
 A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.
 

@@ -35,8 +35,11 @@ const KV_FETCH_ACTION_VERSION: &str = "1.0";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSourceLocationsPayload {
     pub source_control_endpoint: String,
-    /// Root-aligned source-side KV block hashes. `block_hashes[i]`
-    /// corresponds to request block `i`; the target decides which suffix to fetch.
+    /// Root-aligned request hashes through the fetchable end. `block_hashes[i]`
+    /// corresponds to request block `i`; the target fetches its missing suffix.
+    /// With fetch continuation, the source need not hold the target's local prefix.
+    /// If that prefix has been evicted, the receiver must use actual fetch
+    /// results and recompute from any remaining gap; the hint is not a pin.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
@@ -114,10 +117,22 @@ impl From<WorkerWithDpRank> for KvTransferCandidateSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One source's contiguous coverage of request blocks `[start, end)`.
+/// A destination can use it only when its actual local prefix reaches `start`.
+/// `start` may be clamped to the first destination frontier that needs the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvTransferSourceInterval {
+    pub source: KvTransferCandidateSource,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvTransferCandidates {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
+    /// Suffix-only coverage that can extend an original device+host prefix.
+    pub source_intervals: Vec<KvTransferSourceInterval>,
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
