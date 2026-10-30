@@ -86,8 +86,6 @@ const OTHER: &str = "http://10.0.0.2:8000";
 const THIRD: &str = "http://10.0.0.3:8000";
 const STATIC: &str = "http://10.0.0.9:8000";
 
-/// Starts a core replicating over gRPC with `static_peers`, following the
-/// fake discovery's `/routers` as `SELF`.
 async fn core_following(
     client: GlobalDiscoveryClient,
     static_peers: &[&str],

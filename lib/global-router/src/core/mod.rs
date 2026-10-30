@@ -1528,7 +1528,6 @@ mod tests {
                 },
             )),
         };
-        // The old stream's frame is dropped; the current one's is applied.
         hub.apply_from(&peer, old, frame("stale"), &a.service);
         assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 0);
         hub.apply_from(&peer, current, frame("live"), &a.service);
@@ -1545,7 +1544,6 @@ mod tests {
             grpc_replicas(|| CorePolicy::LeastRequests, &pools).await;
         let held = [b.reserve_on(&blue).await, b.reserve_on(&blue).await];
         booked_settles(&a, &blue, 2).await;
-        // The core told the hub it took both.
         assert_eq!(a.replica_sync_stats().unwrap().bookings_tracked, 2);
 
         drop(held);

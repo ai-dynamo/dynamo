@@ -13,12 +13,13 @@
 //! the same way through the core's [`SessionBindingUpdates`] and
 //! [`SelectionService::apply_session_binding`].
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::multi_worker_sequence::{
     ReplicaRequestLeaseObserver, active_request_expiry_duration,
@@ -163,6 +164,11 @@ pub struct ReplicaHub {
     process_id: u64,
     /// Each partition's inbound channel, filled as the core creates them.
     partitions: DashMap<RoutingPartitionId, mpsc::Sender<ActiveSequenceEvent>>,
+    /// Events a full partition has not taken yet, in order; while a
+    /// partition has a backlog every new event joins it, so a free never
+    /// overtakes its add.
+    backlog: DashMap<RoutingPartitionId, VecDeque<ActiveSequenceEvent>>,
+    me: Weak<ReplicaHub>,
     /// Every frame this replica publishes; each subscriber reads a copy.
     frames: broadcast::Sender<proto::ReplicaFrame>,
     /// The peers to follow, each with the token that stops following it
@@ -197,9 +203,11 @@ impl ReplicaHub {
             }
         };
         let (frames, _) = broadcast::channel(FRAME_BUFFER);
-        let hub = Arc::new(Self {
+        let hub = Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             process_id,
             partitions: DashMap::new(),
+            backlog: DashMap::new(),
             frames,
             peers: DashMap::new(),
             generations: AtomicU64::new(0),
@@ -334,43 +342,48 @@ impl ReplicaHub {
         }
     }
 
-    /// Hands `frees` to their partitions. One a partition cannot take at
-    /// once is delivered as soon as it can, never lost.
+    /// Hands `frees` to their partitions, in order and never lost.
     fn free_in_core(&self, frees: Vec<(RoutingPartitionId, ActiveSequenceEvent)>, why: &str) {
         let mut released = 0u64;
-        let mut pending = Vec::new();
         for (partition, free) in frees {
-            let Some(inbound) = self
-                .partitions
-                .get(&partition)
-                .map(|inbound| inbound.clone())
-            else {
-                self.counters.events_unroutable.fetch_add(1, Relaxed);
-                continue;
-            };
-            match inbound.try_send(free) {
-                Ok(()) => released += 1,
-                Err(TrySendError::Full(free)) => pending.push((inbound, free)),
-                Err(TrySendError::Closed(_)) => {
-                    self.counters.events_dropped.fetch_add(1, Relaxed);
-                }
+            if self.deliver(&partition, free) {
+                released += 1;
             }
         }
         self.counters.released(why, released);
-        if !pending.is_empty() {
-            let (counters, why) = (self.counters.clone(), why.to_owned());
-            tokio::spawn(async move {
-                let mut released = 0u64;
-                for (inbound, free) in pending {
-                    match inbound.send(free).await {
-                        Ok(()) => released += 1,
-                        Err(_) => {
-                            counters.events_dropped.fetch_add(1, Relaxed);
-                        }
-                    }
+    }
+
+    /// Hands `event` to its partition: straight to the channel while the
+    /// partition has no backlog, else behind the backlog, which one task
+    /// per partition drains as the channel takes it. `false` if the
+    /// partition is unknown or gone.
+    fn deliver(&self, partition: &RoutingPartitionId, event: ActiveSequenceEvent) -> bool {
+        let Some(inbound) = self
+            .partitions
+            .get(partition)
+            .map(|inbound| inbound.clone())
+        else {
+            self.counters.events_unroutable.fetch_add(1, Relaxed);
+            return false;
+        };
+        match self.backlog.entry(partition.clone()) {
+            Entry::Occupied(mut queued) => {
+                queued.get_mut().push_back(event);
+                true
+            }
+            Entry::Vacant(slot) => match inbound.try_send(event) {
+                Ok(()) => true,
+                Err(TrySendError::Full(event)) => {
+                    slot.insert(VecDeque::from([event]));
+                    tokio::spawn(drain_backlog(self.me.clone(), partition.clone(), inbound));
+                    true
                 }
-                counters.released(&why, released);
-            });
+                Err(TrySendError::Closed(_)) => {
+                    self.counters.events_dropped.fetch_add(1, Relaxed);
+                    tracing::debug!(%partition, "a replica event was dropped: the partition is gone");
+                    false
+                }
+            },
         }
     }
 
@@ -456,7 +469,6 @@ impl ReplicaHub {
             Some(Frame::Events(batch)) => (batch.events, batch.bindings),
             None => return,
         };
-        let mut pending = Vec::new();
         for event in events {
             if event.router_id == self.process_id {
                 continue;
@@ -469,11 +481,11 @@ impl ReplicaHub {
                     continue;
                 }
             };
-            let Some(inbound) = self.partitions.get(&partition) else {
+            if !self.partitions.contains_key(&partition) {
                 self.counters.events_unroutable.fetch_add(1, Relaxed);
                 tracing::debug!(%partition, "a replica event named a partition this core has not created");
                 continue;
-            };
+            }
             let request_id = event.request_id.clone();
             // An add is tracked before it is sent, so the core's `admitted`
             // finds it; a free is left to the core's `completed`, so one the
@@ -494,28 +506,9 @@ impl ReplicaHub {
                     },
                 );
             }
-            match inbound.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(event)) => pending.push((inbound.clone(), event)),
-                Err(TrySendError::Closed(_)) => {
-                    if added {
-                        self.open.remove(&request_id);
-                    }
-                    self.counters.events_dropped.fetch_add(1, Relaxed);
-                    tracing::debug!(%partition, "a replica event was dropped: the partition is gone");
-                }
+            if !self.deliver(&partition, event) && added {
+                self.open.remove(&request_id);
             }
-        }
-        if !pending.is_empty() {
-            // A full partition takes them as soon as it can; nothing is lost.
-            let counters = self.counters.clone();
-            tokio::spawn(async move {
-                for (inbound, event) in pending {
-                    if inbound.send(event).await.is_err() {
-                        counters.events_dropped.fetch_add(1, Relaxed);
-                    }
-                }
-            });
         }
         for binding in bindings {
             if binding.writer_id == self.process_id {
@@ -561,6 +554,41 @@ impl ReplicaHub {
 /// [`MAX_REPLICA_BATCH_EVENTS`] events or [`MAX_REPLICA_BATCH_DURATION`]
 /// after its first, as the core's own mesh batches. Ends when the channel
 /// closes or the hub shuts down.
+/// Delivers a partition's backlog in order as its channel takes it, then
+/// retires the backlog.
+async fn drain_backlog(
+    weak: Weak<ReplicaHub>,
+    partition: RoutingPartitionId,
+    inbound: mpsc::Sender<ActiveSequenceEvent>,
+) {
+    loop {
+        let Some(hub) = weak.upgrade() else {
+            return;
+        };
+        let next = match hub.backlog.entry(partition.clone()) {
+            Entry::Occupied(mut queued) => match queued.get_mut().pop_front() {
+                Some(event) => event,
+                None => {
+                    queued.remove();
+                    return;
+                }
+            },
+            Entry::Vacant(_) => return,
+        };
+        drop(hub);
+        if inbound.send(next).await.is_err() {
+            if let Some(hub) = weak.upgrade() {
+                let dropped = hub
+                    .backlog
+                    .remove(&partition)
+                    .map_or(0, |(_, queued)| queued.len() as u64 + 1);
+                hub.counters.events_dropped.fetch_add(dropped, Relaxed);
+            }
+            return;
+        }
+    }
+}
+
 /// Sweeps mirrored bookings twice per expiry window while the hub lives.
 async fn sweep_bookings(hub: Weak<ReplicaHub>) {
     let Some(expiry) = hub.upgrade().map(|hub| hub.booking_expiry) else {
@@ -694,7 +722,6 @@ mod tests {
         hub.booking_progressed("busy");
         assert_eq!(hub.stats().bookings_tracked, 3);
 
-        // Too young to sweep.
         hub.sweep_at(start + hub.booking_expiry / 2);
         assert_eq!(hub.stats().bookings_tracked, 3);
 
@@ -714,9 +741,44 @@ mod tests {
         assert_eq!(hub.stats().bookings_tracked, 0);
         assert_eq!(channels.inbound_rx.recv().await.unwrap().request_id, "busy");
 
-        // The core letting a booking go removes it from the ledger.
         hub.open.insert("done".to_owned(), booking(true));
         hub.booking_completed("done");
         assert_eq!(hub.stats().bookings_tracked, 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_partition_takes_its_events_later_in_order() {
+        let hub = ReplicaHub::new(CancellationToken::new());
+        let partition = RoutingPartitionId::new("qwen", "global");
+        let mut channels = (hub.factory())(&partition).unwrap();
+        let event = |request: &str| ActiveSequenceEvent {
+            request_id: request.to_owned(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::Free,
+            router_id: 7,
+            lora_name: None,
+        };
+        for i in 0..EVENT_CHANNEL_CAPACITY {
+            assert!(hub.deliver(&partition, event(&format!("fill-{i}"))));
+        }
+        assert!(hub.deliver(&partition, event("late-1")));
+        assert!(hub.deliver(&partition, event("late-2")));
+        assert_eq!(
+            hub.backlog.get(&partition).map(|queued| queued.len()),
+            Some(2)
+        );
+
+        let mut seen = Vec::new();
+        while seen.len() < EVENT_CHANNEL_CAPACITY + 2 {
+            seen.push(channels.inbound_rx.recv().await.unwrap().request_id);
+        }
+        assert_eq!(&seen[EVENT_CHANNEL_CAPACITY..], ["late-1", "late-2"]);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hub.backlog.contains_key(&partition) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the backlog retires once drained");
     }
 }
