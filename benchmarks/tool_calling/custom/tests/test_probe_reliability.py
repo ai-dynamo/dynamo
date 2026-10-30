@@ -1203,3 +1203,31 @@ def test_reasoning_folded_into_content_is_caught_without_markers() -> None:
     errors, _ = probe.validate_result(case, narrated)
     assert "reasoning_text_in_content" not in error_kinds(errors)
     assert not probe.looks_like_reasoning("Sure, I can help with that.")
+
+
+def test_stream_options_only_travel_on_streaming_requests() -> None:
+    case = case_by_id(probe.build_cases("generic"), "plain_usage_counts_consistent")
+    streaming = probe.build_payload(
+        case, model="m", stream=True, temperature=0.0, default_max_tokens=64
+    )
+    nonstreaming = probe.build_payload(
+        case, model="m", stream=False, temperature=0.0, default_max_tokens=64
+    )
+    assert streaming["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in nonstreaming
+
+
+def test_truncation_probes_do_not_schema_validate_the_partial_call() -> None:
+    cases = probe.build_cases("generic")
+    for case_id in (
+        "required_truncated_call_reports_length",
+        "required_max_completion_tokens_alias_truncates",
+    ):
+        case = case_by_id(cases, case_id)
+        assert case.validate_schema is False
+        partial = probe.ChatResult(
+            finish_reason="length",
+            tool_calls=[_call("record_literal", {"label": "cut-eof"})],
+        )
+        errors, _ = probe.validate_result(case, partial)
+        assert errors == [], (case_id, errors)

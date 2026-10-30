@@ -1775,6 +1775,9 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice="auto",
             expected_finish_reasons=("stop", "tool_calls"),
             min_tool_calls=0,
+            # Some models spiral in reasoning after a tool error; cap the
+            # budget so that shows up as finish_reason=length, not a timeout.
+            max_tokens=2048,
         ),
         Case(
             case_id="history_tool_round_trip_without_tools",
@@ -2023,7 +2026,8 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
                     "role": "user",
                     "content": (
                         "Call set_reminder with title standup, minutes_from_now 15, "
-                        "and note set to null (no note)."
+                        "and note set to the JSON value null (not the string "
+                        "'null' or 'None'; there is no note)."
                     ),
                 },
             ),
@@ -2250,6 +2254,9 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             max_tokens=24,
             request_overrides=thinking_disabled,
             expect_reasoning=disabled_reasoning_expectation,
+            # A call cut by the budget is incomplete by design; only the
+            # finish reason and the absence of leaked markup are under test.
+            validate_schema=False,
         ),
         Case(
             case_id="none_with_tool_history_answers_in_text",
@@ -2487,6 +2494,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
                 "max_completion_tokens": 24,
             },
             expect_reasoning=disabled_reasoning_expectation,
+            validate_schema=False,
         ),
         Case(
             case_id="followup_tool_result_as_content_parts",
@@ -3779,6 +3787,10 @@ def build_payload(
     # max_completion_tokens is the only budget the request carries.
     if "max_tokens" in payload and payload["max_tokens"] is None:
         del payload["max_tokens"]
+    # stream_options is only valid on a streaming request; the same case runs
+    # in both modes, so drop it from the nonstream payload.
+    if not stream:
+        payload.pop("stream_options", None)
     return payload
 
 
