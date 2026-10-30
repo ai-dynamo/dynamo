@@ -8,14 +8,12 @@ package validation
 import (
 	"cmp"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -31,23 +29,6 @@ func decodeDynamoGraphDeploymentRequestSpecV1beta2(raw *apiextensionsv1.JSON) (*
 		return nil, err
 	}
 	return &spec, nil
-}
-
-// recommendationInputErrors checks the lowered input after structural API validation.
-// spec and fldPath must not be nil. A lowering failure prevents only the dependent schema check.
-func recommendationInputErrors(spec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
-	input, err := aisimulate.Lower(spec)
-	if err != nil {
-		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error())}
-	}
-	if err := aisimulate.ValidateInput(input); err != nil {
-		var schemaErr *jsonschema.ValidationError
-		if !errors.As(err, &schemaErr) {
-			return field.ErrorList{field.InternalError(fldPath, err)}
-		}
-		return inputSchemaErrors(schemaErr, fldPath)
-	}
-	return nil
 }
 
 // inputSchemaErrors reports native JSON pointers at the shared spec owner. Lowering

@@ -18,7 +18,11 @@
 package validation
 
 import (
+	"errors"
+
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -29,7 +33,20 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 ) field.ErrorList {
 	allErrs := v.validateNativeSearchInput(&spec.NativeSearchInput, fldPath)
-	return append(allErrs, recommendationInputErrors(&spec.NativeSearchInput, fldPath)...)
+
+	// The upstream schema applies to the merged input, independently of typed API rules.
+	input, err := aisimulate.Lower(&spec.NativeSearchInput)
+	if err != nil {
+		return append(allErrs, field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error()))
+	}
+	if err := aisimulate.ValidateInput(input); err != nil {
+		var schemaErr *jsonschema.ValidationError
+		if !errors.As(err, &schemaErr) {
+			return append(allErrs, field.InternalError(fldPath, err))
+		}
+		allErrs = append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
+	}
+	return allErrs
 }
 
 // validateDynamoGraphDeploymentRequestSpecUpdateV1beta2 validates a spec update.
