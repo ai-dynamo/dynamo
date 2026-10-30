@@ -501,7 +501,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     tp_lcm_size = extra_config.get("tp_lcm_size")
     try:
         tp_lcm_size = int(tp_lcm_size) if tp_lcm_size is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logging.warning("Ignoring non-integer Mooncake tp_lcm_size=%r", tp_lcm_size)
         tp_lcm_size = None
 
@@ -531,8 +531,162 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "key_prefix": _mooncake_key_prefix(
             extra_config, getattr(server_args, "served_model_name", None)
         ),
-        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+        or (
+            extra_config.get("kv_events_endpoint")
+            if isinstance(extra_config.get("kv_events_endpoint"), str)
+            else None
+        )
+        or None,
     }
+
+
+def _validate_hicache_layout(envelope: Any, server_args: ServerArgs) -> dict[str, Any]:
+    """Validate one startup envelope; errors contain paths, never config values."""
+    if not isinstance(envelope, dict) or envelope.get("enabled") is not True:
+        raise ValueError("hicache_object_layout.enabled is disabled or invalid")
+    if envelope.get("backend") != "mooncake":
+        raise ValueError("hicache_object_layout.backend must be mooncake")
+    page_size = envelope.get("page_size")
+    if (
+        type(page_size) is not int
+        or not 0 < page_size <= 2**32 - 1
+        or page_size != server_args.page_size
+    ):
+        raise ValueError("hicache_object_layout.page_size is invalid or inconsistent")
+    layout = envelope.get("hicache_object_layout")
+    if not isinstance(layout, dict):
+        raise ValueError(
+            "hicache_object_layout.hicache_object_layout must be an object"
+        )
+    if "key_prefix" not in layout or not (
+        layout["key_prefix"] is None or isinstance(layout["key_prefix"], str)
+    ):
+        raise ValueError("hicache_object_layout.key_prefix must be a string or null")
+    pp_size, pp_rank = layout.get("pp_size"), layout.get("pp_rank", "missing")
+    # One stage reports its own rank; a layout merged across PP stages reports null.
+    pp_rank_ok = (
+        (type(pp_rank) is int and pp_rank == 0) if pp_size == 1 else (pp_rank is None)
+    )
+    if (
+        type(pp_size) is not int
+        or not 0 < pp_size <= 2**32 - 1
+        or not pp_rank_ok
+        or pp_size != (getattr(server_args, "pp_size", 1) or 1)
+    ):
+        raise ValueError(
+            "hicache_object_layout.pp_rank/pp_size is invalid or inconsistent"
+        )
+    if layout.get("is_mla_backend") is not True:
+        raise ValueError("hicache_object_layout requires rank-replicated pools")
+    pools = layout.get("pools")
+    if not isinstance(pools, list) or not pools:
+        raise ValueError("hicache_object_layout.pools must be a non-empty list")
+    for index, pool in enumerate(pools):
+        field = f"hicache_object_layout.pools[{index}]"
+        if (
+            not isinstance(pool, dict)
+            or not isinstance(pool.get("pool"), str)
+            or not pool["pool"]
+        ):
+            raise ValueError(f"{field}.pool must be a non-empty string")
+        suffixes = pool.get("suffixes")
+        if (
+            not isinstance(suffixes, list)
+            or not suffixes
+            or not all(isinstance(suffix, str) and suffix for suffix in suffixes)
+        ):
+            raise ValueError(f"{field}.suffixes must contain non-empty strings")
+        if pool.get("hit_policy") not in ("all_pages", "trailing_pages"):
+            raise ValueError(f"{field}.hit_policy is unsupported")
+        if pool["hit_policy"] == "trailing_pages" or "trailing_pages" in pool:
+            trailing = pool.get("trailing_pages")
+            if type(trailing) is not int or not 0 < trailing <= 2**32 - 1:
+                raise ValueError(f"{field}.trailing_pages must be a positive uint32")
+    return layout
+
+
+def _is_rank_local_layout(envelope: dict[str, Any]) -> bool:
+    """Whether SGLang disabled the layout only because keys embed TP/PP ranks."""
+    layout = envelope.get("hicache_object_layout")
+    if envelope.get("backend") != "mooncake" or not isinstance(layout, dict):
+        return False
+    pp_size = layout.get("pp_size")
+    return layout.get("is_mla_backend") is False or (
+        type(pp_size) is int and pp_size > 1
+    )
+
+
+def _get_registration_mooncake_runtime_data(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> Optional[dict[str, Any]]:
+    # Startup messages already carry server_info's envelope. No HTTP request.
+    layout = None
+    if engine is not None:
+        init_result = getattr(engine, "_scheduler_init_result", None)
+        infos = getattr(init_result, "scheduler_infos", [])
+        if not isinstance(infos, (list, tuple)) or not all(
+            isinstance(info, dict) for info in infos
+        ):
+            logging.warning(
+                "Invalid scheduler_infos HiCache metadata; disabling L3 lookup"
+            )
+            return None
+        if any("hicache_object_layout" in info for info in infos):
+            rank_local = 0
+            try:
+                for info in infos:
+                    if "hicache_object_layout" not in info:
+                        raise ValueError(
+                            "scheduler_infos HiCache availability is inconsistent"
+                        )
+                    envelope = info["hicache_object_layout"]
+                    if isinstance(envelope, dict) and envelope.get("enabled") is False:
+                        if not _is_rank_local_layout(envelope):
+                            logging.debug(
+                                "SGLang HiCache is disabled; disabling L3 lookup"
+                            )
+                            return None
+                        rank_local += 1
+                        continue
+                    current = _validate_hicache_layout(envelope, server_args)
+                    if layout is not None and current != layout:
+                        raise ValueError(
+                            "scheduler_infos HiCache layouts are inconsistent"
+                        )
+                    layout = current
+                if rank_local and layout is not None:
+                    raise ValueError("scheduler_infos HiCache layouts are inconsistent")
+            except ValueError as error:
+                logging.warning("SGLang %s; disabling L3 lookup", error)
+                return None
+    # Absent envelopes (legacy engines), engine=None and rank-local layouts that
+    # the envelope cannot describe keep the static path. Other disabled or
+    # invalid envelopes returned above.
+    try:
+        metadata = _get_mooncake_runtime_data(server_args)
+    except (TypeError, ValueError, OverflowError):
+        logging.warning("Invalid Mooncake static runtime metadata; disabling L3 lookup")
+        return None
+    if layout is not None:
+        if metadata is None or not all(
+            type(metadata[key]) is int and 0 < metadata[key] <= 2**32 - 1
+            for key in ("page_size", "tp_size", "pp_size")
+        ):
+            logging.warning(
+                "HiCache layout/static metadata mismatch; disabling L3 lookup"
+            )
+            return None
+        tp_lcm_size = metadata["tp_lcm_size"]
+        if tp_lcm_size is not None and not 0 < tp_lcm_size <= 2**32 - 1:
+            # The advertised layout never reads it, so drop it instead of L3.
+            logging.warning("Ignoring out-of-range Mooncake tp_lcm_size")
+            metadata["tp_lcm_size"] = None
+        # Keep legacy fields, including is_mla_model. Physical pools are
+        # authoritative even for DSV4's non-MLA model config.
+        metadata["hicache_object_layout"] = layout
+        metadata["should_split_heads"] = False
+    return metadata
 
 
 def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
@@ -729,7 +883,7 @@ async def get_runtime_config(
                 f"Failed to attach SGLang spec decode runtime metadata: {e}"
             )
 
-    mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
+    mooncake_runtime_data = _get_registration_mooncake_runtime_data(engine, server_args)
     if mooncake_runtime_data is not None:
         try:
             runtime_config.set_engine_specific(

@@ -3,8 +3,9 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -506,6 +507,354 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.fixture
+def hicache_layout_envelope():
+    def pool(name, policy="all_pages", **kwargs):
+        return {
+            "pool": name,
+            "suffixes": [f"__{name}"],
+            "hit_policy": policy,
+            **kwargs,
+        }
+
+    return {
+        "enabled": True,
+        "backend": "mooncake",
+        "page_size": 16,
+        "hicache_object_layout": {
+            "key_prefix": "private-prefix",
+            "is_mla_backend": True,
+            "pp_rank": 0,
+            "pp_size": 1,
+            "pools": [
+                pool("swa", "trailing_pages", trailing_pages=4),
+                pool("compress8"),
+                pool("indexer"),
+                pool("draft_swa", "trailing_pages", trailing_pages=4),
+            ],
+        },
+    }
+
+
+@pytest.fixture
+def mooncake_registration(monkeypatch, hicache_layout_envelope):
+    # As above, defer backend imports for marker-only collection.
+    from dynamo.sglang import register
+
+    monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", "false")
+    monkeypatch.delenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT", raising=False)
+    monkeypatch.setattr(
+        register, "sglang_uses_mla_backend", lambda args: args.is_mla_model
+    )
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    submit = AsyncMock()
+    monkeypatch.setattr(register, "register_model", submit)
+    server_args = SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        page_size=16,
+        tp_size=8,
+        pp_size=1,
+        dp_size=2,
+        speculative_algorithm="EAGLE3",
+        speculative_num_steps=3,
+        hicache_storage_backend="mooncake",
+        hicache_mem_layout="page_head",
+        hicache_storage_backend_extra_config={
+            "tp_lcm_size": 16,
+            "extra_backend_tag": "tag",
+            "kv_events_endpoint": "ipc:///unused-mooncake-events",
+        },
+        is_mla_model=True,
+        model_path="unused-model",
+        served_model_name="unused-model",
+    )
+    info = {
+        "max_total_num_tokens": 1024,
+        "hicache_object_layout": hicache_layout_envelope,
+    }
+    engine = SimpleNamespace(
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[info, dict(info)]),
+        tokenizer_manager=SimpleNamespace(
+            context_len=4096,
+            validate_total_tokens=True,
+            num_reserved_tokens=4,
+        ),
+        shutdown=Mock(),
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    dynamo_args.use_sglang_tokenizer = False
+
+    def run(with_engine=True):
+        ready = asyncio.Event()
+        asyncio.run(
+            register.register_model_with_readiness_gate(
+                engine if with_engine else None,
+                Mock(),
+                server_args,
+                dynamo_args,
+                readiness_gate=ready,
+                worker_type=register.WorkerType.Aggregated,
+            )
+        )
+        assert ready.is_set()
+        engine.shutdown.assert_not_called()
+        config = submit.await_args.kwargs["runtime_config"]
+        assert isinstance(config, register.ModelRuntimeConfig)
+        assert config.data_parallel_size == 2
+        if with_engine:
+            assert config.total_kv_blocks == 64
+        return config
+
+    return SimpleNamespace(run=run, engine=engine, server_args=server_args)
+
+
+@pytest.mark.parametrize("is_mla_model", [True, False])
+@pytest.mark.parametrize("key_prefix", [None, "private-prefix"])
+@pytest.mark.parametrize("string_config", [False, True])
+def test_registration_publishes_physical_mooncake_layout(
+    mooncake_registration,
+    hicache_layout_envelope,
+    is_mla_model,
+    key_prefix,
+    string_config,
+):
+    # DSV4 is_mla_model=False still has rank-replicated physical pools.
+    args = mooncake_registration.server_args
+    args.is_mla_model = is_mla_model
+    hicache_layout_envelope["hicache_object_layout"]["key_prefix"] = key_prefix
+    if string_config:
+        args.hicache_storage_backend_extra_config = json.dumps(
+            args.hicache_storage_backend_extra_config
+        )
+    config = mooncake_registration.run()
+    assert json.loads(config.runtime_data["sglang_hicache_mooncake"]) == {
+        "backend": "mooncake",
+        "tenant_id": "default",
+        "page_size": 16,
+        "tp_size": 8,
+        "pp_size": 1,
+        "is_mla_model": is_mla_model,
+        "is_eagle": True,
+        "tp_lcm_size": 16,
+        "should_split_heads": False,
+        "extra_backend_tag": "tag",
+        "key_prefix": "tag_unused-model",
+        "kv_events_endpoint": "ipc:///unused-mooncake-events",
+        "hicache_object_layout": hicache_layout_envelope["hicache_object_layout"],
+    }
+
+
+@pytest.mark.parametrize("with_engine", [True, False])
+def test_registration_retains_legacy_mooncake_metadata(
+    mooncake_registration, with_engine
+):
+    for info in mooncake_registration.engine._scheduler_init_result.scheduler_infos:
+        info.pop("hicache_object_layout")
+    config = mooncake_registration.run(with_engine=with_engine)
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert "hicache_object_layout" not in metadata
+    assert metadata["backend"] == "mooncake"
+    assert metadata["tp_size"] == 8
+    assert metadata["is_mla_model"] is True
+
+
+def test_registration_ignores_non_finite_tp_lcm_size(mooncake_registration):
+    for info in mooncake_registration.engine._scheduler_init_result.scheduler_infos:
+        info.pop("hicache_object_layout")
+    extra = mooncake_registration.server_args.hicache_storage_backend_extra_config
+    extra["tp_lcm_size"] = float("inf")
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["tp_lcm_size"] is None
+
+
+@pytest.mark.parametrize("pp_rank, published", [(None, True), (0, False), (1, False)])
+def test_registration_publishes_layout_covering_all_pp_stages(
+    mooncake_registration, hicache_layout_envelope, pp_rank, published
+):
+    # Only a layout merged across stages (pp_rank null) can cover them all.
+    mooncake_registration.server_args.pp_size = 2
+    layout = hicache_layout_envelope["hicache_object_layout"]
+    layout["pp_size"], layout["pp_rank"] = 2, pp_rank
+    config = mooncake_registration.run()
+    if not published:
+        assert "sglang_hicache_mooncake" not in config.runtime_data
+        return
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["pp_size"] == 2
+    assert metadata["hicache_object_layout"] == layout
+
+
+def test_registration_accepts_uint32_trailing_pages_limit(
+    mooncake_registration, hicache_layout_envelope
+):
+    layout = hicache_layout_envelope["hicache_object_layout"]
+    layout["pools"][0]["trailing_pages"] = 2**32 - 1
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["hicache_object_layout"] == layout
+
+
+@pytest.mark.parametrize("tp_lcm_size", [0, 2**32])
+def test_registration_ignores_invalid_tp_lcm_size_with_layout(
+    mooncake_registration, hicache_layout_envelope, tp_lcm_size
+):
+    args = mooncake_registration.server_args
+    args.hicache_storage_backend_extra_config["tp_lcm_size"] = tp_lcm_size
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["tp_lcm_size"] is None
+    assert (
+        metadata["hicache_object_layout"]
+        == hicache_layout_envelope["hicache_object_layout"]
+    )
+
+
+def test_registration_rejects_null_window_on_all_pages_pool(
+    mooncake_registration, hicache_layout_envelope
+):
+    hicache_layout_envelope["hicache_object_layout"]["pools"][1][
+        "trailing_pages"
+    ] = None
+    config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+
+
+@pytest.mark.parametrize(
+    "envelope", [None, [], {}, {"enabled": False, "reason": "private-reason"}]
+)
+def test_registration_disables_l3_without_failing_worker(
+    mooncake_registration, envelope, caplog
+):
+    for info in mooncake_registration.engine._scheduler_init_result.scheduler_infos:
+        info["hicache_object_layout"] = envelope
+    with caplog.at_level("DEBUG"):
+        config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+    assert "disabling L3 lookup" in caplog.text
+    assert "private-reason" not in caplog.text
+    if isinstance(envelope, dict) and envelope.get("enabled") is False:
+        assert not any(record.levelname == "WARNING" for record in caplog.records)
+
+
+def _disabled_envelope(**layout):
+    return {
+        "enabled": False,
+        "backend": "mooncake",
+        "page_size": 16,
+        "hicache_object_layout": {"pools": [], "pp_rank": 0, **layout},
+        "reason": "private-reason",
+    }
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [{"pp_size": 1, "is_mla_backend": False}, {"pp_size": 2, "is_mla_backend": True}],
+)
+def test_registration_keeps_legacy_metadata_for_rank_local_layouts(
+    mooncake_registration, layout
+):
+    infos = mooncake_registration.engine._scheduler_init_result.scheduler_infos
+    for info in infos:
+        info["hicache_object_layout"] = _disabled_envelope(**layout)
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["backend"] == "mooncake"
+    assert "hicache_object_layout" not in metadata
+
+
+@pytest.mark.parametrize("mixed_with", ["enabled", "auxiliary_disabled"])
+def test_registration_disables_l3_for_mixed_disabled_layouts(
+    mooncake_registration, hicache_layout_envelope, mixed_with
+):
+    infos = mooncake_registration.engine._scheduler_init_result.scheduler_infos
+    infos[0]["hicache_object_layout"] = _disabled_envelope(
+        pp_size=1, is_mla_backend=False
+    )
+    infos[1]["hicache_object_layout"] = (
+        hicache_layout_envelope
+        if mixed_with == "enabled"
+        else _disabled_envelope(pp_size=1, is_mla_backend=True)
+    )
+    config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("enabled", 1),
+        ("backend", "other"),
+        ("page_size", 0),
+        ("page_size", True),
+        ("page_size", 32),
+        ("page_size", 2**32),
+        ("page_size", None),
+        ("page_size", "16"),
+        ("key_prefix", 7),
+        ("pp_rank", -1),
+        ("pp_rank", 1),
+        ("pp_size", 2),
+        ("is_mla_backend", False),
+        ("pools", []),
+        ("pool", ""),
+        ("suffixes", []),
+        ("suffixes", [None]),
+        ("hit_policy", "private-policy"),
+        ("trailing_pages", 0),
+        ("trailing_pages", None),
+        ("trailing_pages", True),
+        ("trailing_pages", 2**32),
+        ("trailing_pages", 2**64 - 1),
+    ],
+)
+def test_registration_rejects_invalid_layout_without_legacy_fallback(
+    mooncake_registration, hicache_layout_envelope, field, value, caplog
+):
+    layout = hicache_layout_envelope["hicache_object_layout"]
+    if field in hicache_layout_envelope:
+        parent = hicache_layout_envelope
+    elif field in layout:
+        parent = layout
+    else:
+        parent = layout["pools"][0]
+    parent[field] = value
+    config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+    assert "disabling L3 lookup" in caplog.text
+    assert "private-prefix" not in caplog.text
+    assert "private-policy" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "mode", ["missing_window", "missing_rank", "inconsistent", "partly_missing"]
+)
+def test_registration_requires_complete_consistent_layouts(
+    mooncake_registration, hicache_layout_envelope, mode, caplog
+):
+    infos = mooncake_registration.engine._scheduler_init_result.scheduler_infos
+    layout = hicache_layout_envelope["hicache_object_layout"]
+    if mode == "missing_window":
+        layout["pools"][0].pop("trailing_pages")
+    elif mode == "missing_rank":
+        layout.pop("pp_rank")
+    elif mode == "inconsistent":
+        infos[1]["hicache_object_layout"] = deepcopy(hicache_layout_envelope)
+        other = infos[1]["hicache_object_layout"]["hicache_object_layout"]
+        other["key_prefix"] = "private-other"
+    else:
+        infos[1].pop("hicache_object_layout")
+    config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+    assert "disabling L3 lookup" in caplog.text
+    assert "private-other" not in caplog.text
 
 
 @pytest.mark.parametrize(

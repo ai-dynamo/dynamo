@@ -36,6 +36,7 @@ use crate::protocol::{
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const MOONCAKE_KV_EVENTS_ENDPOINT_ENV: &str = "DYN_MOONCAKE_KV_EVENTS_ENDPOINT";
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -1100,6 +1101,175 @@ fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -
     }
 }
 
+/// Unlike `register.py`, there is no static-metadata fallback: engines without a
+/// layout envelope, and layouts SGLang cannot describe (MHA, incomplete PP stages),
+/// publish nothing, so L3 lookup stays off for those workers.
+fn mooncake_runtime_data(
+    server_info: &Value,
+    env_kv_events_endpoint: Option<&str>,
+) -> Option<Value> {
+    let envelope = server_info.get("hicache_object_layout")?;
+    if envelope.get("enabled").and_then(Value::as_bool) == Some(false) {
+        tracing::debug!("SGLang HiCache is disabled; disabling L3 lookup");
+        return None;
+    }
+    let result = (|| -> Result<Value, &'static str> {
+        if envelope.get("enabled").and_then(Value::as_bool) != Some(true) {
+            return Err("hicache_object_layout.enabled (disabled or invalid)");
+        }
+        if envelope.get("backend").and_then(Value::as_str) != Some("mooncake") {
+            return Err("hicache_object_layout.backend");
+        }
+        let page_size = envelope
+            .get("page_size")
+            .and_then(Value::as_u64)
+            .filter(|size| *size > 0 && *size <= u64::from(u32::MAX))
+            .ok_or("hicache_object_layout.page_size")?;
+        let layout = envelope
+            .get("hicache_object_layout")
+            .filter(|layout| layout.is_object())
+            .ok_or("hicache_object_layout.hicache_object_layout")?;
+        if !matches!(
+            layout.get("key_prefix"),
+            Some(Value::Null | Value::String(_))
+        ) {
+            return Err("hicache_object_layout.key_prefix");
+        }
+        let pp_size = layout
+            .get("pp_size")
+            .and_then(Value::as_u64)
+            .ok_or("hicache_object_layout.pp_size")?;
+        let pp_rank = layout
+            .get("pp_rank")
+            .ok_or("hicache_object_layout.pp_rank")?;
+        let is_mla_backend = layout
+            .get("is_mla_backend")
+            .and_then(Value::as_bool)
+            .ok_or("hicache_object_layout.is_mla_backend")?;
+        // One stage reports its own rank; a layout merged across PP stages reports null.
+        let pp_rank_ok = if pp_size == 1 {
+            pp_rank.as_u64() == Some(0)
+        } else {
+            pp_rank.is_null()
+        };
+        if !pp_rank_ok || !is_mla_backend {
+            return Err(
+                "hicache_object_layout requires rank-replicated pools and a merged pp_rank",
+            );
+        }
+        let pools = layout
+            .get("pools")
+            .and_then(Value::as_array)
+            .filter(|pools| !pools.is_empty())
+            .ok_or("hicache_object_layout.pools")?;
+        for pool in pools {
+            if pool
+                .get("pool")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err("hicache_object_layout.pools[].pool");
+            }
+            let suffixes = pool
+                .get("suffixes")
+                .and_then(Value::as_array)
+                .filter(|suffixes| !suffixes.is_empty())
+                .ok_or("hicache_object_layout.pools[].suffixes")?;
+            if suffixes
+                .iter()
+                .any(|suffix| suffix.as_str().is_none_or(str::is_empty))
+            {
+                return Err("hicache_object_layout.pools[].suffixes");
+            }
+            let policy = pool.get("hit_policy").and_then(Value::as_str);
+            if !matches!(policy, Some("all_pages" | "trailing_pages")) {
+                return Err("hicache_object_layout.pools[].hit_policy");
+            }
+            if (policy == Some("trailing_pages") || pool.get("trailing_pages").is_some())
+                && pool
+                    .get("trailing_pages")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|pages| pages == 0 || pages > u64::from(u32::MAX))
+            {
+                return Err("hicache_object_layout.pools[].trailing_pages");
+            }
+        }
+        for (field, expected) in [("page_size", page_size), ("pp_size", pp_size)] {
+            if server_info.get(field).is_some()
+                && client::json_u64(server_info, field) != Some(expected)
+            {
+                return Err("hicache_object_layout/server_info page_size or pp_size mismatch");
+            }
+        }
+        if server_info
+            .get("hicache_storage_backend")
+            .is_some_and(|backend| backend.as_str() != Some("mooncake"))
+        {
+            return Err("server_info.hicache_storage_backend mismatch");
+        }
+        let tp_size = match server_info.get("tp_size") {
+            None => 1,
+            Some(_) => client::json_u32(server_info, "tp_size")
+                .filter(|size| *size > 0)
+                .ok_or("server_info.tp_size")?,
+        };
+        // The layout already carries what the router needs, so a bad extra config is ignored.
+        let extra = match server_info.get("hicache_storage_backend_extra_config") {
+            None | Some(Value::Null) => serde_json::json!({}),
+            Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| {
+                    tracing::warn!("Ignoring unreadable hicache_storage_backend_extra_config");
+                    serde_json::json!({})
+                }),
+            Some(value) if value.is_object() => value.clone(),
+            Some(_) => {
+                tracing::warn!("Ignoring unreadable hicache_storage_backend_extra_config");
+                serde_json::json!({})
+            }
+        };
+        let tp_lcm_size = match extra.get("tp_lcm_size") {
+            None | Some(Value::Null) => None,
+            Some(_) => {
+                let size = client::json_u32(&extra, "tp_lcm_size").filter(|size| *size > 0);
+                if size.is_none() {
+                    tracing::warn!("Ignoring invalid Mooncake tp_lcm_size");
+                }
+                size
+            }
+        };
+        let kv_events_endpoint = env_kv_events_endpoint
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(str::to_string)
+            .or_else(|| discovery_string(&extra, "kv_events_endpoint"));
+        Ok(serde_json::json!({
+            "backend": "mooncake",
+            "page_size": page_size,
+            "tp_size": tp_size,
+            "pp_size": pp_size,
+            "is_mla_model": is_mla_backend,
+            "is_eagle": sglang_eagle_enabled(server_info),
+            "tp_lcm_size": tp_lcm_size,
+            "should_split_heads": false,
+            "extra_backend_tag": discovery_string(&extra, "extra_backend_tag"),
+            "kv_events_endpoint": kv_events_endpoint,
+            "hicache_object_layout": layout,
+        }))
+    })();
+    match result {
+        Ok(metadata) => Some(metadata),
+        Err(field) => {
+            // Log only field paths, never reason, prefix, endpoint, or raw config.
+            tracing::warn!(
+                field,
+                "SGLang HiCache metadata unavailable; disabling L3 lookup"
+            );
+            None
+        }
+    }
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -1188,6 +1358,13 @@ fn build_engine_config(
         );
     }
 
+    let env_kv_events_endpoint = std::env::var(MOONCAKE_KV_EVENTS_ENDPOINT_ENV).ok();
+    if let Some(metadata) =
+        mooncake_runtime_data(&discovery.server_info, env_kv_events_endpoint.as_deref())
+    {
+        runtime_data.insert("sglang_hicache_mooncake".to_string(), metadata);
+    }
+
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
         served_model_name: discovery.served_model_name.clone(),
@@ -1223,7 +1400,8 @@ mod tests {
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
         discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        mooncake_runtime_data, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
+        sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1347,6 +1525,92 @@ mod tests {
         }
     }
 
+    fn mooncake_server_info() -> serde_json::Value {
+        json!({
+            "hicache_storage_backend": "mooncake",
+            "page_size": 16, "tp_size": 8, "pp_size": 1, "dp_size": 2,
+            "max_total_num_tokens": 1024, "speculative_algorithm": "EAGLE3",
+            "hicache_object_layout": {
+                "enabled": true, "backend": "mooncake", "page_size": 16,
+                "hicache_object_layout": {
+                    "key_prefix": "private-prefix", "is_mla_backend": true,
+                    "pp_rank": 0, "pp_size": 1,
+                    "pools": [
+                        {"pool": "swa", "suffixes": ["__swa"],
+                         "hit_policy": "trailing_pages", "trailing_pages": 4},
+                        {"pool": "compress8", "suffixes": ["__compress8"],
+                         "hit_policy": "all_pages"},
+                        {"pool": "indexer", "suffixes": ["__indexer"],
+                         "hit_policy": "all_pages"},
+                        {"pool": "draft_swa", "suffixes": ["__draft_swa"],
+                         "hit_policy": "trailing_pages", "trailing_pages": 4}
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn registration_publishes_mooncake_layout_without_model_allowlist() {
+        for string_config in [false, true] {
+            for key_prefix in [json!(null), json!("private-prefix")] {
+                let mut info = mooncake_server_info();
+                info["hicache_object_layout"]["hicache_object_layout"]["key_prefix"] = key_prefix;
+                let extra = json!({
+                    "tp_lcm_size": 16, "extra_backend_tag": "tag",
+                    "kv_events_endpoint": "ipc:///unused-mooncake-events"
+                });
+                info["hicache_storage_backend_extra_config"] = if string_config {
+                    json!(extra.to_string())
+                } else {
+                    extra
+                };
+                let mut discovery = discovery(info.clone());
+                discovery.model_info = json!({
+                    "architectures": ["DeepseekV4ForCausalLM"], "is_mla_model": false
+                });
+                let config =
+                    build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+                        .unwrap();
+                assert_eq!(
+                    config.runtime_data["sglang_hicache_mooncake"],
+                    json!({
+                        "backend": "mooncake", "page_size": 16, "tp_size": 8,
+                        "pp_size": 1, "is_mla_model": true, "is_eagle": true,
+                        "tp_lcm_size": 16, "should_split_heads": false,
+                        "extra_backend_tag": "tag",
+                        "kv_events_endpoint": "ipc:///unused-mooncake-events",
+                        "hicache_object_layout": info["hicache_object_layout"]["hicache_object_layout"]
+                    })
+                );
+                let llm = config.llm.unwrap();
+                assert_eq!(llm.total_kv_blocks, Some(64));
+                assert_eq!(llm.data_parallel_size, Some(2));
+            }
+        }
+    }
+
+    #[test]
+    fn registration_publishes_pp_layout_only_when_server_info_agrees() {
+        let mut info = mooncake_server_info();
+        info["pp_size"] = json!(2);
+        info["hicache_object_layout"]["hicache_object_layout"]["pp_size"] = json!(2);
+        info["hicache_object_layout"]["hicache_object_layout"]["pp_rank"] = json!(null);
+        let config = build_engine_config(
+            &discovery(info.clone()),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.runtime_data["sglang_hicache_mooncake"]["pp_size"], 2);
+        info["pp_size"] = json!(3);
+        let config =
+            build_engine_config(&discovery(info), DisaggregationMode::Aggregated, None, None)
+                .unwrap();
+        assert!(!config.runtime_data.contains_key("sglang_hicache_mooncake"));
+    }
+
     #[test]
     fn encoder_routing_is_rejected_before_discovery() {
         let mut args = args();
@@ -1362,6 +1626,32 @@ mod tests {
             error
                 .to_string()
                 .contains("route-to-encoder is not supported")
+        );
+    }
+
+    #[test]
+    fn registration_publishes_required_mooncake_defaults() {
+        let mut info = mooncake_server_info();
+        info.as_object_mut().unwrap().remove("tp_size");
+        info.as_object_mut()
+            .unwrap()
+            .remove("speculative_algorithm");
+        let config = build_engine_config(
+            &discovery(info.clone()),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config.runtime_data["sglang_hicache_mooncake"],
+            json!({
+                "backend": "mooncake", "page_size": 16, "tp_size": 1,
+                "pp_size": 1, "is_mla_model": true, "is_eagle": false,
+                "tp_lcm_size": null, "should_split_heads": false,
+                "extra_backend_tag": null, "kv_events_endpoint": null,
+                "hicache_object_layout": info["hicache_object_layout"]["hicache_object_layout"]
+            })
         );
     }
 
@@ -1472,6 +1762,24 @@ mod tests {
         assert_eq!(
             (llm.data_parallel_start_rank, llm.data_parallel_size),
             (Some(0), Some(1))
+        );
+    }
+
+    #[test]
+    fn registration_accepts_uint32_trailing_pages_limit() {
+        let mut info = mooncake_server_info();
+        info["hicache_object_layout"]["hicache_object_layout"]["pools"][0]["trailing_pages"] =
+            json!(u32::MAX);
+        let config = build_engine_config(
+            &discovery(info.clone()),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config.runtime_data["sglang_hicache_mooncake"]["hicache_object_layout"],
+            info["hicache_object_layout"]["hicache_object_layout"]
         );
     }
 
@@ -1695,6 +2003,135 @@ mod tests {
                     .contains("invalid SGLang KV-event endpoint host")
             );
         }
+    }
+
+    #[test]
+    fn registration_omits_mooncake_on_missing_disabled_or_invalid_layout() {
+        let mut missing = mooncake_server_info();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("hicache_object_layout");
+        let mut cases = vec![missing];
+        for envelope in [
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"enabled": false, "reason": "private-reason"}),
+        ] {
+            let mut info = mooncake_server_info();
+            info["hicache_object_layout"] = envelope;
+            cases.push(info);
+        }
+        for (field, value) in [
+            ("enabled", json!(1)),
+            ("backend", json!("other")),
+            ("page_size", json!(0)),
+            ("page_size", json!(32)),
+            ("page_size", json!(true)),
+            ("key_prefix", json!(7)),
+            ("page_size", json!(u64::from(u32::MAX) + 1)),
+            ("page_size", json!(null)),
+            ("page_size", json!("16")),
+            ("pp_rank", json!(-1)),
+            ("pp_rank", json!(1)),
+            ("pp_size", json!(2)),
+            ("is_mla_backend", json!(false)),
+            ("pools", json!([])),
+            ("pool", json!("")),
+            ("suffixes", json!([])),
+            ("suffixes", json!([null])),
+            ("hit_policy", json!("other")),
+            ("trailing_pages", json!(0)),
+            ("trailing_pages", json!(null)),
+            ("trailing_pages", json!(true)),
+            ("trailing_pages", json!(u64::from(u32::MAX) + 1)),
+            ("trailing_pages", json!(u64::MAX)),
+        ] {
+            let mut info = mooncake_server_info();
+            let target = match field {
+                "enabled" | "backend" | "page_size" => &mut info["hicache_object_layout"],
+                "key_prefix" | "pp_rank" | "pp_size" | "is_mla_backend" | "pools" => {
+                    &mut info["hicache_object_layout"]["hicache_object_layout"]
+                }
+                _ => &mut info["hicache_object_layout"]["hicache_object_layout"]["pools"][0],
+            };
+            target[field] = value;
+            cases.push(info);
+        }
+        for field in ["pp_rank", "key_prefix"] {
+            let mut info = mooncake_server_info();
+            info["hicache_object_layout"]["hicache_object_layout"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            cases.push(info);
+        }
+        let mut missing_window = mooncake_server_info();
+        missing_window["hicache_object_layout"]["hicache_object_layout"]["pools"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("trailing_pages");
+        cases.push(missing_window);
+        let mut null_window = mooncake_server_info();
+        null_window["hicache_object_layout"]["hicache_object_layout"]["pools"][1]["trailing_pages"] =
+            json!(null);
+        cases.push(null_window);
+        for (field, value) in [("tp_size", json!(0)), ("pp_size", json!(2))] {
+            let mut info = mooncake_server_info();
+            info[field] = value;
+            cases.push(info);
+        }
+        for info in cases {
+            let config =
+                build_engine_config(&discovery(info), DisaggregationMode::Aggregated, None, None)
+                    .expect("optional L3 metadata must not fail worker startup");
+            assert!(!config.runtime_data.contains_key("sglang_hicache_mooncake"));
+            assert_eq!(config.llm.unwrap().total_kv_blocks, Some(64));
+        }
+    }
+
+    #[test]
+    fn unreadable_extra_config_does_not_disable_the_layout() {
+        for extra in [
+            json!("@/private/mooncake.json"),
+            json!("private-invalid-json"),
+            json!([1]),
+            json!({"tp_lcm_size": 0}),
+            json!({"tp_lcm_size": u64::from(u32::MAX) + 1}),
+        ] {
+            let mut info = mooncake_server_info();
+            info["hicache_storage_backend_extra_config"] = extra.clone();
+            let metadata = mooncake_runtime_data(&info, None)
+                .unwrap_or_else(|| panic!("layout dropped for {extra}"));
+            assert_eq!(metadata["tp_lcm_size"], json!(null));
+            assert_eq!(metadata["kv_events_endpoint"], json!(null));
+            assert_eq!(
+                metadata["hicache_object_layout"],
+                info["hicache_object_layout"]["hicache_object_layout"]
+            );
+        }
+    }
+
+    #[test]
+    fn env_kv_events_endpoint_wins_over_extra_config() {
+        let mut info = mooncake_server_info();
+        info["hicache_storage_backend_extra_config"] =
+            json!({"kv_events_endpoint": "ipc:///from-extra-config"});
+        for (env, expected) in [
+            (Some("tcp://from-env:1"), "tcp://from-env:1"),
+            (Some(""), "ipc:///from-extra-config"),
+            (None, "ipc:///from-extra-config"),
+        ] {
+            let metadata = mooncake_runtime_data(&info, env).unwrap();
+            assert_eq!(metadata["kv_events_endpoint"], expected);
+        }
+        let mut info = mooncake_server_info();
+        info.as_object_mut()
+            .unwrap()
+            .remove("hicache_storage_backend_extra_config");
+        let metadata = mooncake_runtime_data(&info, Some("tcp://from-env:1")).unwrap();
+        assert_eq!(metadata["kv_events_endpoint"], "tcp://from-env:1");
     }
 
     #[test]
