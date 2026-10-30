@@ -183,10 +183,8 @@ async def elect_and_wake(
             failover_metrics.set_state("standby")
         if runtime is not None:
             # Healthy while paused, so Kubernetes does not kill the standby
-            # during a long outage.
-            # TODO(failover): no engine monitor watches this engine while we
-            # block below, so a standby that dies here keeps reporting healthy
-            # until it wins the lock and fails to wake.
+            # during a long outage. Callers must monitor engine health while
+            # waiting; this override alone cannot detect a failed standby.
             runtime.set_health_status(True)
         logger.info(
             "[Shadow] Engine paused, startup probe now passing, waiting for lock"
