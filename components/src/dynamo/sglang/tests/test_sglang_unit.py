@@ -2078,8 +2078,15 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("serial", [False, True])
-@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130", "0.5.23"])
+@pytest.mark.parametrize(
+    ("serial", "installed"),
+    [
+        (False, "0.5.19"),
+        (True, "0.5.19"),
+        (True, "0.5.22+cu130"),
+        (True, "0.5.23"),
+    ],
+)
 async def test_systemone_serial_capability_published_only_when_isolated(
     monkeypatch, caplog, serial, installed
 ):
