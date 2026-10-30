@@ -25,7 +25,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet, runtime_config_watch},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
@@ -706,10 +706,39 @@ impl ModelWatcher {
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
+            // Capabilities that shape a request before it is routed cannot be
+            // read off the representative card: `runtime_config` is excluded
+            // from `mdcsum`, so workers advertising different `runtime_data`
+            // still share one cohort and one representative. Hand the
+            // preprocessor the live per-worker view instead, so those reads can
+            // require the whole fleet. Scoped to this WorkerSet's lifecycle;
+            // see `base_runtime_config_watch`'s note on quiescent endpoints.
+            let worker_runtime_configs = if needs_preprocessed_routing
+                || needs_systemone_preprocessor
+            {
+                match runtime_config_watch(&endpoint, cancellation.child_token()).await {
+                    Ok(watch) => Some(watch),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Falling back to the representative card for pre-routing capabilities"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             if needs_systemone_preprocessor {
                 worker_set.systemone_preprocessor = match tokenizer.clone() {
                     Some(tokenizer) => {
-                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                        match worker_set_chat_preprocessor(
+                            card,
+                            tokenizer,
+                            worker_runtime_configs.clone(),
+                            &cancellation,
+                        ) {
                             Ok(preprocessor) => Some(preprocessor),
                             Err(error) => {
                                 tracing::warn!(
@@ -777,7 +806,12 @@ impl ModelWatcher {
                     // Only chat pipelines use speculative prefill.
                     let preprocessor = match worker_set.systemone_preprocessor.clone() {
                         Some(preprocessor) => preprocessor,
-                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                        None => worker_set_chat_preprocessor(
+                            card,
+                            tk.clone(),
+                            worker_runtime_configs.clone(),
+                            &cancellation,
+                        )?,
                     };
                     Some(
                         routing
@@ -818,9 +852,14 @@ impl ModelWatcher {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_worker_configs(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        worker_runtime_configs.clone(),
+                        None,
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts_and_worker_configs")?;
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;
@@ -1534,18 +1573,20 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
 fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
+    worker_runtime_configs: Option<crate::discovery::RuntimeConfigWatch>,
     cancellation: &CancellationToken,
 ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
     let PromptFormatter::OAI(formatter) =
         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
     // A retained pipeline must stop its warmups when its WorkerSet is retired.
-    OpenAIPreprocessor::new_with_parts_and_cancel(
+    OpenAIPreprocessor::new_with_parts_and_worker_configs(
         card.clone(),
         formatter,
         tokenizer,
+        worker_runtime_configs,
         Some(cancellation.clone()),
     )
-    .context("OpenAIPreprocessor.new_with_parts_and_cancel")
+    .context("OpenAIPreprocessor.new_with_parts_and_worker_configs")
 }
 
 #[cfg(test)]
@@ -1668,7 +1709,7 @@ mod tests {
             let runtime_cancellation = CancellationToken::new();
             let cancellation = runtime_cancellation.child_token();
             let preprocessor =
-                worker_set_chat_preprocessor(&card, card.tokenizer().unwrap(), &cancellation)
+                worker_set_chat_preprocessor(&card, card.tokenizer().unwrap(), None, &cancellation)
                     .unwrap()
                     .into_operator();
             let backend = Arc::new(CompletingBackend::default());
