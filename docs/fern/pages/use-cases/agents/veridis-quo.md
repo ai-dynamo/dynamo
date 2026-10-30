@@ -1,11 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Contact Router
+title: Veridis Quo
 subtitle: Group-aware admission for RL rollouts that bounds weight-version staleness
 ---
 
-**Experimental.** Contact Router is a builtin router plugin for RL rollout serving. It starts from the [ThunderAgent Program Scheduler](thunderagent-program-scheduler.md) (same pause/resume and placement) and adds admission by data group, so raising client concurrency queues more groups instead of producing more stale, discarded rollouts.
+**Experimental.** Veridis Quo is a builtin router plugin for RL rollout serving. It starts from the [ThunderAgent Program Scheduler](thunderagent-program-scheduler.md) (same pause/resume and placement) and adds admission by data group, so raising client concurrency queues more groups instead of producing more stale, discarded rollouts.
 
 ## Model
 
@@ -27,7 +27,7 @@ A good `initial_programs` is `target_age * trajectories_per_trainer_step / f`, w
 
 ```yaml
 request_classifier:
-  type: contact_router
+  type: veridis_quo
   parameters:
     kv_admission: true
     target_age: 5
@@ -35,13 +35,13 @@ request_classifier:
     age_gain: 0.1
     age_delay_versions: 8
 worker_selection:
-  aggregated: contact_router
+  aggregated: veridis_quo
   instances:
-    - name: contact_router
-      type: contact_router
+    - name: veridis_quo
+      type: veridis_quo
 ```
 
-Start the frontend as for ThunderAgent, with `--router-policy-config contact_router.yaml` and soft session affinity. End each rollout with a `X-Dynamo-Session-Final: true` request; a rollout that is cancelled, evicted or expires frees its group slot without moving the age limit.
+Start the frontend as for ThunderAgent, with `--router-policy-config veridis_quo.yaml` and soft session affinity. End each rollout with a `X-Dynamo-Session-Final: true` request; a rollout that is cancelled, evicted or expires frees its group slot without moving the age limit.
 
 Request headers:
 

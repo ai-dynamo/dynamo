@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Data-group tags and priority for Contact Router.
+//! Data-group tags and priority for Veridis Quo.
 //!
 //! A data group is the samples of one prompt that train together. Requests name
 //! their group, its size and their task's environment seconds in headers, and

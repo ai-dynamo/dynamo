@@ -10,10 +10,10 @@ use dynamo_kv_router::plugins::request_classifier::{ClassifyEvent, RequestProgre
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use tokio::sync::Notify;
 
-use super::super::ContactRouterConfig;
-use super::ContactRouterError;
+use super::super::VeridisQuoConfig;
+use super::VeridisQuoError;
 use super::capacity::WorkerCapacitySnapshot;
-use crate::contact_router::group_priority::{GroupKey, GroupTag, Groups, VERSION_HEADER, header};
+use crate::veridis_quo::group_priority::{GroupKey, GroupTag, Groups, VERSION_HEADER, header};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgramStatus {
@@ -192,7 +192,7 @@ impl WorkerUsage {
 }
 
 pub(crate) struct State {
-    config: ContactRouterConfig,
+    config: VeridisQuoConfig,
     pub(crate) programs: HashMap<String, Program>,
     paused_programs: HashSet<String>,
     marked_for_pause: usize,
@@ -212,7 +212,7 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn new(config: ContactRouterConfig) -> Self {
+    pub(crate) fn new(config: VeridisQuoConfig) -> Self {
         Self {
             program_limit: config.initial_programs as f64,
             kv_capacity: 0,
@@ -265,7 +265,7 @@ impl State {
         request: RequestRegistration,
         capacities: &WorkerCapacitySnapshot,
         now: Instant,
-    ) -> Result<Arc<Notify>, ContactRouterError> {
+    ) -> Result<Arc<Notify>, VeridisQuoError> {
         let RequestRegistration {
             request_id,
             session_id,
@@ -289,10 +289,10 @@ impl State {
             _ => tag,
         };
         if self.requests.contains_key(&request_id) {
-            return Err(ContactRouterError::DuplicateRequestId(request_id));
+            return Err(VeridisQuoError::DuplicateRequestId(request_id));
         }
         if self.requests.len() >= self.config.max_tracked_requests {
-            return Err(ContactRouterError::RequestLimitExceeded {
+            return Err(VeridisQuoError::RequestLimitExceeded {
                 limit: self.config.max_tracked_requests,
             });
         }
@@ -363,7 +363,7 @@ impl State {
         &mut self,
         session_id: &str,
         now: Instant,
-    ) -> Result<(), ContactRouterError> {
+    ) -> Result<(), VeridisQuoError> {
         if self.programs.contains_key(session_id)
             || self.programs.len() < self.config.max_tracked_requests
         {
@@ -377,7 +377,7 @@ impl State {
             .min_by_key(|(_, program)| program.acting_since)
             .map(|(candidate, _)| candidate.clone());
         let Some(evicted) = evicted else {
-            return Err(ContactRouterError::ProgramLimitExceeded {
+            return Err(VeridisQuoError::ProgramLimitExceeded {
                 limit: self.config.max_tracked_requests,
             });
         };
@@ -1534,9 +1534,9 @@ fn reserve_capacity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contact_router::group_priority::PriorityConfig;
+    use crate::veridis_quo::group_priority::PriorityConfig;
 
-    fn state(config: ContactRouterConfig) -> State {
+    fn state(config: VeridisQuoConfig) -> State {
         State::new(config)
     }
 
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn hard_pins_are_charged_before_sent_and_block_an_interleaved_arrival() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         let capacities = capacities(&[(0, 64_000), (1, 64_000)]);
         let worker = |id| WorkerWithDpRank::new(id, 0);
         // #15280's first seven registrations. Provisional least-used choices
@@ -1648,7 +1648,7 @@ mod tests {
         let worker1 = WorkerWithDpRank::new(1, 0);
         let capacities = WorkerCapacitySnapshot::new([(worker0, 1_000), (worker1, 1_000)])
             .with_live_workers([worker0, worker1]);
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         state
             .register(
                 RequestRegistration::new(
@@ -1702,7 +1702,7 @@ mod tests {
         let worker1 = WorkerWithDpRank::new(1, 0);
         let capacities =
             WorkerCapacitySnapshot::new([(worker1, 1_000)]).with_live_workers([worker0, worker1]);
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         let notify = state
             .register(
                 RequestRegistration::new(
@@ -1731,7 +1731,7 @@ mod tests {
         let now = Instant::now();
         let worker0 = WorkerWithDpRank::new(0, 0);
         let capacities = capacities(&[(0, 1_000)]);
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         state
             .register(
                 RequestRegistration::new(
@@ -1806,7 +1806,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
         let capacities = capacities(&[(0, 1_000), (1, 1_000)]);
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         for (request_id, session_id, worker) in [
             ("blocker", "blocker", worker0),
             ("first", "session", worker1),
@@ -1860,7 +1860,7 @@ mod tests {
     #[test]
     fn waiting_hard_pin_resumes_only_on_its_worker_after_capacity_change() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         let initial = capacities(&[(0, 1_000), (1, 300)]);
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
@@ -1932,7 +1932,7 @@ mod tests {
     #[test]
     fn timed_out_hard_pin_waits_when_discovery_has_no_live_workers() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         let pinned = WorkerWithDpRank::new(1, 0);
         let initial = capacities(&[(1, 100)]);
         let notify = state
@@ -1963,7 +1963,7 @@ mod tests {
     #[test]
     fn cancelling_a_pinned_worker_change_restores_the_prior_charge() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig::default());
+        let mut state = state(VeridisQuoConfig::default());
         let capacities = capacities(&[(0, 1_000), (1, 1_000)]);
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
@@ -2018,7 +2018,7 @@ mod tests {
     #[test]
     fn greedy_resume_selects_scalar_set_then_packs_largest_first() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             pause_threshold: 1.0,
             resume_hysteresis: 0.0,
             buffer_per_program: 100,
@@ -2050,7 +2050,7 @@ mod tests {
     fn assigned_continuation_releases_before_periodic_pressure() {
         let now = Instant::now();
         let worker = WorkerWithDpRank::new(1, 0);
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             pause_threshold: 0.50,
             pause_target: 0.40,
             buffer_per_program: 0,
@@ -2095,7 +2095,7 @@ mod tests {
     fn streamed_progress_updates_capacity_pressure_without_a_state_event() {
         let now = Instant::now();
         let worker = WorkerWithDpRank::new(1, 0);
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             pause_threshold: 0.50,
             pause_target: 0.40,
             buffer_per_program: 0,
@@ -2133,7 +2133,7 @@ mod tests {
         let reasoning_rank = WorkerWithDpRank::new(7, 3);
         let healthy_rank = WorkerWithDpRank::new(7, 4);
         let other_worker = WorkerWithDpRank::new(8, 2);
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             buffer_per_program: 0,
             ..Default::default()
         });
@@ -2189,7 +2189,7 @@ mod tests {
         let now = Instant::now();
         let worker = WorkerWithDpRank::new(0, 0);
         for (priority, paused) in [(false, "old"), (true, "young")] {
-            let mut state = state(ContactRouterConfig {
+            let mut state = state(VeridisQuoConfig {
                 buffer_per_program: 0,
                 priority: oldest_first(priority),
                 ..Default::default()
@@ -2218,7 +2218,7 @@ mod tests {
     fn priority_resumes_the_oldest_program_first() {
         let now = Instant::now();
         for (priority, resumed) in [(false, "young"), (true, "old")] {
-            let mut state = state(ContactRouterConfig {
+            let mut state = state(VeridisQuoConfig {
                 pause_threshold: 1.0,
                 resume_hysteresis: 0.0,
                 buffer_per_program: 100,
@@ -2248,7 +2248,7 @@ mod tests {
     fn priority_admits_the_highest_scoring_new_program_first() {
         let now = Instant::now();
         for (priority, admitted) in [(false, "fast"), (true, "slow")] {
-            let mut state = state(ContactRouterConfig {
+            let mut state = state(VeridisQuoConfig {
                 priority: priority.then(|| PriorityConfig::new(0.0, 0.0, 1.0)),
                 ..Default::default()
             });
@@ -2295,7 +2295,7 @@ mod tests {
     #[test]
     fn target_age_limits_started_groups() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             target_age: Some(6.0),
             initial_programs: 16,
             ..Default::default()
@@ -2354,7 +2354,7 @@ mod tests {
     #[test]
     fn programs_without_a_group_header_count_against_the_limit() {
         let now = Instant::now();
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             target_age: Some(5.0),
             initial_programs: 1,
             ..Default::default()
@@ -2393,7 +2393,7 @@ mod tests {
             env_s: 0.0,
         };
         for (delay, limit) in [(0, 16.5), (10, 16.0)] {
-            let mut state = state(ContactRouterConfig {
+            let mut state = state(VeridisQuoConfig {
                 target_age: Some(5.0),
                 kv_admission: true,
                 initial_programs: 16,
@@ -2419,7 +2419,7 @@ mod tests {
     fn equal_size_pause_candidates_keep_their_existing_order() {
         let now = Instant::now();
         let worker = WorkerWithDpRank::new(1, 3);
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             buffer_per_program: 0,
             ..Default::default()
         });
@@ -2443,7 +2443,7 @@ mod tests {
         let now = Instant::now();
         let worker = WorkerWithDpRank::new(1, 2);
         let capacities = WorkerCapacitySnapshot::new([(worker, 1_000)]);
-        let mut state = state(ContactRouterConfig {
+        let mut state = state(VeridisQuoConfig {
             pause_threshold: 0.5,
             pause_target: 0.4,
             buffer_per_program: 0,
@@ -2496,7 +2496,7 @@ mod tests {
             let mut outcomes = None;
             for iteration in 0..35 {
                 let now = Instant::now();
-                let mut state = state(ContactRouterConfig {
+                let mut state = state(VeridisQuoConfig {
                     buffer_per_program: 0,
                     ..Default::default()
                 });

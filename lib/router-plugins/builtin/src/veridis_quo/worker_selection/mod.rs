@@ -12,11 +12,11 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
-use super::CONTACT_ROUTER_CLASSIFIER_TYPE;
+use super::VERIDIS_QUO_CLASSIFIER_TYPE;
 
-struct ContactRouterScorer;
+struct VeridisQuoScorer;
 
-impl WorkerScorer for ContactRouterScorer {
+impl WorkerScorer for VeridisQuoScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
@@ -38,9 +38,9 @@ impl WorkerScorer for ContactRouterScorer {
     }
 }
 
-struct ContactRouterPicker;
+struct VeridisQuoPicker;
 
-impl WorkerPicker for ContactRouterPicker {
+impl WorkerPicker for VeridisQuoPicker {
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -73,19 +73,19 @@ impl WorkerPicker for ContactRouterPicker {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContactRouterSelectionParameters {}
+struct VeridisQuoSelectionParameters {}
 
 fn worker_selection_provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    let _: ContactRouterSelectionParameters = parameters.deserialize()?;
+    let _: VeridisQuoSelectionParameters = parameters.deserialize()?;
     Ok(Arc::new(
         move |router, worker_type: WorkerType, _partition| {
             WorkerSelectionPolicy::new(
                 router.clone(),
                 worker_type.as_str(),
-                vec![Box::new(ContactRouterScorer)],
-                Box::new(ContactRouterPicker),
+                vec![Box::new(VeridisQuoScorer)],
+                Box::new(VeridisQuoPicker),
             )
         },
     ))
@@ -95,7 +95,7 @@ pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
     registry.register_worker_selection(
-        CONTACT_ROUTER_CLASSIFIER_TYPE,
+        VERIDIS_QUO_CLASSIFIER_TYPE,
         Arc::new(worker_selection_provider),
     )
 }
@@ -165,8 +165,8 @@ mod tests {
         WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
-            vec![Box::new(ContactRouterScorer)],
-            Box::new(ContactRouterPicker),
+            vec![Box::new(VeridisQuoScorer)],
+            Box::new(VeridisQuoPicker),
         )
     }
 

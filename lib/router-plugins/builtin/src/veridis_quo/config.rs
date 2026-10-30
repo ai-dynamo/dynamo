@@ -6,17 +6,17 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::contact_router::group_priority::PriorityConfig;
+use crate::veridis_quo::group_priority::PriorityConfig;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("invalid ContactRouter configuration: {0}")]
+    #[error("invalid VeridisQuo configuration: {0}")]
     Invalid(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ContactRouterConfig {
+pub struct VeridisQuoConfig {
     pub pause_threshold: f64,
     pub pause_target: f64,
     pub resume_hysteresis: f64,
@@ -44,7 +44,7 @@ pub struct ContactRouterConfig {
     pub kv_admission: bool,
 }
 
-impl Default for ContactRouterConfig {
+impl Default for VeridisQuoConfig {
     fn default() -> Self {
         Self {
             pause_threshold: 0.95,
@@ -67,7 +67,7 @@ impl Default for ContactRouterConfig {
     }
 }
 
-impl ContactRouterConfig {
+impl VeridisQuoConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_fraction(self.pause_threshold, "pause_threshold must be in [0, 1]")?;
         validate_fraction(self.pause_target, "pause_target must be in [0, 1]")?;
@@ -165,9 +165,9 @@ mod tests {
 
     #[test]
     fn validates_control_values() {
-        assert!(ContactRouterConfig::default().validate().is_ok());
+        assert!(VeridisQuoConfig::default().validate().is_ok());
         assert!(
-            ContactRouterConfig {
+            VeridisQuoConfig {
                 pause_target: 0.96,
                 ..Default::default()
             }
@@ -175,7 +175,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            ContactRouterConfig {
+            VeridisQuoConfig {
                 scheduler_interval_seconds: 0.0,
                 ..Default::default()
             }
@@ -183,15 +183,15 @@ mod tests {
             .is_err()
         );
         for invalid in [
-            ContactRouterConfig {
+            VeridisQuoConfig {
                 initial_programs: 0,
                 ..Default::default()
             },
-            ContactRouterConfig {
+            VeridisQuoConfig {
                 target_age: Some(0.0),
                 ..Default::default()
             },
-            ContactRouterConfig {
+            VeridisQuoConfig {
                 age_gain: -0.1,
                 ..Default::default()
             },

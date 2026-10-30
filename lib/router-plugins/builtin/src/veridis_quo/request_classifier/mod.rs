@@ -24,7 +24,7 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 use self::scheduler::{RequestRegistration, State, WaitStatus};
-use super::{ConfigError, ContactRouterConfig};
+use super::{ConfigError, VeridisQuoConfig};
 
 fn capacity_provider(context: RequestClassifierContext) -> Arc<dyn WorkerCapacityProvider> {
     let block_size = u64::from(context.block_size());
@@ -46,7 +46,7 @@ fn capacity_provider(context: RequestClassifierContext) -> Arc<dyn WorkerCapacit
 fn classifier_provider(
     parameters: &RequestClassifierParameters,
 ) -> Result<RequestClassifierFactory, RequestClassifierProviderError> {
-    let config: ContactRouterConfig = parameters.deserialize()?;
+    let config: VeridisQuoConfig = parameters.deserialize()?;
     config
         .validate()
         .map_err(|error| RequestClassifierProviderError::new(error.to_string()))?;
@@ -54,8 +54,8 @@ fn classifier_provider(
     Ok(Arc::new(move |context| {
         let capacity_provider = capacity_provider(context);
         Box::new(
-            ContactRouterClassifier::new(config.clone(), capacity_provider)
-                .expect("ContactRouter configuration was validated during catalog resolution"),
+            VeridisQuoClassifier::new(config.clone(), capacity_provider)
+                .expect("VeridisQuo configuration was validated during catalog resolution"),
         )
     }))
 }
@@ -64,26 +64,26 @@ pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), RequestClassifierRegistryError> {
     registry.register_request_classifier(
-        super::CONTACT_ROUTER_CLASSIFIER_TYPE,
+        super::VERIDIS_QUO_CLASSIFIER_TYPE,
         Arc::new(classifier_provider),
     )
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ContactRouterError {
+pub(crate) enum VeridisQuoError {
     #[error("session-aware classification requires a request ID")]
     MissingRequestId,
 
-    #[error("request {0:?} is already active in the ContactRouter classifier")]
+    #[error("request {0:?} is already active in the VeridisQuo classifier")]
     DuplicateRequestId(String),
 
     #[error("request {0:?} ended while classification was pending")]
     RequestEnded(String),
 
-    #[error("ContactRouter is already tracking its configured limit of {limit} requests")]
+    #[error("VeridisQuo is already tracking its configured limit of {limit} requests")]
     RequestLimitExceeded { limit: usize },
 
-    #[error("ContactRouter is already tracking its configured limit of {limit} programs")]
+    #[error("VeridisQuo is already tracking its configured limit of {limit} programs")]
     ProgramLimitExceeded { limit: usize },
 }
 
@@ -98,7 +98,7 @@ impl Inner {
         &self,
         registration: RequestRegistration,
         headers: &BTreeMap<String, Vec<String>>,
-    ) -> Result<Arc<Notify>, ContactRouterError> {
+    ) -> Result<Arc<Notify>, VeridisQuoError> {
         let capacities = self.capacity_provider.snapshot();
         let mut state = self.state.lock();
         let (tag, version) = state.read_group(headers);
@@ -135,8 +135,8 @@ impl Inner {
             return;
         }
         let capacities = self.capacity_provider.snapshot();
-        let debug_enabled = tracing::enabled!(target: "contact_router", tracing::Level::DEBUG);
-        let warn_enabled = tracing::enabled!(target: "contact_router", tracing::Level::WARN);
+        let debug_enabled = tracing::enabled!(target: "veridis_quo", tracing::Level::DEBUG);
+        let warn_enabled = tracing::enabled!(target: "veridis_quo", tracing::Level::WARN);
         let (outcome, telemetry) = {
             let mut state = self.state.lock();
             let outcome = state.reconcile(&capacities, Instant::now());
@@ -147,21 +147,21 @@ impl Inner {
         };
         if outcome.forced_resumes > 0 {
             tracing::warn!(
-                target: "contact_router",
+                target: "veridis_quo",
                 forced_resumes = outcome.forced_resumes,
                 waiting_requests = telemetry.waiting_requests,
-                "ContactRouter deferral timeout forced program resumes"
+                "VeridisQuo deferral timeout forced program resumes"
             );
         }
         tracing::debug!(
-            target: "contact_router",
+            target: "veridis_quo",
             programs = telemetry.programs,
             active_programs = telemetry.active_programs,
             paused_programs = telemetry.paused_programs,
             marked_for_pause = telemetry.marked_for_pause,
             waiting_requests = telemetry.waiting_requests,
             tracked_requests = telemetry.tracked_requests,
-            "ContactRouter scheduler state changed"
+            "VeridisQuo scheduler state changed"
         );
     }
 
@@ -223,7 +223,7 @@ impl Drop for PendingClassification {
 async fn await_release<T>(
     mut pending: PendingClassification,
     value: T,
-) -> Result<(T, Option<dynamo_kv_router::protocols::WorkerWithDpRank>), ContactRouterError> {
+) -> Result<(T, Option<dynamo_kv_router::protocols::WorkerWithDpRank>), VeridisQuoError> {
     pending.inner.start_scheduler();
     let inner = Arc::clone(&pending.inner);
     let request_id = pending.request_id.clone();
@@ -238,7 +238,7 @@ async fn await_release<T>(
             }
             WaitStatus::Missing => {
                 pending.disarm();
-                return Err(ContactRouterError::RequestEnded(request_id));
+                return Err(VeridisQuoError::RequestEnded(request_id));
             }
             WaitStatus::Waiting => {}
         }
@@ -247,22 +247,22 @@ async fn await_release<T>(
 }
 
 /// Program-aware flow control implemented on Dynamo's request-classifier seam.
-pub struct ContactRouterClassifier {
+pub struct VeridisQuoClassifier {
     inner: Arc<Inner>,
 }
 
-impl ContactRouterClassifier {
+impl VeridisQuoClassifier {
     pub fn new(
-        config: ContactRouterConfig,
+        config: VeridisQuoConfig,
         capacity_provider: Arc<dyn WorkerCapacityProvider>,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
         tracing::info!(
-            target: "contact_router",
+            target: "veridis_quo",
             scheduler_interval_seconds = config.scheduler_interval_seconds,
             resume_timeout_seconds = config.resume_timeout_seconds,
             max_tracked_requests = config.max_tracked_requests,
-            "ContactRouter admission enabled"
+            "VeridisQuo admission enabled"
         );
         Ok(Self {
             inner: Arc::new(Inner {
@@ -275,7 +275,7 @@ impl ContactRouterClassifier {
 }
 
 #[async_trait]
-impl RequestClassifier for ContactRouterClassifier {
+impl RequestClassifier for VeridisQuoClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
@@ -286,7 +286,7 @@ impl RequestClassifier for ContactRouterClassifier {
         };
         let Some(request_id) = request.request_id().map(str::to_owned) else {
             return Box::pin(async move {
-                Err(Box::new(ContactRouterError::MissingRequestId) as Box<ClassifierError>)
+                Err(Box::new(VeridisQuoError::MissingRequestId) as Box<ClassifierError>)
             });
         };
         let session_id = session.session_id().to_owned();
@@ -360,8 +360,8 @@ mod tests {
         assert!(snapshot.is_live(worker_without_capacity));
     }
 
-    fn config() -> ContactRouterConfig {
-        ContactRouterConfig {
+    fn config() -> VeridisQuoConfig {
+        VeridisQuoConfig {
             scheduler_interval_seconds: 0.005,
             resume_timeout_seconds: 1.0,
             session_retention_seconds: 1.0,
@@ -376,10 +376,10 @@ mod tests {
         )))
     }
 
-    fn classifier(values: &[(u64, usize)]) -> ContactRouterClassifier {
+    fn classifier(values: &[(u64, usize)]) -> VeridisQuoClassifier {
         let snapshot = capacities(values);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        ContactRouterClassifier::new(config(), provider).unwrap()
+        VeridisQuoClassifier::new(config(), provider).unwrap()
     }
 
     #[test]
@@ -521,7 +521,7 @@ mod tests {
     }
 
     fn register(
-        classifier: &ContactRouterClassifier,
+        classifier: &VeridisQuoClassifier,
         request_id: &str,
         session_id: &str,
         tokens: usize,
@@ -543,13 +543,13 @@ mod tests {
             .unwrap();
     }
 
-    async fn release(classifier: &ContactRouterClassifier, request_id: &str) {
+    async fn release(classifier: &VeridisQuoClassifier, request_id: &str) {
         await_release(pending(classifier, request_id), ())
             .await
             .unwrap();
     }
 
-    fn pending(classifier: &ContactRouterClassifier, request_id: &str) -> PendingClassification {
+    fn pending(classifier: &VeridisQuoClassifier, request_id: &str) -> PendingClassification {
         let notify = classifier
             .inner
             .state
@@ -561,7 +561,7 @@ mod tests {
         PendingClassification::new(Arc::clone(&classifier.inner), request_id.to_owned(), notify)
     }
 
-    async fn sent(classifier: &mut ContactRouterClassifier, request_id: &str, worker: u64) {
+    async fn sent(classifier: &mut VeridisQuoClassifier, request_id: &str, worker: u64) {
         classifier
             .on_event(ClassifyEvent::Sent {
                 request_id: request_id.to_owned(),
@@ -570,7 +570,7 @@ mod tests {
             .await;
     }
 
-    async fn completed(classifier: &mut ContactRouterClassifier, request_id: &str, tokens: usize) {
+    async fn completed(classifier: &mut VeridisQuoClassifier, request_id: &str, tokens: usize) {
         classifier
             .on_event(ClassifyEvent::Completed {
                 request_id: request_id.to_owned(),
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn implements_request_classifier() {
         fn assert_classifier<T: RequestClassifier>() {}
-        assert_classifier::<ContactRouterClassifier>();
+        assert_classifier::<VeridisQuoClassifier>();
     }
 
     #[tokio::test]
@@ -629,7 +629,7 @@ mod tests {
         });
         register(&classifier, "reused", "new-session", 100, false);
 
-        assert!(matches!(old.await, Err(ContactRouterError::RequestEnded(id)) if id == "reused"));
+        assert!(matches!(old.await, Err(VeridisQuoError::RequestEnded(id)) if id == "reused"));
         assert!(
             classifier
                 .inner
@@ -687,7 +687,7 @@ mod tests {
                 Arc::clone(&snapshot)
             })
         };
-        let classifier = ContactRouterClassifier::new(config(), provider).unwrap();
+        let classifier = VeridisQuoClassifier::new(config(), provider).unwrap();
         register(&classifier, "tracked", "session", 100, false);
         reads.store(0, Ordering::Relaxed);
         let worker = WorkerWithDpRank::new(1, 0);
@@ -815,8 +815,8 @@ mod tests {
     async fn final_session_frees_capacity_at_admission_without_restoring_on_abort() {
         let snapshot = capacities(&[(1, 250)]);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 scheduler_interval_seconds: 1.0,
                 ..config()
             },
@@ -914,8 +914,8 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || Arc::clone(&current.lock()))
         };
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 buffer_per_program: 100,
                 ..config()
             },
@@ -943,8 +943,8 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || Arc::clone(&current.lock()))
         };
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 buffer_per_program: 100,
                 scheduler_interval_seconds: 0.05,
                 ..config()
@@ -1013,7 +1013,7 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || Arc::clone(&current.lock()))
         };
-        let mut classifier = ContactRouterClassifier::new(config(), provider).unwrap();
+        let mut classifier = VeridisQuoClassifier::new(config(), provider).unwrap();
         register(&classifier, "request-1", "session-a", 100, false);
         release(&classifier, "request-1").await;
         sent(&mut classifier, "request-1", 1).await;
@@ -1053,7 +1053,7 @@ mod tests {
                 .with_live_workers([worker_2]),
         );
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let mut classifier = ContactRouterClassifier::new(config(), provider).unwrap();
+        let mut classifier = VeridisQuoClassifier::new(config(), provider).unwrap();
 
         register(&classifier, "request-1", "session-a", 100, false);
         release(&classifier, "request-1").await;
@@ -1075,7 +1075,7 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || Arc::clone(&current.lock()))
         };
-        let mut classifier = ContactRouterClassifier::new(config(), provider).unwrap();
+        let mut classifier = VeridisQuoClassifier::new(config(), provider).unwrap();
         register(&classifier, "request-1", "session-a", 100, false);
         release(&classifier, "request-1").await;
         sent(&mut classifier, "request-1", 1).await;
@@ -1104,8 +1104,8 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || Arc::clone(&current.lock()))
         };
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 buffer_per_program: 100,
                 resume_timeout_seconds: 0.02,
                 ..config()
@@ -1141,8 +1141,8 @@ mod tests {
     async fn retained_session_expires_before_its_next_request() {
         let snapshot = capacities(&[(1, 1_000)]);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 session_retention_seconds: 0.005,
                 ..config()
             },
@@ -1168,8 +1168,8 @@ mod tests {
     fn tracked_request_limit_is_enforced_before_allocating_state() {
         let snapshot = capacities(&[(1, 1_000)]);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 max_tracked_requests: 1,
                 ..config()
             },
@@ -1190,7 +1190,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ContactRouterError::RequestLimitExceeded { limit: 1 })
+            Err(VeridisQuoError::RequestLimitExceeded { limit: 1 })
         ));
         assert_eq!(classifier.inner.state.lock().requests.len(), 1);
     }
@@ -1199,8 +1199,8 @@ mod tests {
     async fn retained_programs_are_bounded_by_the_tracking_limit() {
         let snapshot = capacities(&[(1, 1_000)]);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let mut classifier = ContactRouterClassifier::new(
-            ContactRouterConfig {
+        let mut classifier = VeridisQuoClassifier::new(
+            VeridisQuoConfig {
                 max_tracked_requests: 2,
                 ..config()
             },
@@ -1335,7 +1335,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_forces_release_on_the_least_loaded_worker() {
-        let config = ContactRouterConfig {
+        let config = VeridisQuoConfig {
             scheduler_interval_seconds: 0.005,
             resume_timeout_seconds: 0.02,
             session_retention_seconds: 1.0,
@@ -1344,7 +1344,7 @@ mod tests {
         };
         let snapshot = capacities(&[(1, 100)]);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
-        let classifier = ContactRouterClassifier::new(config, provider).unwrap();
+        let classifier = VeridisQuoClassifier::new(config, provider).unwrap();
         register(&classifier, "request-1", "session-a", 200, false);
 
         tokio::time::timeout(

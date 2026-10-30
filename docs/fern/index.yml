@@ -723,8 +723,8 @@ navigation:
             path: pages/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-          - page: Contact Router
-            path: pages/use-cases/agents/contact-router.md
+          - page: Veridis Quo
+            path: pages/use-cases/agents/veridis-quo.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film

@@ -12,13 +12,13 @@ mod group_priority;
 mod request_classifier;
 mod worker_selection;
 
-use config::{ConfigError, ContactRouterConfig};
+use config::{ConfigError, VeridisQuoConfig};
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
-const CONTACT_ROUTER_CLASSIFIER_TYPE: &str = "contact_router";
+const VERIDIS_QUO_CLASSIFIER_TYPE: &str = "veridis_quo";
 
-/// Register ContactRouter's classifier and worker selector in one plugin catalog.
+/// Register VeridisQuo's classifier and worker selector in one plugin catalog.
 pub(super) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), RouterPluginRegistryError> {
@@ -38,12 +38,12 @@ mod tests {
             policy.path(),
             r#"
 request_classifier:
-  type: contact_router
+  type: veridis_quo
 worker_selection:
-  aggregated: contact_router
+  aggregated: veridis_quo
   instances:
-    - name: contact_router
-      type: contact_router
+    - name: veridis_quo
+      type: veridis_quo
 "#,
         )
         .unwrap();
