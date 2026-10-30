@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn selection_defaults_to_current_and_the_core_takes_mesh_peers() {
         let args = Args::try_parse_from(["global-frontend", POOL]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Current);
+        assert!(!args.selection_core);
         assert_eq!(replica_transport(&args).unwrap(), None);
 
         let args = Args::try_parse_from([
@@ -525,7 +525,6 @@ mod tests {
                 ],
             }))
         );
-        // The gRPC stream is served on the API port, not the mesh's.
         let with_port = [&core[..], &peers[..], &["--replica-sync-port", "5600"]].concat();
         assert!(transport(&with_port).is_err());
     }
@@ -545,7 +544,6 @@ mod tests {
         assert!(transport(&["--replica-sync-port", "5600"]).is_err());
         // A tcp:// peer needs the port this replica publishes on.
         assert!(transport(&["--selection-core", "--peer", "tcp://10.0.0.2:5600"]).is_err());
-        // One transport per replica.
         assert!(
             transport(&[
                 "--selection",
