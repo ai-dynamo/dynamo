@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -1030,6 +1031,10 @@ def _run_codex_exec_smoke(
         )
 
 
+# A `marker_` filename with any hex suffix: the answer may miscopy the digits.
+_MARKER_FILENAME_RE = re.compile(r"marker_[0-9a-f]+\.txt")
+
+
 def _codex_listing_failure(stdout: str, marker_filename: str) -> str | None:
     """Return why a `codex exec --json` run did not prove the listing, or None.
 
@@ -1060,9 +1065,9 @@ def _codex_listing_failure(stdout: str, marker_filename: str) -> str | None:
             f"no successful shell command output contained {marker_filename!r}, "
             "so the shell tool did not run `ls` through /v1/responses"
         )
-    if final_message is None or "marker_" not in final_message:
+    if final_message is None or not _MARKER_FILENAME_RE.search(final_message):
         return (
-            "the final answer did not name the `marker_` file, so the tool "
+            "the final answer did not name a `marker_<hex>.txt` file, so the tool "
             f"output did not reach the model; final answer: {final_message!r}"
         )
     return None
@@ -1103,6 +1108,9 @@ def test_codex_listing_failure_requires_command_output_and_answer() -> None:
     # The tool ran, but the answer shows no sign of its output.
     unrelated = {"type": "agent_message", "text": "The directory is empty."}
     assert _codex_listing_failure(events(listing, unrelated), marker)
+    # Mentioning the prefix without naming a file is not an answer.
+    no_name = {"type": "agent_message", "text": "I could not identify a marker_ file."}
+    assert _codex_listing_failure(events(listing, no_name), marker)
     assert _codex_listing_failure(events(listing), marker)
 
 
