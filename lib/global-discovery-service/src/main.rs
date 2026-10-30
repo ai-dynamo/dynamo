@@ -8,12 +8,25 @@
 //!   the registrations PoolRelays send (`registrations`), or the
 //!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
 //!   the standard way (`mcs`).
-//! - `--registration-storage`: where registrations are kept. Only `memory`
-//!   for now.
+//! - `--registration-storage`: where registrations are kept. Either in this
+//!   process (`memory`), so run one replica, or in a DynamoDB table that
+//!   every replica shares (`dynamodb`), in one region or, through a Global
+//!   Table, in several.
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
 //!     --pool-discovery registrations --router aws-ohio/global-router-0=http://10.42.0.5:50051
+//! ```
+//!
+//! With DynamoDB, here dynamodb-local, which takes any credentials:
+//!
+//! ```bash
+//! AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+//! cargo run -p dynamo-global-discovery-service -- \
+//!     --router aws-ohio/global-router-0=http://10.42.0.5:50051 \
+//!     --registration-storage dynamodb --dynamodb-table global-discovery-pools \
+//!     --dynamodb-region us-west-2 --dynamodb-endpoint http://localhost:8000 \
+//!     --dynamodb-ensure-table
 //! ```
 
 use std::collections::HashSet;
@@ -28,6 +41,7 @@ use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
+use dynamo_global_discovery_service::backends::dynamodb::{DynamoDbConfig, DynamoDbPoolStore};
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
 };
@@ -83,7 +97,8 @@ struct Args {
     /// Where the pool and router lists come from.
     #[arg(long, value_enum, default_value_t = PoolDiscovery::Registrations)]
     pool_discovery: PoolDiscovery,
-    /// Where registrations are kept.
+    /// Where registrations are kept. Only `dynamodb` lets several replicas
+    /// serve the same pools.
     #[arg(
         long,
         value_enum,
@@ -106,6 +121,39 @@ struct Args {
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
     #[arg(long = "router", value_parser = parse_router, help_heading = WITH_REGISTRATIONS)]
     routers: Vec<RouterReplica>,
+    /// The DynamoDB table that keeps registrations. Needed with
+    /// `--registration-storage dynamodb`.
+    #[arg(
+        long,
+        required_if_eq("registration_storage", "dynamodb"),
+        help_heading = WITH_REGISTRATIONS
+    )]
+    dynamodb_table: Option<String>,
+    /// The region of the DynamoDB table (replica) to use. By default the AWS
+    /// SDK's: `AWS_REGION`, then the shared config.
+    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    dynamodb_region: Option<String>,
+    /// Send DynamoDB requests here instead of to the region's endpoint, for
+    /// example to dynamodb-local.
+    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    dynamodb_endpoint: Option<Url>,
+    /// How often a watch reads the DynamoDB table again. Less than the
+    /// heartbeat interval.
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = WITH_REGISTRATIONS
+    )]
+    dynamodb_poll_interval_secs: u64,
+    /// Create the DynamoDB table if it does not exist. For development: it
+    /// needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`.
+    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    dynamodb_ensure_table: bool,
+    /// How far the clocks of replicas sharing a DynamoDB table may disagree.
+    /// A pool stays listed this much longer than its lease.
+    #[arg(long, default_value_t = 2, help_heading = WITH_REGISTRATIONS)]
+    lease_skew_secs: u64,
     /// Each PoolRelay Service is named `<DGD name><suffix>`.
     #[arg(
         long,
@@ -151,7 +199,20 @@ enum RegistrationStorage {
     /// In this process. Run one replica: each keeps only the registrations it
     /// receives.
     Memory,
+    /// In the DynamoDB table `--dynamodb-table`, which every replica shares.
+    /// Lists are complete from the start.
+    Dynamodb,
 }
+
+/// The flags only `--registration-storage dynamodb` reads.
+const DYNAMODB_ONLY: [&str; 6] = [
+    "dynamodb_table",
+    "dynamodb_region",
+    "dynamodb_endpoint",
+    "dynamodb_poll_interval_secs",
+    "dynamodb_ensure_table",
+    "lease_skew_secs",
+];
 
 fn parse_router(value: &str) -> Result<RouterReplica, String> {
     let (id, url) = value
@@ -168,7 +229,8 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
 }
 
 /// Parses the flags. A flag set under the `--help` heading of another
-/// `--pool-discovery` value fails, as clap's own errors do. A flag left at
+/// `--pool-discovery` value fails, as clap's own errors do, and so does a
+/// DynamoDB flag without `--registration-storage dynamodb`. A flag left at
 /// its default is not refused.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
 where
@@ -182,20 +244,27 @@ where
         PoolDiscovery::Registrations => WITH_MCS,
         PoolDiscovery::Karmada | PoolDiscovery::Mcs => WITH_REGISTRATIONS,
     };
-    let given = command
-        .get_arguments()
-        .find(|arg| {
-            arg.get_help_heading() == Some(refused)
-                && matches
-                    .value_source(arg.get_id().as_str())
-                    .is_some_and(|source| source != ValueSource::DefaultValue)
-        })
-        .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned());
-    match given {
-        Some(flag) => Err(command.error(
-            ErrorKind::ArgumentConflict,
-            format!("--{flag} works only {}", refused.to_lowercase()),
-        )),
+    let given = |refuse: &dyn Fn(&clap::Arg) -> bool| {
+        command
+            .get_arguments()
+            .find(|arg| {
+                refuse(arg)
+                    && matches
+                        .value_source(arg.get_id().as_str())
+                        .is_some_and(|source| source != ValueSource::DefaultValue)
+            })
+            .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned())
+    };
+    let conflict = if let Some(flag) = given(&|arg| arg.get_help_heading() == Some(refused)) {
+        Some(format!("--{flag} works only {}", refused.to_lowercase()))
+    } else if parsed.registration_storage != RegistrationStorage::Dynamodb {
+        given(&|arg| DYNAMODB_ONLY.contains(&arg.get_id().as_str()))
+            .map(|flag| format!("--{flag} works only with --registration-storage dynamodb"))
+    } else {
+        None
+    };
+    match conflict {
+        Some(message) => Err(command.error(ErrorKind::ArgumentConflict, message)),
         None => Ok(parsed),
     }
 }
@@ -205,7 +274,7 @@ async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
     let backend = match args.pool_discovery {
-        PoolDiscovery::Registrations => registrations_backend(&args)?,
+        PoolDiscovery::Registrations => registrations_backend(&args).await?,
         PoolDiscovery::Karmada => mcs_backend(&args, McsImplementation::Karmada).await?,
         PoolDiscovery::Mcs => mcs_backend(&args, McsImplementation::Standard).await?,
     };
@@ -230,13 +299,11 @@ async fn main() -> Result<()> {
         .context("serve the Global Discovery Service")
 }
 
-/// Pools from registrations; router replicas from `--router`.
-fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
+/// Pools from registrations; router replicas from `--router`. With
+/// DynamoDB, fails unless the table can be used.
+async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     let lease = Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
         .context("check --heartbeat-interval-secs and --lease-duration-secs")?;
-    let registrations = match args.registration_storage {
-        RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
-    };
     let mut ids = HashSet::new();
     if let Some(repeated) = args
         .routers
@@ -245,12 +312,49 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     {
         bail!("--router {} is given twice", repeated.replica.0);
     }
-    let pools: Arc<PoolDirectory> = registrations.clone();
-    let registrar: Arc<dyn PoolRegistrar> = registrations;
+    let (pools, registrar): (Arc<PoolDirectory>, Arc<dyn PoolRegistrar>) =
+        match args.registration_storage {
+            RegistrationStorage::Memory => {
+                let store = Arc::new(MemoryPoolStore::new(lease));
+                (store.clone(), store)
+            }
+            RegistrationStorage::Dynamodb => {
+                let config = dynamodb_config(args)?;
+                let table = config.table.clone();
+                let store = DynamoDbPoolStore::connect(lease, config)
+                    .await
+                    .with_context(|| format!("use DynamoDB table {table} for registrations"))?;
+                (store.clone(), store)
+            }
+        };
     Ok(PoolDiscoveryBackend {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
+    })
+}
+
+/// The DynamoDB flags as the store's configuration. A watch polls more often
+/// than PoolRelays register, so it sees each change before the next
+/// heartbeat.
+fn dynamodb_config(args: &Args) -> Result<DynamoDbConfig> {
+    let Some(table) = args.dynamodb_table.clone() else {
+        bail!("--registration-storage dynamodb needs --dynamodb-table");
+    };
+    if args.dynamodb_poll_interval_secs >= args.heartbeat_interval_secs {
+        bail!(
+            "--dynamodb-poll-interval-secs {} must be less than --heartbeat-interval-secs {}",
+            args.dynamodb_poll_interval_secs,
+            args.heartbeat_interval_secs
+        );
+    }
+    Ok(DynamoDbConfig {
+        table,
+        region: args.dynamodb_region.clone(),
+        endpoint: args.dynamodb_endpoint.clone(),
+        poll_interval: Duration::from_secs(args.dynamodb_poll_interval_secs),
+        lease_skew: Duration::from_secs(args.lease_skew_secs),
+        ensure_table: args.dynamodb_ensure_table,
     })
 }
 
@@ -422,8 +526,127 @@ mod tests {
             "pool-service-suffix",
             "karmada or mcs",
         );
+        assert_refused(
+            &karmada(&["--dynamodb-table", "pools"]),
+            "dynamodb-table",
+            "registrations",
+        );
         // Flags left at their defaults are not refused, whatever their heading.
         assert!(parse_args(karmada(&[])).is_ok());
+    }
+
+    /// `--registration-storage dynamodb --dynamodb-table pools`, then `extra`.
+    fn dynamodb<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec![
+            "gds",
+            "--registration-storage",
+            "dynamodb",
+            "--dynamodb-table",
+            "pools",
+        ];
+        args.extend_from_slice(extra);
+        args
+    }
+
+    #[test]
+    fn dynamodb_needs_a_table_and_has_defaults() {
+        let error = parse_args(["gds", "--registration-storage", "dynamodb"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        assert!(error.to_string().contains("--dynamodb-table"), "{error}");
+
+        let args = parse_args(dynamodb(&[])).unwrap();
+        assert_eq!(args.registration_storage, RegistrationStorage::Dynamodb);
+        assert_eq!(
+            dynamodb_config(&args).unwrap(),
+            DynamoDbConfig {
+                table: "pools".to_owned(),
+                region: None,
+                endpoint: None,
+                poll_interval: Duration::from_secs(2),
+                lease_skew: Duration::from_secs(2),
+                ensure_table: false,
+            }
+        );
+        assert_eq!(
+            dynamodb_config(&args).unwrap(),
+            DynamoDbConfig::new("pools")
+        );
+    }
+
+    #[test]
+    fn dynamodb_flags_set_the_store() {
+        let args = parse_args(dynamodb(&[
+            "--dynamodb-region",
+            "us-east-2",
+            "--dynamodb-endpoint",
+            "http://localhost:8000",
+            "--dynamodb-poll-interval-secs",
+            "1",
+            "--dynamodb-ensure-table",
+            "--lease-skew-secs",
+            "0",
+        ]))
+        .unwrap();
+        assert_eq!(
+            dynamodb_config(&args).unwrap(),
+            DynamoDbConfig {
+                table: "pools".to_owned(),
+                region: Some("us-east-2".to_owned()),
+                endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
+                poll_interval: Duration::from_secs(1),
+                lease_skew: Duration::ZERO,
+                ensure_table: true,
+            }
+        );
+        assert!(parse_args(dynamodb(&["--dynamodb-endpoint", "localhost"])).is_err());
+        assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "0"])).is_err());
+    }
+
+    #[test]
+    fn a_dynamodb_flag_needs_dynamodb() {
+        for flag in [
+            &["--dynamodb-table", "pools"][..],
+            &["--dynamodb-region", "us-east-2"],
+            &["--dynamodb-endpoint", "http://localhost:8000"],
+            &["--dynamodb-poll-interval-secs", "1"],
+            &["--dynamodb-ensure-table"],
+            &["--lease-skew-secs", "3"],
+        ] {
+            let mut args = vec!["gds"];
+            args.extend_from_slice(flag);
+            let error = parse_args(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+            let reason = format!(
+                "{} works only with --registration-storage dynamodb",
+                flag[0]
+            );
+            assert!(error.to_string().contains(&reason), "{error}");
+        }
+        // Every DynamoDB flag is listed, and only those.
+        for arg in Args::command().get_arguments() {
+            let id = arg.get_id().as_str();
+            let listed = DYNAMODB_ONLY.contains(&id);
+            assert_eq!(
+                listed,
+                id.starts_with("dynamodb_") || id == "lease_skew_secs",
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dynamodb_watch_polls_faster_than_relays_register() {
+        let config = |poll: &str| {
+            dynamodb_config(
+                &parse_args(dynamodb(&["--dynamodb-poll-interval-secs", poll])).unwrap(),
+            )
+        };
+        assert!(config("4").is_ok());
+        let error = config("5").unwrap_err().to_string();
+        assert!(
+            error.contains("must be less than --heartbeat-interval-secs 5"),
+            "{error}"
+        );
     }
 
     #[test]

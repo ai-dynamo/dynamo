@@ -171,6 +171,8 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
           - page: Deploy the Pool Relay (Experimental)
             path: pages/kubernetes/kv-aware-routing/pool-relay.md
+          - page: Global Discovery Service Storage (Experimental)
+            path: pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -1258,6 +1260,9 @@ navigation:
           - page: Pool Relay Configuration
             path: pages/reference/components/pool-relay-configuration.md
             slug: pool-relay-configuration
+          - page: Global Discovery Service Configuration
+            path: pages/reference/components/global-discovery-service-configuration.md
+            slug: global-discovery-service-configuration
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration

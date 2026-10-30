@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Global Discovery Service with pool registrations kept in a DynamoDB table, so
+# several replicas serve the same pools and a restart loses nothing. Replace IMAGE
+# with the pushed image, for example:
+#   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service-dynamodb.yaml | kubectl apply -f -
+# Create the table first and grant the role the actions listed in
+# docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md:
+# dynamodb:Query, dynamodb:UpdateItem and dynamodb:DescribeTable on the table.
+# Replace the role ARN below, or remove the annotation and use an EKS Pod
+# Identity association for the ServiceAccount instead. Set --dynamodb-table and
+# --dynamodb-region to your table, and --router to your Global Router replicas.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: global-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/global-discovery-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: global-discovery-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: global-discovery-service
+    spec:
+      serviceAccountName: global-discovery-service
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: global-discovery
+          image: IMAGE
+          args:
+            - --listen=0.0.0.0:8080
+            - --pool-discovery=registrations
+            - --registration-storage=dynamodb
+            - --dynamodb-table=global-discovery-pools
+            - --dynamodb-region=us-east-1
+            - --router=aws-ohio/global-router-0=http://10.42.0.5:50051
+          env:
+            - name: DYN_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          lifecycle:
+            # Keep serving while the Pod leaves the Service's endpoints.
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  selector:
+    app.kubernetes.io/name: global-discovery-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

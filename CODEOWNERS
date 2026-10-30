@@ -96,6 +96,7 @@
 /lib/global-view-broadcaster/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 /container/global-discovery-service.yaml                                                                @ai-dynamo/dynamo-global-router-codeowners
+/container/global-discovery-service-dynamodb.yaml                                                       @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -603,6 +604,8 @@ requirements.txt                                                                
 /recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json                                        @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/reference/components/pool-relay-configuration.md                                       @ai-dynamo/dynamo-global-router-codeowners
 /recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json                              @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/pages/reference/components/global-discovery-service-configuration.md                         @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md                        @ai-dynamo/dynamo-global-router-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md        @ai-dynamo/dynamo-global-router-codeowners
 
