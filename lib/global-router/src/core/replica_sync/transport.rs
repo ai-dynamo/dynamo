@@ -46,6 +46,10 @@ use super::{from_wire_binding, from_wire_event, to_wire_binding, to_wire_event};
 const EVENT_CHANNEL_CAPACITY: usize = 100_000;
 /// Frames a subscriber may fall behind before it loses the oldest.
 const FRAME_BUFFER: usize = 1024;
+/// Events a full partition may have waiting beyond its channel before
+/// further ones are dropped: a partition that cannot take this many is not
+/// keeping up, and the sweep reconciles what a dropped free leaves.
+const MAX_BACKLOG_EVENTS: usize = EVENT_CHANNEL_CAPACITY;
 
 /// Replicate bookings and session bindings with other Global Frontends over
 /// the gRPC `ReplicaSync` stream, served on this replica's API port.
@@ -233,6 +237,11 @@ impl ReplicaHub {
             if now.saturating_duration_since(booking.opened_at) < self.booking_expiry {
                 return true;
             }
+            // Not admitted because its add is still waiting for the
+            // partition: not the core's silence, so not expired.
+            if !booking.admitted && self.backlog.contains_key(&booking.partition) {
+                return true;
+            }
             if booking.progressed {
                 booking.progressed = false;
                 booking.opened_at = now;
@@ -368,6 +377,10 @@ impl ReplicaHub {
         };
         match self.backlog.entry(partition.clone()) {
             Entry::Occupied(mut queued) => {
+                if queued.get().len() >= MAX_BACKLOG_EVENTS {
+                    self.counters.events_dropped.fetch_add(1, Relaxed);
+                    return false;
+                }
                 queued.get_mut().push_back(event);
                 true
             }
@@ -773,6 +786,17 @@ mod tests {
             seen.push(channels.inbound_rx.recv().await.unwrap().request_id);
         }
         assert_eq!(&seen[EVENT_CHANNEL_CAPACITY..], ["late-1", "late-2"]);
+        // A backlog at its cap drops what comes next, counted.
+        if let Some(mut queued) = hub.backlog.get_mut(&partition) {
+            queued.extend((0..MAX_BACKLOG_EVENTS).map(|i| event(&format!("cap-{i}"))));
+        }
+        if hub.backlog.contains_key(&partition) {
+            assert!(!hub.deliver(&partition, event("over")));
+            assert_eq!(hub.stats().events_dropped, 1);
+        }
+        while channels.inbound_rx.try_recv().is_ok() || hub.backlog.contains_key(&partition) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         tokio::time::timeout(Duration::from_secs(2), async {
             while hub.backlog.contains_key(&partition) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
