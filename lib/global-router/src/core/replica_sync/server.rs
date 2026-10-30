@@ -16,7 +16,6 @@ use super::proto::replica_sync_server::{ReplicaSync, ReplicaSyncServer};
 use super::proto::{ReplicaFrame, Snapshot, SubscribeRequest};
 use super::{CONTRACT_MARKER, ReplicaHub};
 
-/// The `ReplicaSync` service of one replica.
 pub struct ReplicaSyncService {
     hub: Arc<ReplicaHub>,
 }
