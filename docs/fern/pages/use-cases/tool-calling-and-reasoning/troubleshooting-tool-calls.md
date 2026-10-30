@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Troubleshooting Tool Calls
 subtitle: Capture raw model output with logprobs so issues can be localized
@@ -19,7 +19,13 @@ what the response will look like, so you can capture and share useful
 diagnostic info.
 
 > [!IMPORTANT]
->  Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`.
+> Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint.
+> On the V2 parser route (see [Parser Generation Routing](#parser-generation-routing)),
+> `logprobs.content` lists every token entry the backend returns, in generation order, including
+> reasoning, tool-call, and control tokens that the parsed message does not show. Streamed responses
+> carry each backend chunk's entries once, on one chunk for that choice, so the entries need not line
+> up with the text in `reasoning_content`, `content`, and `tool_calls`. This note does not describe
+> the V1 route.
 
 ## The request
 
@@ -88,11 +94,16 @@ engine's raw token stream:
 }
 ```
 
-Each entry in `logprobs.content` is one generated token with its exact UTF-8
-`bytes`. Concatenating those bytes in order reconstructs the raw model
-output, before any tool-call parser touched it. That is the key piece for
-triage: it tells us what the model actually produced, separately from what
-the parser made of it.
+Each entry in `logprobs.content` is one generated token and keeps the score
+the backend returned for it. The `token` text and `bytes` are decoded
+representations: a control token such as end-of-sequence can have empty text
+and bytes, and `return_tokens_as_token_ids` can replace the text with a
+`token_id:<id>` label. Without that option, concatenating the `bytes` in
+order shows the model output before any tool-call parser touched it, minus
+tokens that decode to nothing. That is the key piece for triage: it tells us
+what the model actually produced, separately from what the parser made of
+it. Decoded text is not a substitute for exact token IDs where the response
+provides them.
 
 ## What to include when reporting an issue
 
@@ -108,8 +119,9 @@ Share these four things in the bug report or issue thread:
    value if set.
 
 With those four pieces, the Dynamo team can usually localize the bug
-without standing up your model. The team will reconstruct the raw stream
-from the `bytes` arrays and compare it against `message.content` and
+without standing up your model. The team will rebuild the raw stream from
+the per-token entries, using exact token IDs over decoded `bytes` where the
+response provides them, and compare it against `message.content` and
 `message.tool_calls` to decide whether the issue is in the model output,
 the parser configuration, or the parser logic.
 
@@ -153,7 +165,7 @@ On the default Kimi K3 route, a prompt ending with the XTML reasoning opener `<|
 
 ## Known limitations and follow-up
 
-This revision pins `dynamo-parsers-v2` version 0.7.24. The earlier 0.7.17 update included the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). Targeted parser regressions do not establish qualification of every parser path.
+This revision pins `dynamo-parsers-v2` version 0.8.0. The earlier 0.7.17 update included the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). Targeted parser regressions do not establish qualification of every parser path.
 
 A separate quoted native tool-call opener case can still cut off the rest of an answer under V2, in streaming and batch requests. The exact regression remains follow-up work tracked with related native Qwen3 and Kimi streaming changes in [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577). With generic `<think>` prompt prefill, splitting `thought</think>` after `thought<` can also leave the remaining tool JSON in reasoning; this behavior is present on the existing V1 route as well. Both cases still need qualification before they can be claimed as fixed.
 

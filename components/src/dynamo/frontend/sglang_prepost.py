@@ -1279,6 +1279,8 @@ class SglangStreamingPostProcessor:
         self._pending_stop_text = ""
         self._locally_finished = False
         self._local_stop_reason: str | None = None
+        # Decode context, decoded IDs, stop text and hidden stop-token count.
+        self._local_stop_boundary: tuple[list[int], list[int], str, int] | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1384,6 +1386,17 @@ class SglangStreamingPostProcessor:
         self._decode_context_ids = self._pending_decode_ids
         self._pending_decode_ids = []
         return delta_text
+
+    def _count_tokens_through(
+        self, context_ids: list[int], token_ids: list[int], text: str
+    ) -> int:
+        """Count leading ``token_ids`` whose incremental decode covers ``text``."""
+        context_text = self._decode_ids(context_ids)
+        for count in range(len(token_ids)):
+            decoded = self._decode_ids(context_ids + token_ids[:count])
+            if decoded[len(context_text) :].startswith(text):
+                return count
+        return len(token_ids)
 
     def _build_openai_logprobs(
         self,
@@ -1527,6 +1540,18 @@ class SglangStreamingPostProcessor:
     def local_stop_reason(self) -> str | None:
         return self._local_stop_reason
 
+    def post_stop_token_count(self) -> int:
+        """Count the latest generated IDs that follow a local stop string.
+
+        The token completing the stop is kept. The count spans IDs withheld by
+        incremental decoding and is computed on demand by re-decoding them.
+        """
+        if self._local_stop_boundary is None:
+            return 0
+        context_ids, decoded_ids, stop_text, hidden_count = self._local_stop_boundary
+        kept = self._count_tokens_through(context_ids, decoded_ids, stop_text)
+        return len(decoded_ids) - kept + hidden_count
+
     @property
     def has_pending_stop_text(self) -> bool:
         return bool(self._pending_stop_text)
@@ -1571,8 +1596,10 @@ class SglangStreamingPostProcessor:
         text: str,
         finish_reason: str | None,
         stop_reason: Any,
-    ) -> tuple[str, bool]:
-        text = self._pending_stop_text + text
+    ) -> tuple[str, int | None]:
+        """Return visible text and, after a local stop, the stop's end in ``text``."""
+        held_text = self._pending_stop_text
+        text = held_text + text
         self._pending_stop_text = ""
 
         match = self._find_stop_string(text, stop_reason)
@@ -1587,16 +1614,17 @@ class SglangStreamingPostProcessor:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            return text[:retained_end], True
+            stop_end = match_index + len(matched_stop_string) - len(held_text)
+            return text[:retained_end], stop_end
 
         if finish_reason or not text or not self._stop_strings:
-            return text, False
+            return text, None
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
             self._pending_stop_text = text[-pending_len:]
-            return text[:-pending_len], False
-        return text, False
+            return text[:-pending_len], None
+        return text, None
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1669,33 +1697,45 @@ class SglangStreamingPostProcessor:
         stop_terminated = engine_response.get(
             "stop_terminated", finish_reason == "stop"
         )
+        generated_ids = token_ids
         if stop_terminated:
-            raw_token_count = len(token_ids)
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
-            retained_token_count = len(token_ids)
-            if log_probs is not None and len(log_probs) == raw_token_count:
-                log_probs = log_probs[:retained_token_count]
-            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
-                top_logprobs = top_logprobs[:retained_token_count]
 
-        delta_text = (
+        context_ids = self._decode_context_ids
+        held_ids = list(self._pending_decode_ids)
+        decoded_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
             if token_ids or finish_reason is not None
             else ""
         )
-        openai_logprobs = None
+        # A hidden stop token is generated output: score it, but do not display it.
+        stop_logprobs: list[dict[str, Any]] = []
         if log_probs is not None:
+            scored_ids = (
+                generated_ids if len(log_probs) == len(generated_ids) else token_ids
+            )
             openai_logprobs = self._build_openai_logprobs(
-                log_probs, top_logprobs, token_ids
+                log_probs, top_logprobs, scored_ids
             )
             if openai_logprobs is not None:
-                self._pending_logprobs_content.extend(openai_logprobs["content"])
+                content = openai_logprobs["content"]
+                self._pending_logprobs_content.extend(content[: len(token_ids)])
+                stop_logprobs = content[len(token_ids) :]
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, locally_finished = self._filter_stop_string_delta(
-            delta_text, finish_reason, stop_reason
+        delta_text, stop_end = self._filter_stop_string_delta(
+            decoded_text, finish_reason, stop_reason
         )
-        if locally_finished:
+        if stop_end is None:
+            # Queued after stop-string suppression, which matches display text.
+            self._pending_logprobs_content.extend(stop_logprobs)
+        else:
             finish_reason = "stop"
+            self._local_stop_boundary = (
+                context_ids,
+                held_ids + token_ids,
+                decoded_text[:stop_end],
+                len(generated_ids) - len(token_ids),
+            )
 
         if self._fast_plain_text:
             if delta_text:
