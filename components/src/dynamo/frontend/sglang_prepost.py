@@ -34,13 +34,19 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_deepseek import RecipeRequestError, recipe_renderer, render_recipe_prompt
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
-from .utils import PreprocessError, legacy_guided_decoding, random_call_id
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    legacy_guided_decoding,
+    random_call_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +119,7 @@ _THINKING_BY_DEFAULT = {
     "kimi_k2",
     "kimi_k3",
 }
-_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "deepseek-v41", "gemma4"}
 
 _SGLANG_PARSER_NAME_ALIASES = {
     # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
@@ -186,7 +192,7 @@ def resolve_request_force_reasoning(
     if reasoning_parser_name in _THINKING_OPT_IN:
         flag_key = (
             "thinking"
-            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4"}
+            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4", "deepseek-v41"}
             else "enable_thinking"
         )
         return kwargs.get(flag_key) is True
@@ -522,15 +528,29 @@ def _render_deepseek_v4_prompt_token_ids(
     messages: list[dict[str, Any]],
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
+    spec: str = "dsv4",
 ) -> list[int]:
-    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
+    """Use SGLang's recipe adapter or its legacy V4 checkpoint encoder."""
+    if recipe_renderer is not None:
+        try:
+            media, _ = extract_mm_urls(messages)
+        except ValueError as exc:
+            raise PreprocessError(str(exc)) from exc
+        images = (media or {}).get("image_url", [])
+        if any("Url" not in image for image in images):
+            raise PreprocessError("DeepSeek recipe encoding requires image URLs")
+        try:
+            return render_recipe_prompt(
+                request,
+                messages=messages,
+                tokenizer=tokenizer,
+                tools=template_tools,
+                spec=spec,
+                image_urls=[image["Url"] for image in images],
+            )
+        except RecipeRequestError as exc:
+            raise PreprocessError(str(exc)) from exc
 
-    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
-    ``encode_messages`` instead. Flatten each message's content to plain text,
-    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
-    expects, attach the tool schemas to the system message, then tokenize the
-    rendered prompt.
-    """
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
@@ -977,6 +997,19 @@ def preprocess_chat_request(
             messages=messages,
             tokenizer=tokenizer,
             template_tools=template_tools,
+            spec=(
+                "dsv41"
+                if any(
+                    marker in _normalize_deepseek_v4_hint(hint).replace(".", "")
+                    for hint in (
+                        request.get("model"),
+                        tool_call_parser_name,
+                        reasoning_parser_name,
+                    )
+                    for marker in ("deepseekv41", "deepseekv4p1")
+                )
+                else "dsv4"
+            ),
         )
     else:
         # Build template kwargs -- single call for rendering + tokenization
