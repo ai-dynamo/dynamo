@@ -111,6 +111,8 @@ def public_record(record: dict[str, Any], *, detail_chars: int) -> dict[str, Any
             "mode",
             "pass",
             "failure_category",
+            "failure_subcategory",
+            "failure_kinds",
             "errors",
             "warnings",
             "agent_loop",
@@ -135,6 +137,12 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(records)
     failed = sum(not bool(record.get("pass")) for record in records)
     categories = {category: 0 for category in probe.FAILURE_CATEGORIES}
+    subcategories = {
+        f"{category}.{subcategory}": 0
+        for category in probe.FAILURE_CATEGORIES
+        for subcategory in probe.FAILURE_SUBCATEGORIES[category]
+    }
+    kinds: dict[str, int] = {}
     for record in records:
         if record.get("pass"):
             continue
@@ -142,12 +150,22 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         if category not in categories:
             category = "unclassified"
         categories[str(category)] += 1
+        subcategory = record.get("failure_subcategory")
+        if subcategory not in probe.FAILURE_SUBCATEGORIES.get(str(category), ()):
+            subcategory = probe.FAILURE_SUBCATEGORIES[str(category)][-1]
+        subcategories[f"{category}.{subcategory}"] += 1
+        for kind in record.get("failure_kinds") or ():
+            kinds[str(kind)] = kinds.get(str(kind), 0) + 1
     return {
         "total": total,
         "passed": total - failed,
         "failed": failed,
         "pass_rate": None if total == 0 else round((total - failed) / total, 4),
         "failure_categories": categories,
+        # Fine-grained view: "<category>.<subcategory>" -> failed record count,
+        # plus how many failed records raised each error kind.
+        "failure_subcategories": subcategories,
+        "failure_kinds": dict(sorted(kinds.items())),
         "dynamo_api_failures": categories["dynamo_api"],
         "infrastructure_failures": categories["infrastructure"],
         "model_quality_failures": categories["model_quality"],
@@ -292,15 +310,31 @@ def render_html(report: dict[str, Any], records: list[dict[str, Any]]) -> str:
     unclassified = int(categories.get("unclassified") or 0)
     if unclassified:
         category_summary += f" · Unclassified: {unclassified}"
+    subcategory_counts = {
+        name: int(count or 0)
+        for name, count in (summary.get("failure_subcategories") or {}).items()
+        if int(count or 0)
+    }
+    if subcategory_counts:
+        category_summary += " · " + ", ".join(
+            f"{name.replace('_', ' ')}: {count}"
+            for name, count in sorted(subcategory_counts.items())
+        )
     rows = []
     for record in records:
         passed = bool(record.get("pass"))
         failure_category = record.get("failure_category")
+        failure_subcategory = record.get("failure_subcategory")
         category_label = (
             ""
             if passed
             else " · "
             + html.escape(str(failure_category or "unclassified").replace("_", " "))
+            + (
+                " / " + html.escape(str(failure_subcategory).replace("_", " "))
+                if failure_subcategory
+                else ""
+            )
         )
         rows.append(
             '<article class="record">'
