@@ -46,11 +46,8 @@ done
 ok "Gateway API CRDs present & Established"
 
 GAIE_CRDS=(
-  inferencemodelrewrites.inference.networking.x-k8s.io
-  inferenceobjectives.inference.networking.x-k8s.io
   inferencepoolimports.inference.networking.x-k8s.io
   inferencepools.inference.networking.k8s.io
-  inferencepools.inference.networking.x-k8s.io
 )
 
 info "Checking GAIE (Inference Extension) CRDs…"
