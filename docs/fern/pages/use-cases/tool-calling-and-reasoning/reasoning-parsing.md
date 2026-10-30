@@ -293,6 +293,11 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
         affect the model's chat template, not response visibility. If a GLM model
         still generates reasoning, Dynamo keeps it in `reasoning_content` and
         returns the answer in `content`.
+
+        For SGLang and native vLLM reasoning gates, Dynamo also follows an
+        explicitly open or closed reasoning block in the rendered generation
+        prompt. An open `<think>` defers JSON answer constraints until
+        `</think>`; a closed block starts directly with the answer.
       </Accordion>
     </AccordionGroup>
   </Accordion>

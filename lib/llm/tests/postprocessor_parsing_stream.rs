@@ -3854,11 +3854,30 @@ async fn glm_thinking_off_preserves_generated_reasoning() {
                 .unwrap();
             request.normalize_reasoning_template_args().unwrap();
 
-            for (raw, prefilled, expected_reasoning) in [
-                ("<think>private</think>answer", false, "private"),
-                ("private</think>answer", true, "private"),
-                ("answer", false, ""),
+            for (raw, prefilled, expected_reasoning, expected_content) in [
+                ("<think>private</think>answer", false, "private", "answer"),
+                ("private</think>answer", true, "private", "answer"),
+                ("answer", false, "", "answer"),
+                (
+                    "private</think>{\"answer\":\"hello\"}",
+                    true,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (
+                    "<think>private</think>{\"answer\":\"hello\"}",
+                    false,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (r#"{"answer":"hello"}"#, false, "", r#"{"answer":"hello"}"#),
             ] {
+                let mut request = request.clone();
+                if expected_content.starts_with('{') {
+                    request.inner.response_format = Some(
+                        serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap(),
+                    );
+                }
                 for split in 0..=raw.len() {
                     let input = stream::iter(
                         vec![
@@ -3879,7 +3898,7 @@ async fn glm_thinking_off_preserves_generated_reasoning() {
                         out.reasoning, expected_reasoning,
                         "{reasoning:?} {tool:?} {controls} {prefilled} split{split}"
                     );
-                    assert_eq!(out.content, "answer");
+                    assert_eq!(out.content, expected_content);
                     assert!(out.tool_calls.is_empty());
                     assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
 
@@ -3905,7 +3924,7 @@ async fn glm_thinking_off_preserves_generated_reasoning() {
                             .as_ref()
                             .map(get_text)
                             .unwrap_or_default(),
-                        "answer"
+                        expected_content
                     );
                     assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
                 }

@@ -237,10 +237,9 @@ pub struct PromptReasoningPrefill {
     unified: bool,
     unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
     prefix: Option<Arc<str>>,
-    /// MiniMax M3 only: whether the rendered generation prompt ends with
-    /// `</mm:think>`. `None` when unknown (no rendered text, no generation
-    /// prompt, or not an M3 reasoning parser); callers then keep trusting the
-    /// request's `thinking_mode`.
+    /// Whether the rendered generation prompt closed reasoning. MiniMax M3
+    /// treats an unclosed prompt as open; GLM requires an explicit boundary.
+    /// `None` leaves the request's thinking controls authoritative.
     reasoning_closed_by_prompt: Option<bool>,
     /// The prompt left the model's final (visible) channel open — an assistant
     /// prefill with `continue_final_message` on a channel grammar (Beam) — so the
@@ -3477,10 +3476,27 @@ impl OpenAIPreprocessor {
         }
 
         let mut preprocessed = builder.build()?;
-        if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
-            self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
-        ) {
+        let glm_reasoning_ended =
+            prompt_injected_reasoning
+                .reasoning_closed_by_prompt
+                .filter(|_| {
+                    matches!(
+                        self.runtime_config.reasoning_parser.as_deref(),
+                        Some("glm45" | "glm47")
+                    )
+                });
+        if let Some(reasoning_ended) = glm_reasoning_ended {
+            preprocessed.require_reasoning = !reasoning_ended
+                && (Self::has_guided_tool_choice(request)
+                    || Self::has_structured_response_format(request)
+                    || preprocessed.stop_conditions.max_thinking_tokens.is_some());
+        }
+        if let Some(reasoning_ended) = glm_reasoning_ended.or_else(|| {
+            Self::prompt_injected_reasoning_ended_arg(
+                self.runtime_config.reasoning_parser.as_deref(),
+                formatted_prompt.as_ref().map(RenderedPrompt::as_str),
+            )
+        }) {
             let extra_args = preprocessed
                 .extra_args
                 .get_or_insert_with(|| serde_json::json!({}));
@@ -3488,6 +3504,14 @@ impl OpenAIPreprocessor {
                 .as_object_mut()
                 .context("preprocessed extra_args must be an object")?;
             extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
+            if glm_reasoning_ended.is_some() {
+                // vLLM's GLM parser drops the reasoning terminator when thinking is disabled.
+                let kwargs = extra_args
+                    .entry("reasoning_parser_kwargs")
+                    .or_insert_with(|| serde_json::json!({"chat_template_kwargs": {}}));
+                kwargs["chat_template_kwargs"]["thinking"] = (!reasoning_ended).into();
+                kwargs["chat_template_kwargs"]["enable_thinking"] = (!reasoning_ended).into();
+            }
         }
 
         // If omitted, allow generation up to the remaining context length. Responses requests
@@ -3969,8 +3993,8 @@ impl OpenAIPreprocessor {
         );
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
-        // tail cannot show whether the template closed reasoning: keep the
-        // request's `thinking_mode` for it.
+        // tail cannot establish the template's reasoning state: keep the
+        // request's thinking controls for it.
         if !request.should_add_generation_prompt() {
             prefill.reasoning_closed_by_prompt = None;
         }
@@ -7354,9 +7378,19 @@ impl OpenAIPreprocessor {
         // the rendered prompt is what the model was told. A chat template that
         // does not render `thinking_mode` leaves a "disabled" prompt open, so
         // the model may still open with `<mm:think>` or `</mm:think>`.
-        let reasoning_closed_by_prompt = Self::is_minimax_m3_reasoning_parser(reasoning_parser)
-            .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
-            .flatten();
+        let reasoning_closed_by_prompt = if matches!(reasoning_parser, Some("glm45" | "glm47")) {
+            formatted_prompt.and_then(|prompt| {
+                if unified {
+                    Some(false)
+                } else {
+                    prompt.trim_end().ends_with("</think>").then_some(true)
+                }
+            })
+        } else {
+            Self::is_minimax_m3_reasoning_parser(reasoning_parser)
+                .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
+                .flatten()
+        };
         let beam_channel = (family
             == Some(
                 crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
@@ -14970,6 +15004,117 @@ responses_tools: None,
                 expected,
                 "parser={parser:?}, fields={fields}",
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_generation_reasoning_follows_rendered_prompt() {
+        for parser in ["glm45", "glm47"] {
+            let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+            preprocessor.runtime_config.reasoning_parser = Some(parser.into());
+            preprocessor.tool_call_parser = Some("glm47".into());
+            for (tail, reasoning_open) in [
+                ("<|assistant|><think>\n", true),
+                ("<|assistant|><think></think>\n", false),
+            ] {
+                preprocessor.formatter = test_prompt_formatter(tail);
+                for control in ["enable_thinking", "thinking"] {
+                    for requested in [false, true] {
+                        for (fields, needs_gate) in [
+                            (
+                                serde_json::json!({"response_format": {"type": "json_object"}}),
+                                true,
+                            ),
+                            (
+                                serde_json::json!({"response_format": {"type": "json_schema", "json_schema": {
+                                    "name": "answer", "schema": {"type": "object"}
+                                }}}),
+                                true,
+                            ),
+                            (serde_json::json!({"thinking_token_budget": 32}), true),
+                            (
+                                serde_json::json!({"tools": [{"type": "function", "function": {
+                                "name": "lookup", "parameters": {"type": "object", "properties": {}}
+                            }}], "tool_choice": "required"}),
+                                true,
+                            ),
+                            (serde_json::json!({}), false),
+                        ] {
+                            let mut body = serde_json::json!({
+                                "model": "test-model",
+                                "messages": [{"role": "user", "content": "return JSON"}],
+                                "chat_template_kwargs": {control: requested, "reasoning_effort": "max"},
+                            });
+                            body.as_object_mut()
+                                .unwrap()
+                                .extend(fields.as_object().unwrap().clone());
+                            let mut request: NvCreateChatCompletionRequest =
+                                serde_json::from_value(body).unwrap();
+                            OpenAIPreprocessor::normalize_thinking_arg(
+                                &mut request,
+                                Some(parser),
+                                Some("glm47"),
+                            );
+                            let (common, _, prefill) = preprocessor
+                                .preprocess_request(&request, None)
+                                .await
+                                .unwrap();
+                            let case = format!("{parser} {tail:?} {control}={requested} {fields}");
+                            assert_eq!(
+                                common.require_reasoning,
+                                reasoning_open && needs_gate,
+                                "{case}"
+                            );
+                            assert_eq!(prefill.unified, reasoning_open, "{case}");
+                            let extra = common.extra_args.as_ref().unwrap();
+                            assert_eq!(extra["reasoning_ended"], !reasoning_open, "{case}");
+                            let args = &extra["reasoning_parser_kwargs"]["chat_template_kwargs"];
+                            assert_eq!(args["thinking"], reasoning_open, "{case}");
+                            assert_eq!(args["enable_thinking"], reasoning_open, "{case}");
+                            assert_eq!(args["reasoning_effort"], "max", "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_unknown_prompt_reasoning_preserves_request_controls() {
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
+        preprocessor.tool_call_parser = Some("glm47".into());
+        for (tail, add_generation_prompt) in [
+            ("<|assistant|>", true),
+            ("<think>", false),
+            ("</think>", false),
+        ] {
+            preprocessor.formatter = test_prompt_formatter(tail);
+            for requested in [false, true] {
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "return JSON"}],
+                        "response_format": {"type": "json_object"},
+                        "chat_template_kwargs": {"enable_thinking": requested},
+                        "add_generation_prompt": add_generation_prompt,
+                    }))
+                    .unwrap();
+                let (common, _, _) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert_eq!(common.require_reasoning, requested, "{tail:?} {requested}");
+                let extra = common.extra_args.as_ref().unwrap();
+                assert!(
+                    extra.get("reasoning_ended").is_none(),
+                    "{tail:?} {requested}"
+                );
+                assert_eq!(
+                    extra["reasoning_parser_kwargs"]["chat_template_kwargs"]["enable_thinking"],
+                    requested
+                );
+            }
         }
     }
 
