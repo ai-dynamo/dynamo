@@ -84,6 +84,12 @@ func TestIPFamiliesAndPolicies(t *testing.T) {
 	assert.Equal(t, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER, InternalTrafficPolicyToRegistry(&cluster))
 	assert.Equal(t, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED, InternalTrafficPolicyToRegistry(&other))
 	assert.Equal(t, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED, InternalTrafficPolicyToRegistry(nil))
+
+	t.Log("Reverse conversion preserves explicit policies and omission")
+	assert.Equal(t, &local, InternalTrafficPolicyFromRegistry(mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL))
+	assert.Equal(t, &cluster, InternalTrafficPolicyFromRegistry(mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER))
+	assert.Nil(t, InternalTrafficPolicyFromRegistry(mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED))
+	assert.Nil(t, InternalTrafficPolicyFromRegistry(mcsv1.InternalTrafficPolicy(99)))
 }
 
 func TestAddressTypes(t *testing.T) {

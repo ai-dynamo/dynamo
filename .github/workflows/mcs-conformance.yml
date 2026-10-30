@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: MCS Conformance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CONFORMANCE_PREFIX: mcs-conformance-ci
+      CONFORMANCE_TIMEOUT: 60m
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/global-discovery-mcs/go.mod
+          cache-dependency-path: deploy/global-discovery-mcs/go.sum
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.21.0
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcs-helm"
+          cd "$RUNNER_TEMP/mcs-helm"
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error "https://get.helm.sh/${archive}" -o "$archive"
+          curl --fail --location --silent --show-error "https://get.helm.sh/${archive}.sha256sum" -o checksum
+          sha256sum --check checksum
+          tar -xzf "$archive"
+          echo "$PWD/linux-amd64" >> "$GITHUB_PATH"
+      - name: Run all upstream conformance tests
+        run: |
+          set -o pipefail
+          make -C deploy/global-discovery-mcs conformance 2>&1 | tee mcs-conformance.log
+      - name: Upload reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: mcs-conformance
+          path: |
+            mcs-conformance.log
+            deploy/global-discovery-mcs/bin/conformance/reports/
+          if-no-files-found: warn

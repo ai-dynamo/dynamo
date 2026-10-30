@@ -108,9 +108,11 @@ test-integration: ## Run the DynamoDB store and mcs-admin integration tests agai
 	@docker_host="$${DOCKER_HOST:-$$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)}"; \
 	socket_override="$${TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE:-}"; \
 	case "$${docker_host}" in *colima*) socket_override="$${socket_override:-/var/run/docker.sock}" ;; esac; \
+	if [ -n "$${socket_override}" ]; then \
+		export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE="$${socket_override}"; \
+	else unset TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE; fi; \
 	echo "DOCKER_HOST=$${docker_host} $(GO) test -race -count=1 -tags=integration $(INTEGRATION_PACKAGES)"; \
-	DOCKER_HOST="$${docker_host}" TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE="$${socket_override}" \
-		$(GO) test -race -count=1 -tags=integration $(INTEGRATION_PACKAGES)
+	DOCKER_HOST="$${docker_host}" $(GO) test -race -count=1 -tags=integration $(INTEGRATION_PACKAGES)
 
 .PHONY: manifests
 manifests: controller-gen ## Generate the controller ClusterRole from the +kubebuilder:rbac markers.
@@ -215,6 +217,29 @@ e2e: kind ## Run the kind end-to-end test of the registry, the controller and th
 .PHONY: e2e-down
 e2e-down: kind ## Delete the kind clusters of the end-to-end test.
 	KIND=$(KIND) $(E2E_DIR)/run.sh down
+
+##@ Upstream MCS conformance
+
+# The opt-in build tag keeps real-cluster tests out of the unit/envtest run.
+.PHONY: conformance-bin
+conformance-bin: $(LOCALBIN) ## Compile the upstream MCS conformance runner.
+	$(GO) test -tags conformance -c -o $(LOCALBIN)/mcs-conformance.test ./test/conformance
+
+.PHONY: conformance
+conformance: kind conformance-bin ## Run the full upstream suite on two isolated kind clusters.
+	KIND=$(KIND) test/conformance/run.sh
+
+.PHONY: conformance-setup
+conformance-setup: kind ## Create and deploy the isolated conformance clusters, retaining them.
+	KIND=$(KIND) test/conformance/run.sh setup
+
+.PHONY: conformance-test
+conformance-test: kind conformance-bin ## Run upstream tests against retained conformance clusters.
+	KIND=$(KIND) test/conformance/run.sh test
+
+.PHONY: conformance-down
+conformance-down: kind ## Delete only the isolated conformance clusters.
+	KIND=$(KIND) test/conformance/run.sh down
 
 ##@ Dependencies
 
