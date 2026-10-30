@@ -27,6 +27,7 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 
 # Trees with dedicated CI jobs or runnable demos outside the runtime suites.
 # Helm chart tests run in helm-chart-tests, which installs the Helm CLI.
+# Operator upgrade tests run in operator-upgrade-contract, which installs Go.
 # Their files are still collected, so a developer can run one explicitly, but
 # they must not be defaulted into a lifecycle: an unmarked demo helper such as
 # examples/backends/sglang/test_sglang_profile.py assumes a server the harness
@@ -34,7 +35,13 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 # Anything under these roots that carries its own markers is unaffected.
 # ``skills`` is a symlink to ``.agents/skills``, so resolve() lands on
 # ``.agents``; both names are listed because either can reach collection.
-_UNMANAGED_PATHS = (("examples",), ("skills",), (".agents",), ("deploy", "helm"))
+_UNMANAGED_PATHS = (
+    ("examples",),
+    ("skills",),
+    (".agents",),
+    ("deploy", "helm"),
+    ("deploy", "operator", "hack"),
+)
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
