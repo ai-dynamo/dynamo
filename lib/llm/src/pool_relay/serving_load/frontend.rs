@@ -1113,6 +1113,7 @@ mod tests {
         let catalog = catalog(vec![pool("pools", "a")]);
         let topology = TopologySnapshot {
             revision: 1,
+            capacities: HashMap::new(),
             entries: vec![TopologyEntry {
                 namespace: "models".to_string(),
                 model: CanonicalModelId::new("b").unwrap(),

@@ -60,6 +60,11 @@ pub struct TopologyEntry {
 pub struct TopologySnapshot {
     pub revision: u64,
     pub entries: Vec<TopologyEntry>,
+    /// Serving capacity per (namespace, base model) over every member, from
+    /// the members' runtime configurations; `None` while a member's config
+    /// is invalid. Published with the entries so a reader sees one
+    /// generation of both.
+    pub(crate) capacities: HashMap<(String, String), Option<PoolDeployment>>,
 }
 
 #[derive(Default)]
@@ -106,6 +111,8 @@ struct TopologyProjectionInputs {
     pools: HashMap<(EndpointId, CanonicalModelId), PoolLink>,
     /// [`model_capacities`] of `membership`, computed when it changes.
     capacities: HashMap<(String, String), Option<PoolDeployment>>,
+    /// The generation of each endpoint whose invalid config was logged.
+    warned_invalid: HashMap<EndpointId, u64>,
     revision: u64,
 }
 
@@ -127,14 +134,20 @@ impl TopologyPublisher {
     pub(crate) fn new(membership: DcMembershipView, catalog: &PoolCatalogSnapshot) -> Self {
         let pools = pool_links(catalog);
         let entries = derive_topology(&membership, &HashMap::new(), &pools);
-        let capacities = model_capacities(&membership);
+        let mut warned_invalid = HashMap::new();
+        let capacities = model_capacities(&membership, &mut warned_invalid);
         let revision = 1;
-        let (sender, _) = watch::channel(Arc::new(TopologySnapshot { revision, entries }));
+        let (sender, _) = watch::channel(Arc::new(TopologySnapshot {
+            revision,
+            entries,
+            capacities: capacities.clone(),
+        }));
         Self {
             state: Mutex::new(TopologyProjectionInputs {
                 membership,
                 pools,
                 capacities,
+                warned_invalid,
                 revision,
                 ..TopologyProjectionInputs::default()
             }),
@@ -150,15 +163,14 @@ impl TopologyPublisher {
         self.sender.borrow().clone()
     }
 
-    /// Serving capacity per (namespace, base model) over every topology
-    /// member, from the members' runtime configurations. Membership alone
-    /// decides it: a member that has not materialized a pool, because no
-    /// worker publishes KV events yet, still counts. The catalog stays free
-    /// of phantom pools while the serving-load stream can still say how
-    /// many requests the model's workers run at once. `None` is a model
-    /// whose capacity is unknown because a member's config is invalid.
+    /// The published snapshot's capacities. Membership alone decides them:
+    /// a member that has not materialized a pool, because no worker
+    /// publishes KV events yet, still counts, so the catalog stays free of
+    /// phantom pools while the serving-load stream can still say how many
+    /// requests the model's workers run at once.
+    #[cfg(test)]
     pub(crate) fn model_capacities(&self) -> HashMap<(String, String), Option<PoolDeployment>> {
-        self.state.lock().capacities.clone()
+        self.sender.borrow().capacities.clone()
     }
 
     pub(crate) fn replace_membership(&self, membership: DcMembershipView) {
@@ -173,7 +185,13 @@ impl TopologyPublisher {
             .availability_owners
             .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
         state.membership = membership;
-        state.capacities = model_capacities(&state.membership);
+        let TopologyProjectionInputs {
+            membership,
+            capacities,
+            warned_invalid,
+            ..
+        } = &mut *state;
+        *capacities = model_capacities(membership, warned_invalid);
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -207,6 +225,7 @@ impl TopologyPublisher {
         state.availability_owners.clear();
         state.pools.clear();
         state.capacities.clear();
+        state.warned_invalid.clear();
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -245,13 +264,17 @@ fn publish_if_changed(
     sender: &watch::Sender<Arc<TopologySnapshot>>,
 ) {
     let entries = derive_topology(&state.membership, &state.availability, &state.pools);
-    if sender.borrow().entries == entries {
-        return;
+    {
+        let current = sender.borrow();
+        if current.entries == entries && current.capacities == state.capacities {
+            return;
+        }
     }
     state.revision = state.revision.saturating_add(1);
     sender.send_replace(Arc::new(TopologySnapshot {
         revision: state.revision,
         entries,
+        capacities: state.capacities.clone(),
     }));
 }
 
@@ -382,12 +405,15 @@ fn derive_topology(
 /// `max_concurrency` is `None` as soon as one member worker does not declare
 /// its limit, and the whole capacity is `None` as soon as one member's configs
 /// fail the pool view's validation: unknown rather than wrong, with the model
-/// still listed.
+/// still listed. An invalid config is logged once per endpoint generation,
+/// tracked in `warned`.
 fn model_capacities(
     membership: &DcMembershipView,
+    warned: &mut HashMap<EndpointId, u64>,
 ) -> HashMap<(String, String), Option<PoolDeployment>> {
     let mut capacities = HashMap::<(String, String), PoolDeployment>::new();
     let mut invalid = HashSet::new();
+    warned.retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
     for endpoint_membership in membership.endpoints.values() {
         if endpoint_membership.has_serving_topology_conflict() {
             continue;
@@ -406,11 +432,17 @@ fn model_capacities(
             let deployment = match &deployment {
                 Ok(deployment) => *deployment,
                 Err(error) => {
-                    tracing::warn!(
-                        endpoint = %endpoint_membership.endpoint,
-                        %error,
-                        "a member's runtime config is invalid; its model's capacity is unknown"
-                    );
+                    let generation = endpoint_membership.generation;
+                    if warned.insert(endpoint_membership.endpoint.clone(), generation)
+                        != Some(generation)
+                    {
+                        tracing::warn!(
+                            endpoint = %endpoint_membership.endpoint,
+                            generation,
+                            %error,
+                            "a member's runtime config is invalid; its model's capacity is unknown"
+                        );
+                    }
                     invalid.insert(key);
                     continue;
                 }
@@ -1753,6 +1785,10 @@ mod tests {
             }))
         );
         assert_eq!(capacities.len(), 2);
+
+        // The capacities ride in the published snapshot, one generation
+        // with the entries.
+        assert_eq!(publisher.snapshot().capacities, capacities);
 
         publisher.clear();
         assert!(publisher.model_capacities().is_empty());
