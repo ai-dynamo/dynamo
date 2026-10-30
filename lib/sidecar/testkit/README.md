@@ -184,8 +184,8 @@ clients. That makes peer-loss tests deterministic.
 | Suite | Scope | Execution |
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery; all three: request migration after a real engine is killed mid-stream, on the aggregated and disaggregated `*_kv_router` configs | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
@@ -223,7 +223,8 @@ that a real SGLang transfer-wait queue drains after cancellation.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
-`tests/fault_tolerance/migration/test_vllm.py`.
+`tests/fault_tolerance/migration/test_vllm.py`. Sidecar migration is not yet
+tested after a prefill-worker failure or on the DEP configs.
 
 ### Adding an integration test
 

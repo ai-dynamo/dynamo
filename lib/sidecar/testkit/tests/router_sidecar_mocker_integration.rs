@@ -670,6 +670,170 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     peer.shutdown().await;
 }
 
+#[derive(Clone, Copy)]
+enum WorkerFault {
+    /// The native engine goes away mid-stream; the sidecar stays up.
+    EngineFailure,
+    /// The native engine goes away before its first token, while the sidecar
+    /// still waits for the stream to open.
+    EngineFailureBeforeFirstToken,
+    /// The sidecar drains on SIGTERM and ends what is left after its grace period.
+    GracefulShutdown,
+}
+
+/// A request in flight on a faulted worker finishes on the other worker, with
+/// the tokens it already streamed kept, as the frontend's migration does for
+/// in-process workers.
+async fn faulted_request_migrates<F: ProcessFixture>(fault: WorkerFault) {
+    const MAX_TOKENS: usize = 8;
+    let env = Environment::new().await;
+    let controls = [Controller::default(), Controller::default()];
+    let mut peers = Vec::new();
+    for control in &controls {
+        let config = FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        };
+        peers.push(F::start(control.clone(), config).await);
+    }
+    let mut children: Vec<_> = peers
+        .iter()
+        .map(|peer| env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1))
+        .collect();
+    let router = env.ready("backend").await;
+    bounded("both workers selectable", async {
+        while router.selectable_worker_ids().map_or(0, |ids| ids.len()) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let frontend = Frontend::start_with_migration(&env, 3).await;
+
+    // Either worker may take the request; whichever does holds it.
+    let (plan, held) = match fault {
+        WorkerFault::EngineFailureBeforeFirstToken => (
+            RequestPlan {
+                open: OpenAction::Hold,
+                ..Default::default()
+            },
+            Event::Received,
+        ),
+        _ => (hold_after_token(), Event::Checkpoint),
+    };
+    let handles = controls
+        .each_ref()
+        .map(|control| control.next_request(plan));
+    let response = tokio::spawn(
+        frontend
+            .generate_tokens(&env.model, true, MAX_TOKENS as u32)
+            .send(),
+    );
+    let serving = bounded("a worker holds the request", async {
+        tokio::select! {
+            _ = handles[0].wait(held) => 0,
+            _ = handles[1].wait(held) => 1,
+        }
+    })
+    .await;
+    let other = 1 - serving;
+    // The migrated request must not pause on the surviving worker.
+    handles[other].release();
+    match fault {
+        WorkerFault::EngineFailure | WorkerFault::EngineFailureBeforeFirstToken => {
+            peers[serving].shutdown().await
+        }
+        WorkerFault::GracefulShutdown => children[serving].signal(libc::SIGTERM),
+    }
+
+    let response = bounded("HTTP response", response).await.unwrap().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = bounded("migrated stream body", response.text())
+        .await
+        .unwrap();
+    let events: Vec<_> = sse_events(&body).collect();
+    assert!(
+        events.iter().all(|event| event.get("error").is_none()),
+        "{body}"
+    );
+    let tokens: usize = events
+        .iter()
+        .filter_map(|event| event["nvext"]["completion_token_ids"].as_array())
+        .map(Vec::len)
+        .sum();
+    assert_eq!(tokens, MAX_TOKENS, "{body}");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["choices"][0]["finish_reason"] == "length"),
+        "{body}"
+    );
+    assert!(
+        handles[other].reached(Event::Received),
+        "the request must continue on the other worker"
+    );
+
+    frontend.shutdown().await;
+    for (index, child) in children.iter_mut().enumerate() {
+        if index != serving {
+            child.shutdown().await;
+        } else if matches!(fault, WorkerFault::GracefulShutdown) {
+            assert!(child.exit().await.success(), "{}", child.logs());
+        } else {
+            // Its engine is gone, so it cannot drain cleanly.
+            child.signal(libc::SIGKILL);
+            child.exit().await;
+        }
+    }
+    for (index, peer) in peers.iter_mut().enumerate() {
+        if index != serving || matches!(fault, WorkerFault::GracefulShutdown) {
+            peer.shutdown().await;
+        }
+    }
+}
+
+macro_rules! migration_tests {
+    ($backend:ident, $fixture:ty) => {
+        mod $backend {
+            use super::*;
+
+            #[tokio::test]
+            async fn engine_failure_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::EngineFailure).await;
+            }
+
+            #[tokio::test]
+            async fn engine_failure_before_first_token_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::EngineFailureBeforeFirstToken).await;
+            }
+
+            #[tokio::test]
+            async fn graceful_shutdown_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::GracefulShutdown).await;
+            }
+        }
+    };
+}
+
+/// Each scenario runs two sidecar processes that watch file discovery. Running
+/// them one at a time keeps the suite under the per-user inotify instance
+/// limit (128 by default).
+static MIGRATION_SCENARIO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn migration_scenario<F: ProcessFixture>(fault: WorkerFault) {
+    let _serial = MIGRATION_SCENARIO.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        faulted_request_migrates::<F>(fault),
+    )
+    .await
+    .expect("migration scenario exceeded its overall deadline");
+}
+
+migration_tests!(vllm_migration, vllm::Fixture);
+migration_tests!(sglang_migration, sglang::Fixture);
+migration_tests!(trtllm_migration, support::trtllm::Fixture);
+migration_tests!(lpx_migration, lpx::Fixture);
+
 /// Load that stays unavailable past the LPX sidecar's 30 s staleness limit
 /// withdraws the worker, and the sidecar then exits with an error.
 async fn load_loss_withdraws_worker_and_fails_the_process() {

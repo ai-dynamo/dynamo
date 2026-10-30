@@ -379,13 +379,15 @@ async fn cleanup<F: SidecarFixture>() {
     assert!(poll!(stream.next()).is_pending());
     engine.cleanup().await.unwrap();
     engine.cleanup().await.unwrap();
-    outputs.extend(bounded("cleanup cancellation", stream.collect::<Outputs>()).await);
-    terminal(outputs, &handle.tokens(), 3, FinishReason::Cancelled);
+    outputs.extend(bounded("cleanup shutdown", stream.collect::<Outputs>()).await);
+    // A migratable error, not a cancelled terminal, so the frontend moves the
+    // request to another worker instead of ending it short.
+    failure(outputs, &handle.tokens(), BackendError::EngineShutdown);
     bounded("cleanup remote drop", handle.wait(Event::Dropped)).await;
 
     let ctx = mock_context();
     let unsubmitted = control.request(ctx.id(), RequestPlan::default());
-    terminal(
+    failure(
         collect(
             &engine,
             request("mocker-model", vec![11, 22, 33], 3),
@@ -393,8 +395,7 @@ async fn cleanup<F: SidecarFixture>() {
         )
         .await,
         &[],
-        3,
-        FinishReason::Cancelled,
+        BackendError::EngineShutdown,
     );
     assert!(!unsubmitted.reached(Event::Received));
     fixture.scheduler_idle().await;
@@ -581,7 +582,7 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<vllm_fixture::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("GenerateStream"));
 }
 
@@ -691,7 +692,7 @@ async fn sglang_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::sglang::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -702,7 +703,7 @@ async fn lpx_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::lpx::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -809,7 +810,7 @@ async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::trtllm::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 

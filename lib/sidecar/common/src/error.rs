@@ -72,6 +72,10 @@ pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
     backend(BackendError::EngineShutdown, message)
 }
 
+pub fn stream_incomplete(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::StreamIncomplete, message)
+}
+
 pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
     backend(BackendError::CannotConnect, message)
 }
@@ -104,6 +108,45 @@ pub fn status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError
     )
 }
 
+/// Whether tonic built `status` from a transport failure (the engine died or
+/// dropped the connection) rather than receiving it from the engine: only the
+/// former carries a source error. UNAVAILABLE is left out because it already
+/// maps to the migratable `CannotConnect`.
+pub fn is_broken_stream(status: &tonic::Status) -> bool {
+    std::error::Error::source(status).is_some() && status.code() != tonic::Code::Unavailable
+}
+
+#[cfg(feature = "tonic-v14")]
+pub fn is_broken_stream_v14(status: &tonic_v14::Status) -> bool {
+    std::error::Error::source(status).is_some() && status.code() != tonic_v14::Code::Unavailable
+}
+
+/// Maps a status from opening or reading a generate stream. A broken stream
+/// becomes `Disconnected`, which the frontend migrates as it does when an
+/// in-process worker dies.
+pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    if is_broken_stream(&status) {
+        return disconnected(rpc, status.message(), status.code());
+    }
+    status_to_dynamo(rpc, status)
+}
+
+#[cfg(feature = "tonic-v14")]
+pub fn stream_status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError {
+    let code = tonic::Code::from_i32(status.code() as i32);
+    if is_broken_stream_v14(&status) {
+        return disconnected(rpc, status.message(), code);
+    }
+    status_to_dynamo_parts(rpc, status.message(), code)
+}
+
+fn disconnected(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+    backend(
+        BackendError::Disconnected,
+        format!("{rpc}: stream broke: {message} ({code:?})"),
+    )
+}
+
 fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
     let kind = match code {
         tonic::Code::InvalidArgument
@@ -123,7 +166,7 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
 mod tests {
     use dynamo_backend_common::{BackendError, ErrorType};
 
-    use super::status_to_dynamo;
+    use super::{status_to_dynamo, stream_status_to_dynamo};
 
     #[test]
     fn maps_transport_statuses_to_backend_errors() {
@@ -172,5 +215,41 @@ mod tests {
                 assert_eq!(v14.to_string(), error.to_string());
             }
         }
+    }
+
+    #[test]
+    fn broken_stream_is_disconnected_but_engine_status_is_not() {
+        let broken = tonic::Status::from_error(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "error reading a body from connection",
+        )));
+        let error = stream_status_to_dynamo("Test", broken);
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::Disconnected)
+        );
+        assert!(error.to_string().contains("error reading a body"));
+
+        // Sent by the engine: no transport source, so the regular mapping.
+        let sent = stream_status_to_dynamo("Test", tonic::Status::unknown("engine failure"));
+        assert_eq!(sent.error_type(), ErrorType::Backend(BackendError::Unknown));
+    }
+
+    #[cfg(feature = "tonic-v14")]
+    #[test]
+    fn broken_stream_is_disconnected_on_tonic_v14() {
+        let broken = tonic_v14::Status::from_error(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "error reading a body from connection",
+        )));
+        assert_eq!(
+            crate::error::stream_status_to_dynamo_v14("Test", broken).error_type(),
+            ErrorType::Backend(BackendError::Disconnected)
+        );
+        let sent = tonic_v14::Status::unknown("engine failure");
+        assert_eq!(
+            crate::error::stream_status_to_dynamo_v14("Test", sent).error_type(),
+            ErrorType::Backend(BackendError::Unknown)
+        );
     }
 }

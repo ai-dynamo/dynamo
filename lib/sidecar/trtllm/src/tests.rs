@@ -1099,7 +1099,8 @@ async fn a_configured_context_length_requires_model_info_and_a_served_name() {
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a
-/// stream waits forever on an engine that will never answer.
+/// stream waits forever on an engine that will never answer. It ends them with
+/// a migratable error so the frontend finishes them on another worker.
 #[tokio::test]
 async fn cleanup_terminates_an_in_flight_request() {
     let service = FakeTrtllm::default();
@@ -1117,12 +1118,15 @@ async fn cleanup_terminates_an_in_flight_request() {
     assert_eq!(first.token_ids, [42]);
 
     engine.cleanup().await.expect("cleanup");
-    let terminal = tokio::time::timeout(Duration::from_secs(5), stream.next())
+    let error = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
         .expect("shutdown must terminate the stream")
         .expect("terminal item")
-        .expect("terminal");
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+        .expect_err("shutdown ends the request with an error");
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::EngineShutdown)
+    );
 }
 
 /// A decode leg's cancellation deferral has to cover the dispatch itself, not

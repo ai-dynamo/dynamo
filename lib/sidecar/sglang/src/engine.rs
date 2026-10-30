@@ -36,6 +36,7 @@ use crate::protocol::{
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const SHUTDOWN_MESSAGE: &str = "SGLang sidecar shut down before the request finished";
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -398,12 +399,17 @@ impl LLMEngine for SglangSidecarEngine {
             None
         };
         let cancel = self.cancel.child_token();
+        let shutting_down = cancel.clone();
         let is_prefill = self.disaggregation_mode.is_prefill();
         let stop_conditions = request.stop_conditions;
 
         Ok(Box::pin(async_stream::stream! {
-            if ctx.is_stopped() || cancel.is_cancelled() {
+            if ctx.is_stopped() {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
+                return;
+            }
+            if cancel.is_cancelled() {
+                yield Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
                 return;
             }
             let stopped_ctx = ctx.inner_arc();
@@ -418,13 +424,17 @@ impl LLMEngine for SglangSidecarEngine {
                 response = grpc_client.generate(grpc_request) => Some(response),
             };
             let Some(opened) = opened else {
-                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
+                if shutting_down.is_cancelled() && !ctx.is_stopped() {
+                    yield Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
+                } else {
+                    yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
+                }
                 return;
             };
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(client::stream_status_to_dynamo("Generate", status));
                     return;
                 }
             };
@@ -453,9 +463,15 @@ impl LLMEngine for SglangSidecarEngine {
                             .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
+                    // Migrated off a draining worker, as in-process, unless
+                    // the client is gone.
                     _ = &mut shutdown_cancellation => {
-                        yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(observed_prompt_tokens, generated)));
+                        if ctx.is_stopped() {
+                            yield Ok(LLMEngineOutput::cancelled()
+                                .with_usage(usage(observed_prompt_tokens, generated)));
+                        } else {
+                            yield Err(client::engine_shutdown(SHUTDOWN_MESSAGE));
+                        }
                         break;
                     }
                     message = stream.message() => {
@@ -468,7 +484,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         };

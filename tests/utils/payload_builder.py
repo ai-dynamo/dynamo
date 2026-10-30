@@ -42,6 +42,7 @@ from tests.utils.payloads import (
     StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
+    EngineFailurePayload,
 )
 from tests.utils.router_nvext import RouterNvextExpectation, router_nvext_extra_body
 
@@ -994,6 +995,26 @@ def http_cancellation_payloads(
             expected_completion_tokens=4,
         ),
     ]
+
+
+def engine_failure_payload(
+    workers: tuple[int, ...], *, max_tokens: int = 1024
+) -> BasePayload:
+    """Stream a chat request and kill the engine serving it; see EngineFailurePayload."""
+    return EngineFailurePayload(
+        body={
+            "messages": [{"role": "user", "content": "Count from one to a thousand."}],
+            "max_tokens": max_tokens,
+            "ignore_eos": True,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+        expected_response=[],
+        expected_log=[],
+        workers=workers,
+    )
 
 
 def stop_string_payloads(metrics: EngineMetrics | None) -> list[BasePayload]:

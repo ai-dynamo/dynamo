@@ -16,8 +16,10 @@ use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, startup_deadline};
+pub(crate) use dynamo_sidecar_common::v14::{status_to_dynamo, stream_status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::{
+    engine_shutdown, invalid_argument, startup_deadline, stream_incomplete,
+};
 
 use crate::proto as pb;
 
@@ -175,7 +177,7 @@ impl VllmClient {
             .generate_stream(request)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("GenerateStream", status))
+            .map_err(|status| stream_status_to_dynamo("GenerateStream", status))
     }
 
     pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {

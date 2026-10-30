@@ -31,6 +31,7 @@ from tests.utils.payload_builder import (
     http_cancellation_payloads,
     kv_routing_payload,
     sglang_generate_cancellation_payloads,
+    engine_failure_payload,
     stop_string_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
@@ -132,6 +133,20 @@ KV_ROUTING_ENV = {
     "MAX_MODEL_LEN": "2048",
     "VLLM_BLOCK_SIZE": str(KV_ROUTING_BLOCK_SIZE),
     "SGLANG_PAGE_SIZE": str(KV_ROUTING_BLOCK_SIZE),
+}
+# Two-worker configs end by killing one engine mid-stream: the frontend must
+# migrate the request and the launcher must keep the other worker running.
+MIGRATION_ENV = {
+    **KV_ROUTING_ENV,
+    "DYN_MIGRATION_LIMIT": "3",
+    "DYN_LAUNCH_WAIT_ALL": "1",
+}
+# Several TensorRT-LLM engines in one deployment; see trtllm_disaggregated.
+TRTLLM_MULTI_ENGINE_ENV = {
+    "TLLM_ALLOW_N_GREEDY_DECODING": "1",
+    "PYTHONUNBUFFERED": "1",
+    "PRTE_ALLOW_RUN_AS_ROOT": "1",
+    "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
 }
 SGLANG_KV_ROUTING_ARGS = [
     "--disable-cuda-graph",
@@ -318,6 +333,58 @@ sidecar_configs = {
             ),
         ],
     ),
+    # Migration coverage only; KV-routing payloads run for vLLM and SGLang.
+    "trtllm_kv_router": SidecarConfig(
+        name="trtllm_kv_router",
+        directory=trtllm_sidecar_dir,
+        script_name="agg_kv_router.sh",
+        gpu_env=_on_first_gpu("TRTLLM_WORKER1_GPU", "TRTLLM_WORKER2_GPU"),
+        marks=[
+            pytest.mark.trtllm,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(2048),
+            pytest.mark.timeout(1200),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                not _trtllm_serves_openengine(),
+                reason=TRTLLM_OPENENGINE_SKIP_REASON,
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        timeout=1000,
+        health_check_workers=True,
+        health_check_worker_count=2,
+        env={**MIGRATION_ENV, **TRTLLM_MULTI_ENGINE_ENV},
+        request_payloads=[engine_failure_payload((1, 2))],
+    ),
+    # Migration coverage only; KV-routing payloads run for vLLM and SGLang.
+    "trtllm_disaggregated_kv_router": SidecarConfig(
+        name="trtllm_disaggregated_kv_router",
+        directory=trtllm_sidecar_dir,
+        script_name="disagg_kv_router.sh",
+        gpu_env=_on_first_gpu(*(f"TRTLLM_WORKER{n}_GPU" for n in range(1, 5))),
+        marks=[
+            pytest.mark.trtllm,
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(2048),
+            # Four engines load serially before the last sidecar registers.
+            pytest.mark.timeout(1800),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                not _trtllm_serves_openengine(),
+                reason=TRTLLM_OPENENGINE_SKIP_REASON,
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        timeout=1600,
+        health_check_workers=True,
+        health_check_worker_count=4,
+        env={**MIGRATION_ENV, **TRTLLM_MULTI_ENGINE_ENV},
+        # disagg_kv_router.sh launches prefill as workers 1-2 and decode as workers 3-4.
+        request_payloads=[engine_failure_payload((3, 4))],
+    ),
     "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",
         directory=vllm_sidecar_dir,
@@ -393,8 +460,11 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=2,
-        env=KV_ROUTING_ENV,
-        request_payloads=[kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE)],
+        env=MIGRATION_ENV,
+        request_payloads=[
+            kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE),
+            engine_failure_payload((1, 2)),
+        ],
     ),
     "sglang_kv_router": SidecarConfig(
         name="sglang_kv_router",
@@ -413,8 +483,11 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=2,
-        env=KV_ROUTING_ENV,
-        request_payloads=[kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE)],
+        env=MIGRATION_ENV,
+        request_payloads=[
+            kv_routing_payload((1, 2), block_size=KV_ROUTING_BLOCK_SIZE),
+            engine_failure_payload((1, 2)),
+        ],
     ),
     "vllm_disaggregated_kv_router": SidecarConfig(
         name="vllm_disaggregated_kv_router",
@@ -437,12 +510,13 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=4,
-        env=KV_ROUTING_ENV,
+        env=MIGRATION_ENV,
         # disagg_kv_router.sh launches decode as workers 1-2 and prefill as workers 3-4.
         request_payloads=[
             disaggregated_kv_routing_payload(
                 (3, 4), _engine_metrics(VllmMetricsChecker, 4)
-            )
+            ),
+            engine_failure_payload((1, 2)),
         ],
     ),
     "sglang_disaggregated_kv_router": SidecarConfig(
@@ -467,12 +541,13 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=4,
-        env=KV_ROUTING_ENV,
+        env=MIGRATION_ENV,
         # disagg_kv_router.sh launches prefill as workers 1-2 and decode as workers 3-4.
         request_payloads=[
             disaggregated_kv_routing_payload(
                 (1, 2), _engine_metrics(SGLangMetricsChecker, 4)
-            )
+            ),
+            engine_failure_payload((3, 4)),
         ],
     ),
     "vllm_dep_kv_router": SidecarConfig(
