@@ -13,12 +13,14 @@
 
 mod catalog;
 mod metrics;
+mod pingora_plane;
 mod proxy;
 mod relay;
 mod round_trip;
 
 pub use catalog::PoolSnapshot;
 pub use metrics::Metrics;
+pub use pingora_plane::{PingoraProxy, serve_pingora};
 pub use proxy::{app, serve};
 pub use relay::follow_relays;
 pub use round_trip::measure_round_trips;

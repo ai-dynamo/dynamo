@@ -41,7 +41,7 @@ use crate::metrics::Metrics;
 /// Dynamo's HTTP service: enough for 500k-token prompts.
 const DEFAULT_BODY_LIMIT_MB: usize = 45;
 /// How long open requests may run after shutdown starts.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 struct Proxy {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
@@ -153,7 +153,7 @@ async fn serve_connection(stream: TcpStream, app: Router, graceful: Cancellation
     }
 }
 
-fn body_limit() -> usize {
+pub(crate) fn body_limit() -> usize {
     std::env::var(DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|mb| mb.parse::<usize>().ok())
@@ -164,8 +164,8 @@ fn body_limit() -> usize {
 
 /// The one field read from a request.
 #[derive(Deserialize)]
-struct Model {
-    model: String,
+pub(crate) struct Model {
+    pub(crate) model: String,
 }
 
 async fn forward(
@@ -272,7 +272,7 @@ async fn forward(
 
 /// `uri`'s path and query below `frontend`, keeping any path the frontend
 /// URL has. `None` if the path would leave it, for example through `..`.
-fn route_url(frontend: &Url, uri: &Uri) -> Option<Url> {
+pub(crate) fn route_url(frontend: &Url, uri: &Uri) -> Option<Url> {
     let path = format!("{}{}", frontend.path().trim_end_matches('/'), uri.path());
     let mut url = frontend.clone();
     url.set_path(&path);
@@ -281,16 +281,20 @@ fn route_url(frontend: &Url, uri: &Uri) -> Option<Url> {
 }
 
 async fn models(State(proxy): State<Arc<Proxy>>) -> Json<serde_json::Value> {
+    Json(models_json(&proxy.pools.borrow()))
+}
+
+/// The `/v1/models` body: every model a pool in `pools` serves.
+pub(crate) fn models_json(pools: &PoolSnapshot) -> serde_json::Value {
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let snapshot = proxy.pools.borrow().clone();
-    let data = snapshot
+    let data = pools
         .models()
         .into_iter()
         .map(|model| json!({"id": model, "object": "model", "created": created, "owned_by": "nvidia"}))
         .collect::<Vec<_>>();
-    Json(json!({"object": "list", "data": data}))
+    json!({"object": "list", "data": data})
 }
 
 async fn scrape(State(proxy): State<Arc<Proxy>>) -> Response {
@@ -307,56 +311,67 @@ async fn scrape(State(proxy): State<Arc<Proxy>>) -> Response {
 
 /// Healthy while some pool has a frontend to send to.
 async fn health(State(proxy): State<Arc<Proxy>>) -> Response {
-    let reachable = proxy
-        .pools
-        .borrow()
-        .pools()
-        .iter()
-        .any(|pool| !pool.frontends.is_empty());
-    if reachable {
-        Json(json!({"status": "healthy"})).into_response()
+    let (status, body) = health_json(&proxy.pools.borrow());
+    (status, Json(body)).into_response()
+}
+
+/// `/health`: healthy while some pool has a frontend to forward to.
+pub(crate) fn health_json(pools: &PoolSnapshot) -> (StatusCode, serde_json::Value) {
+    if pools.pools().iter().any(|pool| !pool.frontends.is_empty()) {
+        (StatusCode::OK, json!({"status": "healthy"}))
     } else {
-        let body = Json(json!({"status": "unhealthy", "message": "no pool has a frontend"}));
-        (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+        let body = json!({"status": "unhealthy", "message": "no pool has a frontend"});
+        (StatusCode::SERVICE_UNAVAILABLE, body)
     }
 }
 
 /// An error in the OpenAI shape.
 fn error(status: StatusCode, message: String) -> Response {
+    (status, Json(error_json(status, &message))).into_response()
+}
+
+/// An OpenAI-style error body.
+pub(crate) fn error_json(status: StatusCode, message: &str) -> serde_json::Value {
     let kind = if status.is_client_error() {
         "invalid_request_error"
     } else {
         "server_error"
     };
-    let body = json!({"error": {"message": message, "type": kind, "code": status.as_u16()}});
-    (status, Json(body)).into_response()
+    json!({"error": {"message": message, "type": kind, "code": status.as_u16()}})
 }
 
 /// Removes hop-by-hop headers, which apply to one connection only: the fixed
 /// ones, and any the `Connection` header names (RFC 9110).
 fn remove_hop_headers(headers: &mut HeaderMap) {
-    let named = headers
+    for name in hop_headers(headers) {
+        headers.remove(name);
+    }
+}
+
+/// The hop-by-hop headers in `headers`: those `Connection` names, and the
+/// standard ones. They describe one connection, so a proxy drops them.
+pub(crate) fn hop_headers(headers: &HeaderMap) -> Vec<HeaderName> {
+    let mut names = headers
         .get_all(header::CONNECTION)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
         .collect::<Vec<_>>();
-    for name in named {
-        headers.remove(name);
-    }
-    for name in [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ] {
-        headers.remove(name);
-    }
+    names.extend(
+        [
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        ]
+        .map(HeaderName::from_static),
+    );
+    names
 }
 
 #[cfg(test)]

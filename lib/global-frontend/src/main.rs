@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+    Metrics, PingoraProxy, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+    serve_pingora,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -37,6 +38,15 @@ enum RouterPolicy {
     /// for a pool with much more room (see `--headroom-factor`). Reads each
     /// pool's load from its Relay (`--pool-relay`).
     Affinity,
+}
+
+/// How requests reach the pools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DataPlane {
+    /// axum's server and reqwest's client.
+    Axum,
+    /// A prototype on Cloudflare's Pingora.
+    Pingora,
 }
 
 #[derive(Parser)]
@@ -76,6 +86,9 @@ struct Args {
     /// `affinity`: how long a session keeps its pool without a request.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
+    /// How requests reach the pools.
+    #[arg(long, value_enum, default_value_t = DataPlane::Axum)]
+    data_plane: DataPlane,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -174,10 +187,7 @@ async fn main() -> Result<()> {
     // The pools never change; the sender must live as long as the process,
     // since the Relay followers stop once it drops.
     let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
-        .build()
-        .context("build the pool HTTP client")?;
+    let connect_timeout = Duration::from_secs(args.connect_timeout_secs);
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
@@ -214,13 +224,28 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(&address)
-        .await
-        .with_context(|| format!("listen on {address}"))?;
-    tracing::info!(%address, "Global Frontend listening");
-    serve(listener, app, shutdown).await;
+    match args.data_plane {
+        DataPlane::Axum => {
+            let http = reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .build()
+                .context("build the pool HTTP client")?;
+            let app = app(pools, selector, in_flight, http, metrics);
+            let listener = tokio::net::TcpListener::bind(&address)
+                .await
+                .with_context(|| format!("listen on {address}"))?;
+            tracing::info!(%address, "Global Frontend listening");
+            serve(listener, app, shutdown).await;
+        }
+        DataPlane::Pingora => {
+            let proxy = PingoraProxy::new(pools, selector, in_flight, metrics, connect_timeout);
+            let listener = std::net::TcpListener::bind(&address)
+                .with_context(|| format!("listen on {address}"))?;
+            tracing::info!(%address, "Global Frontend listening on Pingora");
+            serve_pingora(listener, proxy, shutdown).await;
+        }
+    }
     Ok(())
 }
 

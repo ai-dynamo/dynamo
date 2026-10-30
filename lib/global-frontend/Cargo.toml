@@ -23,6 +23,7 @@ dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 clap = { version = "4.5.49", features = ["derive"] }
 futures = { workspace = true }
@@ -36,3 +37,10 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+
+# Prototype data plane (`--data-plane pingora`). cloudflare/pingora#816's head: it adds
+# early request body buffering, which routing on `model` needs, and has the tokio 1.54
+# fix; no release has both yet.
+pingora-core = { git = "https://github.com/CodyPubNub/pingora", rev = "ea996d746382f0f5ccde6bbfa9a50b9b974f6de2", default-features = false }
+pingora-http = { git = "https://github.com/CodyPubNub/pingora", rev = "ea996d746382f0f5ccde6bbfa9a50b9b974f6de2", default-features = false }
+pingora-proxy = { git = "https://github.com/CodyPubNub/pingora", rev = "ea996d746382f0f5ccde6bbfa9a50b9b974f6de2", default-features = false, features = ["early_body_buffer"] }

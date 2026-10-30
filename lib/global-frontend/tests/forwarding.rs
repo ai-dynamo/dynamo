@@ -147,6 +147,37 @@ fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
     Pool::new(&key, model, REGION, vec![frontend.clone()])
 }
 
+/// Serves a Global Frontend on `listener` until `shutdown` fires, on the data
+/// plane `GF_TEST_DATA_PLANE` names: `axum` (the default) or `pingora`.
+async fn serve(
+    listener: TcpListener,
+    pools: watch::Receiver<Arc<PoolSnapshot>>,
+    selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
+    metrics: Metrics,
+    shutdown: CancellationToken,
+) {
+    match std::env::var("GF_TEST_DATA_PLANE").as_deref() {
+        Ok("pingora") => {
+            let connect_timeout = Duration::from_secs(5);
+            let proxy = dynamo_global_frontend::PingoraProxy::new(
+                pools,
+                selector,
+                in_flight,
+                metrics,
+                connect_timeout,
+            );
+            let listener = listener.into_std().unwrap();
+            dynamo_global_frontend::serve_pingora(listener, proxy, shutdown).await;
+        }
+        Ok("axum") | Err(_) => {
+            let app = dynamo_global_frontend::app(pools, selector, in_flight, client(), metrics);
+            dynamo_global_frontend::serve(listener, app, shutdown).await;
+        }
+        Ok(other) => panic!("unknown GF_TEST_DATA_PLANE {other}"),
+    }
+}
+
 /// A running Global Frontend, and the catalog it routes over.
 struct GlobalFrontend {
     server: Server,
@@ -170,8 +201,14 @@ async fn global_frontend_with(
     let (listener, url) = bind().await;
     let cancel = CancellationToken::new();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
-    tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
+    tokio::spawn(serve(
+        listener,
+        receiver,
+        selector,
+        in_flight,
+        metrics,
+        cancel.clone(),
+    ));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
         server: Server { url, cancel },
@@ -689,11 +726,13 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let selector = Arc::new(RoundRobinSelector::new());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
     let shutdown = CancellationToken::new();
-    let serving = tokio::spawn(dynamo_global_frontend::serve(
+    let serving = tokio::spawn(serve(
         listener,
-        app,
+        receiver,
+        selector,
+        in_flight,
+        metrics,
         shutdown.clone(),
     ));
     wait_until_ok(&url.join("live").unwrap()).await;

@@ -152,6 +152,18 @@ impl Metrics {
         }
     }
 
+    /// Counts `pool`'s response status, or `None` if it sent no response.
+    pub(crate) fn answered(&self, pool: &Pool, status: Option<StatusCode>) {
+        let status = status.as_ref().map_or(NO_RESPONSE, StatusCode::as_str);
+        self.count(pool, status);
+    }
+
+    /// Counts a request whose client left before `pool`'s response headers
+    /// arrived.
+    pub(crate) fn cancelled(&self, pool: &Pool) {
+        self.count(pool, CANCELLED);
+    }
+
     fn count(&self, pool: &Pool, status: &str) {
         let local = match &self.region {
             None => "unknown",
@@ -216,8 +228,7 @@ pub(crate) struct Sending<'a> {
 impl Sending<'_> {
     /// Counts the pool's response status, or `None` if it sent no response.
     pub(crate) fn answered(mut self, status: Option<StatusCode>) {
-        let status = status.as_ref().map_or(NO_RESPONSE, StatusCode::as_str);
-        self.metrics.count(self.pool, status);
+        self.metrics.answered(self.pool, status);
         self.counted = true;
     }
 }
@@ -225,7 +236,7 @@ impl Sending<'_> {
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if !self.counted {
-            self.metrics.count(self.pool, CANCELLED);
+            self.metrics.cancelled(self.pool);
         }
     }
 }
