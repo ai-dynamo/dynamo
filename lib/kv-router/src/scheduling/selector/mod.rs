@@ -42,10 +42,12 @@ use policy::{
 use reference::pick_default_worker;
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use super::types::{
+    KvSchedulerError, SchedulingRequest, SchedulingResponse, WorkerSelectionPolicyError,
+};
 use crate::protocols::{
-    SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
-    WorkerSelectionResult, WorkerWithDpRank,
+    SelectionLogFields, SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike,
+    WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
 
 /// Low-level selector used by routing hosts.
@@ -485,6 +487,7 @@ fn selection_result(
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
         kv_transfer_source,
+        log_fields: None,
     }
 }
 
@@ -564,31 +567,26 @@ fn log_scored_candidates(
     }
 }
 
-fn log_selection<C: WorkerConfigLike>(
-    workers: &HashMap<WorkerId, C>,
-    request: &SchedulingRequest,
-    worker: WorkerWithDpRank,
-    worker_type: &'static str,
-    cost: f64,
-    effective_overlap_blocks: f64,
-) {
-    let request_id = request.mode.request_id().unwrap_or("-");
-    let host_pinned_blocks = request
-        .overlap
-        .tier_overlap_blocks
-        .host_pinned
-        .get(&worker)
-        .copied()
-        .unwrap_or(0);
-    let disk_blocks = request
-        .overlap
-        .tier_overlap_blocks
-        .disk
-        .get(&worker)
-        .copied()
-        .unwrap_or(0);
+/// Log the scheduler's selection on the routing task once the scheduler replies, so
+/// the scheduler actor does not format the line. Selections without log fields came
+/// from a selector that does not log them.
+pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingResponse) {
+    let Some(SelectionLogFields {
+        worker_type,
+        logit: cost,
+        pinned,
+        host_pinned_blocks,
+        disk_blocks,
+        total_kv_blocks,
+    }) = response.log_fields
+    else {
+        return;
+    };
+    let request_id = request_id.unwrap_or("-");
+    let worker = response.best_worker;
+    let effective_overlap_blocks = response.effective_overlap_blocks;
 
-    if request.pinned_worker == Some(worker) {
+    if pinned {
         tracing::info!(
             request_id,
             "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
@@ -611,9 +609,6 @@ fn log_selection<C: WorkerConfigLike>(
             "Selected worker"
         );
     } else {
-        let total_kv_blocks = workers
-            .get(&worker.worker_id)
-            .and_then(WorkerConfigLike::total_kv_blocks);
         tracing::info!(
             router_mode = "kv",
             request_id,
@@ -746,21 +741,26 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         return Err(KvSchedulerError::NoEndpoints);
     };
     let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
-    let result = selection_result(
-        request,
-        worker,
-        block_size,
-        input.max_raw_cached_tokens(),
-        kv_transfer_source,
-    );
-    log_selection(
-        workers,
-        request,
-        worker,
+    // Copy only what the routing task's log line needs; it formats the line there.
+    let tiers = &request.overlap.tier_overlap_blocks;
+    let log_fields = SelectionLogFields {
         worker_type,
-        cost,
-        result.effective_overlap_blocks,
-    );
+        logit: cost,
+        pinned: request.pinned_worker == Some(worker),
+        host_pinned_blocks: tiers.host_pinned.get(&worker).copied().unwrap_or(0),
+        disk_blocks: tiers.disk.get(&worker).copied().unwrap_or(0),
+        total_kv_blocks: None,
+    };
+    let result = WorkerSelectionResult {
+        log_fields: Some(log_fields),
+        ..selection_result(
+            request,
+            worker,
+            block_size,
+            input.max_raw_cached_tokens(),
+            kv_transfer_source,
+        )
+    };
     Ok((result, selection_trace))
 }
 

@@ -1118,6 +1118,31 @@ pub struct WorkerSelectionResult {
     /// The source the selected worker fetches its KV prefix from, chosen with
     /// the same rule that credited the fetch during selection.
     pub kv_transfer_source: Option<KvTransferSourceChoice>,
+
+    /// Fields for the routing task's "Selected worker" log line. Set by
+    /// [`crate::WorkerSelectionPolicy`]; `None` from selectors that do not log
+    /// their selection.
+    pub log_fields: Option<SelectionLogFields>,
+}
+
+/// The selection facts the "Selected worker" log line reports beyond the
+/// scheduling response's own fields. The scheduler actor copies them so the
+/// routing task can format the line after the scheduler replies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionLogFields {
+    /// The policy's worker label, e.g. `"decode"` or `"prefill"`.
+    pub worker_type: &'static str,
+    /// The selected candidate's cost.
+    pub logit: f64,
+    /// Whether the request pinned the selected worker and rank.
+    pub pinned: bool,
+    /// Host-pinned overlap reported for the selected rank, in blocks.
+    pub host_pinned_blocks: usize,
+    /// Disk overlap reported for the selected rank, in blocks.
+    pub disk_blocks: usize,
+    /// The selected worker's KV capacity as its configuration reports it,
+    /// filled in by the scheduler.
+    pub total_kv_blocks: Option<u64>,
 }
 
 /// How many candidates a selection trace retains: the `top_k` lowest-cost rows

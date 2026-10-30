@@ -1946,7 +1946,7 @@ impl<
                     prepared,
                     trace,
                 )
-                .map(|(selection, selection_trace)| {
+                .map(|(mut selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
                     {
@@ -1963,6 +1963,9 @@ impl<
                     let config = workers
                         .get(&selection.worker.worker_id)
                         .expect("selected worker config must exist");
+                    if let Some(log_fields) = &mut selection.log_fields {
+                        log_fields.total_kv_blocks = config.total_kv_blocks();
+                    }
                     let selected_worker_tiers = request
                         .overlap
                         .selected_worker_tiers(selection.worker, config);
@@ -2008,6 +2011,7 @@ impl<
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
+                    log_fields: selected.selection.log_fields,
                 },
             })
         })
@@ -2067,6 +2071,7 @@ impl<
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
+            log_fields: selected.selection.log_fields,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2517,6 +2522,7 @@ mod tests {
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
                 kv_transfer_source: None,
+                log_fields: None,
             })
         }
     }

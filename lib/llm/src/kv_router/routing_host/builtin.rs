@@ -93,6 +93,7 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
         selected_raw_cached_tokens: None,
         potential_decode_blocks: 0,
         kv_transfer_source: None,
+        log_fields: None,
     }
 }
 
