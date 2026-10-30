@@ -2110,6 +2110,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-indexer"
+version = "1.7.0"
+dependencies = [
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-router-protocol",
+ "flume",
+ "parking_lot",
+ "prometheus",
+ "rustc-hash 2.1.2",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.7.0"
 dependencies = [
@@ -2125,6 +2142,7 @@ dependencies = [
  "derive_builder",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-runtime",
  "dynamo-tokens",

@@ -5,6 +5,7 @@
 //! from router configuration with runtime-backed metrics and, when configured,
 //! a request-plane remote primary.
 
+use dynamo_kv_router::indexer::KvIndexerMetricsExt;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;

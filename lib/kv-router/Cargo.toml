@@ -14,21 +14,22 @@ readme = "README.md"
 
 [features]
 default = []
-metrics = ["dep:prometheus"]
+metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
 runtime-protocols = ["dep:dynamo-runtime"]
-bench = ["dynamo-router-protocol/bench"]
-profile = []
+bench = ["dynamo-router-protocol/bench", "dynamo-kv-indexer/bench"]
+profile = ["dynamo-kv-indexer/profile"]
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:dynamo-zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq", "dep:dynamo-zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing"]
+testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing"]
 
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 dynamo-zmq = { workspace = true, optional = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }

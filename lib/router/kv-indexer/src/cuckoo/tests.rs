@@ -3,7 +3,8 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::protocols::{LocalBlockHash, compute_seq_hash_for_block};
+use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_router_protocol::block_hash::LocalBlockHash;
 
 use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
@@ -174,7 +175,7 @@ fn bounded_relocation_rolls_back_every_write_and_emits_no_dirty_bucket() {
 
     assert!(matches!(
         result,
-        Err(crate::protocols::KvCacheEventError::CapacityExhausted)
+        Err(dynamo_kv_events::event::KvCacheEventError::CapacityExhausted)
     ));
     assert_eq!(view.load_bucket(0), full_a);
     assert_eq!(view.load_bucket(1), full_b);
@@ -772,10 +773,10 @@ fn store_remove_churn_drains_every_physical_slot() {
     );
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 #[test]
 fn new_event_errors_have_finite_metric_labels() {
-    use crate::indexer::{
+    use crate::metrics::{
         KvIndexerMetrics, METRIC_EVENT_STORED, METRIC_STATUS_CAPACITY_EXHAUSTED,
         METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
     };
@@ -783,11 +784,11 @@ fn new_event_errors_have_finite_metric_labels() {
     let metrics = KvIndexerMetrics::new_unregistered();
     metrics.increment_event_applied(
         METRIC_EVENT_STORED,
-        Err(crate::protocols::KvCacheEventError::CapacityExhausted),
+        Err(dynamo_kv_events::event::KvCacheEventError::CapacityExhausted),
     );
     metrics.increment_event_applied(
         METRIC_EVENT_STORED,
-        Err(crate::protocols::KvCacheEventError::IndexerInvariantViolation),
+        Err(dynamo_kv_events::event::KvCacheEventError::IndexerInvariantViolation),
     );
     assert_eq!(
         metrics

@@ -6,7 +6,8 @@ use std::{hash::Hash, sync::Arc};
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// Observes the first owner and last owner of a sequence hash within one indexer.
 ///
@@ -39,7 +40,7 @@ struct DelegateState<O> {
 
 /// Shared across mutation threads, allocated only when a delegate is configured.
 #[derive(Clone)]
-pub(crate) struct HashLifecycle<O = WorkerWithDpRank>(Option<Arc<DelegateState<O>>>);
+pub struct HashLifecycle<O = WorkerWithDpRank>(Option<Arc<DelegateState<O>>>);
 
 impl<O> Default for HashLifecycle<O> {
     fn default() -> Self {
@@ -48,18 +49,18 @@ impl<O> Default for HashLifecycle<O> {
 }
 
 impl<O: Eq + Hash> HashLifecycle<O> {
-    pub(crate) fn is_enabled(&self) -> bool {
+    pub fn is_enabled(&self) -> bool {
         self.0.is_some()
     }
 
-    pub(crate) fn new(delegate: Arc<dyn KvIndexerDelegate>) -> Self {
+    pub fn new(delegate: Arc<dyn KvIndexerDelegate>) -> Self {
         Self(Some(Arc::new(DelegateState {
             delegate,
             shards: std::array::from_fn(|_| Mutex::new(FxHashMap::default())),
         })))
     }
 
-    pub(crate) fn insert(&self, worker: O, hash: ExternalSequenceBlockHash) {
+    pub fn insert(&self, worker: O, hash: ExternalSequenceBlockHash) {
         let Some(state) = &self.0 else { return };
         let mut shard = state.shards[hash.0 as usize % state.shards.len()].lock();
         let owners = shard.entry(hash).or_default();
@@ -68,7 +69,7 @@ impl<O: Eq + Hash> HashLifecycle<O> {
         }
     }
 
-    pub(crate) fn remove(&self, worker: O, hash: ExternalSequenceBlockHash) {
+    pub fn remove(&self, worker: O, hash: ExternalSequenceBlockHash) {
         let Some(state) = &self.0 else { return };
         let mut shard = state.shards[hash.0 as usize % state.shards.len()].lock();
         if let Some(owners) = shard.get_mut(&hash)

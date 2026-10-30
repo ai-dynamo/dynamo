@@ -34,9 +34,7 @@
 mod approximate_lru;
 mod branch_sharded;
 mod compressed_radix;
-mod delegate;
-use delegate::HashLifecycle;
-pub use delegate::KvIndexerDelegate;
+pub use dynamo_kv_indexer::delegate::{HashLifecycle, KvIndexerDelegate};
 mod shard_handle;
 
 use std::any::Any;
@@ -66,7 +64,10 @@ mod kv_indexer;
 mod local;
 mod lower_tier;
 mod lower_tier_indexers;
-mod metrics;
+#[cfg(feature = "runtime-protocols")]
+mod runtime_metrics;
+#[cfg(feature = "runtime-protocols")]
+pub use runtime_metrics::KvIndexerMetricsExt;
 #[cfg(feature = "bench")]
 mod observation;
 mod thread_pool;
@@ -74,7 +75,7 @@ mod traits;
 mod types;
 
 pub mod concurrent_radix_tree_compressed;
-pub mod cuckoo;
+pub use dynamo_kv_indexer::cuckoo;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;
@@ -88,11 +89,11 @@ mod delegate_tests;
 // Re-export everything that was public in the old single-file module.
 pub use approximate_lru::*;
 pub use branch_sharded::*;
+pub use dynamo_kv_indexer::metrics::*;
 pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
-pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;
 pub use thread_pool::*;

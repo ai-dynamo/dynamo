@@ -64,6 +64,7 @@ areas:
   - lib/kv-events/src/zmq_wire/
   - lib/kv-router/tests/
   - lib/router/
+  - lib/router/kv-indexer/
   - lib/router/protocol/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/

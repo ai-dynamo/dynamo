@@ -15,10 +15,9 @@ use std::collections::HashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData, RouterEvent,
-    WorkerId, WorkerWithDpRank,
-};
+use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, KvCacheStoreData, RouterEvent};
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, OwnedPackedCkfLane, PackedBucket};
@@ -468,7 +467,7 @@ impl DcCkfRankReplacement {
 #[derive(Debug)]
 pub struct DcCkfState {
     delegate:
-        Option<std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>>,
+        Option<std::sync::Arc<dyn crate::delegate::KvIndexerDelegate<CanonicalSequenceBlockHash>>>,
     /// Per-source engine vocabulary. Lineage and ownership commit even when physical admission
     /// is capacity-omitted, so CKF capacity does not bound this memory; the operative bound is
     /// the source engine's own KV-cache block count, because the engine emits `Removed` when it
@@ -502,7 +501,9 @@ impl DcCkfState {
     /// Notifications include owned hashes omitted from the physical filter for capacity.
     pub fn new_with_delegate(
         config: CkfConfig,
-        delegate: std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>,
+        delegate: std::sync::Arc<
+            dyn crate::delegate::KvIndexerDelegate<CanonicalSequenceBlockHash>,
+        >,
     ) -> Result<Self, CkfBuildError> {
         let mut state = Self::new(config)?;
         state.delegate = Some(delegate);
@@ -1438,13 +1439,35 @@ fn retain_first_error(slot: &mut Option<KvCacheEventError>, error: KvCacheEventE
 
 #[cfg(test)]
 mod tests {
+
+    use crate::cuckoo::CanonicalSequenceBlockHash;
+    use crate::delegate::KvIndexerDelegate;
+
+    #[derive(Default)]
+    struct CanonicalRecorder(std::sync::Mutex<Vec<(bool, CanonicalSequenceBlockHash)>>);
+
+    impl CanonicalRecorder {
+        fn take(&self) -> Vec<(bool, CanonicalSequenceBlockHash)> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl KvIndexerDelegate<CanonicalSequenceBlockHash> for CanonicalRecorder {
+        fn on_create(&self, hash: CanonicalSequenceBlockHash) {
+            self.0.lock().unwrap().push((true, hash));
+        }
+        fn on_remove(&self, hash: CanonicalSequenceBlockHash) {
+            self.0.lock().unwrap().push((false, hash));
+        }
+    }
     use std::collections::HashMap;
 
-    use crate::protocols::{
-        BlockHashOptions, KvCacheEvent, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier, WireResidencyDomain,
-        compute_block_hash_for_seq,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_router_protocol::block_hash::LocalBlockHash;
+    use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier, WireResidencyDomain};
 
     use super::*;
 
@@ -2370,8 +2393,7 @@ mod tests {
     #[test]
     fn replacement_failure_after_valid_prefix_leaves_state_untouched() {
         let existing = WorkerWithDpRank::new(1, 0);
-        let recorder =
-            std::sync::Arc::new(crate::indexer::delegate_tests::CanonicalRecorder::default());
+        let recorder = std::sync::Arc::new(CanonicalRecorder::default());
         let mut state =
             DcCkfState::new_with_delegate(CkfConfig::new(64), recorder.clone()).unwrap();
         assert!(

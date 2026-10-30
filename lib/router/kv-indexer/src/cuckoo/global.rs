@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{ClusterId, IdentitySource, IndexerDomainId, PoolId};
-use crate::protocols::LocalBlockHash;
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_router_protocol::identity::{ClusterId, IdentitySource, IndexerDomainId, PoolId};
 
 use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{PackedBucket, TransposedCkfTable};
@@ -702,7 +702,7 @@ impl GlobalCkfIndexer {
     }
 
     fn prepared_probes(&self, sequence: &[LocalBlockHash]) -> Vec<CkfProbe> {
-        crate::protocols::compute_seq_hash_for_block(sequence)
+        dynamo_kv_hashing::routing::compute_seq_hash_for_block(sequence)
             .into_iter()
             .map(|hash| self.shared.addressing.prepare(hash))
             .collect()
@@ -1083,10 +1083,10 @@ impl Drop for GlobalCkfLaneIngestor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{CacheSemanticsId, RoutingScopeId};
-    use crate::indexer::cuckoo::{
+    use crate::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, DcCkfState,
     };
+    use dynamo_router_protocol::identity::{CacheSemanticsId, RoutingScopeId};
 
     struct Fixture {
         indexer: GlobalCkfIndexer,

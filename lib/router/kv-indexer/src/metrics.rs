@@ -1,20 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(any(feature = "metrics", feature = "runtime-protocols"))]
+#[cfg(feature = "export")]
 use std::sync::Arc;
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "runtime-protocols")]
-use dynamo_runtime::component::Component;
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-use dynamo_runtime::metrics::MetricsHierarchy;
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 use prometheus::{IntCounter, IntCounterVec, Opts};
 
-use crate::protocols::{KvCacheEventData, KvCacheEventError, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, RouterEvent};
 
 static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -110,12 +104,12 @@ impl std::fmt::Display for EventWarningKind {
 }
 
 #[cfg(feature = "bench")]
-pub(crate) struct ShardedIndexerCounters {
-    pub(crate) find_match_dispatches: AtomicU64,
-    pub(crate) find_match_early_returns: AtomicU64,
-    pub(crate) anchor_installs: AtomicU64,
-    pub(crate) anchor_reuses: AtomicU64,
-    pub(crate) remove_broadcasts: AtomicU64,
+pub struct ShardedIndexerCounters {
+    pub find_match_dispatches: AtomicU64,
+    pub find_match_early_returns: AtomicU64,
+    pub anchor_installs: AtomicU64,
+    pub anchor_reuses: AtomicU64,
+    pub remove_broadcasts: AtomicU64,
 }
 
 #[cfg(feature = "bench")]
@@ -132,10 +126,10 @@ impl ShardedIndexerCounters {
 }
 
 #[cfg(feature = "bench")]
-pub(crate) struct ShardedIndexerTiming {
-    pub(crate) calls: AtomicU64,
-    pub(crate) routing_ns: AtomicU64,
-    pub(crate) shard_ns: AtomicU64,
+pub struct ShardedIndexerTiming {
+    pub calls: AtomicU64,
+    pub routing_ns: AtomicU64,
+    pub shard_ns: AtomicU64,
 }
 
 #[cfg(feature = "bench")]
@@ -150,14 +144,21 @@ impl ShardedIndexerTiming {
 }
 
 #[cfg(feature = "bench")]
-pub(crate) struct ShardedIndexerMetrics {
-    pub(crate) counters: ShardedIndexerCounters,
-    pub(crate) timing: ShardedIndexerTiming,
+pub struct ShardedIndexerMetrics {
+    pub counters: ShardedIndexerCounters,
+    pub timing: ShardedIndexerTiming,
+}
+
+#[cfg(feature = "bench")]
+impl Default for ShardedIndexerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "bench")]
 impl ShardedIndexerMetrics {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             counters: ShardedIndexerCounters::new(),
             timing: ShardedIndexerTiming::new(),
@@ -167,16 +168,16 @@ impl ShardedIndexerMetrics {
 
 /// Metrics for the KV Indexer.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "metrics"), derive(Default))]
+#[cfg_attr(not(feature = "export"), derive(Default))]
 pub struct KvIndexerMetrics {
     /// Counter of events applied.
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     pub kv_cache_events_applied: IntCounterVec,
     /// Counter of suspicious-but-valid KV events.
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     pub kv_cache_event_warnings: IntCounterVec,
     /// Counters for CKF mutation outcomes that are finer-grained than event status.
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     pub ckf_mutation: IntCounterVec,
 }
 
@@ -207,38 +208,30 @@ pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
 pub const METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
 
 /// Metric name for KV cache events applied counter.
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 const KV_CACHE_EVENTS_APPLIED_NAME: &str = "dynamo_kvrouter_kv_cache_events_applied";
-#[cfg(feature = "metrics")]
-const KV_CACHE_EVENTS_APPLIED_HELP: &str = "Total number of KV cache events applied to index";
-#[cfg(feature = "metrics")]
-const KV_CACHE_EVENTS_APPLIED_LABELS: &[&str] = &["event_type", "status"];
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-const KV_CACHE_EVENT_WARNINGS_SUFFIX: &str = "kv_cache_event_warnings";
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
+pub const KV_CACHE_EVENTS_APPLIED_HELP: &str = "Total number of KV cache events applied to index";
+#[cfg(feature = "export")]
+pub const KV_CACHE_EVENTS_APPLIED_LABELS: &[&str] = &["event_type", "status"];
+#[cfg(feature = "export")]
 const KV_CACHE_EVENT_WARNINGS_NAME: &str = "dynamo_kvrouter_kv_cache_event_warnings";
-#[cfg(feature = "metrics")]
-const KV_CACHE_EVENT_WARNINGS_HELP: &str =
+#[cfg(feature = "export")]
+pub const KV_CACHE_EVENT_WARNINGS_HELP: &str =
     "Total number of suspicious KV cache events seen by the router indexer";
-#[cfg(feature = "metrics")]
-const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-const CKF_MUTATION_SUFFIX: &str = "ckf_mutation_total";
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
+pub const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
+#[cfg(feature = "export")]
 const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
-#[cfg(feature = "metrics")]
-const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
-#[cfg(feature = "metrics")]
-const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
-
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
+#[cfg(feature = "export")]
+pub const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
+#[cfg(feature = "export")]
+pub const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 
 impl KvIndexerMetrics {
-    #[cfg(feature = "metrics")]
-    fn new(
+    /// Build from counter vectors a host created and registered itself.
+    #[cfg(feature = "export")]
+    pub fn from_counters(
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
         ckf_mutation: IntCounterVec,
@@ -250,9 +243,9 @@ impl KvIndexerMetrics {
         }
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     fn new_prometheus() -> Result<Self, prometheus::Error> {
-        Ok(Self::new(
+        Ok(Self::from_counters(
             IntCounterVec::new(
                 Opts::new(KV_CACHE_EVENTS_APPLIED_NAME, KV_CACHE_EVENTS_APPLIED_HELP),
                 KV_CACHE_EVENTS_APPLIED_LABELS,
@@ -269,7 +262,7 @@ impl KvIndexerMetrics {
     }
 
     /// Creates and registers a shared metrics instance in `registry`.
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     pub fn new_registered(registry: &prometheus::Registry) -> Result<Arc<Self>, prometheus::Error> {
         let metrics = Arc::new(Self::new_prometheus()?);
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
@@ -278,68 +271,15 @@ impl KvIndexerMetrics {
         Ok(metrics)
     }
 
-    /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
-    /// KV_INDEXER_METRICS to avoid duplicate registration issues.
-    #[cfg(feature = "runtime-protocols")]
-    pub fn from_component(component: &Component) -> Arc<Self> {
-        #[cfg(feature = "metrics")]
-        {
-            KV_INDEXER_METRICS
-                .get_or_init(|| {
-                    match (
-                        component.metrics().create_intcountervec(
-                            KV_CACHE_EVENTS_APPLIED_SUFFIX,
-                            KV_CACHE_EVENTS_APPLIED_HELP,
-                            KV_CACHE_EVENTS_APPLIED_LABELS,
-                            &[],
-                        ),
-                        component.metrics().create_intcountervec(
-                            KV_CACHE_EVENT_WARNINGS_SUFFIX,
-                            KV_CACHE_EVENT_WARNINGS_HELP,
-                            KV_CACHE_EVENT_WARNINGS_LABELS,
-                            &[],
-                        ),
-                        component.metrics().create_intcountervec(
-                            CKF_MUTATION_SUFFIX,
-                            CKF_MUTATION_HELP,
-                            CKF_MUTATION_LABELS,
-                            &[],
-                        ),
-                    ) {
-                        (
-                            Ok(kv_cache_events_applied),
-                            Ok(kv_cache_event_warnings),
-                            Ok(ckf_mutation),
-                        ) => Arc::new(Self::new(
-                            kv_cache_events_applied,
-                            kv_cache_event_warnings,
-                            ckf_mutation,
-                        )),
-                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                            tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
-                            Arc::new(Self::new_unregistered())
-                        }
-                    }
-                })
-                .clone()
-        }
-
-        #[cfg(not(feature = "metrics"))]
-        {
-            let _ = component;
-            Arc::new(Self::new_unregistered())
-        }
-    }
-
     /// Creates a new KvIndexerMetrics which is not registered with a MetricsRegistry.
     /// This may be used for tests or as a fallback for when a MetricsRegistry is not available / has errored.
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     pub fn new_unregistered() -> Self {
         Self::new_prometheus().expect("valid KV indexer metric definitions")
     }
 
     /// Creates a no-op metrics instance when Prometheus support is disabled.
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(feature = "export"))]
     pub fn new_unregistered() -> Self {
         Self::default()
     }
@@ -349,7 +289,7 @@ impl KvIndexerMetrics {
         event_type: &'static str,
         result: Result<(), KvCacheEventError>,
     ) {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             match result {
                 Ok(_) => {
@@ -381,18 +321,18 @@ impl KvIndexerMetrics {
                 }
             }
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         let _ = (self, event_type, result);
     }
 
     pub fn increment_event_warning(&self, warning_kind: &'static str) {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             self.kv_cache_event_warnings
                 .with_label_values(&[warning_kind])
                 .inc_by(1);
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         let _ = (self, warning_kind);
     }
 
@@ -411,11 +351,11 @@ impl KvIndexerMetrics {
 /// the event processing loop with a direct `.inc()` call instead of the
 /// `IntCounterVec::with_label_values()` hashmap lookup.
 pub struct PreBoundEventCounters {
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     inner: PreBoundMetricCounters,
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 struct PreBoundMetricCounters {
     stored: ResultCounters,
     removed: ResultCounters,
@@ -424,13 +364,13 @@ struct PreBoundMetricCounters {
     ckf_mutation: CkfMutationCounters,
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 struct CkfMutationCounters {
     unknown_remove: IntCounter,
     capacity_exhausted: IntCounter,
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 struct ResultCounters {
     ok: IntCounter,
     parent_not_found: IntCounter,
@@ -444,7 +384,7 @@ struct ResultCounters {
     unknown: IntCounter,
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "export")]
 impl ResultCounters {
     fn new(counters: &IntCounterVec, event_type: &'static str) -> Self {
         Self {
@@ -488,7 +428,7 @@ impl ResultCounters {
 
 impl PreBoundEventCounters {
     fn new(metrics: &KvIndexerMetrics) -> Self {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             let cv = &metrics.kv_cache_events_applied;
             let warnings = &metrics.kv_cache_event_warnings;
@@ -510,7 +450,7 @@ impl PreBoundEventCounters {
                 },
             }
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         {
             let _ = metrics;
             Self {}
@@ -523,7 +463,7 @@ impl PreBoundEventCounters {
     /// so the compiler enforces exhaustiveness — a new [`EventKind`] or
     /// [`KvCacheEventError`] variant will produce a compile error here.
     pub fn inc(&self, kind: EventKind, result: Result<(), KvCacheEventError>) {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             let counters = match kind {
                 EventKind::Stored => &self.inner.stored,
@@ -532,24 +472,24 @@ impl PreBoundEventCounters {
             };
             counters.for_result(result).inc();
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         let _ = (self, kind, result);
     }
 
     pub fn inc_warning(&self, kind: EventWarningKind) {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             let counter = match kind {
                 EventWarningKind::DuplicateStore => &self.inner.duplicate_store_warning,
             };
             counter.inc();
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         let _ = (self, kind);
     }
 
     pub fn inc_ckf_mutation(&self, kind: CkfMutationKind, count: u64) {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "export")]
         {
             if count == 0 {
                 return;
@@ -560,7 +500,7 @@ impl PreBoundEventCounters {
             };
             counter.inc_by(count);
         }
-        #[cfg(not(feature = "metrics"))]
+        #[cfg(not(feature = "export"))]
         let _ = (self, kind, count);
     }
 }

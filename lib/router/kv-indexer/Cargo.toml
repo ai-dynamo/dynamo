@@ -1,0 +1,32 @@
+[package]
+name = "dynamo-kv-indexer"
+description = "KV events in, prefix knowledge out: the Dynamo router's KV indexer stage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# Transitional: Prometheus counter vectors as metric fields. Replaced by atomics + stats().
+export = ["dep:prometheus"]
+bench = ["dynamo-router-protocol/bench"]
+testing = ["dynamo-router-protocol/testing"]
+profile = []
+
+[dependencies]
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+flume = "0.12.0"
+parking_lot = { workspace = true }
+prometheus = { workspace = true, optional = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }

@@ -7,7 +7,7 @@ use rustc_hash::FxHashSet;
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket};
 use super::canonical::CanonicalSequenceBlockHash;
-use crate::protocols::KvCacheEventError;
+use dynamo_kv_events::event::KvCacheEventError;
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 

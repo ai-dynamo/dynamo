@@ -18,7 +18,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::protocols::{KvCacheEventError, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEventError, RouterEvent};
 
 use super::global::{GlobalCkfIndexer, GlobalCkfIngestOutcome, LaneLease, ProducerIdentity};
 use super::ingestion_pool::{GlobalCkfIngestionError, GlobalCkfIngestionPool};
@@ -127,7 +127,7 @@ struct TestSinkFaults {
     drop_next: AtomicBool,
 }
 
-/// Actor-backed local producer-to-consumer composition for one [`PoolId`](crate::identity::PoolId)
+/// Actor-backed local producer-to-consumer composition for one [`PoolId`](dynamo_router_protocol::identity::PoolId)
 /// lane.
 pub struct LocalCkfAdapter {
     state: DcCkfState,
@@ -159,7 +159,7 @@ impl LocalCkfAdapter {
         identity: ProducerIdentity,
         lease: LaneLease,
         ingestion: Arc<GlobalCkfIngestionPool>,
-        delegate: Arc<dyn crate::indexer::KvIndexerDelegate<super::CanonicalSequenceBlockHash>>,
+        delegate: Arc<dyn crate::delegate::KvIndexerDelegate<super::CanonicalSequenceBlockHash>>,
     ) -> Result<Self, LocalCkfAdapterBuildError> {
         Self::from_state(
             DcCkfState::new_with_delegate(config, delegate)?,
@@ -362,12 +362,12 @@ fn map_publish_error(error: DcCkfPublishError<LocalCkfDeltaSinkError>) -> LocalC
 
 #[cfg(test)]
 mod tests {
-    use crate::identity::{
-        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
-    use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
 
     use super::super::global::{ConsumerInstanceId, GlobalCkfManifest};

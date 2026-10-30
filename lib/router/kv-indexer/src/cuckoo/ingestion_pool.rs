@@ -1365,12 +1365,12 @@ fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: Global
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{
-        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-    };
-    use crate::indexer::cuckoo::{
+    use crate::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, ConsumerInstanceId,
         DcCkfState, GlobalCkfBucketImage, GlobalCkfManifest, PrefixSearchConfig,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
 
     struct Fixture {

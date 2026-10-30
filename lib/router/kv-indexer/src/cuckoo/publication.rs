@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Logically serialized publication for one actor-owned [`PoolId`](crate::identity::PoolId).
+//! Logically serialized publication for one actor-owned [`PoolId`](dynamo_router_protocol::identity::PoolId).
 //!
 //! The actor core emits unsequenced absolute bucket-image batches. This publisher alone owns the
 //! ordinary `last_sequence`, current consumer lease, and reliable FIFO handoff. Mutation handling
@@ -205,13 +205,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::identity::{
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+    };
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
-    use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::super::global::ConsumerInstanceId;
     use super::super::{CkfConfig, DcCkfFormatIdentity};
