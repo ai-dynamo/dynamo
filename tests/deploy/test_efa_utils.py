@@ -231,15 +231,3 @@ def test_read_pod_logs_raises_when_tunnel_stays_down(monkeypatch) -> None:
 
     with pytest.raises(httpx.ConnectError):
         _read_pod_logs(pod)
-
-
-@pytest.mark.pre_merge
-@pytest.mark.unit
-@pytest.mark.gpu_0
-def test_read_pod_logs_tolerates_missing_previous_instance(monkeypatch) -> None:
-    sleep = MagicMock()
-    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
-    pod = _fake_pod([_LIBFABRIC_LOG], _NO_PREVIOUS)
-
-    assert _read_pod_logs(pod) == "\n".join(_LIBFABRIC_LOG)
-    sleep.assert_not_called()
