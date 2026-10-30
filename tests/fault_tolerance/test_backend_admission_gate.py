@@ -962,22 +962,20 @@ def test_request_limit_holds_requests_until_one_finishes(
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
 
 
-######################### CAPACITY-DERIVED DEFAULTS #########################
+######################### ENGINE AND QUEUE DEFAULTS #########################
 
 
 @pytest.mark.timeout(60)
-def test_automatic_limits_follow_the_reported_capacity(
+def test_engine_defaults_follow_capacity_and_queue_default_allows_a_backlog(
     request,
     runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
 ):
-    """With no setting given, every limit follows the `max_num_seqs` the worker
-    reports, one sequence: one request in the engine, one awaiting its first
-    response, and a queue of twice that. With the first request running, the
-    second and third queue, the fourth is refused, and the queue drains in
-    order."""
+    """Engine defaults follow the reported capacity of one sequence. The
+    default queue accepts three requests, beyond twice that capacity, and
+    drains in FIFO order. Rust unit tests verify its exact size of 40000."""
 
     async def scenario(
         gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
@@ -987,14 +985,12 @@ def test_automatic_limits_follow_the_reported_capacity(
             await _stage_waiting(
                 gate, session, url, _hold, (1, 0, index + 1), f"queued-{index}"
             )
-            for index in range(2)
+            for index in range(3)
         ]
-        await _shed(gate, session, url)
         await gate.assert_counters(
-            "the automatic request limit queues and the automatic queue limit refuses",
+            "the default queue accepts more than twice the engine capacity",
             received=4,
             direct=1,
-            rejected=1,
         )
 
         released = runner
@@ -1003,12 +999,12 @@ def test_automatic_limits_follow_the_reported_capacity(
             released = await _result(task, f"queued-{index}")
             await gate.await_counter("queue", index + 1, f"queued-{index} to enter")
             await gate.await_occupancy(
-                1, 0, 1 - index, f"queued-{index} to answer in FIFO order"
+                1, 0, 2 - index, f"queued-{index} to answer in FIFO order"
             )
         released.close()
         await gate.await_idle()
         await gate.assert_counters(
-            "the queue has drained", received=4, direct=1, queue=2, rejected=1
+            "the queue has drained", received=4, direct=1, queue=3
         )
 
     with _deployment(

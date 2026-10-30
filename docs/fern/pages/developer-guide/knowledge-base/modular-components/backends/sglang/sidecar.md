@@ -26,6 +26,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
 
 ## Launch Locally
 
@@ -60,6 +61,18 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: sglang` as the examples do; the operator does not infer a backend from
+a native engine launch. The templates own the native engine commands and
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
+with matching attention-DP metadata support. Engine-failure KV recovery remains
+incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
 ## Topologies
 

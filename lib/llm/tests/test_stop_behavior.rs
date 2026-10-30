@@ -88,6 +88,7 @@ fn make_decoder(
         stop_conditions,
         include_stop_str,
         false,
+        false,
         None,
         None,
     )
@@ -183,7 +184,15 @@ fn user_stop_token_reports_distinct_trigger() {
         stop_token_ids_hidden: Some(vec![EOS]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
+    let mut decoder = Decoder::new(
+        decode_stream,
+        stop_conditions,
+        false,
+        false,
+        false,
+        None,
+        None,
+    );
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hi"));
@@ -283,7 +292,15 @@ fn visible_stop_token_flushes_and_orders_prior_jailed_prefix() {
         stop: Some(vec!["hiya".to_string()]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
+    let mut decoder = Decoder::new(
+        decode_stream,
+        stop_conditions,
+        false,
+        false,
+        false,
+        None,
+        None,
+    );
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hiSTOP"));
@@ -371,6 +388,7 @@ fn no_stop_trim_preserves_seed_order_and_special_token_policy() {
             },
             false,
             no_stop_trim,
+            false,
             None,
             Some("o".into()),
         );

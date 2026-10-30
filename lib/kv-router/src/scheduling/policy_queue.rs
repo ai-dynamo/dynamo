@@ -486,7 +486,7 @@ pub struct PolicyQueue<T> {
 }
 
 impl<T> PolicyQueue<T> {
-    pub fn new(profile: PolicyProfile) -> Self {
+    pub fn new(profile: &PolicyProfile) -> Self {
         let class_count = profile.classes().len();
         Self {
             classes: profile
@@ -1037,7 +1037,7 @@ policy_classes:
 
     #[test]
     fn per_worker_caps_scale_and_remain_pre_add() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: capped
 uncached_isl_buckets:
@@ -1099,7 +1099,7 @@ policy_classes:
 
     #[test]
     fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let now = Instant::now();
         queue
             .enqueue_with_due_at(
@@ -1155,7 +1155,7 @@ policy_classes:
 
     #[test]
     fn due_time_order_preserves_sub_millisecond_precision() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let due_at = Instant::now() + std::time::Duration::from_secs(10);
         queue
             .enqueue_with_due_at(
@@ -1196,7 +1196,7 @@ policy_classes:
 
     #[test]
     fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let due_at = Instant::now() + std::time::Duration::from_secs(10);
         queue
             .enqueue(
@@ -1235,7 +1235,7 @@ policy_classes:
 
     #[test]
     fn deadline_timer_removes_an_expired_blocked_worker_lane() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let worker = WorkerWithDpRank::new(7, 0);
         let due_at = Instant::now() + std::time::Duration::from_secs(1);
         queue
@@ -1274,7 +1274,7 @@ policy_classes:
 
     #[test]
     fn strict_priority_precedes_earlier_due_request_within_a_class() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let now = Instant::now();
         queue
             .enqueue_with_due_at(
@@ -1315,7 +1315,7 @@ policy_classes:
 
     #[test]
     fn drr_charges_cost_when_the_queue_was_empty() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let mut snapshot = QueueSnapshot::new(100, 0);
         snapshot.scheduling_cost_tokens = 7;
         queue
@@ -1352,7 +1352,7 @@ policy_classes:
 
     #[test]
     fn retain_removes_payload_and_rebuilds_queue_accounting() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: default
 uncached_isl_buckets:
@@ -1404,7 +1404,7 @@ policy_classes:
 
     #[test]
     fn blocked_worker_lane_does_not_block_another_lane() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         for (worker, payload) in [(1, "blocked"), (2, "ready")] {
             queue
                 .enqueue(
@@ -1429,7 +1429,7 @@ policy_classes:
 
     #[test]
     fn worker_update_rechecks_only_that_blocked_lane() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let worker_1 = WorkerWithDpRank::new(1, 0);
         let worker_2 = WorkerWithDpRank::new(2, 0);
         for (worker, payload) in [(worker_1, "worker-1"), (worker_2, "worker-2")] {
@@ -1463,7 +1463,7 @@ policy_classes:
 
     #[test]
     fn exact_lane_index_tracks_a_new_higher_priority_head() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         let worker = WorkerWithDpRank::new(1, 0);
         queue
             .enqueue(
@@ -1503,7 +1503,7 @@ policy_classes:
     #[test]
     fn exact_lane_head_index_checks_each_blocked_lane_once() {
         const LANES: usize = 10_000;
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         for lane in 0..LANES {
             queue
                 .enqueue(
@@ -1538,7 +1538,7 @@ policy_classes:
 
     #[test]
     fn global_recheck_dispatches_workers_as_they_become_available() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         for lane in 0..3 {
             queue
                 .enqueue(
@@ -1579,7 +1579,7 @@ policy_classes:
 
     #[test]
     fn global_recheck_preserves_priority_for_multiple_available_workers() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         for (worker, strict_priority, payload) in [(1, 0, "low"), (2, 1, "high")] {
             queue
                 .enqueue(
@@ -1610,7 +1610,7 @@ policy_classes:
 
     #[test]
     fn pending_global_recheck_survives_retain_removing_blocked_lane() {
-        let mut queue = PolicyQueue::new(admission_profile());
+        let mut queue = PolicyQueue::new(&admission_profile());
         for (worker, payload) in [(1, "remove"), (2, "keep")] {
             queue
                 .enqueue(
@@ -1640,7 +1640,7 @@ policy_classes:
 
     #[test]
     fn per_worker_token_caps_follow_capacity_without_evicting() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: raw
 uncached_isl_buckets:
@@ -1786,7 +1786,7 @@ policy_classes:
 
     #[test]
     fn per_worker_limit_multiplication_saturates() {
-        let mut queue = PolicyQueue::new(profile(&format!(
+        let mut queue = PolicyQueue::new(&profile(&format!(
             r#"
 default_policy_family: capped
 uncached_isl_buckets:
@@ -1817,7 +1817,7 @@ policy_classes:
 
     #[test]
     fn fcfs_and_wspt_order_only_within_each_class() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: fcfs
 uncached_isl_buckets:
@@ -1893,7 +1893,7 @@ policy_classes:
 
     #[test]
     fn drr_weights_progress_and_skips_blocked_classes_without_credit() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: slow
 uncached_isl_buckets:
@@ -1951,7 +1951,7 @@ policy_classes:
 
     #[test]
     fn drr_carry_uses_next_dispatchable_lane() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: agents
 uncached_isl_buckets:
@@ -2033,7 +2033,7 @@ policy_classes:
 
     #[test]
     fn drr_serves_exact_quantum_ratio_for_equal_cost_backlogs() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: one
 uncached_isl_buckets:
@@ -2089,7 +2089,7 @@ policy_classes:
 
     #[test]
     fn fully_blocked_ring_returns_without_accruing_deficit() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: first
 uncached_isl_buckets:
@@ -2140,7 +2140,7 @@ policy_classes:
 
     #[test]
     fn oversized_heads_bulk_add_deficit_and_make_progress() {
-        let mut queue = PolicyQueue::new(profile(
+        let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_family: large
 uncached_isl_buckets:
