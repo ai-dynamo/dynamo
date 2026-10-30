@@ -63,13 +63,16 @@ def test_router_hint_forwarding_is_private_and_lossless():
     assert kv_hint_kwargs(_HintEngine(), {"nvext": {"kv_hint": hint}}) == {}
 
 
-def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine():
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
+    tp_size,
+):
     args = SimpleNamespace(
         enable_hierarchical_cache=False,
         enable_unified_cache_external_linker=True,
         unified_cache_external_linker_backend="kvcr",
         nnodes=1,
-        tp_size=1,
+        tp_size=tp_size,
         dp_size=1,
         pp_size=1,
     )
@@ -102,10 +105,11 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
     publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Aggregated)
     assert values == {}
     source["capabilities"].append("kvcr_inventory")
-    args.tp_size = 2
-    publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Aggregated)
+    source["source_control_endpoint"] = "tcp://0.0.0.0:24100"
+    with pytest.raises(ValueError, match="wildcard"):
+        publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Aggregated)
     assert values == {}
-    args.tp_size = 1
+    source["source_control_endpoint"] = "tcp://worker:24100"
     publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Prefill)
     assert values == {}
 

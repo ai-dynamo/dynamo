@@ -41,21 +41,17 @@ def is_kvcr_linker(server_args) -> bool:
     )
 
 
-def is_single_rank_linker(server_args) -> bool:
-    return (
-        is_kvcr_linker(server_args)
-        and getattr(server_args, "tp_size", None) == 1
-        and all(
-            getattr(server_args, name, 1) in (None, 1)
-            for name in (
-                "nnodes",
-                "dp_size",
-                "attn_dp_size",
-                "attn_cp_size",
-                "dcp_size",
-                "pp_size",
-                "tokenizer_worker_num",
-            )
+def is_supported_kvcr_linker_topology(server_args) -> bool:
+    return is_kvcr_linker(server_args) and all(
+        getattr(server_args, name, 1) in (None, 1)
+        for name in (
+            "nnodes",
+            "dp_size",
+            "attn_dp_size",
+            "attn_cp_size",
+            "dcp_size",
+            "pp_size",
+            "tokenizer_worker_num",
         )
     )
 
@@ -136,7 +132,10 @@ def publish_kvcr_hint_capabilities(
 ) -> None:
     """Publish KVCR sources explicitly reported by a supported SGLang worker."""
     server_args = resolved_server_args(server_args)
-    linker = is_single_rank_linker(server_args) and worker_type == WorkerType.Aggregated
+    linker = (
+        is_supported_kvcr_linker_topology(server_args)
+        and worker_type == WorkerType.Aggregated
+    )
     if (
         not (getattr(server_args, "enable_hierarchical_cache", False) or linker)
         or getattr(server_args, "nnodes", 1) != 1

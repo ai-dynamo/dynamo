@@ -22,7 +22,10 @@ from dynamo.sglang._compat import (
     resolved_server_args,
 )
 from dynamo.sglang.capacity import model_card_dp_rank_bounds
-from dynamo.sglang.kv_hints import is_single_rank_linker, kvcr_hint_endpoints
+from dynamo.sglang.kv_hints import (
+    is_supported_kvcr_linker_topology,
+    kvcr_hint_endpoints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
     if not sources:
         return []
     server_args = resolved_server_args(config.server_args)
-    linker = is_single_rank_linker(server_args)
+    linker = is_supported_kvcr_linker_topology(server_args)
     if (
         not (getattr(server_args, "enable_hierarchical_cache", False) or linker)
         or server_args.nnodes != 1
@@ -68,7 +71,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
         or not config.dynamo_args.use_kv_events
     ):
         raise ValueError(
-            "KVCR inventory requires a single-host HiCache or TP1 linker worker, one tokenizer "
+            "KVCR inventory requires a single-host HiCache or supported linker worker, one tokenizer "
             "worker, PP=1 and KV event emission"
         )
     if linker and (

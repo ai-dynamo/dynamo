@@ -110,8 +110,10 @@ def linker_fixture():
     return engine, config, source, info
 
 
-def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source():
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size):
     engine, config, source, _ = linker_fixture()
+    config.server_args.tp_size = tp_size
     (descriptor,) = state_agent_descriptors(engine, config)
     assert descriptor["cache_owner_id"] == source["cache_owner_id"]
     assert descriptor["raw_zmq_endpoint"] == "tcp://worker:24020"
@@ -125,8 +127,10 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source():
     }
 
 
-def test_linker_registration_uses_state_agent(monkeypatch):
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_linker_registration_uses_state_agent(monkeypatch, tp_size):
     engine, config, source, _ = linker_fixture()
+    config.server_args.tp_size = tp_size
     config.server_args.model_path = config.server_args.served_model_name = "test-model"
     config.dynamo_args.use_sglang_tokenizer = False
     config.dynamo_args.model_source_uri = None
@@ -157,9 +161,8 @@ def test_linker_registration_uses_state_agent(monkeypatch):
 @pytest.mark.parametrize(
     "change,mode,match",
     [
-        ({"tp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
-        ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
-        ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
+        ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
+        ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({}, DisaggregationMode.PREFILL, "aggregated hint-forwarding"),
     ],
 )
@@ -171,8 +174,10 @@ def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
         state_agent_descriptors(engine, config)
 
 
-def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_linker_inventory_requires_hint_forwarding_and_reported_inventory(tp_size):
     engine, config, source, info = linker_fixture()
+    config.server_args.tp_size = tp_size
     engine.async_generate = lambda: None
     with pytest.raises(ValueError, match="hint-forwarding"):
         state_agent_descriptors(engine, config)
@@ -182,6 +187,7 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
     assert state_agent_descriptors(engine, config) == []
 
 
+@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize(
     "change,match",
     [
@@ -192,8 +198,9 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
         ("topic", "topic must identify"),
     ],
 )
-def test_linker_inventory_rejects_wrong_ownership_contract(change, match):
+def test_linker_inventory_rejects_wrong_ownership_contract(change, match, tp_size):
     engine, config, source, info = linker_fixture()
+    config.server_args.tp_size = tp_size
     if change == "lifetime":
         source["inventory_lifetime"] = "persistent"
     elif change == "reset":
