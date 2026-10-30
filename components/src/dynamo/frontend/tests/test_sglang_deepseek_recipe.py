@@ -7,7 +7,8 @@ import copy
 
 import pytest
 
-from dynamo.frontend import sglang_deepseek
+pytest.importorskip("sglang.srt.parser")
+from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 
 pytestmark = [
     pytest.mark.unit,
