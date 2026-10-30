@@ -5904,8 +5904,7 @@ def _start_frontend_generation(
                         )
                     if "error" in chunk:
                         raise AssertionError(
-                            f"{label}: FE generation stream contained "
-                            "an error chunk"
+                            f"{label}: FE generation stream contained " "an error chunk"
                         )
         except Exception as exc:
             outcome["error"] = exc
@@ -6103,8 +6102,7 @@ def _classify_epp_sentinel_outcome(
     if isinstance(outcome, QueueRejectionOutcome):
         return "typed"
     if not (
-        isinstance(outcome, RouteObservation)
-        and outcome.routing_mode == "aggregated"
+        isinstance(outcome, RouteObservation) and outcome.routing_mode == "aggregated"
     ):
         raise AssertionError(
             f"{case_name}: EPP sentinel is neither typed 503 nor "
@@ -6122,8 +6120,7 @@ def _classify_epp_sentinel_outcome(
         )
     if outcome.token_ids != blocker_obs.token_ids:
         raise AssertionError(
-            f"{case_name}: EPP aggregated sentinel token_ids differ from "
-            "blocker"
+            f"{case_name}: EPP aggregated sentinel token_ids differ from " "blocker"
         )
     if outcome.prefill_worker_id is not None:
         raise AssertionError(
@@ -6323,9 +6320,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                 leftover, leftover_deadline - time.monotonic()
             )
         if leftover_obs is None:
-            raise AssertionError(
-                f"{kind}: EPP leftover {pending} never admitted"
-            )
+            raise AssertionError(f"{kind}: EPP leftover {pending} never admitted")
         for label, obs in (
             (admitted, first.observation),
             (pending, leftover_obs),
@@ -6368,9 +6363,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
         body_error = exc
     finally:
         try:
-            _close_priority_held_streams(
-                epp_blocker, epp_low, epp_high, epp_sentinel
-            )
+            _close_priority_held_streams(epp_blocker, epp_low, epp_high, epp_sentinel)
         except BaseException as exc:
             close_error = exc
     _raise_priority_cleanup(body_error, close_error)
@@ -6385,9 +6378,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
     )
 
     case = frontend_epp_priority_case(model_name)
-    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs(
-        "body_strict"
-    )
+    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs("body_strict")
     catalog = stack.catalog_snapshot()
     if catalog != stack.worker_ids:
         raise AssertionError(
@@ -6432,9 +6423,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             deadline=deadline,
             label="sentinel-high",
         )
-        _wait_pending_prefill(
-            stack, float(PRIORITY_QUEUE_LIMIT), deadline, "sentinel"
-        )
+        _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, "sentinel")
         _assert_priority_catalog(stack, catalog, "before FE sentinel")
         fe_sentinel = _post_fe_priority_sentinel(
             stack, case, low_payload, sentinel_id, deadline, "sentinel"
@@ -6453,8 +6442,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
         ):
             if "error" in outcome or outcome.get("status") != 200:
                 raise AssertionError(
-                    f"sentinel FE {label} did not complete after CONT: "
-                    f"{outcome}"
+                    f"sentinel FE {label} did not complete after CONT: " f"{outcome}"
                 )
     except BaseException as exc:
         fe_error = exc
@@ -6539,9 +6527,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
         body_error = exc
     finally:
         try:
-            _close_priority_held_streams(
-                epp_blocker, epp_low, epp_high, epp_sentinel
-            )
+            _close_priority_held_streams(epp_blocker, epp_low, epp_high, epp_sentinel)
         except BaseException as exc:
             close_error = exc
     _raise_priority_cleanup(body_error, close_error)

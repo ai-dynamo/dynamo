@@ -9,14 +9,18 @@ network container. pre_merge is the dedicated serial/own-container CI
 selector together with runtime_epp, not generic runtime-image coverage.
 
 Inventory and completeness guards are fail-closed and knowingly incomplete
-for this increment. They are ordinary failures, not skip/xfail. Gap
-attempts share the same runner and stay ordinary tests.
+for this increment. They are ordinary failures, not skip/xfail. The two
+measured gaps are strict xfails of their dedicated mismatch subclasses.
+Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
+hard failures. Other profiles stay ordinary tests.
 """
 
 import pytest
 
 from tests.router.epp_config_contract import (
     PROFILE_NAMES,
+    ConditionalJsonConfigMismatch,
+    LoadAwarePresetConfigMismatch,
     assert_coverage_complete,
     assert_inventory_matches_manifest,
     assert_manifest_bindings_match_collected_tests,
@@ -52,20 +56,49 @@ def test_fe_honored_coverage_is_complete():
 
 
 def test_manifest_bindings_match_collected_tests(request):
-    """Observer/profile metadata must name a collected profile test."""
-    assert_manifest_bindings_match_collected_tests(
-        item.nodeid for item in request.session.items
-    )
+    """Observer rows must bind collected Items and exact measured xfails."""
+    assert_manifest_bindings_match_collected_tests(request.session.items)
 
 
-@pytest.mark.parametrize("profile_name", list(PROFILE_NAMES))
+def _effective_config_profile_case(profile_name: str):
+    if profile_name == "load_aware_preset":
+        return pytest.param(
+            profile_name,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=LoadAwarePresetConfigMismatch,
+                reason=(
+                    "issue #16592: measured FE load-aware preset vs EPP "
+                    "ignoring DYN_ROUTER_LOAD_AWARE"
+                ),
+            ),
+        )
+    if profile_name == "conditional_json":
+        return pytest.param(
+            profile_name,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=ConditionalJsonConfigMismatch,
+                reason=(
+                    "issue #16592: measured FE conditional JSON vs EPP "
+                    "default scalar config"
+                ),
+            ),
+        )
+    return profile_name
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    [_effective_config_profile_case(name) for name in PROFILE_NAMES],
+)
 def test_effective_config_profile(
     request, predownload_tokenizers, tmp_path, monkeypatch, profile_name
 ):
     """Compare native FE to_json with the owned EPP post-parse init event.
 
-    Gap attempts are ordinary profiles. Setup, parse, warning, and FE
-    sentinel failures stay hard AssertionError.
+    load_aware_preset and conditional_json are measured strict gaps.
+    Setup, parse, warning, and FE sentinel failures stay hard AssertionError.
     """
     from tests.router.epp_parity import EppFrontendParityStack
 

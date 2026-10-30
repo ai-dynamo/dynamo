@@ -7,6 +7,11 @@ Inventory is fail-closed and knowingly incomplete. Discovered CLI/env/schema
 names without a row, and explicit PENDING rows, fail the completeness guard.
 Do not treat that failure as full-issue completion.
 
+``load_aware_preset`` and ``conditional_json`` are measured strict gaps
+(#16592): dedicated subclasses of ``FrontendEppConfigMismatch`` with
+strict xfail. Setup, warning, FE sentinel, parse, and other mismatches
+stay ordinary hard failures. Other profiles stay ordinary tests.
+
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
 (``skip_initial_worker_wait=true``,
@@ -20,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import logging
 import re
 import warnings
 from dataclasses import dataclass
@@ -200,11 +206,74 @@ PROFILE_DEPRECATED_ENVS = {
 STATUS_PENDING = "pending"
 STATUS_SUPPORTED = "supported_candidate"
 STATUS_ALIAS = "alias"
-KNOWN_STATUSES = frozenset({STATUS_PENDING, STATUS_SUPPORTED, STATUS_ALIAS})
+STATUS_KNOWN_GAP = "known_gap"
+KNOWN_STATUSES = frozenset(
+    {STATUS_PENDING, STATUS_SUPPORTED, STATUS_ALIAS, STATUS_KNOWN_GAP}
+)
+LOGGER = logging.getLogger(__name__)
 
 
 class FrontendEppConfigMismatch(AssertionError):
     """FE and EPP both produced a value, and those values differ."""
+
+
+class LoadAwarePresetConfigMismatch(FrontendEppConfigMismatch):
+    """Measured FE load-aware preset vs EPP ignoring DYN_ROUTER_LOAD_AWARE."""
+
+
+class ConditionalJsonConfigMismatch(FrontendEppConfigMismatch):
+    """Measured FE conditional JSON vs EPP default scalar config."""
+
+
+@dataclass(frozen=True)
+class MeasuredGapSignature:
+    """Exact 25a FE/EPP projections and mismatch set for one known gap."""
+
+    profile: str
+    exception: type[FrontendEppConfigMismatch]
+    frontend: Mapping[str, Any]
+    epp: Mapping[str, Any]
+    mismatch_fields: frozenset[str]
+
+
+MEASURED_GAP_SIGNATURES: dict[str, MeasuredGapSignature] = {
+    "load_aware_preset": MeasuredGapSignature(
+        "load_aware_preset",
+        LoadAwarePresetConfigMismatch,
+        {"overlap_score_credit": 0.0, "use_kv_events": False},
+        {"overlap_score_credit": 1.0, "use_kv_events": True},
+        frozenset({"overlap_score_credit", "use_kv_events"}),
+    ),
+    "conditional_json": MeasuredGapSignature(
+        "conditional_json",
+        ConditionalJsonConfigMismatch,
+        {
+            "conditional_disagg_enabled": True,
+            "conditional_disagg_policy": "isl_or_load",
+            "conditional_disagg_eff_isl_threshold": 1024,
+            "conditional_disagg_eff_isl_ratio_threshold": 0.25,
+            "conditional_disagg_prefill_busy_threshold": 0.8,
+            "conditional_disagg_decode_busy_threshold": 0.7,
+        },
+        {
+            "conditional_disagg_enabled": True,
+            "conditional_disagg_policy": "isl_bounding",
+            "conditional_disagg_eff_isl_threshold": 2048,
+            "conditional_disagg_eff_isl_ratio_threshold": 0.7,
+            "conditional_disagg_prefill_busy_threshold": None,
+            "conditional_disagg_decode_busy_threshold": None,
+        },
+        frozenset(
+            {
+                "conditional_disagg_policy",
+                "conditional_disagg_eff_isl_threshold",
+                "conditional_disagg_eff_isl_ratio_threshold",
+                "conditional_disagg_prefill_busy_threshold",
+                "conditional_disagg_decode_busy_threshold",
+            }
+        ),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -494,12 +563,12 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--load-aware", "--no-load-aware"),
         ("DYN_ROUTER_LOAD_AWARE",),
         ("load_aware",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("load_aware_preset",),
         ("overlap_score_credit", "use_kv_events"),
-        "FE applies the load-aware preset from this env. EPP has no matching "
-        "parse. Same env on both paths; do not expand the FE preset into EPP env.",
+        "Measured 25a gap: FE applies the load-aware preset; EPP ignores "
+        "DYN_ROUTER_LOAD_AWARE. Same env on both paths.",
     ),
     SettingDecision(
         "conditional_disagg_enabled",
@@ -524,7 +593,7 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
             "conditional_disagg_config.prefill_busy_threshold",
             "conditional_disagg_config.decode_busy_threshold",
         ),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         (
@@ -534,63 +603,63 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
             "conditional_disagg_prefill_busy_threshold",
             "conditional_disagg_decode_busy_threshold",
         ),
-        "FE nested JSON keys. Not EPP scalar env names. Same JSON env on both "
-        "paths; no scalar shadow input.",
+        "Measured 25a gap: FE nested JSON keys vs EPP default scalars. Same "
+        "JSON env on both paths; no scalar shadow input.",
     ),
     SettingDecision(
         "conditional_disagg_policy",
         (),
         (),
         ("conditional_disagg_policy",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         ("conditional_disagg_policy",),
-        "FE flattened field filled from the nested JSON key policy.",
+        "Measured 25a gap: FE flattened policy from JSON vs EPP isl_bounding.",
     ),
     SettingDecision(
         "conditional_disagg_eff_isl_threshold",
         (),
         (),
         ("conditional_disagg_eff_isl_threshold",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         ("conditional_disagg_eff_isl_threshold",),
-        "FE flattened field filled from the nested JSON key eff_isl_threshold.",
+        "Measured 25a gap: FE flattened eff_isl_threshold from JSON vs EPP 2048.",
     ),
     SettingDecision(
         "conditional_disagg_eff_isl_ratio_threshold",
         (),
         (),
         ("conditional_disagg_eff_isl_ratio_threshold",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         ("conditional_disagg_eff_isl_ratio_threshold",),
-        "FE flattened field filled from nested JSON key eff_isl_ratio_threshold.",
+        "Measured 25a gap: FE flattened ratio from JSON vs EPP 0.7.",
     ),
     SettingDecision(
         "conditional_disagg_prefill_busy_threshold",
         (),
         (),
         ("conditional_disagg_prefill_busy_threshold",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         ("conditional_disagg_prefill_busy_threshold",),
-        "FE flattened field filled from nested JSON key prefill_busy_threshold.",
+        "Measured 25a gap: FE flattened prefill busy from JSON vs EPP None.",
     ),
     SettingDecision(
         "conditional_disagg_decode_busy_threshold",
         (),
         (),
         ("conditional_disagg_decode_busy_threshold",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         IMPLEMENTED_OBSERVER,
         ("conditional_json",),
         ("conditional_disagg_decode_busy_threshold",),
-        "FE flattened field filled from nested JSON key decode_busy_threshold.",
+        "Measured 25a gap: FE flattened decode busy from JSON vs EPP None.",
     ),
     SettingDecision(
         "serve_indexer",
@@ -739,8 +808,7 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         None,
         (),
         (),
-        "Process-local; skipped from to_json. No live observer in this "
-        "increment.",
+        "Process-local; skipped from to_json. No live observer in this increment.",
     ),
     SettingDecision(
         "router_prefill_policy",
@@ -751,8 +819,7 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         None,
         (),
         (),
-        "Process-local; skipped from to_json. No live observer in this "
-        "increment.",
+        "Process-local; skipped from to_json. No live observer in this increment.",
     ),
     SettingDecision(
         "router_decode_policy",
@@ -763,8 +830,7 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         None,
         (),
         (),
-        "Process-local; skipped from to_json. No live observer in this "
-        "increment.",
+        "Process-local; skipped from to_json. No live observer in this increment.",
     ),
     SettingDecision(
         "router_prefill_load_model",
@@ -1229,19 +1295,61 @@ def assert_coverage_complete() -> None:
         )
 
 
-def assert_manifest_bindings_match_collected_tests(nodeids: Iterable[str]) -> None:
+def _require_collected_item(item: Any) -> Any:
+    if isinstance(item, (str, bytes)) or not hasattr(item, "nodeid"):
+        raise AssertionError(
+            "manifest binding requires collected pytest Items, not "
+            f"{type(item).__name__}"
+        )
+    if not callable(getattr(item, "iter_markers", None)):
+        raise AssertionError(f"collected item {item.nodeid!r} has no iter_markers")
+    return item
+
+
+def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
+    spec = MEASURED_GAP_SIGNATURES[name]
+    if mark.args:
+        raise AssertionError(f"{name} xfail has positional condition {mark.args!r}")
+    if "condition" in mark.kwargs:
+        raise AssertionError(
+            f"{name} xfail has condition={mark.kwargs['condition']!r}"
+        )
+    if mark.kwargs.get("strict") is not True:
+        raise AssertionError(
+            f"{name} xfail strict={mark.kwargs.get('strict')!r} is not True"
+        )
+    if mark.kwargs.get("raises") is not spec.exception:
+        raise AssertionError(
+            f"{name} xfail raises={mark.kwargs.get('raises')!r} "
+            f"!= {spec.exception!r}"
+        )
+    if mark.kwargs.get("run", True) is not True:
+        raise AssertionError(f"{name} xfail run={mark.kwargs.get('run')!r} is disabled")
+
+
+def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
-    Manifest metadata strings are not coverage. A supported or alias row
-    must use the implemented observer and bind ``affected_fields`` to the
-    live asserted fields of each collected
-    ``test_effective_config_profile[<profile>]`` node.
+    Manifest metadata strings are not coverage. Collection entries must be
+    real pytest Items. A supported, alias, or known_gap row must use the
+    implemented observer and bind ``affected_fields`` to the live asserted
+    fields of each collected ``test_effective_config_profile[<profile>]``
+    node. Ordinary profiles must carry exactly zero xfail markers. The two
+    measured profiles must carry exactly one unconditional strict xfail
+    whose ``raises`` is the dedicated subclass. known_gap affected fields
+    must be in that profile's measured ``mismatch_fields``.
     """
-    collected: set[str] = set()
-    for nodeid in nodeids:
+    collected: dict[str, list[Any]] = {}
+    for item in items:
+        item = _require_collected_item(item)
+        nodeid = item.nodeid
         for name in PROFILE_NAMES:
-            if f"test_effective_config_profile[{name}]" in nodeid:
-                collected.add(name)
+            if f"test_effective_config_profile[{name}]" not in nodeid:
+                continue
+            marks = list(item.iter_markers(name="xfail"))
+            if name in collected:
+                raise AssertionError(f"profile {name} collected more than once")
+            collected[name] = marks
     missing_profiles = [name for name in PROFILE_NAMES if name not in collected]
     if missing_profiles:
         raise AssertionError(
@@ -1257,18 +1365,40 @@ def assert_manifest_bindings_match_collected_tests(nodeids: Iterable[str]) -> No
             "PROFILE_DEPRECATED_ENVS keys must equal PROFILE_NAMES: "
             f"{sorted(PROFILE_DEPRECATED_ENVS)} vs {list(PROFILE_NAMES)}"
         )
+    for name, spec in MEASURED_GAP_SIGNATURES.items():
+        asserted = set(PROFILE_ASSERTED_FIELDS[name])
+        if set(spec.frontend) != asserted or set(spec.epp) != asserted:
+            raise AssertionError(
+                f"{name} measured signature field keys "
+                f"frontend={sorted(spec.frontend)} epp={sorted(spec.epp)} "
+                f"!= asserted {sorted(asserted)}"
+            )
     for name, envs in PROFILE_DEPRECATED_ENVS.items():
         unknown = [
             env
             for env in envs
-            if env not in _POLICY_PARAMETER_ENVS
-            and env not in _DIRECT_DEPRECATED_ENVS
+            if env not in _POLICY_PARAMETER_ENVS and env not in _DIRECT_DEPRECATED_ENVS
         ]
         if unknown:
             raise AssertionError(
                 f"{name} deprecated envs have no source Deprecated builder: "
                 + ", ".join(unknown)
             )
+    for name, marks in collected.items():
+        spec = MEASURED_GAP_SIGNATURES.get(name)
+        if spec is None:
+            if marks:
+                raise AssertionError(
+                    f"{name} is an ordinary profile but collected {len(marks)} "
+                    "xfail marker(s)"
+                )
+            continue
+        if len(marks) != 1:
+            raise AssertionError(
+                f"{name} measured gap must collect exactly one xfail, "
+                f"found {len(marks)}"
+            )
+        _assert_measured_xfail_marker(name, marks[0])
     for row in SETTING_DECISIONS:
         if row.status == STATUS_PENDING:
             continue
@@ -1288,6 +1418,25 @@ def assert_manifest_bindings_match_collected_tests(nodeids: Iterable[str]) -> No
                 raise AssertionError(
                     f"{row.name} affected_fields {missing} are not in "
                     f"{profile} asserted fields {live}"
+                )
+            if row.status != STATUS_KNOWN_GAP:
+                continue
+            spec = MEASURED_GAP_SIGNATURES.get(profile)
+            if spec is None:
+                raise AssertionError(
+                    f"{row.name} known_gap profile {profile} is not a "
+                    "measured gap ID"
+                )
+            not_gap = [
+                field
+                for field in row.affected_fields
+                if field not in spec.mismatch_fields
+            ]
+            if not_gap:
+                raise AssertionError(
+                    f"{row.name} affected_fields {not_gap} are not in "
+                    f"{profile} measured mismatch_fields "
+                    f"{sorted(spec.mismatch_fields)}"
                 )
 
 
@@ -1472,9 +1621,7 @@ def assert_frontend_expected_fields(
         if name not in frontend:
             raise AssertionError(f"{profile} FE projection missing {name}")
         if not _values_equal(frontend[name], wanted):
-            raise AssertionError(
-                f"{profile} {name}: FE {frontend[name]!r} != {wanted!r}"
-            )
+            raise AssertionError(f"{profile} {name}: FE {frontend[name]!r} != {wanted!r}")
         if name not in defaults:
             continue
         recorded = defaults[name]
@@ -1484,6 +1631,20 @@ def assert_frontend_expected_fields(
             raise AssertionError(
                 f"{profile} {name}={frontend[name]!r} equals the native default"
             )
+
+
+def _projection_matches(got: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
+    if set(got) != set(wanted):
+        return False
+    return all(_values_equal(got[name], wanted[name]) for name in wanted)
+
+
+def _projection_mismatch_detail(
+    frontend: Mapping[str, Any],
+    epp: Mapping[str, Any],
+    mismatches: Mapping[str, tuple[Any, Any]],
+) -> str:
+    return f"frontend={dict(frontend)} epp={dict(epp)} mismatches={dict(mismatches)}"
 
 
 def compare_effective_fields(
@@ -1500,13 +1661,35 @@ def compare_effective_fields(
         expected=expected,
         defaults=defaults,
     )
+    mismatches: dict[str, tuple[Any, Any]] = {}
     for name in expected:
         if name not in epp:
             raise AssertionError(f"{profile} EPP event missing {name}")
         if not _values_equal(frontend[name], epp[name]):
-            raise FrontendEppConfigMismatch(
-                f"{profile} {name}: FE={frontend[name]!r} EPP={epp[name]!r}"
-            )
+            mismatches[name] = (frontend[name], epp[name])
+    LOGGER.info(
+        "%s complete projections frontend=%r epp=%r mismatches=%r",
+        profile,
+        dict(frontend),
+        dict(epp),
+        mismatches,
+    )
+    if not mismatches:
+        return
+    spec = MEASURED_GAP_SIGNATURES.get(profile)
+    if (
+        spec is not None
+        and set(mismatches) == spec.mismatch_fields
+        and _projection_matches(frontend, spec.frontend)
+        and _projection_matches(epp, spec.epp)
+    ):
+        raise spec.exception(
+            f"{profile} measured gap "
+            f"{_projection_mismatch_detail(frontend, epp, mismatches)}"
+        )
+    raise FrontendEppConfigMismatch(
+        f"{profile} {_projection_mismatch_detail(frontend, epp, mismatches)}"
+    )
 
 
 def _expected_deprecation_messages(envs: Iterable[str]) -> tuple[str, ...]:

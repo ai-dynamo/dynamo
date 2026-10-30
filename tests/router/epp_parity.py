@@ -1397,9 +1397,7 @@ def _extract_held_routing_headers(responses: list[Any]) -> dict[str, Any]:
                 f"{PREFILL_INSTANCE_ID_HEADER}={prefill_worker_id}"
             )
     else:
-        raise AssertionError(
-            f"held EPP {ROUTING_MODE_HEADER} is {routing_mode!r}"
-        )
+        raise AssertionError(f"held EPP {ROUTING_MODE_HEADER} is {routing_mode!r}")
     return {
         "worker_id": worker_id,
         "dp_rank": dp_rank,
@@ -1431,9 +1429,7 @@ def _typed_queue_rejection_outcome(response: Any) -> QueueRejectionOutcome:
     try:
         body = bytes(immediate.body).decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise AssertionError(
-            "held EPP ImmediateResponse body is not UTF-8"
-        ) from exc
+        raise AssertionError("held EPP ImmediateResponse body is not UTF-8") from exc
     expected = _typed_queue_rejection_display()
     if expected not in body:
         raise AssertionError(
@@ -1775,9 +1771,7 @@ class HeldExtProcStream:
                 f"streamed_response: {status}"
             )
         token_ids = decode_epp_token_data(
-            _extract_unique_terminal_request_body(
-                self._modules.pb2, self._responses
-            )
+            _extract_unique_terminal_request_body(self._modules.pb2, self._responses)
         )
         headers = _extract_held_routing_headers(self._responses)
         self.observation = RouteObservation(
@@ -1806,9 +1800,7 @@ class HeldExtProcStream:
                 raise TimeoutError("held EPP stream is still pending")
             kind, payload = self._take_inbox(max(remaining, 0.0))
             if kind == "end":
-                raise AssertionError(
-                    "held EPP stream ended before a token mutation"
-                )
+                raise AssertionError("held EPP stream ended before a token mutation")
             if kind != "response":
                 raise AssertionError(f"held EPP reader sent {kind!r}")
             observation = self._consume_response(payload)
@@ -1872,8 +1864,7 @@ class HeldExtProcStream:
 
     def _is_owner_initiated_cancel(self, exc: BaseException) -> bool:
         return (
-            self._owner_cancelled
-            and self._rpc_status(exc) == grpc.StatusCode.CANCELLED
+            self._owner_cancelled and self._rpc_status(exc) == grpc.StatusCode.CANCELLED
         )
 
     def close(self) -> None:
