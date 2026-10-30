@@ -3594,17 +3594,10 @@ async fn chat_completions(
             err_response
         })?;
 
-    // Beam route, before generic validation (which rejects what these normalize): a
-    // `strict` tool whose schema is outside OpenAI's strict subset is served as
-    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
-    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
-    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    // Beam route, before generic validation (which rejects what this normalizes): a
+    // legacy `builtin_tools` declaration is promoted into `tools` (see
+    // `tool_choice::declare_legacy_builtin_tools_for_beam`).
     crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
-    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
         &mut request,
         parsing_options.tool_call_parser.as_deref(),
         parsing_options.reasoning_parser.as_deref(),
