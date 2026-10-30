@@ -355,7 +355,17 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
-        ep_disaggregated_params = encoder_outputs[0].disaggregated_params
+        result = encoder_outputs[0]
+        # Opt in only when the backend exposes the versioned export API.
+        # Older backends keep their existing output and prompt metadata below.
+        export_handoff = getattr(result, "export_multimodal_handoff", None)
+        if export_handoff is not None:
+            handoff = export_handoff()
+            if handoff is not None:
+                encoded_params = DisaggregatedParamsCodec.encode(handoff)
+                yield {"ep_disaggregated_params": asdict(encoded_params)}
+                return
+        ep_disaggregated_params = result.disaggregated_params
         if ep_disaggregated_params is None:
             logging.error(
                 "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"

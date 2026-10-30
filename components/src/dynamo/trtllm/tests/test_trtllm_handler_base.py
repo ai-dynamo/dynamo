@@ -2073,3 +2073,39 @@ def test_trtllm_handler_matches_shared():
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
+
+
+def test_versioned_prefill_forwards_owned_state_without_legacy_markers(monkeypatch):
+    @dataclass
+    class Params:
+        multimodal: dict
+        opaque_state: bytes | None = None
+        request_type: str = "context_only"
+
+    monkeypatch.setattr(
+        "dynamo.trtllm.request_handlers.handler_base.DisaggregatedParams", Params
+    )
+    params = Params(
+        multimodal={
+            "schema_version": 1,
+            "items": [],
+            "request_layout": {"prompt_token_ids": [4, 5, 6]},
+            "decode_inputs": {"model_state": "prefill-owned-handle"},
+        }
+    )
+    handler = TestPrefillPromptMetadata()._make_handler()
+    result = handler._encode_and_pack_disaggregated_params(
+        SimpleNamespace(disaggregated_params=params),
+        None,
+        {"token_ids": [1, 2, 3]},
+        SimpleNamespace(prompt_token_ids=[4, 5, 6]),
+    )
+    assert result["multimodal"] == params.multimodal
+    assert "_epd_metadata" not in result
+    incoming = {"disaggregated_params": result}
+    snapshot = deepcopy(incoming)
+    decoded, metadata = handler._decode_disaggregated_params_from_prefill(incoming)
+    assert metadata == {"prompt_token_ids": [4, 5, 6]}
+    assert decoded.request_type == "generation_only"
+    assert decoded.multimodal == params.multimodal
+    assert incoming == snapshot

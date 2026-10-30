@@ -608,7 +608,7 @@ class HandlerBase(BaseGenerativeHandler):
             - disaggregated_params: Decoded LlmDisaggregatedParams object
             - epd_metadata: Dictionary containing EPD-specific metadata (_epd_processed_prompt, etc.)
         """
-        params_dict = prefill_result["disaggregated_params"]
+        params_dict = dict(prefill_result["disaggregated_params"])
 
         # Remove worker_id if present (added by prefill worker, not needed for decode)
         params_dict.pop("worker_id", None)
@@ -631,6 +631,13 @@ class HandlerBase(BaseGenerativeHandler):
         )
         # Set to generation_only mode for decode phase
         disaggregated_params.request_type = "generation_only"
+
+        handoff = getattr(disaggregated_params, "multimodal", None)
+        if handoff is not None:
+            layout = handoff.get("request_layout")
+            if layout is not None:
+                epd_metadata = {"prompt_token_ids": layout["prompt_token_ids"]}
+            return disaggregated_params, epd_metadata
 
         # In generation-only mode, multimodal embeddings are already processed and in KV cache
         # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
@@ -710,6 +717,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
+
+        if getattr(params_to_encode, "multimodal", None) is not None:
+            return params_dict
 
         # Text-only decode requests already carry the original token_ids.
         # Prompt metadata is only needed to avoid reprocessing multimodal input.
@@ -880,6 +890,11 @@ class HandlerBase(BaseGenerativeHandler):
         """
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and epd_metadata.get("prompt_token_ids") is not None
+        ):
+            return {"prompt_token_ids": epd_metadata["prompt_token_ids"]}
         has_prefill_metadata = epd_metadata and (
             epd_metadata.get("_prefill_prompt")
             or epd_metadata.get("_epd_processed_prompt")
