@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
+
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
@@ -17,6 +21,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, WorkerAdmissionGate};
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
@@ -90,6 +95,10 @@ where
     G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
+        // Covers GIL acquisition plus the Rust->Python crossing that builds the
+        // request object and calls the handler's `generate`. Not token
+        // generation: the generator has not been advanced when this range ends.
+        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
@@ -126,9 +135,14 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
+        // the Python generator (and, for a worker, the engine) producing the item,
+        // so leaving it outside the range keeps engine time out of the bridge cost.
+        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
+        drop(nvtx_anext);
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -201,6 +215,16 @@ impl PythonAsyncEngine {
 }
 
 impl PythonAsyncEngine {
+    pub(crate) fn chat_engine(
+        &self,
+        runtime_config: dynamo_llm::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> PythonChatEngine {
+        PythonChatEngine {
+            engine: self.0.clone(),
+            runtime_config: Arc::new(runtime_config),
+        }
+    }
+
     pub(crate) fn network_engine(
         &self,
         backend_role: BackendRole,
@@ -211,6 +235,45 @@ impl PythonAsyncEngine {
             backend_role,
             admission,
         }
+    }
+}
+
+/// In-process frontend adapter. The generic/network Python engines retain
+/// their normal serialization contract, including the N-2 worker wire.
+pub(crate) struct PythonChatEngine {
+    engine: PythonServerStreamingEngine,
+    runtime_config: Arc<dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>,
+}
+
+#[async_trait::async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for PythonChatEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let runtime_config = self.runtime_config.clone();
+        generate_python_stream(
+            &self.engine,
+            request,
+            move |py, request| {
+                // Ordinary Chat Completions retain direct typed serialization.
+                if request.responses_tools.is_none() {
+                    return Ok(pythonize(py, &request)?.unbind());
+                }
+                let value = request
+                    .python_chat_processor_request_json(&runtime_config)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+                Ok(pythonize(py, &value)?.unbind())
+            },
+            buffered_typed_response_stream::<NvCreateChatCompletionStreamResponse>,
+        )
+        .await
     }
 }
 
@@ -446,6 +509,9 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
+        // Per-response Python->Rust deserialization: pure Dynamo overhead paid
+        // once per streamed chunk.
+        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
         Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
