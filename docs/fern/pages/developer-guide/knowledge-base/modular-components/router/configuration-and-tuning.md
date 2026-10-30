@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-jsew` | Join-shortest-expected-work. Computes the default cost but charges each worker's decode backlog by the incoming request's predicted decode work (an EMA of uncached prompt tokens, or the declared `expected_output_tokens`), with a convex charge on deeper backlogs and a correction for prefix-shared footprints. Targets time-to-last-token tails on long-context agentic traffic; neutral parameters reproduce the default exactly. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -214,6 +215,25 @@ experimental router exactly. Add any subset to tune it:
         balance_abs_threshold: 32
         balance_rel_threshold: 1.1
 ```
+
+`dynamo-jsew` ships the operating point tuned on a long-context agentic trace; its parameters are a
+jointly tuned set, so re-tune them together against a target trace rather than adjusting one:
+
+```yaml
+    - name: dynamo-jsew
+      type: dynamo-jsew
+      parameters:
+        effective_work_predictor: ema_uncached_tokens   # or ground_truth_future_decode
+        decode_work_scale: 17.601
+        decode_footprint_weight: 1.526
+        ema_alpha: 0.01737
+        decode_work_exponent: 1.0
+        decode_load_exponent: 1.2
+        decode_share_exponent: 0.13
+```
+
+`decode_work_scale: 0.0`, `decode_footprint_weight: 1.0`, `decode_load_exponent: 1.0` and
+`decode_share_exponent: 0.0` make it byte-identical to the default, which is the baseline for an A/B.
 
 | Parameter | Default | Meaning |
 |---|---|---|
