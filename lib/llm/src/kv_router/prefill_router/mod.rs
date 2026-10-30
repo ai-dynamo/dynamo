@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    kv_router::{RoutingHost, SelectionPolicySource, stage_router::StageRouter},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -49,6 +49,7 @@ mod stage;
 use activation::ActivationSnapshot;
 use handoff::PrefillTask;
 pub use query::PrefillReservation;
+use stage::PrefillDispatched;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -386,9 +387,10 @@ impl
     /// 7. Load the binding. If the target was replaced since the gate, resolve
     ///    it again with the same `Pending`/`Untargeted` rules.
     /// 8. Direct routing mode requires a preselected prefill worker.
-    /// 9. Select and dispatch the prefill worker. With early bootstrap info,
-    ///    prefill continues in a background task. Otherwise, drain the prefill
-    ///    stream to a handoff or a terminal output.
+    /// 9. Select the prefill worker, then dispatch to it. KV routing books the
+    ///    worker before sending; built-in modes choose while sending. With
+    ///    early bootstrap info, prefill continues in a background task.
+    ///    Otherwise, drain the prefill stream to a handoff or a terminal output.
     /// 10. A terminal prefill output is the whole response, and decode is skipped.
     /// 11. Set the Decode phase. On the bootstrap path, this waits until the
     ///     prefill task has finished routing.
@@ -585,19 +587,16 @@ impl
             ));
         }
 
-        let router = &binding.router;
-        let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let PrefillDispatch {
-                metadata: prepared,
+            let plan = self
+                .select_prefill_worker(binding, &prefill_context)
+                .await?;
+            let PrefillDispatched {
+                prepared,
                 stream: prefill_stream,
                 booking,
-            } = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
-                })
-                .await?;
+            } = self.dispatch(prefill_context, plan).await?;
             if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
                 state.store_prefill_release(booking);
             }

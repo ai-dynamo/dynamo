@@ -74,11 +74,11 @@ pub(crate) enum PrefillPreview {
 
 /// A dispatched prefill leg: where it went and its response stream.
 pub(crate) struct PrefillDispatched {
-    prepared: PreparedPrefill,
-    stream: ManyOut<Annotated<LLMEngineOutput>>,
+    pub(super) prepared: PreparedPrefill,
+    pub(super) stream: ManyOut<Annotated<LLMEngineOutput>>,
     /// Frees the KV booking early, so a migration retry can release it while
     /// the prefill stream still runs. `None` for built-in modes.
-    booking: Option<RequestAttemptRelease>,
+    pub(super) booking: Option<RequestAttemptRelease>,
 }
 
 /// How far prefill got before decode can start.
@@ -115,26 +115,7 @@ impl StageRouter for PrefillRouter {
             ));
         }
 
-        if binding.router.kv_router_if_enabled().is_none() {
-            return Ok(PrefillPlan::SelectAtDispatch { binding });
-        }
-        let route = binding
-            .router
-            .plan_kv_route_without_preview(request, RequestPhase::Prefill)
-            .await?;
-        let worker = route.worker();
-        let target = AffinityTarget::new(worker.worker_id, Some(worker.dp_rank));
-        match self.plan_prefill_dispatch(target, &binding.endpoint_id) {
-            Ok(prepared) => Ok(PrefillPlan::Booked {
-                binding,
-                route,
-                prepared,
-            }),
-            Err(error) => {
-                route.abort(Some(&error)).await;
-                Err(error)
-            }
-        }
+        self.select_prefill_worker(binding, request).await
     }
 
     /// Decide whether conditional disaggregation keeps the request on its
@@ -222,10 +203,8 @@ impl StageRouter for PrefillRouter {
 impl PrefillRouter {
     /// `generate` composed from [`StageRouter`] calls and helpers.
     ///
-    /// Behaves like `generate`, though not bit for bit: a KV-routed prefill
-    /// leg books its worker before preparing the request, and schedule
-    /// failures are not logged as prefill failures. It is not wired into the
-    /// pipeline yet.
+    /// Behaves like `generate`, though not bit for bit: schedule failures are
+    /// not logged as prefill failures. It is not wired into the pipeline yet.
     #[allow(dead_code)]
     pub(crate) async fn generate_v2(
         &self,
@@ -358,6 +337,38 @@ impl PrefillRouter {
                 &self.namespace,
             )),
             ActivationSnapshot::Untargeted => Ok(None),
+        }
+    }
+
+    /// Choose the prefill worker for `binding` without sending to it.
+    ///
+    /// KV routing books the worker now; [`StageRouter::dispatch`] sends to it.
+    /// Built-in modes choose at dispatch instead, because their send can move
+    /// to another worker and prepare the request for that one.
+    pub(super) async fn select_prefill_worker(
+        &self,
+        binding: Arc<PrefillBinding>,
+        request: &SingleIn<PreprocessedRequest>,
+    ) -> Result<PrefillPlan> {
+        if binding.router.kv_router_if_enabled().is_none() {
+            return Ok(PrefillPlan::SelectAtDispatch { binding });
+        }
+        let route = binding
+            .router
+            .plan_kv_route_without_preview(request, RequestPhase::Prefill)
+            .await?;
+        let worker = route.worker();
+        let target = AffinityTarget::new(worker.worker_id, Some(worker.dp_rank));
+        match self.plan_prefill_dispatch(target, &binding.endpoint_id) {
+            Ok(prepared) => Ok(PrefillPlan::Booked {
+                binding,
+                route,
+                prepared,
+            }),
+            Err(error) => {
+                route.abort(Some(&error)).await;
+                Err(error)
+            }
         }
     }
 
