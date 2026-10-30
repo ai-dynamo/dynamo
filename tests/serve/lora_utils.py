@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import boto3
-import pytest
 import requests
 from boto3.exceptions import S3UploadFailedError
 from boto3.s3.transfer import TransferConfig
@@ -255,14 +254,8 @@ class MinioService:
     def download_lora(self) -> str:
         """Resolve the LoRA snapshot path from the local HF cache.
 
-        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
+        A hydrated --models-dir resolves the approved adapter without network access.
         """
-        if os.environ.get("DYNAMO_MODELS_DIR"):
-            pytest.skip(
-                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
-                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
-            )
-
         # The adapter is staged into the HF cache by predownload_models (via
         # @pytest.mark.model) before HF_HUB_OFFLINE is enabled. Resolve the cache
         # snapshot path directly — passing local_dir bypasses the cache-hit

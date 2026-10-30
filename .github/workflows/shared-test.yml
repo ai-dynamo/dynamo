@@ -359,6 +359,13 @@ jobs:
       # Each stage uploads coverage and Allure results under the per-stage
       # artifact names an external CI-metrics pipeline consumes (upload-artifact
       # rejects a duplicate name with a non-retryable 409).
+      - name: Hydrate approved canonical test models
+        # This rollout provisions readers only in west. ARM remains in west
+        # even when a caller selects east labels for its AMD64 jobs.
+        if: vars.APPROVED_TEST_MODELS_ENABLED == 'true' && !(matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'us-east-1'))
+        uses: $/.github/actions/hydrate-test-models
+        with:
+          bucket: dynamo-ci-210086341041-us-west-2-approved-test-models
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}

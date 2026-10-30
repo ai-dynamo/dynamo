@@ -56,8 +56,8 @@ What `--models-dir` does:
 - Enables `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` — no network calls.
 - Short-circuits `predownload_models` and `predownload_tokenizers` — no writes to
   the cache directory.
-- Sets `DYNAMO_MODELS_DIR` — code that would perform network downloads (e.g. LoRA
-  adapters in `download_lora()`) will `pytest.skip()` instead of failing.
+- Sets `DYNAMO_MODELS_DIR`. LoRA adapters resolve from that cache without network
+  access; a missing adapter fails rather than silently skipping its coverage.
 
 **LoRA tests are incompatible with `--models-dir`** because they download adapters
 from HuggingFace Hub at test time. Tests that call `download_lora()` will be

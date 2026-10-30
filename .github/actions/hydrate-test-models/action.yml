@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Hydrate approved test models
+description: Restore verified test assets using the job's scoped AWS identity
+inputs:
+  bucket:
+    description: PR model store or approved_test_models store
+    required: true
+  destination:
+    description: Writable HF_HOME directory for this job
+    required: false
+    default: /models
+runs:
+  using: composite
+  steps:
+    - name: Install the model-store client separately from test dependencies
+      shell: bash
+      run: |
+        python -m pip install --disable-pip-version-check --no-compile \
+          --target "$RUNNER_TEMP/model-cache-deps" -r .github/model-cache-requirements.txt
+    - name: Hydrate the approved inventory
+      shell: bash
+      env:
+        MODEL_BUCKET: ${{ inputs.bucket }}
+        MODEL_DESTINATION: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+        PYTHONPATH="$RUNNER_TEMP/model-cache-deps" python .github/scripts/model-cache.py hydrate \
+          --bucket "$MODEL_BUCKET" --destination "$MODEL_DESTINATION"
+        echo "MODELS_DIR=$MODEL_DESTINATION" >> "$GITHUB_ENV"
+        echo "HF_HOME=$MODEL_DESTINATION" >> "$GITHUB_ENV"
+        echo 'HF_HUB_OFFLINE=1' >> "$GITHUB_ENV"
+        echo 'TRANSFORMERS_OFFLINE=1' >> "$GITHUB_ENV"
