@@ -12,7 +12,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 import aiohttp
 import requests
@@ -5026,6 +5026,801 @@ def run_frontend_epp_first_selection_parity(
             "live-negative-route rejected frontend.R_A=%s epp.R_B=%s",
             (frontend_route.worker_id, frontend_route.dp_rank),
             (epp_route.worker_id, epp_route.dp_rank),
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+########################################################
+# Frontend / Runtime EPP input-family conformance
+########################################################
+
+
+def _with_nvext(payload: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    body = deepcopy(payload)
+    nvext = dict(body.get("nvext") or {})
+    nvext.update(fields)
+    body["nvext"] = nvext
+    return body
+
+
+def _overlap_blocks(scores: Mapping[str, Any]) -> dict[tuple[int, int], int]:
+    return {
+        (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+        for row in scores["workers"]
+    }
+
+
+def _active_requests(loads: list[Mapping[str, Any]]) -> dict[tuple[int, int], int]:
+    return {
+        (row["worker_id"], row["dp_rank"]): row["active_requests"] for row in loads
+    }
+
+
+def _dp0_worker_load_rows(
+    loads: list[Mapping[str, Any]],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> dict[tuple[int, int], Mapping[str, Any]] | None:
+    """Return exact DP0 rows for both catalog workers, or None if incomplete.
+
+    Duplicates fail immediately. Empty or missing rows are not evidence.
+    """
+    if not loads:
+        return None
+    seen: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for row in loads:
+        key = (row["worker_id"], row["dp_rank"])
+        if key in seen:
+            raise AssertionError(
+                f"{case_name}: duplicate potential_load row {key}"
+            )
+        seen[key] = row
+    expected = {(worker_a, 0), (worker_b, 0)}
+    if set(seen) != expected:
+        return None
+    return seen
+
+
+def _exact_dp0_zero_active(
+    loads: list[Mapping[str, Any]],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> bool:
+    rows = _dp0_worker_load_rows(loads, worker_a, worker_b, case_name)
+    if rows is None:
+        return False
+    return all(rows[key]["active_requests"] == 0 for key in rows)
+
+
+def _namespaced_overlap_snapshot(
+    stack,
+    token_ids: list[int],
+    *,
+    worker_a: int,
+    worker_b: int,
+    deadline: float | None = None,
+) -> dict[str | None, Any]:
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
+    tables: dict[str | None, Any] = {}
+    for namespace in ("tenant-a", "tenant-b", None):
+        if deadline is None:
+            timeout_s = READINESS_DEADLINE_S
+        else:
+            timeout_s = deadline - time.monotonic()
+            if timeout_s <= 0:
+                raise AssertionError(
+                    "cache-salt readiness exhausted the 45s budget before "
+                    f"overlap snapshot cache_namespace={namespace!r}"
+                )
+        scores = stack.provider_overlap_scores(
+            token_ids, cache_namespace=namespace, timeout_s=timeout_s
+        )
+        if deadline is None:
+            timeout_s = READINESS_DEADLINE_S
+        else:
+            timeout_s = deadline - time.monotonic()
+            if timeout_s <= 0:
+                raise AssertionError(
+                    "cache-salt readiness exhausted the 45s budget before "
+                    f"load snapshot cache_namespace={namespace!r}"
+                )
+        loads = stack.provider_potential_loads(
+            token_ids, cache_namespace=namespace, timeout_s=timeout_s
+        )
+        rows = _dp0_worker_load_rows(
+            loads, worker_a, worker_b, f"cache-salt:{namespace}"
+        )
+        tables[namespace] = {
+            "blocks": _overlap_blocks(scores),
+            "active": _active_requests(loads),
+            "rows": rows,
+        }
+    return tables
+
+
+def _assert_overlap_snapshots_match(
+    frozen: Mapping[str | None, Any],
+    current: Mapping[str | None, Any],
+    case_name: str,
+) -> None:
+    if frozen != current:
+        raise AssertionError(
+            f"{case_name}: namespaced overlap/load tables changed: "
+            f"frozen={frozen} current={current}"
+        )
+
+
+def _assert_zero_active_load(
+    tables: Mapping[str | None, Any],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> None:
+    for namespace, table in tables.items():
+        rows = table["rows"]
+        if rows is None or any(
+            rows[key]["active_requests"] != 0 for key in rows
+        ):
+            raise AssertionError(
+                f"{case_name}: active load is not exactly both DP0 workers "
+                f"at zero for cache_namespace={namespace!r}: {rows}"
+            )
+
+
+def _compare_input_routes(
+    stack,
+    payload: dict[str, Any],
+    *,
+    path: str,
+    case_name: str,
+    headers: Mapping[str, str] | None = None,
+    expected_worker: int | None = None,
+    compare_tokens: bool = True,
+):
+    before = _stable_provider_query_baseline(stack, arm=f"{case_name}-frontend")
+    frontend_route = stack.collect_frontend_route(
+        payload,
+        path=path,
+        request_id=unique_request_id(f"fe-{case_name}"),
+        headers=headers,
+    )
+    after_fe = _wait_for_provider_query_increase(
+        stack, before, arm=f"{case_name}-frontend"
+    )
+    epp_before = _stable_provider_query_baseline(stack, arm=f"{case_name}-epp")
+    if epp_before < after_fe:
+        raise AssertionError(
+            f"{case_name}-epp: provider counter decreased between arms "
+            f"({after_fe} -> {epp_before})"
+        )
+    epp_route = stack.collect_epp_route(
+        payload,
+        path=path,
+        request_id=unique_request_id(f"epp-{case_name}"),
+        headers=headers,
+    )
+    _wait_for_provider_query_increase(stack, epp_before, arm=f"{case_name}-epp")
+    _assert_catalog_valid_route(
+        frontend_route, stack.worker_ids, f"{case_name}-frontend"
+    )
+    _assert_catalog_valid_route(epp_route, stack.worker_ids, f"{case_name}-epp")
+    if compare_tokens:
+        assert_ordered_token_ids_match(
+            frontend_route.token_ids,
+            epp_route.token_ids,
+            left_label="frontend.token_ids",
+            right_label="epp.token_ids",
+            case_name=case_name,
+        )
+    assert_route_observations_match(
+        frontend_route,
+        epp_route,
+        left_label="frontend",
+        right_label="epp",
+        case_name=case_name,
+    )
+    if expected_worker is not None and frontend_route.worker_id != expected_worker:
+        raise AssertionError(
+            f"{case_name}: frontend selected {frontend_route.worker_id}, "
+            f"expected {expected_worker}"
+        )
+    return frontend_route, epp_route
+
+
+def frontend_epp_cache_salt_case(model_name: str) -> FirstSelectionCase:
+    """One fixed completion body reused across two cache namespaces."""
+    return FirstSelectionCase(
+        name="cache_salt",
+        path="/v1/completions",
+        payload={
+            "model": model_name,
+            "prompt": "cache salt routing stem " * 8 + ("shared salt body " * 12),
+            "stream": True,
+            "max_tokens": 1,
+        },
+        label="S",
+    )
+
+
+def run_frontend_epp_cache_salt_parity(stack, case: FirstSelectionCase) -> None:
+    """Compare FE/EPP first selections under controlled namespaced indexer state.
+
+    Native Mocker does not publish salted engine KV events. This profile seeds
+    the approximate indexer through public best_worker and is not proof of
+    engine cache-salt isolation.
+    """
+    from dynamo.llm import RoutingConstraints
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        ZONE_A_TAINT,
+        ZONE_B_TAINT,
+        collect_frontend_query_token_ids,
+    )
+
+    _require_cache_sensitive_policy(stack)
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    if stack.worker_configs[worker_a]["taints"] & {ZONE_A_TAINT} != {ZONE_A_TAINT}:
+        raise AssertionError(
+            f"worker A {worker_a} missing published {ZONE_A_TAINT}: "
+            f"{stack.worker_configs[worker_a]}"
+        )
+    if stack.worker_configs[worker_b]["taints"] & {ZONE_B_TAINT} != {ZONE_B_TAINT}:
+        raise AssertionError(
+            f"worker B {worker_b} missing published {ZONE_B_TAINT}: "
+            f"{stack.worker_configs[worker_b]}"
+        )
+
+    stack.open_consumer_pair(include_epp=False)
+    deadline = time.monotonic() + READINESS_DEADLINE_S
+
+    def remaining(step: str) -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise AssertionError(
+                f"cache-salt readiness exhausted the 45s budget at {step}"
+            )
+        return left
+
+    try:
+        token_ids = collect_frontend_query_token_ids(
+            stack.frontend_url,
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("fe-ready-cache-salt"),
+            timeout_s=remaining("tokenize"),
+        )
+    finally:
+        stack.close_consumer_pair()
+    if len(token_ids) // 16 < 2:
+        raise AssertionError(
+            f"{case.name}: readiness tokens must cover at least two full "
+            f"blocks, got {len(token_ids)} tokens"
+        )
+
+    selected_a = stack.provider_best_worker(
+        token_ids,
+        timeout_s=remaining("seed-tenant-a"),
+        update_indexer=True,
+        cache_namespace="tenant-a",
+        routing_constraints=RoutingConstraints(required_taints={ZONE_A_TAINT}),
+        request_id=None,
+    )
+    selected_b = stack.provider_best_worker(
+        token_ids,
+        timeout_s=remaining("seed-tenant-b"),
+        update_indexer=True,
+        cache_namespace="tenant-b",
+        routing_constraints=RoutingConstraints(required_taints={ZONE_B_TAINT}),
+        request_id=None,
+    )
+    if (selected_a[0], selected_a[1]) != (worker_a, 0):
+        raise AssertionError(
+            f"best_worker tenant-a/zone-a returned {selected_a}, expected "
+            f"{(worker_a, 0)}"
+        )
+    if (selected_b[0], selected_b[1]) != (worker_b, 0):
+        raise AssertionError(
+            f"best_worker tenant-b/zone-b returned {selected_b}, expected "
+            f"{(worker_b, 0)}"
+        )
+
+    last_tables: dict[str | None, Any] = {}
+    while time.monotonic() < deadline:
+        last_tables = _namespaced_overlap_snapshot(
+            stack,
+            token_ids,
+            worker_a=worker_a,
+            worker_b=worker_b,
+            deadline=deadline,
+        )
+        blocks_a = last_tables["tenant-a"]["blocks"]
+        blocks_b = last_tables["tenant-b"]["blocks"]
+        default_blocks = {
+            key: value for key, value in last_tables[None]["blocks"].items() if value
+        }
+        winner_a = blocks_a.get((worker_a, 0), 0)
+        winner_b = blocks_b.get((worker_b, 0), 0)
+        other_a = blocks_a.get((worker_b, 0), 0)
+        other_b = blocks_b.get((worker_a, 0), 0)
+        if (
+            winner_a > 0
+            and winner_b > 0
+            and winner_a > other_a
+            and winner_b > other_b
+            and not default_blocks
+        ):
+            if all(
+                table["rows"] is not None
+                and all(
+                    table["rows"][key]["active_requests"] == 0
+                    for key in table["rows"]
+                )
+                for namespace, table in last_tables.items()
+            ):
+                _assert_zero_active_load(
+                    last_tables, worker_a, worker_b, "cache-salt-setup"
+                )
+                break
+        time.sleep(0.05)
+    else:
+        raise AssertionError(
+            "approximate namespaced overlap did not reach opposite unique "
+            f"winners with empty default namespace: {last_tables}"
+        )
+    frozen = last_tables
+    logger.info("cache-salt controlled overlap tables=%s", frozen)
+
+    comparisons = (
+        ("salt-a", _with_nvext(case.payload, cache_salt="tenant-a"), None, worker_a),
+        ("salt-b", _with_nvext(case.payload, cache_salt="tenant-b"), None, worker_b),
+        (
+            "header-over-body",
+            _with_nvext(case.payload, cache_salt="tenant-a"),
+            {"x-tenant-id": "tenant-b"},
+            worker_b,
+        ),
+    )
+    seen_tokens: list[int] | None = None
+    for name, payload, headers, expected in comparisons:
+        stack.open_consumer_pair()
+        try:
+            frontend_route, epp_route = _compare_input_routes(
+                stack,
+                payload,
+                path=case.path,
+                case_name=name,
+                headers=headers,
+                expected_worker=expected,
+            )
+            if seen_tokens is None:
+                seen_tokens = frontend_route.token_ids
+            elif frontend_route.token_ids != seen_tokens:
+                raise AssertionError(
+                    f"{name}: token ids changed across cache-salt variants"
+                )
+            if epp_route.token_ids != seen_tokens:
+                raise AssertionError(
+                    f"{name}: EPP token ids diverged from the shared salt body"
+                )
+            _assert_overlap_snapshots_match(
+                frozen,
+                _namespaced_overlap_snapshot(
+                    stack, token_ids, worker_a=worker_a, worker_b=worker_b
+                ),
+                name,
+            )
+        finally:
+            stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+def frontend_epp_constraints_cold_case(model_name: str) -> FirstSelectionCase:
+    return FirstSelectionCase(
+        name="constraints_cold",
+        path="/v1/completions",
+        payload={
+            "model": model_name,
+            "prompt": "constraints cold routing stem " * 8
+            + ("unique cold branch " * 12),
+            "stream": True,
+            "max_tokens": 1,
+        },
+        label="C",
+    )
+
+
+def run_frontend_epp_routing_constraints_parity(
+    stack, cached_cases: list[FirstSelectionCase], cold_case: FirstSelectionCase
+) -> None:
+    """Compare FE/EPP routes under published worker taints and request constraints."""
+    from dynamo.llm import RoutingConstraints
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        ZONE_A_TAINT,
+        ZONE_B_TAINT,
+        collect_frontend_query_token_ids,
+    )
+
+    preferred_weight = 0.85
+    if len(cached_cases) != 2 or {case.label for case in cached_cases} != {"A", "B"}:
+        raise AssertionError("constraints parity requires opposite A/B cache cases")
+
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    if stack.worker_configs[worker_a]["taints"] & {ZONE_A_TAINT} != {ZONE_A_TAINT}:
+        raise AssertionError(
+            f"worker A {worker_a} missing published {ZONE_A_TAINT}: "
+            f"{stack.worker_configs[worker_a]}"
+        )
+    if stack.worker_configs[worker_b]["taints"] & {ZONE_B_TAINT} != {ZONE_B_TAINT}:
+        raise AssertionError(
+            f"worker B {worker_b} missing published {ZONE_B_TAINT}: "
+            f"{stack.worker_configs[worker_b]}"
+        )
+
+    _prepare_first_selection_snapshot(stack, cached_cases)
+    frozen_events = _provider_cache_snapshot(stack)
+    cached_a = next(case for case in cached_cases if case.label == "A")
+    stack.open_consumer_pair()
+    try:
+        _compare_input_routes(
+            stack,
+            cached_a.payload,
+            path=cached_a.path,
+            case_name="unconstrained-cache-a",
+            expected_worker=worker_a,
+        )
+        required_b = RoutingConstraints(required_taints={ZONE_B_TAINT})
+        if required_b.required_taints != {ZONE_B_TAINT}:
+            raise AssertionError(
+                "native required_taints contract mismatch: "
+                f"{required_b.required_taints}"
+            )
+        _compare_input_routes(
+            stack,
+            _with_nvext(
+                cached_a.payload,
+                routing_constraints={"required_taints": [ZONE_B_TAINT]},
+            ),
+            path=cached_a.path,
+            case_name="required-taint-b",
+            expected_worker=worker_b,
+        )
+        _assert_provider_snapshot_unchanged(
+            frozen_events, _provider_cache_snapshot(stack), "required-taint-b"
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    stack.open_consumer_pair(include_epp=False)
+    try:
+        cold_tokens = collect_frontend_query_token_ids(
+            stack.frontend_url,
+            cold_case.payload,
+            path=cold_case.path,
+            request_id=unique_request_id("fe-ready-constraints-cold"),
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    deadline = time.monotonic() + READINESS_DEADLINE_S
+    last_blocks: dict[tuple[int, int], int] = {}
+    last_loads: list[Any] = []
+    cold_ready = False
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        scores = stack.provider_overlap_scores(cold_tokens, timeout_s=remaining)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        loads = stack.provider_potential_loads(cold_tokens, timeout_s=remaining)
+        last_blocks = _overlap_blocks(scores)
+        last_loads = loads
+        rows = _dp0_worker_load_rows(
+            loads, worker_a, worker_b, "preferred-taint-cold"
+        )
+        if rows is None:
+            time.sleep(0.05)
+            continue
+        load_a = rows[(worker_a, 0)]
+        load_b = rows[(worker_b, 0)]
+        prefill_a = load_a["potential_prefill_tokens"]
+        prefill_b = load_b["potential_prefill_tokens"]
+        if (
+            last_blocks.get((worker_a, 0), 0) == 0
+            and last_blocks.get((worker_b, 0), 0) == 0
+            and load_a["active_requests"] == 0
+            and load_b["active_requests"] == 0
+            and prefill_a == prefill_b
+            and prefill_a > 0
+        ):
+            cold_ready = True
+            break
+        time.sleep(0.05)
+    if not cold_ready:
+        raise AssertionError(
+            "preferred-taint cold overlap/load did not reach zero-cache "
+            "zero-active equal positive potential_prefill: "
+            f"blocks={last_blocks} loads={last_loads}"
+        )
+    preferred_frozen = _provider_cache_snapshot(stack)
+
+    prefer_a = RoutingConstraints(
+        preferred_taints={ZONE_A_TAINT: preferred_weight}
+    )
+    prefer_b = RoutingConstraints(
+        preferred_taints={ZONE_B_TAINT: preferred_weight}
+    )
+    weight_a = prefer_a.preferred_taints.get(ZONE_A_TAINT)
+    weight_b = prefer_b.preferred_taints.get(ZONE_B_TAINT)
+    if weight_a is None or abs(float(weight_a) - preferred_weight) > 1e-5:
+        raise AssertionError(
+            "native preferred_taints weight for zone-a is not 0.85: "
+            f"{prefer_a.preferred_taints}"
+        )
+    if weight_b is None or abs(float(weight_b) - preferred_weight) > 1e-5:
+        raise AssertionError(
+            "native preferred_taints weight for zone-b is not 0.85: "
+            f"{prefer_b.preferred_taints}"
+        )
+
+    stack.open_consumer_pair()
+    try:
+        prefer_a_routes = _compare_input_routes(
+            stack,
+            _with_nvext(
+                cold_case.payload,
+                routing_constraints={
+                    "preferred_taints": {ZONE_A_TAINT: preferred_weight}
+                },
+            ),
+            path=cold_case.path,
+            case_name="preferred-taint-a",
+            expected_worker=worker_a,
+        )
+        prefer_b_routes = _compare_input_routes(
+            stack,
+            _with_nvext(
+                cold_case.payload,
+                routing_constraints={
+                    "preferred_taints": {ZONE_B_TAINT: preferred_weight}
+                },
+            ),
+            path=cold_case.path,
+            case_name="preferred-taint-b",
+            expected_worker=worker_b,
+        )
+        if prefer_a_routes[0].token_ids != prefer_b_routes[0].token_ids:
+            raise AssertionError("preferred-taint cases used different token ids")
+        if prefer_a_routes[0].token_ids != cold_tokens:
+            raise AssertionError(
+                "preferred-taint tokens diverged from the cold tokenization"
+            )
+        assert_route_observations_differ(
+            prefer_a_routes[0],
+            prefer_b_routes[1],
+            left_label="frontend.preferred.A",
+            right_label="epp.preferred.B",
+            case_name="preferred-taint-live-negative",
+        )
+        _assert_provider_snapshot_unchanged(
+            preferred_frozen,
+            _provider_cache_snapshot(stack),
+            "preferred-taint",
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -> None:
+    """Establish real FE session affinity, then compare the mismatch observation."""
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
+    if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
+        raise AssertionError("session parity requires opposite A/B cases")
+
+    _prepare_first_selection_snapshot(stack, cases)
+    frozen_events = _provider_cache_snapshot(stack)
+    case_a = next(case for case in cases if case.label == "A")
+    case_b = next(case for case in cases if case.label == "B")
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    session_headers = {"x-dynamo-session-id": f"inputs-session-{uuid.uuid4()}"}
+    baseline_a = stack.token_ids_by_label["A"]
+
+    stack.open_consumer_pair()
+    try:
+        _compare_input_routes(
+            stack,
+            case_a.payload,
+            path=case_a.path,
+            case_name="no-session-a",
+            expected_worker=worker_a,
+        )
+        _compare_input_routes(
+            stack,
+            case_b.payload,
+            path=case_b.path,
+            case_name="no-session-b",
+            expected_worker=worker_b,
+        )
+        _assert_provider_snapshot_unchanged(
+            frozen_events, _provider_cache_snapshot(stack), "no-session-setup"
+        )
+
+        generation = stack.collect_frontend_generation(
+            case_a.payload,
+            path=case_a.path,
+            request_id=unique_request_id("fe-session-establish-a"),
+            headers=session_headers,
+        )
+        _assert_catalog_valid_route(
+            generation, stack.worker_ids, "fe-session-establish-a"
+        )
+        if generation.worker_id != worker_a:
+            raise AssertionError(
+                "FE session establishment did not bind worker A: "
+                f"{generation.worker_id} != {worker_a}"
+            )
+        epp_seed = stack.collect_epp_route(
+            case_a.payload,
+            path=case_a.path,
+            request_id=unique_request_id("epp-session-seed-a"),
+            headers=session_headers,
+        )
+        _assert_catalog_valid_route(
+            epp_seed, stack.worker_ids, "epp-session-seed-a"
+        )
+        if epp_seed.worker_id != worker_a:
+            raise AssertionError(
+                "EPP session seed did not select catalog worker A: "
+                f"{epp_seed.worker_id} != {worker_a}"
+            )
+        assert_ordered_token_ids_match(
+            baseline_a,
+            epp_seed.token_ids,
+            left_label="baseline.A.token_ids",
+            right_label="epp.seed.token_ids",
+            case_name="epp-session-seed-a",
+        )
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        last_snapshot = None
+        after_establish = None
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            loads = stack.provider_potential_loads(
+                baseline_a, timeout_s=remaining
+            )
+            if not _exact_dp0_zero_active(
+                loads, worker_a, worker_b, "session-establish"
+            ):
+                last_snapshot = None
+                time.sleep(0.05)
+                continue
+            current = _provider_cache_snapshot(stack)
+            if last_snapshot is not None and current == last_snapshot:
+                after_establish = current
+                break
+            last_snapshot = current
+            time.sleep(0.05)
+        if after_establish is None:
+            raise AssertionError(
+                "session establishment events did not settle after worker A bind"
+            )
+
+        bound_before = _stable_provider_query_baseline(
+            stack, arm="fe-session-prefix-b"
+        )
+        bound = stack.collect_frontend_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("fe-session-prefix-b"),
+            headers=session_headers,
+        )
+        after_bound = _wait_for_provider_query_increase(
+            stack, bound_before, arm="fe-session-prefix-b"
+        )
+        _assert_catalog_valid_route(bound, stack.worker_ids, "fe-session-prefix-b")
+        if bound.worker_id != worker_a:
+            raise AssertionError(
+                "FE session S did not stay bound to worker A on prefix B: "
+                f"{bound.worker_id} != {worker_a}"
+            )
+        control_before = _stable_provider_query_baseline(
+            stack, arm="fe-nosession-prefix-b"
+        )
+        if control_before < after_bound:
+            raise AssertionError(
+                "fe-nosession-prefix-b: provider counter decreased between arms "
+                f"({after_bound} -> {control_before})"
+            )
+        control = stack.collect_frontend_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("fe-nosession-prefix-b"),
+        )
+        after_control = _wait_for_provider_query_increase(
+            stack, control_before, arm="fe-nosession-prefix-b"
+        )
+        _assert_catalog_valid_route(
+            control, stack.worker_ids, "fe-nosession-prefix-b"
+        )
+        if control.worker_id != worker_b:
+            raise AssertionError(
+                "FE no-session control did not prefer worker B on prefix B: "
+                f"{control.worker_id} != {worker_b}"
+            )
+        epp_before = _stable_provider_query_baseline(
+            stack, arm="epp-session-prefix-b"
+        )
+        if epp_before < after_control:
+            raise AssertionError(
+                "epp-session-prefix-b: provider counter decreased between arms "
+                f"({after_control} -> {epp_before})"
+            )
+        epp_bound = stack.collect_epp_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("epp-session-prefix-b"),
+            headers=session_headers,
+        )
+        _wait_for_provider_query_increase(
+            stack, epp_before, arm="epp-session-prefix-b"
+        )
+        _assert_catalog_valid_route(
+            epp_bound, stack.worker_ids, "epp-session-prefix-b"
+        )
+        assert_ordered_token_ids_match(
+            bound.token_ids,
+            control.token_ids,
+            left_label="frontend.session.token_ids",
+            right_label="frontend.nosession.token_ids",
+            case_name="session-prefix-b",
+        )
+        assert_ordered_token_ids_match(
+            bound.token_ids,
+            epp_bound.token_ids,
+            left_label="frontend.session.token_ids",
+            right_label="epp.session.token_ids",
+            case_name="session-prefix-b",
+        )
+        _assert_provider_snapshot_unchanged(
+            after_establish,
+            _provider_cache_snapshot(stack),
+            "session-prefix-b",
+        )
+        assert_route_observations_match(
+            bound,
+            epp_bound,
+            left_label="frontend.session",
+            right_label="epp.session",
+            case_name="session-prefix-b",
         )
     finally:
         stack.close_consumer_pair()
