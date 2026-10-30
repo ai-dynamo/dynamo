@@ -15,10 +15,12 @@ covers installing and running the operator. This page adds only the parts that n
 - which pod labels select each Dynamo component;
 - a profile config with process patterns and `nsys` arguments for each component;
 - the NVTX settings that add Dynamo's own ranges to the reports;
-- pitfalls seen with Dynamo, and what has been tested.
+- limitations when profiling Dynamo.
 
 You can use the [published Dynamo runtime images](../../reference/general/release-artifacts.mdx) from NGC without a
 custom build, and the DynamoGraphDeployment (DGD) needs no new fields.
+
+These instructions use Nsight Operator 26.3. If your cluster runs an older version, upgrade to 26.3 first.
 
 ## Who Does What
 
@@ -62,7 +64,7 @@ fastest first look. Adjust it as follows:
 - Pass `--deployment-name <your DGD>`. The helper selects every pod whose name contains that string, so pick a name
   that no other DGD's name contains.
 - Set `--nsys-profile-args "-t cuda,nvtx,osrt --python-sampling=true"`. The helper's default adds
-  `--pytorch=autograd-nvtx` (see [Pitfalls](#pitfalls)).
+  `--pytorch=autograd-nvtx` (see [Limitations](#limitations)).
 - Leave out `--gpu-metrics`. It installs Nsight's GPU metrics collector: a DaemonSet whose pods run with
   `privileged: true`, plus a profile config that runs `nsys --gpu-metrics-devices=all` in those pods.
 
@@ -171,7 +173,7 @@ spec:
 | Component | `nsightToolArgs` | NVTX environment |
 |---|---|---|
 | Frontend | `-t nvtx,osrt --python-sampling=true` | `DYN_ENABLE_RUST_NVTX=1` adds per-request ranges: `preprocess.*`, `transport.*`, `detokenize`, and `route.*` with KV routing. Dynamo 1.6.0 and newer only. |
-| Workers | `-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true` | vLLM: `VLLM_NVTX_SCOPES_FOR_PROFILING=1` adds scheduler ranges. Leave `DYN_NVTX` unset (see [Pitfalls](#pitfalls)). |
+| Workers | `-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true` | vLLM: `VLLM_NVTX_SCOPES_FOR_PROFILING=1` adds scheduler ranges. Leave `DYN_NVTX` unset (see [Limitations](#limitations)). |
 
 - `--cuda-graph-trace=node` shows every kernel inside CUDA graphs and costs the most. For lower overhead, use
   `--cuda-graph-trace=graph`, which shows each graph launch as one item.
@@ -245,7 +247,7 @@ container restarts. Copy it out as soon as `nsys stop` returns:
 kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./reports/worker.nsys-rep
 ```
 
-## Pitfalls
+## Limitations
 
 - **Apply the profile config before the pods start.** Only pods created after the config exists are profiled. After
   you change rules or arguments, recreate the pods.
@@ -265,8 +267,3 @@ kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./r
 - **If a pod is not profiled,** follow Nsight's
   [sidecar injection checks](https://docs.nvidia.com/nsight-operator/Troubleshooting/index.html#sidecar-injection-issues).
   Setting `logOutput: /tmp/injector.log` on a rule writes the process hook's log inside the pod.
-
-## Tested Configurations
-
-The instructions on this page were tested on Nsight Operator 26.3 with vLLM, SGLang and TensorRT-LLM, in both aggregated
-and disaggregated DGDs. If your cluster runs an older Nsight Operator, upgrade to 26.3 first.
