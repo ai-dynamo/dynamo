@@ -1081,6 +1081,130 @@ def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     assert tags(terminal) == ["a"]
 
 
+def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
+    tmp_path: Path,
+    renders: list[str],
+    fake_search_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aisimulate.recommend as recommendation
+    from aisimulate.config import CoreRecommendationConfig
+    from aisimulate.sweeper import search
+
+    # Use the same scalar CoreRecommendationConfig as the scalar lifecycle test;
+    # the sweeper is mocked so the target never reaches AISimulate. The Pareto
+    # mode is signalled through is_pareto=True in the plugin config, which is
+    # exactly the path the operator takes (it writes is_pareto=true into the
+    # dgdr_run reserved fields when spec.objective.mode is Pareto).
+    config = CoreRecommendationConfig.model_validate(
+        {
+            "engine": {
+                "model": "openai/gpt-oss-120b",
+                "hardware": "gb300",
+                "backend": "vllm",
+                "mode": "aggregated",
+                "context_length": 16384,
+                "workers": {"aggregated": {}},
+            },
+            "traffic": {
+                "source": {
+                    "type": "synthetic",
+                    "input_tokens": 10240,
+                    "output_tokens": 1024,
+                },
+                "load": {
+                    "type": "concurrency",
+                    "concurrency": {"choices": [8]},
+                },
+                "stop": {"requests_per_load_unit": 1},
+            },
+            "optimization": {
+                "target": "throughput_per_gpu",
+                "constraints": {
+                    "min_candidate_gpus": 1,
+                    "max_candidate_gpus": 8,
+                },
+            },
+            "optimizer": {"parallelism": 1, "max_trials": 1},
+        }
+    )
+    output_config = {
+        **PLUGIN_CONFIG,
+        "snapshot_dir": str(tmp_path),
+        "is_pareto": True,
+        # Buffer periodic writes so we can observe the live flush from finish_search().
+        "snapshot_interval_seconds": 3600,
+    }
+
+    # A Pareto candidate may carry score=None; the adapter retains it in Pareto mode.
+    pareto_a = record("a", 9.0, objectives={"throughput_per_gpu": 9.0, "throughput_per_user": 3.0})
+    pareto_b = record("b", 7.0, objectives={"throughput_per_gpu": 4.0, "throughput_per_user": 8.0})
+    # The final result reports both candidates on the Pareto front; the retained set
+    # inside the live adapter may hold fewer (bounded by max_candidates).
+    final_result = SimpleNamespace(
+        views=SimpleNamespace(pareto_front=[pareto_a, pareto_b]),
+        provenance=SimpleNamespace(config={}),
+        selected_candidates=[pareto_a, pareto_b],
+        counts=SimpleNamespace(evaluated=2),
+    )
+
+    monkeypatch.setattr(
+        recommendation, "resolve_budget", lambda *args, **kwargs: {"cpu_limit": 1}
+    )
+
+    class ParetoLifecycleSweeper:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def run(
+            self,
+            smart: Any,
+            *,
+            top_n: int | None,
+            on_candidate: Any = None,
+            on_round: Any = None,
+        ) -> Any:
+            del smart, top_n
+            assert on_candidate is not None
+            assert on_round is not None
+            on_candidate(pareto_a)
+            on_round(1, [])
+            return final_result
+
+    monkeypatch.setattr(search, "Sweeper", ParetoLifecycleSweeper)
+
+    # Run through the real AISimulate lifecycle dispatcher with the Pareto output config.
+    # This calls subscribe(output_config, context=...) — the same boundary the reviewer
+    # probed — and wires the returned callbacks into ParetoLifecycleSweeper.run().
+    returned = recommendation._run_recommendation(
+        config,
+        stack="engine",
+        runner_factory=object(),
+        output_configs={"dgdr_run": output_config},
+        output_adapters={"dgdr_run": create_adapter()},
+    )
+    assert returned is final_result
+
+    # After the search ends (finish_search() called via on_complete), the live adapter
+    # flushes its retained set. With is_pareto=True, the snapshot must carry paretoFront.
+    running = load(tmp_path)
+    assert running["run"] == {"phase": "Running", "terminal": False}
+    assert running["progress"].get("paretoFront") == 1, (
+        "Running snapshot must carry paretoFront when is_pareto=True is in the "
+        "plugin config and a Pareto candidate has been retained"
+    )
+
+    # The terminal write uses result.views.pareto_front for the definitive front count,
+    # which may exceed the live adapter's bounded retained set.
+    create_adapter().write(output_config, result=returned, output_dir=tmp_path)
+    terminal = load(tmp_path)
+    assert terminal["run"] == {"phase": "Succeeded", "terminal": True}
+    assert terminal["progress"].get("paretoFront") == 2, (
+        "Terminal snapshot must carry the full pareto_front count from result.views, "
+        "not the live adapter's max_candidates-bounded retained set"
+    )
+
+
 def _final_result(evaluated: int = 42) -> Any:
     return SimpleNamespace(
         views=SimpleNamespace(pareto_front=[]),
