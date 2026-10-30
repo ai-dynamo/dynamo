@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Arm B of the gateway A/B benchmark (see README.md):
+#   client -> Gateway -> EPP (KV router, Dynamo runtime mode)
+#          -> Frontend sidecar in direct mode, in the chosen worker pod -> mocker worker
+#
+# This is examples/backends/vllm/deploy/gaie/agg.yaml (Qwen/Qwen3-0.6B,
+# aggregated, EPP plus a direct-mode Frontend sidecar per worker) with each
+# vLLM worker replaced by one mocker worker. The worker component must match
+# the one in a-frontend.yaml, apart from the sidecar; tests/test_gateway_epp_ab.py
+# checks it. run.sh sets the images, the worker count and the model cache claim
+# when it applies this file, and records the applied manifest with the results.
+#
+# The EPP maps each worker it picks to a pod through the worker's pod name, so
+# every mocker runs in its own pod: 2048 workers are 2048 pods, on both arms.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen-b
+spec:
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+          # In Dynamo runtime mode the EPP reads the model and the KV block
+          # size from the workers' model cards, as the Frontend does.
+          env:
+          # The same KV event socket grouping as arm A's Frontend; a-frontend.yaml explains.
+          - name: DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB
+            value: "16"
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: worker
+    type: decode
+    replicas: 2048
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.1
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --model-name
+          - Qwen/Qwen3-0.6B
+          - --block-size
+          - "16"
+          - --speedup-ratio
+          - "1.0"
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        # Same image as arm A's Frontend, so both arms run the same HTTP and
+        # tokenizer code.
+        - name: sidecar-frontend
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          env:
+          # Every Frontend subscribes to the load reports (kv_metrics) of every
+          # worker, one ZMQ socket each, though only busy thresholds use them,
+          # and this sidecar sets none and sends only to its own worker. With a
+          # sidecar per worker, at 2048 workers each sidecar hit libzmq's 1,023
+          # sockets and its 4 GiB limit. Broker mode, with no broker deployed,
+          # makes that subscription fail at startup; the Frontend runs on without
+          # it, and requests do not use the event plane. Only here: the EPP needs
+          # the event plane for KV events. Remove once #17237 ships.
+          - name: DYN_ZMQ_BROKER_ENABLED
+            value: "true"
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          # Each sidecar keeps every worker's discovery record, so its memory
+          # grows with the workers: 0.5 GiB at 512, and 1.3 to 1.7 GiB at 2048.
+          # Requesting less let the scheduler pack nodes past their memory.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1536Mi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        # Spread the arm's workers over the nodes. Each requests little, so
+        # without this the scheduler put up to 382 of 2048 workers on one node.
+        # A soft anti-affinity, because Grove rejects topologySpreadConstraints.
+        # run.sh also caps them per node (MAX_WORKERS_PER_NODE).
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: qwen-b
+                    nvidia.com/dynamo-component-type: decode
+---
+# The Gateway sends arm B's requests to the InferencePool the operator creates
+# for this DGD, so the EPP picks the worker. The matches are the same as arm
+# A's; run.sh sets the arm header to <namespace>/qwen-b.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-b
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: agentgateway-system
+    sectionName: http
+  rules:
+  - matches:
+    - headers:
+      - name: X-Gateway-Model-Name
+        type: Exact
+        value: Qwen/Qwen3-0.6B
+      - name: X-Dynamo-AB-Arm
+        type: Exact
+        value: qwen-b
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: qwen-b-pool
+      port: 8000
+    timeouts:
+      request: 300s
