@@ -24,10 +24,12 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 )
 
@@ -45,9 +47,35 @@ func TestDynamoGraphDeploymentRequestCarrierObjectsStayWritable(t *testing.T) {
 	t.Run("native v1beta2 written through v1alpha1", func(t *testing.T) {
 		carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionHardware), alphaDGDRForAdmission(nil), "v1beta2")
 	})
+	t.Run("native v1beta2 trace written through v1beta1", func(t *testing.T) {
+		foreign := carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionTrace), betaDGDRForAdmission(nil), "v1beta2")
+
+		t.Log("The v1beta1 carrier holds the complete trace and no static default")
+		trace, found, err := unstructured.NestedMap(foreign.Object, "spec", "v1beta2", "workload", "trace")
+		if err != nil || !found {
+			t.Fatalf("spec.v1beta2.workload.trace found=%v err=%v", found, err)
+		}
+		path, _, _ := unstructured.NestedString(trace, "source", "pvc", "path")
+		if trace["format"] != "dynamo" || path != "retune/w-1.jsonl.gz" {
+			t.Fatalf("spec.v1beta2.workload.trace = %#v", trace)
+		}
+		if _, found, _ := unstructured.NestedFieldNoCopy(foreign.Object, "spec", "v1beta2", "workload", "static"); found {
+			t.Fatal("the carrier gained a static workload beside the trace")
+		}
+	})
 }
 
-func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, carrierKey string) {
+func setBeta2AdmissionTrace(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	setBeta2AdmissionHardware(request)
+	request.Spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
+		Format: nvidiacomv1beta2.TraceFormatDynamo,
+		Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+		}},
+	}}
+}
+
+func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, carrierKey string) *unstructured.Unstructured {
 	t.Helper()
 	env := admissionEnv.ForTest(t)
 	admissionGate.set(features.Gates{GPUDiscovery: true})
@@ -119,4 +147,5 @@ func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, c
 	if updated.GetGeneration() != created.GetGeneration() {
 		t.Fatalf("generation = %d, want %d: an unchanged update rewrote the spec", updated.GetGeneration(), created.GetGeneration())
 	}
+	return foreign
 }

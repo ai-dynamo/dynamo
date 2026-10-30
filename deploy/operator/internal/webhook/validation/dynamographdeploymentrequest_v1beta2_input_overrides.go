@@ -23,9 +23,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateAISimulateSpec validates the Request's native AISimulate overrides.
+// validateAISimulateSpec validates the Request's native AISimulate overrides. workload may be
+// nil; a workload with a trace owns the trace source the overrides may not change.
 func validateAISimulateSpec(
 	input *nvidiacomv1beta2.AISimulateSpec,
+	workload *nvidiacomv1beta2.WorkloadSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Use the lowering package's decoder as the single interpretation of RawExtension.
@@ -35,16 +37,21 @@ func validateAISimulateSpec(
 		return nil
 	}
 
+	allErrs := field.ErrorList{}
+	if workload != nil && workload.Trace != nil {
+		allErrs = validateTraceOverrides(overrides, fldPath.Child("inputOverrides"))
+	}
+
 	dgdrRunValue, found := overrides["dgdr_run"]
 	if !found {
-		return nil
+		return allErrs
 	}
 	dgdrRun, ok := dgdrRunValue.(map[string]any)
 	if !ok {
-		return field.ErrorList{field.Forbidden(
+		return append(allErrs, field.Forbidden(
 			fldPath.Child("inputOverrides", "dgdr_run"),
 			"must be an object because the operator owns required execution fields within it",
-		)}
+		))
 	}
 
 	// Search overrides remain authoritative; only execution values coupled to the
@@ -59,13 +66,46 @@ func validateAISimulateSpec(
 		"runtime_version_override",
 		"snapshot_dir",
 	}
-	allErrs := field.ErrorList{}
 	for _, key := range reserved {
 		if _, found := dgdrRun[key]; found {
 			allErrs = append(allErrs, field.Forbidden(
 				fldPath.Child("inputOverrides", "dgdr_run", key),
 				"is managed by the operator and cannot be overridden",
 			))
+		}
+	}
+	return allErrs
+}
+
+// validateTraceOverrides rejects the traffic overrides that would replace what a trace workload
+// owns: traffic.source.type, format and paths, or a traffic or traffic.source value that is not an
+// object and would delete them. Every other traffic override is AISimulate input, which AISimulate
+// validates itself.
+func validateTraceOverrides(overrides map[string]any, fldPath *field.Path) field.ErrorList {
+	const owned = "is owned by spec.workload.trace and cannot be overridden"
+	traffic, found := overrides["traffic"]
+	if !found {
+		return nil
+	}
+	trafficObject, ok := traffic.(map[string]any)
+	if !ok {
+		return field.ErrorList{field.Forbidden(fldPath.Child("traffic"),
+			"must be an object because spec.workload.trace owns traffic.source")}
+	}
+
+	// The source fields the trace owns, or a source that is not an object.
+	source, found := trafficObject["source"]
+	if !found {
+		return nil
+	}
+	sourceObject, ok := source.(map[string]any)
+	if !ok {
+		return field.ErrorList{field.Forbidden(fldPath.Child("traffic", "source"), owned)}
+	}
+	allErrs := field.ErrorList{}
+	for _, key := range []string{"format", "paths", "type"} {
+		if _, found := sourceObject[key]; found {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("traffic", "source", key), owned))
 		}
 	}
 	return allErrs

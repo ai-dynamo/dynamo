@@ -9610,9 +9610,13 @@ spec:
                         runtime_image, runtime_version_override, derive_runtime_images,
                         num_gpus_per_node, and namespace are operator-owned. Request admission
                         rejects them, and the Run controller enforces its values while lowering the
-                        immutable snapshot. The operator runs the AISimulate version from its
-                        configured planner image; Requests and Runs cannot select a different image
-                        or version.
+                        immutable snapshot. When spec.workload.trace is set, traffic and
+                        traffic.source must remain objects, and the trace owns traffic.source.type,
+                        format, and paths the same way: Request admission rejects them, and the Run
+                        controller enforces the typed values. Other traffic overrides are AISimulate
+                        input, which AISimulate validates when the Run's Job starts. The operator runs
+                        the AISimulate version from its configured planner image; Requests and Runs
+                        cannot select a different image or version.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -9780,20 +9784,22 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: |-
-                    Workload defines the synthetic traffic model used for every candidate evaluation.
+                    Workload defines the traffic model used for every candidate evaluation: synthetic static
+                    traffic or a recorded trace.
                     When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
                     an explicit empty workload receives the same shape. workload.static: {} opts out of all
-                    traffic defaults. Any other static object is completed with its missing defaults.
+                    traffic defaults. Any other static object is completed with its missing defaults, and a
+                    trace workload receives no static default.
                     spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
-                    every lowered traffic field it names.
+                    every lowered traffic field it names, except the traffic.source fields a trace owns.
                     The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
                     search. Lowering independently defaults optimizer.max_trials to 320.
                   properties:
                     static:
                       description: |-
-                        Static defines AISimulate synthetic traffic. When omitted, admission supplies the
-                        complete static default. An explicit empty object opts out; any nonempty object is
-                        completed with omitted inputTokens, outputTokens and load defaults.
+                        Static defines AISimulate synthetic traffic. When omitted without a trace, admission
+                        supplies the complete static default. An explicit empty object opts out; any nonempty
+                        object is completed with omitted inputTokens, outputTokens and load defaults.
                       properties:
                         inputTokens:
                           description: InputTokens is the synthetic request input length in tokens.
@@ -9862,7 +9868,79 @@ spec:
                           minimum: 1
                           type: integer
                       type: object
+                    trace:
+                      description: |-
+                        Trace replays a recorded request trace from a PersistentVolumeClaim in the Request
+                        namespace. Admission supplies no static default when it is set. The Run Job mounts only the
+                        trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
+                        or trace.jsonl.gz when the path ends in .gz, and spec.aisimulate.inputOverrides cannot change
+                        traffic.source.type, format or paths.
+                      properties:
+                        format:
+                          description: |-
+                            Format identifies the trace decoder. It has no default; only dynamo is admitted in this
+                            release.
+                          enum:
+                            - dynamo
+                          type: string
+                        replay:
+                          description: Replay configures how the decoded trace is replayed.
+                          properties:
+                            arrivalSpeedupRatio:
+                              description: |-
+                                ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+                                When omitted, the recorded arrival times are replayed unchanged.
+                              exclusiveMinimum: true
+                              minimum: 0
+                              type: number
+                          type: object
+                        source:
+                          description: Source identifies the trace artifact.
+                          properties:
+                            pvc:
+                              description: PVC reads the trace from a PersistentVolumeClaim in the Request namespace.
+                              properties:
+                                claimName:
+                                  description: |-
+                                    ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
+                                    The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
+                                    container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
+                                    until its execution stops; deleting the claim cancels the Runs that read it.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                                path:
+                                  description: |-
+                                    Path names one trace file relative to the root of the claim. It is neither a directory
+                                    nor a glob. It must not start or end with '/' and must not contain empty, '.' or '..'
+                                    segments or a NUL character, which no file name can hold. The file must be complete before
+                                    the Request is created and must never be rewritten: every Run of the Request reads it when
+                                    its Job starts.
+                                  maxLength: 1024
+                                  minLength: 1
+                                  type: string
+                                  x-kubernetes-validations:
+                                    - message: path must be relative to the claim root without empty, '.' or '..' segments
+                                      rule: '!self.startsWith(''/'') && !self.endsWith(''/'') && !self.contains(''//'') && !self.matches(''(^|/)[.][.]?(/|$)'')'
+                                    - message: path must not contain a NUL character
+                                      rule: '!self.contains(''\u0000'')'
+                              required:
+                                - claimName
+                                - path
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                            - message: pvc is required
+                              rule: has(self.pvc)
+                      required:
+                        - format
+                        - source
+                      type: object
                   type: object
+                  x-kubernetes-validations:
+                    - message: static and trace are mutually exclusive
+                      rule: '!(has(self.static) && has(self.trace))'
               type: object
               x-kubernetes-validations:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified

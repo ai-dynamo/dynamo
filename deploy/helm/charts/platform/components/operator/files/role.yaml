@@ -11,6 +11,7 @@ rules:
   resources:
   - configmaps
   - events
+  - persistentvolumeclaims
   - services
   verbs:
   - create
@@ -25,16 +26,6 @@ rules:
   resources:
   - nodes
   verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - persistentvolumeclaims
-  verbs:
-  - create
-  - delete
   - get
   - list
   - watch

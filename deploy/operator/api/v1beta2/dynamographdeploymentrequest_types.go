@@ -154,13 +154,90 @@ type StaticWorkloadSpec struct {
 	Load *StaticLoadSpec `json:"load,omitempty"`
 }
 
-// WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
+// TraceFormat identifies the decoder of a recorded request trace.
+// +kubebuilder:validation:Enum=dynamo
+type TraceFormat string
+
+const (
+	// TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend
+	// records, as JSON Lines or gzip-compressed JSON Lines.
+	TraceFormatDynamo TraceFormat = "dynamo"
+)
+
+// TracePVCSource names one trace file on a PersistentVolumeClaim in the Request namespace.
+type TracePVCSource struct {
+	// ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
+	// The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
+	// container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
+	// until its execution stops; deleting the claim cancels the Runs that read it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	ClaimName string `json:"claimName"`
+
+	// Path names one trace file relative to the root of the claim. It is neither a directory
+	// nor a glob. It must not start or end with '/' and must not contain empty, '.' or '..'
+	// segments or a NUL character, which no file name can hold. The file must be complete before
+	// the Request is created and must never be rewritten: every Run of the Request reads it when
+	// its Job starts.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && !self.matches('(^|/)[.][.]?(/|$)')",message="path must be relative to the claim root without empty, '.' or '..' segments"
+	// +kubebuilder:validation:XValidation:rule="!self.contains('\\u0000')",message="path must not contain a NUL character"
+	Path string `json:"path"`
+}
+
+// TraceSourceSpec identifies exactly one trace artifact. A PersistentVolumeClaim is the only
+// source in this release.
+// +kubebuilder:validation:XValidation:rule="has(self.pvc)",message="pvc is required"
+type TraceSourceSpec struct {
+	// PVC reads the trace from a PersistentVolumeClaim in the Request namespace.
+	// +optional
+	PVC *TracePVCSource `json:"pvc,omitempty"`
+}
+
+// TraceReplaySpec configures how AISimulate replays a decoded trace.
+type TraceReplaySpec struct {
+	// ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+	// When omitted, the recorded arrival times are replayed unchanged.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	ArrivalSpeedupRatio *float64 `json:"arrivalSpeedupRatio,omitempty"`
+}
+
+// TraceWorkloadSpec replays a recorded request trace open loop at its recorded arrival times.
+type TraceWorkloadSpec struct {
+	// Format identifies the trace decoder. It has no default; only dynamo is admitted in this
+	// release.
+	// +kubebuilder:validation:Required
+	Format TraceFormat `json:"format,omitempty"`
+
+	// Source identifies the trace artifact.
+	Source TraceSourceSpec `json:"source"`
+
+	// Replay configures how the decoded trace is replayed.
+	// +optional
+	Replay *TraceReplaySpec `json:"replay,omitempty"`
+}
+
+// WorkloadSpec defines the traffic model used for every candidate evaluation. static and
+// trace are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="!(has(self.static) && has(self.trace))",message="static and trace are mutually exclusive"
 type WorkloadSpec struct {
-	// Static defines AISimulate synthetic traffic. When omitted, admission supplies the
-	// complete static default. An explicit empty object opts out; any nonempty object is
-	// completed with omitted inputTokens, outputTokens and load defaults.
+	// Static defines AISimulate synthetic traffic. When omitted without a trace, admission
+	// supplies the complete static default. An explicit empty object opts out; any nonempty
+	// object is completed with omitted inputTokens, outputTokens and load defaults.
 	// +optional
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
+
+	// Trace replays a recorded request trace from a PersistentVolumeClaim in the Request
+	// namespace. Admission supplies no static default when it is set. The Run Job mounts only the
+	// trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
+	// or trace.jsonl.gz when the path ends in .gz, and spec.aisimulate.inputOverrides cannot change
+	// traffic.source.type, format or paths.
+	// +optional
+	Trace *TraceWorkloadSpec `json:"trace,omitempty"`
 }
 
 // ObjectiveMode selects the optimization mode. Pareto is reserved for a future
@@ -239,9 +316,13 @@ type AISimulateSpec struct {
 	// runtime_image, runtime_version_override, derive_runtime_images,
 	// num_gpus_per_node, and namespace are operator-owned. Request admission
 	// rejects them, and the Run controller enforces its values while lowering the
-	// immutable snapshot. The operator runs the AISimulate version from its
-	// configured planner image; Requests and Runs cannot select a different image
-	// or version.
+	// immutable snapshot. When spec.workload.trace is set, traffic and
+	// traffic.source must remain objects, and the trace owns traffic.source.type,
+	// format, and paths the same way: Request admission rejects them, and the Run
+	// controller enforces the typed values. Other traffic overrides are AISimulate
+	// input, which AISimulate validates when the Run's Job starts. The operator runs
+	// the AISimulate version from its configured planner image; Requests and Runs
+	// cannot select a different image or version.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -279,12 +360,14 @@ type NativeSearchInput struct {
 	// +optional
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
-	// Workload defines the synthetic traffic model used for every candidate evaluation.
+	// Workload defines the traffic model used for every candidate evaluation: synthetic static
+	// traffic or a recorded trace.
 	// When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
 	// an explicit empty workload receives the same shape. workload.static: {} opts out of all
-	// traffic defaults. Any other static object is completed with its missing defaults.
+	// traffic defaults. Any other static object is completed with its missing defaults, and a
+	// trace workload receives no static default.
 	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
-	// every lowered traffic field it names.
+	// every lowered traffic field it names, except the traffic.source fields a trace owns.
 	// The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
 	// search. Lowering independently defaults optimizer.max_trials to 320.
 	// +optional
