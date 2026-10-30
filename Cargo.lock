@@ -2870,7 +2870,7 @@ dependencies = [
  "dynamo-structural-tag 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "num-traits",
- "openai-harmony 0.0.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "openai-harmony",
  "percent-encoding",
  "regex",
  "rustpython-ruff_python_ast",
@@ -2885,11 +2885,11 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.8.10"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=c2c185db66bcb3af96e432b6be08889c4a98e9ee#c2c185db66bcb3af96e432b6be08889c4a98e9ee"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90#e144fae6e29a02242d3d105732a5825c54fa5b90"
 dependencies = [
  "anyhow",
- "dynamo-structural-tag 0.1.0 (git+https://github.com/ai-dynamo/frontend-crates?rev=c2c185db66bcb3af96e432b6be08889c4a98e9ee)",
- "openai-harmony 0.0.8 (git+https://github.com/keivenchang/harmony?rev=32530bcc10740588962216a3e7ce161fc9386306)",
+ "dynamo-structural-tag 0.1.0 (git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90)",
+ "openai-harmony",
  "percent-encoding",
  "regex",
  "serde",
@@ -3172,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=c2c185db66bcb3af96e432b6be08889c4a98e9ee#c2c185db66bcb3af96e432b6be08889c4a98e9ee"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=e144fae6e29a02242d3d105732a5825c54fa5b90#e144fae6e29a02242d3d105732a5825c54fa5b90"
 dependencies = [
  "anyhow",
  "regex",
@@ -6771,29 +6771,6 @@ name = "openai-harmony"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e77e82af451fc95deeb728a40b84db8ee82d341e136c268de415123a560b9b72"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bstr",
- "clap",
- "fancy-regex 0.13.0",
- "futures",
- "image",
- "regex",
- "reqwest 0.12.28",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
- "serde_with",
- "sha1",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "openai-harmony"
-version = "0.0.8"
-source = "git+https://github.com/keivenchang/harmony?rev=32530bcc10740588962216a3e7ce161fc9386306#32530bcc10740588962216a3e7ce161fc9386306"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
