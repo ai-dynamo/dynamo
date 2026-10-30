@@ -59,7 +59,7 @@ ndarray-npy = { version = "0.9", default-features = false }
 ndarray-interp = "0.5"
 rustc-hash = "2"
 # deflate-flate2 uses the miniz_oxide backend above; the zlib variants switch flate2 for all users.
-zip ={ version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"
