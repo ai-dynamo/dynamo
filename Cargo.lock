@@ -2529,6 +2529,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
+ "hyper-util",
  "prometheus",
  "reqwest 0.12.28",
  "serde",

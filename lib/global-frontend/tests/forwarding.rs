@@ -661,3 +661,61 @@ async fn rotates_across_pools_and_tracks_catalog_changes() {
     assert_eq!(blue_requests.lock().unwrap().len(), 3);
     assert_eq!(green_requests.lock().unwrap().len(), 4);
 }
+
+#[tokio::test]
+async fn shutdown_lets_an_open_stream_finish_then_returns() {
+    // A pool that sends one chunk, then the second once `release` fires.
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let gate = gate.clone();
+            async move {
+                let first = futures::stream::once(async { Ok::<_, Infallible>("data: one\n\n") });
+                let second = futures::stream::once(async move {
+                    gate.notified().await;
+                    Ok::<_, Infallible>("data: two\n\n")
+                });
+                let body = axum::body::Body::from_stream(first.chain(second));
+                ([("content-type", "text/event-stream")], body)
+            }
+        }),
+    );
+    let pool_server = pool_frontend(app).await;
+    let pools = vec![pool("gated", MODEL, &pool_server.url)];
+    let (_catalog, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
+    let (listener, url) = bind().await;
+    let in_flight = Arc::new(InFlightTracker::new());
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let selector = Arc::new(RoundRobinSelector::new());
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    let shutdown = CancellationToken::new();
+    let serving = tokio::spawn(dynamo_global_frontend::serve(
+        listener,
+        app,
+        shutdown.clone(),
+    ));
+    wait_until_ok(&url.join("live").unwrap()).await;
+
+    // The client keeps its connection open once idle, so the server must
+    // close it when the response ends.
+    let client = client();
+    let response = client
+        .post(url.join("v1/chat/completions").unwrap())
+        .json(&chat(MODEL, "hi", true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    shutdown.cancel();
+    release.notify_one();
+    assert_eq!(response.text().await.unwrap(), "data: one\n\ndata: two\n\n");
+    // The server returns once its last connection closes, long before the
+    // grace period ends.
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(client);
+}
