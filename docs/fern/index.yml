@@ -202,6 +202,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/kubernetes/fault-tolerance/introduction.md
+          - page: Shadow Engine Recovery
+            path: pages/kubernetes/fault-tolerance/shadow-engine-recovery.mdx
           - page: Request Migration
             path: pages/kubernetes/fault-tolerance/request-migration.md
           - page: Request Rejection

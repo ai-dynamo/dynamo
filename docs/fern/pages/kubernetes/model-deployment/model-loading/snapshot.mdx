@@ -10,6 +10,10 @@ initialization. This walkthrough captures a TensorRT-LLM worker, restores it, an
 sends a request through the Dynamo frontend. Choose a single-GPU Qwen3 example
 or an eight-GPU GLM 5.3 example.
 
+For an active/standby vLLM or SGLang engine pair that uses Snapshot to recover
+after an engine failure, see
+[Shadow Engine Recovery](../../fault-tolerance/shadow-engine-recovery.mdx).
+
 <Warning>
 Experimental. Consult the
 [backend compatibility matrix](../../../reference/general/compatibility.mdx) before
