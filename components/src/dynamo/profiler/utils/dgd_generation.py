@@ -116,7 +116,10 @@ def assemble_final_config(
        initialize its direct AISimulate model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
-    6. **Profile data** — attach interpolation-data ConfigMap when mocker
+    6. **Unauthenticated** — when the DGDR declares the model needs no
+       Hugging Face credentials, strip every hf-token-secret reference from
+       the generated components.
+    7. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
        were produced on disk; rapid-mode deployments never emit it (the
@@ -138,6 +141,7 @@ def assemble_final_config(
         if kv_router:
             enable_kv_router(dgd_config)
         apply_runtime_version_override(dgdr, dgd_config)
+        apply_unauthenticated_mode(dgdr, dgd_config)
         return dgd_config
 
     # Save picked config for auditing
@@ -185,9 +189,47 @@ def assemble_final_config(
             config_maps.append(profile_cm)
 
     apply_runtime_version_override(dgdr, base)
+    apply_unauthenticated_mode(dgdr, base)
     if config_maps:
         return config_maps + [base]
     return base
+
+
+def apply_unauthenticated_mode(dgdr, config_dict: dict) -> None:
+    """Omit hf-token-secret references for unauthenticated model access.
+
+    When the DGDR declares the model needs no Hugging Face credentials, the
+    generated deployment must not reference hf-token-secret at all. The default
+    keeps the reference required, preserving the wait-for-credentials behavior.
+    """
+    if not dgdr.unauthenticated:
+        return
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        containers = (
+            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        )
+        if not isinstance(containers, list):
+            continue
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            env_from = container.get("envFrom")
+            if not isinstance(env_from, list):
+                continue
+            container["envFrom"] = [
+                entry
+                for entry in env_from
+                if not (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("secretRef"), dict)
+                    and entry["secretRef"].get("name") == "hf-token-secret"
+                )
+            ]
 
 
 def apply_runtime_version_override(dgdr, config_dict: dict) -> None:

@@ -567,6 +567,15 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(profilerEnvNames).ShouldNot(HaveKey(EnvDGDOverrideToolPath))
 			Expect(job.Spec.Template.Spec.InitContainers).Should(BeEmpty())
 
+			profilerContainer := job.Spec.Template.Spec.Containers[0]
+			hfTokenEnv := findEnv(profilerContainer.Env, "HUGGING_FACE_HUB_TOKEN")
+			Expect(hfTokenEnv).ShouldNot(BeNil())
+			Expect(hfTokenEnv.ValueFrom).ShouldNot(BeNil())
+			Expect(hfTokenEnv.ValueFrom.SecretKeyRef).ShouldNot(BeNil())
+			Expect(hfTokenEnv.ValueFrom.SecretKeyRef.Name).Should(Equal("hf-token-secret"))
+			Expect(hfTokenEnv.ValueFrom.SecretKeyRef.Key).Should(Equal("HF_TOKEN"))
+			Expect(hfTokenEnv.ValueFrom.SecretKeyRef.Optional).Should(BeNil())
+
 			// Verify both alpha-only profiling fields were restored from the
 			// structural payload and used by the controller.
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
@@ -589,6 +598,70 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 						}},
 					},
 				},
+			))
+
+			// Clean up job
+			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should omit the Hugging Face token env for unauthenticated requests", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-unauthenticated"
+			namespace := envtestNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Name:      dgdrName,
+				Namespace: namespace,
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:           "test-model",
+					Backend:         "vllm",
+					Image:           "test-profiler:1.1.0",
+					Unauthenticated: ptr.To(true),
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         new(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: new(100.0),
+						ITL:  new(1500.0),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile twice: validation, then Pending -> Profiling
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				Name: dgdrName, Namespace: namespace,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				Name: dgdrName, Namespace: namespace,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The profiling job must start without any hf-token-secret
+			// reference so the pod does not wait for a Secret that will
+			// never be needed.
+			Eventually(func() bool {
+				jobName := getProfilingJobName(dgdr)
+				job := &batchv1.Job{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
+				return err == nil
+			}, timeout, interval).Should(BeTrue())
+
+			jobName := getProfilingJobName(dgdr)
+			job := &batchv1.Job{}
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
+			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+			Expect(profiler).ShouldNot(BeNil())
+			Expect(findEnv(profiler.Env, "HUGGING_FACE_HUB_TOKEN")).Should(BeNil())
+			// DGDR metadata env vars are still present for ownerReferences.
+			Expect(findEnv(profiler.Env, "DGDR_NAME")).Should(Equal(
+				&corev1.EnvVar{Name: "DGDR_NAME", Value: dgdrName},
 			))
 
 			// Clean up job
