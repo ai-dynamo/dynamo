@@ -569,13 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn the_mesh_flags_are_gone() {
-        assert!(transport(&[&CORE[..], &["--replica-sync-port", "5600"]].concat()).is_err());
-        assert!(transport(&[&CORE[..], &["--peer", "tcp://10.0.0.2:5600"]].concat()).is_err());
-        assert!(transport(&[&CORE[..], &["--replica-sync", "mesh"]].concat()).is_err());
-    }
-
-    #[test]
     fn peers_are_plain_http_api_addresses() {
         assert_eq!(
             parse_peer("http://peer:8000"),

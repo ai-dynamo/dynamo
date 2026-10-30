@@ -109,8 +109,9 @@ pub struct ReplicaSyncStats {
 #[derive(Clone)]
 struct OpenBooking {
     partition: RoutingPartitionId,
-    /// The stream it arrived on; `None` for a frame applied directly.
-    peer: Option<Url>,
+    /// The stream it arrived on, as (peer, following generation); `None`
+    /// for a frame applied directly.
+    peer: Option<(Url, u64)>,
     router_id: u64,
     worker: WorkerWithDpRank,
     lora_name: Option<String>,
@@ -172,6 +173,9 @@ pub struct ReplicaHub {
     /// partition has a backlog every new event joins it, so a free never
     /// overtakes its add.
     backlog: DashMap<RoutingPartitionId, VecDeque<ActiveSequenceEvent>>,
+    /// Each partition channel's capacity, and the most a backlog holds.
+    channel_capacity: usize,
+    backlog_capacity: usize,
     me: Weak<ReplicaHub>,
     /// Every frame this replica publishes; each subscriber reads a copy.
     frames: broadcast::Sender<proto::ReplicaFrame>,
@@ -200,6 +204,14 @@ impl ReplicaHub {
     /// id, which stamps every event this replica publishes, is random and
     /// never zero.
     pub fn new(cancel: CancellationToken) -> Arc<Self> {
+        Self::with_capacities(cancel, EVENT_CHANNEL_CAPACITY, MAX_BACKLOG_EVENTS)
+    }
+
+    fn with_capacities(
+        cancel: CancellationToken,
+        channel_capacity: usize,
+        backlog_capacity: usize,
+    ) -> Arc<Self> {
         let process_id = loop {
             let id: u64 = rand::random();
             if id != 0 {
@@ -212,6 +224,8 @@ impl ReplicaHub {
             process_id,
             partitions: DashMap::new(),
             backlog: DashMap::new(),
+            channel_capacity,
+            backlog_capacity,
             frames,
             peers: DashMap::new(),
             generations: AtomicU64::new(0),
@@ -289,8 +303,8 @@ impl ReplicaHub {
     pub fn factory(self: &Arc<Self>) -> HostReplicaSyncFactory {
         let hub = self.clone();
         Arc::new(move |partition: &RoutingPartitionId| {
-            let (outbound_tx, outbound_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-            let (inbound_tx, inbound_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+            let (outbound_tx, outbound_rx) = mpsc::channel(hub.channel_capacity);
+            let (inbound_tx, inbound_rx) = mpsc::channel(hub.channel_capacity);
             hub.partitions.insert(partition.clone(), inbound_tx.clone());
             tokio::spawn(publish_events(hub.clone(), partition.clone(), outbound_rx));
             Some(HostReplicaChannels {
@@ -331,16 +345,21 @@ impl ReplicaHub {
         };
         follow.cancel.cancel();
         self.peers_changed.notify_one();
-        self.release_bookings_of(peer);
+        self.release_bookings_of(peer, follow.generation);
         true
     }
 
     /// Frees, in the core, every booking still open that `peer`'s stream
-    /// carried.
-    fn release_bookings_of(&self, peer: &Url) {
+    /// carried in following `generation`; a following started since, under
+    /// the same address, keeps its own.
+    fn release_bookings_of(&self, peer: &Url, generation: u64) {
         let mut frees = Vec::new();
         self.open.retain(|request_id, booking| {
-            if booking.peer.as_ref() == Some(peer) {
+            if booking
+                .peer
+                .as_ref()
+                .is_some_and(|(url, carried)| url == peer && *carried == generation)
+            {
                 frees.push((booking.partition.clone(), booking.free(request_id.clone())));
                 return false;
             }
@@ -377,7 +396,7 @@ impl ReplicaHub {
         };
         match self.backlog.entry(partition.clone()) {
             Entry::Occupied(mut queued) => {
-                if queued.get().len() >= MAX_BACKLOG_EVENTS {
+                if queued.get().len() >= self.backlog_capacity {
                     self.counters.events_dropped.fetch_add(1, Relaxed);
                     return false;
                 }
@@ -467,12 +486,12 @@ impl ReplicaHub {
         if followed.generation != generation {
             return;
         }
-        self.apply_inner(Some(peer), frame, service);
+        self.apply_inner(Some((peer, generation)), frame, service);
     }
 
     fn apply_inner(
         &self,
-        peer: Option<&Url>,
+        peer: Option<(&Url, u64)>,
         frame: proto::ReplicaFrame,
         service: &SelectionService,
     ) {
@@ -509,7 +528,7 @@ impl ReplicaHub {
                     request_id.clone(),
                     OpenBooking {
                         partition: partition.clone(),
-                        peer: peer.cloned(),
+                        peer: peer.map(|(url, generation)| (url.clone(), generation)),
                         router_id: event.router_id,
                         worker: event.worker,
                         lora_name: event.lora_name.clone(),
@@ -761,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_partition_takes_its_events_later_in_order() {
-        let hub = ReplicaHub::new(CancellationToken::new());
+        let hub = ReplicaHub::with_capacities(CancellationToken::new(), 2, 2);
         let partition = RoutingPartitionId::new("qwen", "global");
         let mut channels = (hub.factory())(&partition).unwrap();
         let event = |request: &str| ActiveSequenceEvent {
@@ -771,32 +790,19 @@ mod tests {
             router_id: 7,
             lora_name: None,
         };
-        for i in 0..EVENT_CHANNEL_CAPACITY {
-            assert!(hub.deliver(&partition, event(&format!("fill-{i}"))));
+        for request in ["a", "b", "c", "d"] {
+            assert!(hub.deliver(&partition, event(request)));
         }
-        assert!(hub.deliver(&partition, event("late-1")));
-        assert!(hub.deliver(&partition, event("late-2")));
-        assert_eq!(
-            hub.backlog.get(&partition).map(|queued| queued.len()),
-            Some(2)
-        );
+        // The channel holds two and the backlog the next two; a fifth is
+        // dropped and counted.
+        assert!(!hub.deliver(&partition, event("e")));
+        assert_eq!(hub.stats().events_dropped, 1);
 
         let mut seen = Vec::new();
-        while seen.len() < EVENT_CHANNEL_CAPACITY + 2 {
+        while seen.len() < 4 {
             seen.push(channels.inbound_rx.recv().await.unwrap().request_id);
         }
-        assert_eq!(&seen[EVENT_CHANNEL_CAPACITY..], ["late-1", "late-2"]);
-        // A backlog at its cap drops what comes next, counted.
-        if let Some(mut queued) = hub.backlog.get_mut(&partition) {
-            queued.extend((0..MAX_BACKLOG_EVENTS).map(|i| event(&format!("cap-{i}"))));
-        }
-        if hub.backlog.contains_key(&partition) {
-            assert!(!hub.deliver(&partition, event("over")));
-            assert_eq!(hub.stats().events_dropped, 1);
-        }
-        while channels.inbound_rx.try_recv().is_ok() || hub.backlog.contains_key(&partition) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        assert_eq!(seen, ["a", "b", "c", "d"]);
         tokio::time::timeout(Duration::from_secs(2), async {
             while hub.backlog.contains_key(&partition) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
