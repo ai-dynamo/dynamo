@@ -18,8 +18,8 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::{PolicyProfile, RejectThresholdsProvider};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
-    BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
-    SchedulerQueue,
+    BookingHandle, ClassQueueStats, RouterQueueWaitObserver, SchedulerBookingCleanup,
+    SchedulerBookingDescriptor, SchedulerQueue,
 };
 use super::request_classifier::{RequestClassifierRuntime, RequestLifecycle};
 use super::selector::{WorkerInputs, WorkerSelector};
@@ -511,6 +511,13 @@ where
         observer: NonMaxOverlapSelectionObserver,
     ) -> bool {
         self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
+    /// Install the observer for time spent pending in the scheduler queue.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: RouterQueueWaitObserver) -> bool {
+        self.queue.set_queue_wait_observer(observer)
     }
 
     /// Install per-candidate cost capture for admitted selections.

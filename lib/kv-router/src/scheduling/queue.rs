@@ -61,6 +61,8 @@ mod capacity;
 /// backlog past it waits, in order, for a slot.
 const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
+pub type RouterQueueWaitObserver = Arc<dyn Fn(usize, Duration) + Send + Sync>;
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -598,6 +600,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -636,6 +639,7 @@ pub struct SchedulerQueue<
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     supports_overlap_refresh: bool,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -745,6 +749,7 @@ impl<
             tx: admission_tx.downgrade(),
         });
         let cleanup = Arc::new(AdmissionCleanup::default());
+        let queue_wait_observer = Arc::new(OnceLock::new());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let start_time = Instant::now();
@@ -796,6 +801,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider: overloaded_worker_provider.clone(),
             available_worker_provider: available_worker_provider.clone(),
+            queue_wait_observer: Arc::clone(&queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             reject_thresholds: reject_thresholds.clone(),
@@ -820,6 +826,7 @@ impl<
             available_worker_provider,
             overloaded_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            queue_wait_observer,
             non_max_overlap_selection_observer,
             selection_trace,
             reject_thresholds,
@@ -845,6 +852,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the observer for time spent pending in the scheduler queue.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: RouterQueueWaitObserver) -> bool {
+        self.queue_wait_observer.set(observer).is_ok()
     }
 
     /// Install per-candidate cost capture for admitted selections.
@@ -1837,7 +1851,12 @@ impl<
                 };
             }
             let admit_now = Instant::now();
-            let class_index = popped.class_index();
+            if let Some(observer) = self.queue_wait_observer.get() {
+                observer(
+                    class_index,
+                    admit_now.saturating_duration_since(queued.enqueue_at),
+                );
+            }
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             tracing::trace!(
@@ -3873,6 +3892,7 @@ policy_classes:
             overlap_refresh_after: None,
             overloaded_worker_provider: None,
             available_worker_provider: None,
+            queue_wait_observer: Arc::clone(&queue.queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
