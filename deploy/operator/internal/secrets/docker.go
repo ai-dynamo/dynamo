@@ -69,7 +69,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 			}
 			for auth := range dockerConfig.Auths {
 				// retrieve the registry host
-				registry, err := common.GetHost(auth)
+				registry, err := registryHost(auth)
 				if err != nil {
 					refreshErrors = append(refreshErrors, fmt.Errorf("unable to get host for registry %q for secret %s/%s: %w", auth, secret.Namespace, secret.Name, err))
 					continue
@@ -98,11 +98,25 @@ func (i *DockerSecretIndexer) listOptions() []client.ListOption {
 }
 
 func (i *DockerSecretIndexer) GetSecrets(namespace, registry string) ([]string, error) {
-	registry, err := common.GetHost(registry)
+	registry, err := registryHost(registry)
 	if err != nil {
 		return nil, err
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return append([]string(nil), i.secrets[namespace][registry]...), nil
+}
+
+// registryHost accepts registry keys and URLs without interpreting them as image names.
+func registryHost(registry string) (string, error) {
+	host, err := common.GetHost(registry)
+	if err != nil {
+		return "", err
+	}
+
+	// Docker login stores Hub credentials under its legacy index endpoint.
+	if host == "index.docker.io" {
+		host = "docker.io"
+	}
+	return host, nil
 }
