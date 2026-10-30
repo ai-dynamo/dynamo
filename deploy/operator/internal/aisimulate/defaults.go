@@ -57,7 +57,9 @@ func applyDefaults(underlay map[string]any) error {
 	b := builder{root: underlay}
 
 	if has(underlay, trafficPath...) {
-		if !has(underlay, trafficStopRequests...) {
+		// A trace accepts only max_virtual_time_seconds; a request count would be rejected.
+		sourceType, _, _ := unstructured.NestedString(underlay, trafficSourceType...)
+		if sourceType != "trace" && !has(underlay, trafficStopRequests...) {
 			b.set(float64(DefaultRequestCount), trafficStopRequests)
 		}
 	}

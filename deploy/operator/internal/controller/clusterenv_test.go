@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/yaml"
 )
 
 var clusterTestEnv *clusterenv.Env
@@ -367,6 +368,26 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			t.Log("Allow the AISimulate Job Pod to run while preventing unrelated ReplicaSet workloads")
 			env.BlockReplicaSets()
 
+			t.Log("Write a trace scenario's trace to the claim file its Request names before applying it")
+			traceFixture := filepath.Join(scenarioDir, "trace.jsonl")
+			var trace clusterTestTraceFile
+			traceBefore := ""
+			if _, err := os.Stat(traceFixture); err == nil {
+				scenario := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+				data, err := os.ReadFile(input)
+				require.NoError(t, err)
+				require.NoError(t, yaml.Unmarshal(data, scenario))
+				require.NotNil(t, scenario.Spec.Workload, "trace scenario input has no workload")
+				require.NotNil(t, scenario.Spec.Workload.Trace, "trace scenario input has no trace workload")
+				require.NotNil(t, scenario.Spec.Workload.Trace.Source.PVC, "trace scenario input has no trace claim")
+				trace = clusterTestTraceFile{
+					claim: scenario.Spec.Workload.Trace.Source.PVC.ClaimName,
+					path:  scenario.Spec.Workload.Trace.Source.PVC.Path,
+				}
+				createClusterTestTraceClaim(t, env, trace)
+				traceBefore = writeClusterTestTrace(t, env, trace, traceFixture, plannerImage)
+			}
+
 			t.Log("Apply the native v1beta2 Request through production admission")
 			objects := golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
 			if len(objects) != 1 || objects[0].GetKind() != "DynamoGraphDeploymentRequest" {
@@ -486,6 +507,12 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Match the published Candidate API contract against the reviewed golden")
 			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+
+			if traceBefore != "" {
+				t.Log("The Run replayed the mounted trace file and left its contents, owner and mode unchanged")
+				requireClusterTestTraceInput(t, &completedRun, trace)
+				require.Equal(t, traceBefore, statClusterTestTrace(t, env, trace, "trace-after", plannerImage))
+			}
 		})
 	}
 }

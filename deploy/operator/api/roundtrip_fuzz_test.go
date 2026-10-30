@@ -563,7 +563,31 @@ func fuzzBeta2Hardware(hardware *v1beta2.HardwareSpec, c randfill.Continue) {
 }
 
 func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
-	if workload == nil || workload.Static == nil {
+	if workload == nil {
+		return
+	}
+
+	// A trace is exclusive with static and names one admitted claim-relative file. When both are
+	// filled, keep one of them at random so static and trace are equally likely.
+	if workload.Trace != nil && workload.Static != nil {
+		if c.Bool() {
+			workload.Static = nil
+		} else {
+			workload.Trace = nil
+		}
+	}
+	if workload.Trace != nil {
+		workload.Trace.Format = v1beta2.TraceFormatDynamo
+		workload.Trace.Source.PVC = &v1beta2.TracePVCSource{
+			ClaimName: fmt.Sprintf("traces-%d", c.Uint32()),
+			Path:      fmt.Sprintf("retune/window-%d.jsonl.gz", c.Uint32()),
+		}
+		if workload.Trace.Replay != nil && workload.Trace.Replay.ArrivalSpeedupRatio != nil {
+			workload.Trace.Replay.ArrivalSpeedupRatio = oneOfPtr(c, 0.5, 1.0, 4.0)
+		}
+		return
+	}
+	if workload.Static == nil {
 		return
 	}
 

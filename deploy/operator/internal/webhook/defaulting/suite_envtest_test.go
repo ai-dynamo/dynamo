@@ -368,6 +368,20 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			check:      expectV1beta2ExplicitValues,
 		},
 		{
+			name: "v1beta2 trace workload receives no static default",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
+					Format: nvidiacomv1beta2.TraceFormatDynamo,
+					Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
+						ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+					}},
+				}}
+			}),
+			discovered: discoveredH200,
+			check:      expectV1beta2TraceWithoutStaticDefault,
+			idempotent: true,
+		},
+		{
 			name: "v1beta2 explicit node width wins while admission discovers a missing budget",
 			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
 				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
@@ -566,6 +580,23 @@ func expectV1beta2ExplicitValues(t *testing.T, request *nvidiacomv1beta2.DynamoG
 	engine, _ := overrides["engine"].(map[string]any)
 	if engine["hardware"] != "h100_sxm" {
 		t.Fatalf("inputOverrides = %#v, want engine.hardware untouched", overrides)
+	}
+	expectV1beta2H200x8Hardware(t, request)
+}
+
+func expectV1beta2TraceWithoutStaticDefault(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	want := &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
+		Format: nvidiacomv1beta2.TraceFormatDynamo,
+		Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+		}},
+	}}
+	if !reflect.DeepEqual(request.Spec.Workload, want) {
+		t.Fatalf("workload = %#v, want the trace alone", request.Spec.Workload)
+	}
+	if request.Spec.Objective == nil || request.Spec.Recommendation == nil {
+		t.Fatalf("objective = %#v, recommendation = %#v, want the other defaults", request.Spec.Objective, request.Spec.Recommendation)
 	}
 	expectV1beta2H200x8Hardware(t, request)
 }

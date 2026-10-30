@@ -1114,6 +1114,150 @@ kubectl get dgdr my-model -n $NAMESPACE \
 - The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
 
+## Replay a recorded trace (v1beta2)
+
+<Warning>
+The `nvidia.com/v1beta2` API is experimental and disabled by default. See the
+[installation guide](../../kubernetes/installation/install-dynamo.md) before you enable it.
+</Warning>
+
+A native `v1beta2` request can evaluate every candidate against a recorded request trace instead
+of synthetic traffic. Set `spec.workload.trace` instead of `spec.workload.static`; the two are
+mutually exclusive, and admission adds no static default when `trace` is set. To switch an existing
+request from static traffic to a trace, set `spec.workload.static` to `null` in the same update.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-trace-replay
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  workload:
+    trace:
+      format: dynamo                          # required; no default
+      source:
+        pvc:
+          claimName: request-traces           # PersistentVolumeClaim in this namespace
+          path: windows/2026-10-27T10-00.jsonl.gz
+      replay:
+        arrivalSpeedupRatio: 1.0              # optional; 2.0 replays arrivals twice as fast
+```
+
+Before you create the request:
+
+- Create the PersistentVolumeClaim in the request's namespace. Use a filesystem volume, not
+  `volumeMode: Block`. When the process that writes the trace keeps running, use `ReadWriteMany`.
+  With `ReadWriteOnce`, a Job scheduled to another node than the writer waits in
+  `ContainerCreating`, and with `ReadWriteOncePod`, a Job waits in `Pending` until the writer's pod
+  is gone. The Run reports `Running` while its Job waits.
+- Finish writing the file. `path` names one file relative to the claim root; directories and globs
+  are not expanded. Every Run of the request reads the file when its Job starts, so do not rewrite
+  it afterwards. To replay several rolled `jsonl_gz` segments, concatenate them into one `.jsonl.gz`
+  file. A relative symlink to another file in the claim works. An absolute symlink does not,
+  because the kubelet resolves it on the node rather than inside the claim, and neither does a
+  symlink that leaves the claim.
+- Make the file readable by others (for example, mode `0644` in `0755` directories) or by group
+  `65532`, which the Job's pod has as a supplemental group. The pod sets no `fsGroup`, so neither
+  the kubelet nor a CSI driver changes the ownership or permissions of anything on the claim.
+
+The operator mounts only this file, read-only and only into the AISimulate container, through a
+`subPath` of the claim at `/var/run/aisimulate/trace/trace.jsonl.gz`, or at
+`/var/run/aisimulate/trace/trace.jsonl` when `path` does not end in `.gz`. The kubelet resolves
+`path` inside the claim and refuses to mount a file outside it. If the file does not exist when
+the Job starts, the kubelet cannot mount it either, and the AISimulate container waits; see
+[Trace claim lifecycle](#trace-claim-lifecycle). On a volume type whose node directory the kubelet
+can write, such as `hostPath`, the kubelet instead creates an empty directory at `path` on the
+claim, and the Run fails when AISimulate cannot read it.
+
+`format: dynamo` is the only admitted format. It reads the Dynamo request trace
+(`dynamo.request.trace.v1`) written by the frontend, as JSON Lines or as gzip-compressed JSON Lines
+when the file name ends in `.gz`. See the [Request Trace Reference](../observability/request-traces.mdx).
+
+The operator lowers the trace to the AISimulate input `traffic.source` (`type: trace`, `format`, and
+`paths` with the mounted file) and `traffic.load.type: trace_timestamps`, with
+`traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traffic.stop.requests`. When
+`trace` is set, `spec.aisimulate.inputOverrides` cannot set `traffic.source.type`,
+`traffic.source.format`, or `traffic.source.paths`, or replace `traffic` or `traffic.source` with a
+non-object value. Admission rejects these overrides, and the Run controller restores the typed
+values. Other `traffic` overrides, such as `traffic.load` and `traffic.stop`, go to AISimulate,
+which validates the complete input when the Run's Job starts; an input it rejects fails the Run.
+
+### Trace claim lifecycle
+
+The operator ties the claim's lifetime to the Runs that read it. It decides from structured state
+only: the claim's `deletionTimestamp`, `volumeMode`, and phase, the Job's conditions, and the
+request's `spec`. It copies container status messages into the Run but never interprets them.
+
+- **Protection.** Before a Run creates its Job, the operator adds the finalizer
+  `nvidia.com/dgdr-run-<run-uid>` to the claim, where `<run-uid>` is the Run's `metadata.uid`. Every
+  Run that reads the claim adds its own finalizer, so Runs of several requests can share a claim. The
+  operator removes a Run's finalizer once the Run is complete and none of its Jobs is still running,
+  or once the Run and its Jobs are deleted, for example when the request retires old Runs or is
+  deleted.
+- **Deleting the claim cancels its Runs.** When the claim has a `deletionTimestamp`, the operator
+  stops the Job of every Run that reads it through foreground deletion, whether or not the Job's pod
+  has started. Once the Job and its pod are gone, the Run fails with reason `TraceSourceDeleted`, and
+  the operator then removes the Run's finalizer. A Job that already completed or failed before the
+  claim's deletion, and is not itself being deleted, is not stopped; its own outcome decides the Run.
+  Once the operator has started stopping a Job, the Run fails with `TraceSourceDeleted` even if the
+  Job is marked failed while its pod is removed. A Run whose claim is already being deleted before it
+  creates its Job fails with `TraceSourceDeleted` without creating anything.
+- **A missing claim keeps the Run open.** When the claim does not exist, the Run stays `Pending`
+  with `Completed=False` and reason `TraceSourceMissing`, and starts once you create the claim.
+- **A claim no Job can mount fails the Run before it starts.** Before the Run creates its Job, a
+  `volumeMode: Block` claim or a claim in phase `Lost` fails the Run with reason
+  `TraceSourceUnavailable`. After the Job exists, the operator does not check the claim's volume mode
+  or phase again; the Job's pod waits until the volume is usable, the Job fails, or you cancel the
+  Run.
+- **A waiting container is a diagnostic, not a failure.** While a container of the Run's Job waits
+  on an error, such as a trace file the kubelet cannot mount (a missing file, an absolute symlink,
+  or a symlink that leaves the claim) or an image it cannot pull, the Run stays open with
+  `Completed=False`, reason `ContainerWaiting`, and the message
+  `container "<name>" is waiting: <reason>: <message>`, where `<reason>` and `<message>` are copied
+  from the container's status. The operator does not delete the Job, and there is no timeout. The
+  kubelet keeps retrying the container, so fixing the cause, for example writing the missing file,
+  lets the same Run continue. Waiting in `ContainerCreating` or `PodInitializing` is not reported:
+  volume errors that keep a pod there, such as a `ReadWriteOnce` claim attached to another node,
+  appear only in the pod's events.
+
+To stop a Run that cannot continue, cancel it explicitly: change the request's `spec` (the Run
+fails with reason `Superseded`), delete the request, or delete the claim (`TraceSourceDeleted`). A
+Pending claim, such as one that waits for its first consumer, is accepted. The request starts one
+Run per `metadata.generation`, so after a Run failed, change the request's `spec` to start a new
+Run.
+
+```bash
+# Active and recent Runs of the request
+kubectl get dynamographdeploymentrequests.v1beta2.nvidia.com qwen3-trace-replay -n "$NAMESPACE" \
+  -o jsonpath='{.status.activeRunRef}{"\n"}{.status.recentRunRefs}{"\n"}'
+
+# Why a Run failed or waits
+kubectl get dynamographdeploymentrun qwen3-trace-replay-1 -n "$NAMESPACE" \
+  -o jsonpath='{.status.conditions}'
+```
+
+<Note>
+Kubernetes keeps a deleted claim `Terminating` while any pod that mounts it exists
+(`kubernetes.io/pvc-protection`), including the completed pods of finished Jobs. The operator keeps
+the Runs, Jobs, and pods of a request's five most recent finished Runs, so a deleted trace claim can
+stay `Terminating` after every Run released it, until those Runs are retired or the request is
+deleted.
+</Note>
+
+If the operator is uninstalled, or the `v1beta2` API is disabled, while Runs are in flight, their
+finalizers stay on the claim and keep it from being deleted. List them, then remove only the
+`nvidia.com/dgdr-run-` finalizers (requires `jq`):
+
+```bash
+kubectl get pvc request-traces -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}{"\n"}'
+
+kubectl get pvc request-traces -n "$NAMESPACE" -o json \
+  | jq '.metadata.finalizers |= map(select(startswith("nvidia.com/dgdr-run-") | not))' \
+  | kubectl replace -f -
+```
+
 ## Known issues
 
 - **PCIe profiler data not yet available.** See the PCIe callout under [SKU format](#sku-format).
