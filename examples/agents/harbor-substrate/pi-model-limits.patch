@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+--- a/pi-plugin/src/light/provider.ts
++++ b/pi-plugin/src/light/provider.ts
+@@ -115,6 +115,11 @@
+ 
+ export function createDynamoModels(modelIds: string[], baseUrl: string): ProviderModelConfig[] {
+ 	const ids = modelIds.length > 0 ? modelIds : [DEFAULT_DYNAMO_MODEL_ID];
++	const contextWindow = Number(process.env.DYNAMO_CONTEXT_WINDOW ?? 128000);
++	const maxTokens = Number(process.env.DYNAMO_MAX_TOKENS ?? 8192);
++	if (!Number.isSafeInteger(contextWindow) || !Number.isSafeInteger(maxTokens) || maxTokens <= 1 || maxTokens >= contextWindow) {
++		throw new Error("Require 1 < DYNAMO_MAX_TOKENS < DYNAMO_CONTEXT_WINDOW");
++	}
+ 	return ids.map((id) => ({
+ 		id,
+ 		name: id,
+@@ -123,8 +128,8 @@
+ 		reasoning: false,
+ 		input: ["text"],
+ 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+-		contextWindow: 128000,
+-		maxTokens: 8192,
++		contextWindow,
++		maxTokens,
+ 		compat: dynamoOpenAICompat,
+ 	}));
+ }
+--- a/pi-plugin/test/light.test.ts
++++ b/pi-plugin/test/light.test.ts
+@@ -4,10 +4,11 @@
+ import { decode } from "@msgpack/msgpack";
+ import { createAssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions } from "@mariozechner/pi-ai";
+ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+-import { describe, expect, it, vi } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ import {
+ 	applySubagentSessionBridge,
+ 	buildToolAgentContext,
++	createDynamoModels,
+ 	createDynamoStreamSimple,
+ 	discoverDynamoModels,
+ 	DEFAULT_DYNAMO_BASE_URL,
+@@ -228,3 +229,47 @@
+ 		expect(record).not.toHaveProperty("agent_context");
+ 	});
+ });
++
++
++describe("explicit model limits", () => {
++	afterEach(() => {
++		vi.unstubAllEnvs();
++		vi.restoreAllMocks();
++	});
++
++	it.each([
++		[32768, 4096, 65536, 32768, 4096],
++		[32768, 8192, 16384, 16384, 4096],
++		[131072, 8192, undefined, 131072, 8192],
++		[32768, 1024, 8192, 8192, 1024],
++		[32768, 8192, 2, 2, 1],
++		[32768, 8192, 3, 3, 1],
++	])("respects configured %s/%s and served %s limits", async (context, output, served, contextWindow, maxTokens) => {
++		vi.stubEnv("DYNAMO_CONTEXT_WINDOW", String(context));
++		vi.stubEnv("DYNAMO_MAX_TOKENS", String(output));
++		vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(JSON.stringify({ data: [{ id: "configured-model", context_window: served }] })),
++		);
++
++		const models = await discoverDynamoModels(config);
++
++		expect(models).toHaveLength(1);
++		expect(models[0]).toMatchObject({ id: "configured-model", contextWindow, maxTokens });
++		expect(models[0]?.maxTokens).toBeGreaterThan(0);
++	});
++
++	it.each([
++		["invalid", "8192"],
++		["8192", "8192"],
++		["32768", "1"],
++		["32768", "-1"],
++		["32768", "1.5"],
++	])("rejects invalid configured limits %s/%s", (context, output) => {
++		vi.stubEnv("DYNAMO_CONTEXT_WINDOW", context);
++		vi.stubEnv("DYNAMO_MAX_TOKENS", output);
++
++		expect(() => createDynamoModels(["configured-model"], config.baseUrl)).toThrow(
++			"Require 1 < DYNAMO_MAX_TOKENS < DYNAMO_CONTEXT_WINDOW",
++		);
++	});
++});

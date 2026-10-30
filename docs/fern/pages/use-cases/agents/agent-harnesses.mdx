@@ -208,6 +208,14 @@ bash examples/backends/sglang/launch/agg_agent.sh
 </Step>
 </Steps>
 
+## Run a sandboxed coding benchmark
+
+[Run SWE-bench Verified with Harbor, Pi, and Substrate](harbor-substrate.mdx)
+walks through sandbox preparation, one trial, a concurrent batch, and result
+inspection. Use Dynamo inference or a compatible external endpoint. The
+[runnable example](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/harbor-substrate)
+contains the environment adapter, prepared-image build, and telemetry configuration.
+
 ## Drive a Harness from Another Agent
 
 Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.

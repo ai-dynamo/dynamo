@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+diff --git a/pi-plugin/harbor/dynamo_pi.py b/pi-plugin/harbor/dynamo_pi.py
+index ddf7b57..1ba4db8 100644
+--- a/pi-plugin/harbor/dynamo_pi.py
++++ b/pi-plugin/harbor/dynamo_pi.py
+@@ -11,10 +11,14 @@ from harbor.agents.installed.pi import Pi
+ from harbor.environments.base import BaseEnvironment
+ from harbor.models.agent.context import AgentContext
+ 
++from pi_trajectory import write_trajectory
++
+ 
+ class DynamoPi(Pi):
+     """Pi with the local Dynamo provider and Harbor's per-trial session ID."""
+ 
++    SUPPORTS_ATIF = True
++
+     def __init__(
+         self,
+         *args,
+@@ -24,6 +28,18 @@ class DynamoPi(Pi):
+         self._provider_path = provider_path
+         super().__init__(*args, **kwargs)
+ 
++    @override
++    def populate_context_post_run(self, context: AgentContext) -> None:
++        super().populate_context_post_run(context)
++        output_file = self.logs_dir / self._OUTPUT_FILENAME
++        if output_file.exists():
++            write_trajectory(
++                output_file,
++                agent_version=self.version(),
++                model_name=self.model_name,
++                harbor_session_id=self.session_id,
++            )
++
+     @override
+     async def install(self, environment: BaseEnvironment) -> None:
+         await super().install(environment)

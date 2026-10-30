@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: ate-env-api
+  name: ate-env-api
+  namespace: ate-env
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ate-env-api
+  template:
+    metadata:
+      labels:
+        app: ate-env-api
+    spec:
+      containers:
+      - args:
+        - -listen
+        - 0.0.0.0:7777
+        - -ateapi-token-file=/var/run/secrets/ateapi/token
+        - --atenet=atenet-router.ate-system.svc:443
+        - --skip-verify=false
+        - --tls-ca-file=/run/substrate/trust-bundle.pem
+        - --tls-credential-bundle=/run/substrate/credential-bundle.pem
+        - --ateapi=api.ate-system.svc:443
+        image: ${ENV_API_IMAGE}
+        name: ate-env-api
+        ports:
+        - containerPort: 7777
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 7777
+        volumeMounts:
+        - mountPath: /var/run/secrets/ateapi
+          name: ateapi-token
+          readOnly: true
+        - name: substrate-identity
+          mountPath: /run/substrate
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+      volumes:
+      - name: ateapi-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 7200
+              path: token
+      - name: substrate-identity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      serviceAccountName: ate-env-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: ate-env-api
+  name: ate-env-api
+  namespace: ate-env
+spec:
+  ports:
+  - port: 7777
+    targetPort: 7777
+  selector:
+    app: ate-env-api

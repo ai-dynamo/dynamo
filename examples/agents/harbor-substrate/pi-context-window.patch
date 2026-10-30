@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+diff --git a/pi-plugin/src/light/provider.ts b/pi-plugin/src/light/provider.ts
+index 9db0396..246b6d5 100644
+--- a/pi-plugin/src/light/provider.ts
++++ b/pi-plugin/src/light/provider.ts
+@@ -42,7 +42,7 @@ export interface DynamoConfig {
+ }
+ 
+ interface OpenAIModelsResponse {
+-	data?: Array<{ id?: unknown }>;
++	data?: Array<{ id?: unknown; context_window?: unknown }>;
+ }
+ 
+ type OpenAICompletionsStreamSimple = (
+@@ -142,7 +142,12 @@ export async function discoverDynamoModels(config: DynamoConfig, timeoutMs = 200
+ 		const ids =
+ 			body.data?.map((model) => model.id).filter((id): id is string => typeof id === "string" && id.length > 0) ??
+ 			[];
+-		return createDynamoModels([...new Set(ids)], config.baseUrl);
++		return createDynamoModels([...new Set(ids)], config.baseUrl).map((model) => {
++			const limit = body.data?.find((entry) => entry.id === model.id)?.context_window;
++			return typeof limit === "number" && Number.isSafeInteger(limit) && limit > 1
++				? { ...model, contextWindow: Math.min(model.contextWindow, limit), maxTokens: Math.min(model.maxTokens, Math.max(1, Math.floor(Math.min(model.contextWindow, limit) / 4))) }
++				: model;
++		});
+ 	} catch {
+ 		return [];
+ 	} finally {
+diff --git a/pi-plugin/test/light.test.ts b/pi-plugin/test/light.test.ts
+index 5ef3c2e..4958591 100644
+--- a/pi-plugin/test/light.test.ts
++++ b/pi-plugin/test/light.test.ts
+@@ -4,11 +4,12 @@
+ import { decode } from "@msgpack/msgpack";
+ import { createAssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions } from "@mariozechner/pi-ai";
+ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+-import { describe, expect, it } from "vitest";
++import { describe, expect, it, vi } from "vitest";
+ import {
+ 	applySubagentSessionBridge,
+ 	buildToolAgentContext,
+ 	createDynamoStreamSimple,
++	discoverDynamoModels,
+ 	DEFAULT_DYNAMO_BASE_URL,
+ 	DEFAULT_DYNAMO_MODEL_ID,
+ 	DynamoToolEventPublisher,
+@@ -55,6 +56,26 @@ function createContext(sessionId: string): ExtensionContext {
+ }
+ 
+ describe("light provider", () => {
++	it.each([
++		[32768, 32768, 8192],
++		[8192, 8192, 2048],
++		[undefined, 128000, 8192],
++		["32768", 128000, 8192],
++		[0, 128000, 8192],
++		[1.5, 128000, 8192],
++	])("uses valid served context metadata (%s)", async (served, contextWindow, maxTokens) => {
++		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(JSON.stringify({ data: [{ id: "small-model", context_window: served }] })),
++		);
++		try {
++			const models = await discoverDynamoModels(config);
++			expect(models).toHaveLength(1);
++			expect(models[0]).toMatchObject({ id: "small-model", contextWindow, maxTokens });
++		} finally {
++			fetch.mockRestore();
++		}
++	});
++
+ 	it("keeps Pi sessionId and adds Dynamo session headers", () => {
+ 		let capturedModel: Model<"openai-completions"> | undefined;
+ 		let capturedOptions: SimpleStreamOptions | undefined;

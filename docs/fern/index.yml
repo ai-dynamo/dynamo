@@ -717,6 +717,8 @@ navigation:
             path: pages/use-cases/agents/priority-scheduling.md
           - page: Agent Harnesses
             path: pages/use-cases/agents/agent-harnesses.mdx
+          - page: Sandboxed Coding Agents
+            path: pages/use-cases/agents/harbor-substrate.mdx
           - page: Agent Tracing
             path: pages/use-cases/agents/agent-tracing.md
           - page: Agent Simulation
