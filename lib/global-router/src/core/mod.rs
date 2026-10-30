@@ -23,11 +23,13 @@ use async_trait::async_trait;
 use dynamo_global_common::PoolId;
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::multi_worker_sequence::ReplicaRequestLeaseObserver;
 use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::queue::SchedulerBookingDescriptor;
 use dynamo_kv_router::scheduling::RouterPolicyConfig;
 use dynamo_kv_router::services::selection::{
-    CatalogReconciler, PromptRequest, SelectAndReserveRequest, SelectionService,
-    SelectionServiceBuilder,
+    CatalogReconciler, HostReplication, PromptRequest, SelectAndReserveRequest, SelectionHost,
+    SelectionService, SelectionServiceBuilder,
 };
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -61,6 +63,13 @@ impl CoreSelector {
         let service =
             SelectionServiceBuilder::new(config(policy)?, WorkerType::Aggregated, registry()?)
                 .indexer_threads(1)
+                .host(SelectionHost {
+                    replication: HostReplication {
+                        request_leases: Some(Arc::new(ReservationLeases)),
+                        ..HostReplication::default()
+                    },
+                    ..SelectionHost::default()
+                })
                 .build()
                 .await
                 .context("build the router core")?;
@@ -214,6 +223,19 @@ fn config(policy: CorePolicy) -> Result<KvRouterConfig> {
 
 fn registry() -> Result<dynamo_kv_router::services::selection::RouterPluginRegistry> {
     policies::registry().context("register the pool selection policies")
+}
+
+/// The host owns each booking's lifetime: a booking lasts as long as its
+/// [`Reservation`], which the frontend holds until the response ends or the
+/// client leaves, never a fixed age. Supplying this to the core turns its
+/// age-based expiry off. Nothing is mirrored from peers here, so there is
+/// nothing to observe.
+struct ReservationLeases;
+
+impl ReplicaRequestLeaseObserver for ReservationLeases {
+    fn admitted(&self, _: SchedulerBookingDescriptor) {}
+    fn progressed(&self, _: &SchedulerBookingDescriptor) {}
+    fn completed(&self, _: &SchedulerBookingDescriptor) {}
 }
 
 /// The core's booking of one request on its pool, held from selection until
