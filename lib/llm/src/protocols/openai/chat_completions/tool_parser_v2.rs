@@ -183,7 +183,9 @@ pub fn structural_tag_family_names() -> Vec<&'static str> {
         legacy
             .get(*family)
             .is_some_and(|config| config.structural_tag_builder.is_some())
-            || dynamo_parsers_v2::structural_tag_builder_for_family(family).is_some()
+            || super::unified_parser::canonical_family(family)
+                .and_then(dynamo_parsers_v2::structural_tag_builder_for_family)
+                .is_some()
     });
     names.sort_unstable();
     names.dedup();
@@ -1014,19 +1016,16 @@ mod tests {
     #[test]
     fn grammar_capability_inventory_is_sorted_and_selectable() {
         let names = structural_tag_family_names();
-        assert!(names.contains(&"deepseek_v4"));
+        for family in ["deepseek_v4", "deepseek_v41", "glm45", "kimi_k25"] {
+            assert!(names.contains(&family), "missing grammar: {family}");
+        }
         assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
         let mut selectable = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
         selectable.extend_from_slice(unified_family_names());
         assert!(names.iter().all(|family| selectable.contains(family)));
-        // The pinned dependency determines this capability; selecting the
-        // Unified V4.1 output parser must not invent a grammar builder.
-        assert!(unified_family_names().contains(&"deepseek_v41"));
-        let v41_has_builder = dynamo_parsers::tool_calling::parsers::get_tool_parser_map()
-            .get("deepseek_v41")
-            .is_some_and(|config| config.structural_tag_builder.is_some())
-            || dynamo_parsers_v2::structural_tag_builder_for_family("deepseek_v41").is_some();
-        assert_eq!(names.contains(&"deepseek_v41"), v41_has_builder);
+        assert!(selectable.contains(&"gemma4"));
+        assert!(!names.contains(&"gemma4"));
+        assert!(!names.contains(&"no_such_parser"));
     }
 
     #[test]
