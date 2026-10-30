@@ -379,21 +379,27 @@ fn generate_description_for_path(path: &str) -> String {
 
 /// Create router for OpenAPI documentation endpoints
 pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<RouteDoc>, Router) {
-    use utoipa_swagger_ui::SwaggerUi;
+    use std::sync::Arc;
+    use utoipa_swagger_ui::{Config, SwaggerUi};
 
     // Generate the OpenAPI spec from route docs
-    let openapi_spec = generate_openapi_spec(&route_docs);
+    let openapi_spec = Arc::new(generate_openapi_spec(&route_docs));
 
     // Note: SwaggerUi requires a static string for the URL path, so we ignore the custom path
     // parameter and always use "/openapi.json"
     let openapi_path = "/openapi.json";
 
-    // Create Swagger UI with the OpenAPI spec
-    // SwaggerUi automatically serves both the spec at /openapi.json and the UI at /docs
-    let swagger_ui = SwaggerUi::new("/docs").url(openapi_path, openapi_spec);
-
-    // SwaggerUi handles both routes internally, so we just merge it
-    let router = Router::new().merge(swagger_ui);
+    // Serve the spec here and give Swagger UI only its URL, so no utoipa type crosses into
+    // utoipa-swagger-ui, which can build on a different utoipa major.
+    let router = Router::new()
+        .route(
+            openapi_path,
+            axum::routing::get(move || {
+                let spec = Arc::clone(&openapi_spec);
+                async move { axum::Json(spec.as_ref().clone()) }
+            }),
+        )
+        .merge(SwaggerUi::new("/docs").config(Config::new([openapi_path])));
 
     let docs = vec![
         RouteDoc::new(axum::http::Method::GET, openapi_path),
@@ -439,5 +445,43 @@ mod tests {
         let item = &json["paths"]["/busy_threshold"];
         assert!(item.get("get").is_some(), "GET operation missing: {item}");
         assert!(item.get("post").is_some(), "POST operation missing: {item}");
+    }
+
+    #[tokio::test]
+    async fn openapi_router_serves_the_spec_and_swagger_ui() {
+        let (docs, router) = openapi_router(
+            vec![RouteDoc::new(
+                axum::http::Method::POST,
+                "/v1/chat/completions",
+            )],
+            None,
+        );
+        assert_eq!(docs.len(), 2);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let spec = client
+            .get(format!("{base}/openapi.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(spec.status(), reqwest::StatusCode::OK);
+        assert_eq!(spec.headers()["content-type"], "application/json");
+        let spec: serde_json::Value = serde_json::from_str(&spec.text().await.unwrap()).unwrap();
+        assert!(
+            spec["paths"].get("/v1/chat/completions").is_some(),
+            "{spec}"
+        );
+
+        let initializer = client
+            .get(format!("{base}/docs/swagger-initializer.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(initializer.status(), reqwest::StatusCode::OK);
+        assert!(initializer.text().await.unwrap().contains("/openapi.json"));
+        server.abort();
     }
 }

@@ -12,6 +12,10 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# flate2 only selects the deflate backend that zip uses; no code imports it.
+ignored = ["flate2"]
+
 [features]
 default = []
 profile = []
@@ -48,10 +52,15 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 # crate-specific
+# zip's deflate-flate2 picks no flate2 backend; flate2's default backend is miniz_oxide.
+flate2 = "1.1.9"
 ndarray = "0.16"
-ndarray-npy = "0.9"
+# Without its npz feature, which needs zip 2.x; perf_model.rs reads NPZ archives with zip.
+ndarray-npy = { version = "0.9", default-features = false }
 ndarray-interp = "0.5"
 rustc-hash = "2"
+# deflate-flate2 uses the miniz_oxide backend above; the zlib variants switch flate2 for all users.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"
