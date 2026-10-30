@@ -15,10 +15,10 @@ from .common import check_module_available
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 HAS_QWEN3_REASONING = check_module_available(
     "vllm.reasoning.qwen3_engine_reasoning_parser"
-) or check_module_available("vllm.reasoning.qwen3_reasoning_parser")
+)
 HAS_QWEN3_TOOL_PARSER = check_module_available(
     "vllm.tool_parsers.qwen3_engine_tool_parser"
-) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
+)
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
@@ -51,27 +51,15 @@ pytestmark = [
 
 
 def _resolve_qwen3_reasoning_parser_class():
-    try:
-        from vllm.reasoning.qwen3_engine_reasoning_parser import (
-            Qwen3ParserReasoningAdapter,
-        )
+    from vllm.reasoning.qwen3_engine_reasoning_parser import Qwen3ParserReasoningAdapter
 
-        return Qwen3ParserReasoningAdapter
-    except ImportError:
-        from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
-
-        return Qwen3ReasoningParser
+    return Qwen3ParserReasoningAdapter
 
 
 def _resolve_qwen3_tool_parser_class():
-    try:
-        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
-        return Qwen3EngineToolParser
-    except ImportError:
-        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-
-        return Qwen3CoderToolParser
+    return Qwen3EngineToolParser
 
 
 def _make_qwen3_tool_parser(tokenizer, tools):

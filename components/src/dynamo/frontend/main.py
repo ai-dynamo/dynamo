@@ -27,7 +27,6 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
-from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -276,15 +275,10 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
-            from vllm.utils import FlexibleArgumentParser
-        except ImportError:
-            try:
-                from vllm.utils.argparse_utils import FlexibleArgumentParser
-            except ModuleNotFoundError:
-                logger.exception(
-                    "Flag '--chat-processor vllm' requires vllm be installed."
-                )
-                sys.exit(1)
+            from vllm.utils.argparse_utils import FlexibleArgumentParser
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
         # On a host with no GPU and a CUDA-built wheel, vllm.platforms
         # auto-detection picks UnspecifiedPlatform and the
@@ -302,11 +296,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-
-            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
-                from vllm.entrypoints.launchers.cli_args import FrontendArgs
-            else:
-                from vllm.entrypoints.openai.cli_args import FrontendArgs
+            from vllm.entrypoints.launchers.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
