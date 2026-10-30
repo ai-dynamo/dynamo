@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Client for the Global Discovery Service: listing every Global Router
-//! replica ([`GlobalDiscoveryClient::routers`]) and registering a pool
+//! replica ([`GlobalDiscoveryClient::routers`]), listing pools
+//! ([`GlobalDiscoveryClient::pools`]) and registering a pool
 //! ([`GlobalDiscoveryClient::register_pool`]). [`RouterCache`] keeps the
 //! router list current by reading it on an interval.
 //!
@@ -15,6 +16,6 @@ mod client;
 pub use cache::{Freshness, RouterCache};
 pub use client::{DiscoveryClientError, GlobalDiscoveryClient};
 pub use dynamo_global_common::{
-    Capacity, Lease, LeaseError, PoolKey, PoolKeyError, PoolLocation, PoolRegistration,
-    RouterReplica, RouterReplicaId,
+    Capacity, Lease, LeaseError, PoolKey, PoolKeyError, PoolListing, PoolLocation,
+    PoolRegistration, PoolsResponse, RouterReplica, RouterReplicaId,
 };
