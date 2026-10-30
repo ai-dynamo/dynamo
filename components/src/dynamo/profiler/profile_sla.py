@@ -36,6 +36,7 @@ from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
     build_ais_perf_model_spec,
+    finalize_unauthenticated_output,
 )
 from dynamo.profiler.utils.dgd_materialization import (
     DGDMaterializationPurpose,
@@ -550,6 +551,7 @@ async def run_profile(
             model_name_or_path=resolve_model_path(dgdr),
             trust_remote_code=trust_remote_code,
         )
+        final_config = finalize_unauthenticated_output(dgdr, final_config)
 
         if final_config:
             _validate_dgd_service_name_lengths(dgdr, final_config)
