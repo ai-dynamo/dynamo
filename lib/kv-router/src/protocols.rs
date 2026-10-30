@@ -955,6 +955,9 @@ pub struct PlacementEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Positive text-only provenance required for shared-cache learning.
+    #[serde(default, rename = "sce", skip_serializing_if = "std::ops::Not::not")]
+    pub shared_cache_eligible: bool,
 }
 
 impl PlacementEvent {
@@ -963,6 +966,7 @@ impl PlacementEvent {
             placement,
             event,
             session_id: None,
+            shared_cache_eligible: false,
         }
     }
 
@@ -973,6 +977,11 @@ impl PlacementEvent {
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
         Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn with_shared_cache_eligibility(mut self, eligible: bool) -> Self {
+        self.shared_cache_eligible = eligible;
+        self
     }
 
     pub fn into_router_event(self) -> Option<RouterEvent> {
@@ -986,6 +995,7 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
+        event.shared_cache_eligible = self.shared_cache_eligible;
         Some(event)
     }
 }
@@ -1578,6 +1588,9 @@ pub struct RouterEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Positive text-only provenance required for shared-cache learning.
+    #[serde(default, rename = "sce", skip_serializing_if = "std::ops::Not::not")]
+    pub shared_cache_eligible: bool,
 }
 
 impl RouterEvent {
@@ -1615,6 +1628,7 @@ impl RouterEvent {
             worker_id,
             state_source: None,
             session_id: None,
+            shared_cache_eligible: false,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1635,6 +1649,11 @@ impl RouterEvent {
     /// Attach an explicit stable source to a residency-aware event.
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
+        self
+    }
+
+    pub fn with_shared_cache_eligibility(mut self, eligible: bool) -> Self {
+        self.shared_cache_eligible = eligible;
         self
     }
 
@@ -1988,6 +2007,55 @@ mod tests {
                     blocks: Vec::new(),
                 }),
             )
+        }
+
+        #[test]
+        fn shared_cache_eligibility_defaults_false_and_roundtrips() {
+            let legacy = LegacyRouterEvent {
+                worker_id: 7,
+                storage_tier: StorageTier::Device,
+                event: stored(1),
+            };
+            let json: RouterEvent =
+                serde_json::from_slice(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+            let named: RouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert!(!json.shared_cache_eligible);
+            assert!(!named.shared_cache_eligible);
+
+            for eligible in [false, true] {
+                let placement =
+                    PlacementEvent::local_gpu(7, stored(1)).with_shared_cache_eligibility(eligible);
+                let value = serde_json::to_value(&placement).unwrap();
+                assert_eq!(value.get("sce").is_some(), eligible);
+                assert!(value.get("shared_cache_eligible").is_none());
+                let json: PlacementEvent = serde_json::from_value(value).unwrap();
+                let named: PlacementEvent =
+                    rmp_serde::from_slice(&rmp_serde::to_vec_named(&placement).unwrap()).unwrap();
+                assert_eq!(json.shared_cache_eligible, eligible);
+                assert_eq!(named.shared_cache_eligible, eligible);
+
+                let router = placement.into_router_event().unwrap();
+                assert_eq!(router.shared_cache_eligible, eligible);
+                assert_eq!(
+                    router,
+                    RouterEvent::new(7, stored(1)).with_shared_cache_eligibility(eligible)
+                );
+                let value = serde_json::to_value(&router).unwrap();
+                assert_eq!(value.get("sce").is_some(), eligible);
+                assert!(value.get("shared_cache_eligible").is_none());
+                let wire = rmp_serde::to_vec_named(&router).unwrap();
+                let baseline = rmp_serde::to_vec_named(&RouterEvent::new(7, stored(1))).unwrap();
+                assert_eq!(wire.len(), baseline.len() + if eligible { 5 } else { 0 });
+                let old_json: LegacyRouterEvent = serde_json::from_value(value.clone()).unwrap();
+                let old_named: LegacyRouterEvent = rmp_serde::from_slice(&wire).unwrap();
+                assert_eq!(old_json.event, stored(1));
+                assert_eq!(old_named.event, stored(1));
+                let json: RouterEvent = serde_json::from_value(value).unwrap();
+                let named: RouterEvent = rmp_serde::from_slice(&wire).unwrap();
+                assert_eq!(json, router);
+                assert_eq!(named, router);
+            }
         }
 
         #[test]
