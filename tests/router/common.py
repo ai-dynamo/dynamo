@@ -5945,6 +5945,26 @@ def _wait_prefill_booking(
     )
 
 
+def _wait_fe_priority_prefill_order(
+    stack, low_id: str, high_id: str, deadline: float, case_name: str
+) -> list[str]:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = []
+        for record in stack.selection_records():
+            if record.get("worker_type") != "prefill":
+                continue
+            rid = record.get("request_id")
+            if rid in {low_id, high_id} and rid not in last:
+                last.append(rid)
+        if len(last) == 2:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE low/high prefill traces are {last}, expected both"
+    )
+
+
 def _wait_pending_prefill(stack, expected: float, deadline: float, case_name: str):
     last = None
     observed: list[str] = []
@@ -6057,10 +6077,7 @@ def _post_fe_priority_sentinel(
     deadline: float,
     case_name: str,
 ):
-    from tests.router.epp_parity import (
-        _typed_fe_queue_rejection,
-        merge_request_headers,
-    )
+    from tests.router.epp_parity import _typed_fe_queue_rejection, merge_request_headers
 
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -6277,6 +6294,164 @@ def _prove_fe_priority_capacity(
     return low_thread, low_out, high_thread, high_out, sentinel
 
 
+def _wait_epp_blocker_queue_ordering(stack, deadline: float, case_name: str) -> None:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.epp_queue_ordering_records(after_bytes=0)
+        if len(last) > 1:
+            raise AssertionError(
+                f"{case_name}: EPP blocker queue ordering records are {last}, "
+                "not exactly 1"
+            )
+        if len(last) == 1:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: EPP blocker queue ordering records are {last}, "
+        "expected exactly 1"
+    )
+
+
+def _wait_epp_low_high_queue_ordering(
+    stack,
+    *,
+    after_bytes: int,
+    deadline: float,
+    case_name: str,
+    epp_low,
+    epp_high,
+) -> None:
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                f"{case_name}: EPP low/high admitted before sentinel"
+            )
+        last = stack.epp_queue_ordering_records(after_bytes=after_bytes)
+        if len(last) > PRIORITY_QUEUE_LIMIT:
+            raise AssertionError(
+                f"{case_name}: EPP queue ordering records are {last}, "
+                f"not exactly {PRIORITY_QUEUE_LIMIT}"
+            )
+        if len(last) == PRIORITY_QUEUE_LIMIT:
+            if (
+                _poll_held_admission(epp_low, 0.0) is not None
+                or _poll_held_admission(epp_high, 0.0) is not None
+            ):
+                raise AssertionError(
+                    f"{case_name}: EPP low/high admitted before sentinel"
+                )
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: EPP queue ordering records are {last}, "
+        f"expected exactly {PRIORITY_QUEUE_LIMIT}"
+    )
+
+
+def _wait_epp_prefill_fallback(
+    stack, *, after_bytes: int, deadline: float, case_name: str
+) -> None:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.epp_prefill_fallback_rejections(after_bytes=after_bytes)
+        if len(last) > 1:
+            raise AssertionError(
+                f"{case_name}: EPP prefill fallback records are extra: "
+                f"{len(last)}"
+            )
+        if len(last) == 1:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: EPP prefill fallback queue rejection is absent"
+    )
+
+
+def _prove_epp_priority_capacity(
+    stack,
+    case: dict[str, Any],
+    *,
+    catalog: dict[str, int],
+    case_name: str,
+    blocker_obs,
+    low_id: str,
+    high_id: str,
+    sentinel_id: str,
+    low_payload: dict[str, Any],
+    high_payload: dict[str, Any],
+    low_headers,
+    high_headers,
+):
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
+
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    _wait_epp_blocker_queue_ordering(stack, deadline, case_name)
+    log_cursor = stack.epp_log_bytes()
+    with contextlib.ExitStack() as acquired:
+        epp_low = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+        )
+        acquired.callback(epp_low.close)
+        epp_high = stack.driver.open_held_stream(
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+        )
+        acquired.callback(epp_high.close)
+        _wait_epp_low_high_queue_ordering(
+            stack,
+            after_bytes=log_cursor,
+            deadline=deadline,
+            case_name=case_name,
+            epp_low=epp_low,
+            epp_high=epp_high,
+        )
+        _assert_priority_catalog(stack, catalog, "before EPP sentinel")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{case_name}: EPP hold budget exhausted before sentinel"
+            )
+        epp_sentinel = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=sentinel_id,
+            accept_queue_rejection=True,
+        )
+        acquired.callback(epp_sentinel.close)
+        sentinel_outcome = epp_sentinel.wait_routing_mutation(timeout_s=remaining)
+        sentinel_kind = _classify_epp_sentinel_outcome(
+            sentinel_outcome, case_name, catalog, blocker_obs
+        )
+        if sentinel_kind == "aggregated":
+            _wait_epp_prefill_fallback(
+                stack,
+                after_bytes=log_cursor,
+                deadline=deadline,
+                case_name=case_name,
+            )
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                f"{case_name}: EPP low/high admitted before blocker release"
+            )
+        _assert_priority_catalog(stack, catalog, "during EPP hold")
+        acquired.pop_all()
+        return epp_low, epp_high, epp_sentinel, sentinel_kind, sentinel_outcome
+
+
 def _poll_held_admission(handle, timeout_s: float):
     try:
         return handle.wait_routing_mutation(timeout_s=timeout_s)
@@ -6322,11 +6497,7 @@ def _classify_epp_sentinel_outcome(
 
 def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
     """Compare FE/EPP admission under a held 1P+1D queue of two."""
-    from tests.router.epp_parity import (
-        PRIORITY_HOLD_DEADLINE_S,
-        PRIORITY_POLICY_CLASS,
-        PRIORITY_QUEUE_LIMIT,
-    )
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
 
     case = frontend_epp_priority_case(model_name)
     low_nvext, high_nvext, low_headers, high_headers = _priority_inputs(kind)
@@ -6356,24 +6527,28 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
             label=f"{kind}-blocker",
         )
         _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
-        low_thread, low_out, high_thread, high_out, _fe_sentinel = (
-            _prove_fe_priority_capacity(
-                stack,
-                case,
-                catalog=catalog,
-                deadline=deadline,
-                case_name=kind,
-                blocker_id=blocker_id,
-                low_id=low_id,
-                high_id=high_id,
-                sentinel_id=sentinel_id,
-                low_payload=low_payload,
-                high_payload=high_payload,
-                low_headers=low_headers,
-                high_headers=high_headers,
-                low_label=f"{kind}-low",
-                high_label=f"{kind}-high",
-            )
+        (
+            low_thread,
+            low_out,
+            high_thread,
+            high_out,
+            _fe_sentinel,
+        ) = _prove_fe_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            deadline=deadline,
+            case_name=kind,
+            blocker_id=blocker_id,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+            low_label=f"{kind}-low",
+            high_label=f"{kind}-high",
         )
         stack.resume_owned_prefill()
         join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
@@ -6393,13 +6568,9 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                     f"{kind} FE {label} HTTP {outcome.get('status')}: "
                     f"{str(outcome.get('text', ''))[:300]}"
                 )
-        fe_order = []
-        for record in stack.selection_records():
-            if record.get("worker_type") != "prefill":
-                continue
-            rid = record.get("request_id")
-            if rid in {low_id, high_id} and rid not in fe_order:
-                fe_order.append(rid)
+        fe_order = _wait_fe_priority_prefill_order(
+            stack, low_id, high_id, join_deadline, kind
+        )
         if fe_order != [high_id, low_id]:
             raise AssertionError(
                 f"{kind}: FE admission order {fe_order} is not high then low"
@@ -6434,46 +6605,20 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
                 f"{catalog['prefill']}: {blocker_obs.prefill_worker_id}"
             )
         _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
-        log_cursor = stack.epp_log_bytes()
-        epp_low = stack.driver.open_held_stream(
-            low_payload,
-            path=case["path"],
-            request_id=low_id,
-            headers=low_headers or None,
+        epp_low, epp_high, epp_sentinel, _, _ = _prove_epp_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            case_name=kind,
+            blocker_obs=blocker_obs,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
         )
-        epp_high = stack.driver.open_held_stream(
-            high_payload,
-            path=case["path"],
-            request_id=high_id,
-            headers=high_headers or None,
-        )
-        epp_sentinel = stack.driver.open_held_stream(
-            low_payload,
-            path=case["path"],
-            request_id=sentinel_id,
-            accept_queue_rejection=True,
-        )
-        sentinel_outcome = epp_sentinel.wait_routing_mutation(
-            timeout_s=PRIORITY_HOLD_DEADLINE_S
-        )
-        sentinel_kind = _classify_epp_sentinel_outcome(
-            sentinel_outcome, kind, catalog, blocker_obs
-        )
-        errors = stack.epp_queue_rejection_errors(after_bytes=log_cursor)
-        if not errors:
-            raise AssertionError(
-                f"{kind}: EPP sentinel {sentinel_kind} without owned "
-                f"policy class {PRIORITY_POLICY_CLASS!r} "
-                f"current={PRIORITY_QUEUE_LIMIT}/limit="
-                f"{PRIORITY_QUEUE_LIMIT} debug error"
-            )
-        if (
-            _poll_held_admission(epp_low, 0.0) is not None
-            or _poll_held_admission(epp_high, 0.0) is not None
-        ):
-            raise AssertionError(
-                f"{kind}: EPP low/high admitted before blocker release"
-            )
         epp_blocker.release()
         admitted = None
         pending = None
@@ -6556,11 +6701,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
 
 def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
     """Compare FE typed 529 to the EPP third-waiter outcome."""
-    from tests.router.epp_parity import (
-        PRIORITY_HOLD_DEADLINE_S,
-        PRIORITY_POLICY_CLASS,
-        PRIORITY_QUEUE_LIMIT,
-    )
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
 
     case = frontend_epp_priority_case(model_name)
     low_nvext, high_nvext, low_headers, high_headers = _priority_inputs("body_strict")
@@ -6590,24 +6731,28 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             label="sentinel-blocker",
         )
         _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
-        low_thread, low_out, high_thread, high_out, fe_sentinel = (
-            _prove_fe_priority_capacity(
-                stack,
-                case,
-                catalog=catalog,
-                deadline=deadline,
-                case_name="sentinel",
-                blocker_id=blocker_id,
-                low_id=low_id,
-                high_id=high_id,
-                sentinel_id=sentinel_id,
-                low_payload=low_payload,
-                high_payload=high_payload,
-                low_headers=low_headers,
-                high_headers=high_headers,
-                low_label="sentinel-low",
-                high_label="sentinel-high",
-            )
+        (
+            low_thread,
+            low_out,
+            high_thread,
+            high_out,
+            fe_sentinel,
+        ) = _prove_fe_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            deadline=deadline,
+            case_name="sentinel",
+            blocker_id=blocker_id,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+            low_label="sentinel-low",
+            high_label="sentinel-high",
         )
         stack.resume_owned_prefill()
         join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
@@ -6652,45 +6797,26 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
                 f"{blocker_obs}"
             )
         _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
-        log_cursor = stack.epp_log_bytes()
-        epp_low = stack.driver.open_held_stream(
-            low_payload,
-            path=case["path"],
-            request_id=low_id,
-            headers=low_headers or None,
+        (
+            epp_low,
+            epp_high,
+            epp_sentinel,
+            sentinel_kind,
+            sentinel_outcome,
+        ) = _prove_epp_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            case_name="sentinel",
+            blocker_obs=blocker_obs,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
         )
-        epp_high = stack.driver.open_held_stream(
-            high_payload,
-            path=case["path"],
-            request_id=high_id,
-            headers=high_headers or None,
-        )
-        epp_sentinel = stack.driver.open_held_stream(
-            low_payload,
-            path=case["path"],
-            request_id=sentinel_id,
-            accept_queue_rejection=True,
-        )
-        sentinel_outcome = epp_sentinel.wait_routing_mutation(
-            timeout_s=PRIORITY_HOLD_DEADLINE_S
-        )
-        sentinel_kind = _classify_epp_sentinel_outcome(
-            sentinel_outcome, "sentinel", catalog, blocker_obs
-        )
-        if not stack.epp_queue_rejection_errors(after_bytes=log_cursor):
-            raise AssertionError(
-                f"sentinel EPP {sentinel_kind} without owned "
-                f"policy class {PRIORITY_POLICY_CLASS!r} "
-                f"current={PRIORITY_QUEUE_LIMIT}/limit="
-                f"{PRIORITY_QUEUE_LIMIT} debug error"
-            )
-        if (
-            _poll_held_admission(epp_low, 0.0) is not None
-            or _poll_held_admission(epp_high, 0.0) is not None
-        ):
-            raise AssertionError(
-                "sentinel EPP low/high admitted before blocker release"
-            )
         _assert_priority_catalog(stack, catalog, "after EPP admission")
         if stack.kube_api.failures:
             raise AssertionError(

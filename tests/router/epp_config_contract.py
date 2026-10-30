@@ -17,7 +17,9 @@ parser contracts. The five conditional scalar envs and
 ``positional_search_mode`` are separate not-FE-honored rows.
 ``use_remote_indexer`` binds the existing first-selection query-counter
 observer. ``session_affinity_ttl_secs`` binds TTL enable-presence only on
-the existing session_id gap. ``shared_cache_multiplier`` is a
+the existing session_id gap. ``overlap_refresh_after_secs`` is a
+supported_candidate dual-process queue-construction INFO plus plain-chat
+token-parity observer. ``shared_cache_multiplier`` is a
 supported_candidate profile pending runtime evidence. Remaining rows stay
 pending.
 
@@ -36,6 +38,7 @@ import ast
 import json
 import logging
 import re
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,8 +128,38 @@ POSITIONAL_ROW = "positional_search_mode"
 POSITIONAL_ENV = "DYN_ROUTER_POSITIONAL_SEARCH_MODE"
 POSITIONAL_SENTINEL = "binary"
 POSITIONAL_TEST = "test_positional_search_not_fe_honored"
-POSITIONAL_ITEM = (
-    f"tests/router/test_epp_frontend_config_parity.py::{POSITIONAL_TEST}"
+POSITIONAL_ITEM = f"tests/router/test_epp_frontend_config_parity.py::{POSITIONAL_TEST}"
+OVERLAP_REFRESH_ROW = "overlap_refresh_after_secs"
+OVERLAP_REFRESH_OBSERVER = "owned_fe_epp_queue_refresh_info+plain_chat_token_parity"
+OVERLAP_REFRESH_TEST = "test_overlap_refresh_effective_config"
+OVERLAP_REFRESH_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{OVERLAP_REFRESH_TEST}"
+)
+OVERLAP_REFRESH_ENV = "DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS"
+OVERLAP_REFRESH_SENTINEL = "0"
+OVERLAP_REFRESH_DEFAULT_SECS = 10
+OVERLAP_REFRESH_DISABLED = (
+    "Router queue overlap-score refresh disabled via "
+    "DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS"
+)
+OVERLAP_REFRESH_ENABLED = "Router queue overlap-score refresh enabled after"
+OVERLAP_REFRESH_TARGET = "dynamo_kv_router::scheduling::queue"
+OVERLAP_REFRESH_LOG_FLUSH_S = 2.0
+OVERLAP_REFRESH_RS = REPO_ROOT / "lib/kv-router/src/scheduling/overlap_refresh.rs"
+QUEUE_RS = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
+INDEXER_BACKEND_RS = REPO_ROOT / "lib/kv-router/src/services/indexer/backend.rs"
+WORKERS_RS = REPO_ROOT / "lib/kv-router/src/services/selection/core/workers.rs"
+_DEFAULT_OVERLAP_REFRESH_RE = re.compile(
+    r"pub const DEFAULT_OVERLAP_REFRESH_AFTER_SECS:\s*u64\s*=\s*(\d+)\s*;"
+)
+_READ_OVERLAP_REFRESH_RE = re.compile(
+    r"pub fn read_overlap_refresh_after\s*\(\s*\)\s*->\s*Option<Duration>\s*\{"
+)
+_QUEUE_REFRESH_IF_RE = re.compile(
+    r"let overlap_refresh_after = if overlap_scores_refresh\.is_some\(\)\s*\{"
+)
+_SUPPORTS_OVERLAP_REFRESH_RE = re.compile(
+    r"pub fn supports_overlap_refresh\s*\(\s*&self\s*\)\s*->\s*bool\s*\{"
 )
 NOT_FE_HONORED_ROWS = frozenset({NOT_FE_HONORED_ROW, POSITIONAL_ROW})
 KV_INDEXER_MOD = REPO_ROOT / "lib/kv-router/src/indexer/mod.rs"
@@ -1097,16 +1130,17 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "observer in this increment.",
     ),
     SettingDecision(
-        "overlap_refresh_after_secs",
+        OVERLAP_REFRESH_ROW,
         (),
-        ("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS",),
+        (OVERLAP_REFRESH_ENV,),
         (),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        OVERLAP_REFRESH_OBSERVER,
         (),
-        (),
-        "Rust env consumed by overlap refresh. No FE CLI dest. No live "
-        "observer in this increment.",
+        (OVERLAP_REFRESH_ROW,),
+        "Rust env consumed at scheduler queue construction when the indexer "
+        "supports overlap refresh. Owned FE and EPP queue INFO plus plain-chat "
+        "token parity observe the shared nondefault disable sentinel.",
     ),
     SettingDecision(
         "positional_search_mode",
@@ -1398,6 +1432,14 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {SESSION_TTL_OBSERVER}; only "
                 f"{SESSION_TTL_ROW} may"
             )
+        if (
+            row.observer == OVERLAP_REFRESH_OBSERVER
+            and row.name != OVERLAP_REFRESH_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {OVERLAP_REFRESH_OBSERVER}; only "
+                f"{OVERLAP_REFRESH_ROW} may"
+            )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
         names.add(row.name)
@@ -1663,7 +1705,9 @@ def _assert_remote_indexer_binding(row: SettingDecision, items: Iterable[Any]) -
             f"{row.name} is not the fixed {REMOTE_INDEXER_ROW} contract"
         )
     if row.status != STATUS_SUPPORTED:
-        raise AssertionError(f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}")
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+        )
     if row.observer != REMOTE_INDEXER_OBSERVER:
         raise AssertionError(
             f"{row.name} observer={row.observer!r} != {REMOTE_INDEXER_OBSERVER!r}"
@@ -1718,7 +1762,9 @@ def _assert_session_ttl_binding(row: SettingDecision, items: Iterable[Any]) -> N
     if row.name != SESSION_TTL_ROW:
         raise AssertionError(f"{row.name} is not the fixed {SESSION_TTL_ROW} contract")
     if row.status != STATUS_KNOWN_GAP:
-        raise AssertionError(f"{row.name} status {row.status!r} != {STATUS_KNOWN_GAP!r}")
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_KNOWN_GAP!r}"
+        )
     if row.observer != SESSION_TTL_OBSERVER:
         raise AssertionError(
             f"{row.name} observer={row.observer!r} != {SESSION_TTL_OBSERVER!r}"
@@ -1755,6 +1801,37 @@ def _assert_session_ttl_binding(row: SettingDecision, items: Iterable[Any]) -> N
     assert_session_inputs_stack_uses_ttl_300()
 
 
+def _assert_overlap_refresh_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    if row.name != OVERLAP_REFRESH_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {OVERLAP_REFRESH_ROW} contract"
+        )
+    if row.status != STATUS_SUPPORTED:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+        )
+    if row.observer != OVERLAP_REFRESH_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != "
+            f"{OVERLAP_REFRESH_OBSERVER!r}"
+        )
+    if row.flags != ():
+        raise AssertionError(f"{row.name} flags {row.flags} != ()")
+    if row.env != (OVERLAP_REFRESH_ENV,):
+        raise AssertionError(f"{row.name} env {row.env} != {(OVERLAP_REFRESH_ENV,)!r}")
+    if row.schema_fields != ():
+        raise AssertionError(f"{row.name} schema_fields {row.schema_fields} != ()")
+    if row.affected_fields != (OVERLAP_REFRESH_ROW,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            f"{(OVERLAP_REFRESH_ROW,)!r}"
+        )
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    item = _require_unique_nodeid_item(items, OVERLAP_REFRESH_ITEM)
+    _assert_ordinary_collected_item(OVERLAP_REFRESH_ITEM, item)
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -1770,7 +1847,8 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     ignored_compatibility and not_fe_honored rows bind only their fixed
     ordinary case-ID sets and verbatim identifier tuples. Those tests must
     stay free of xfail/skip. use_remote_indexer and session_affinity_ttl_secs
-    bind only their exact existing collected Items.
+    bind only their exact existing collected Items. overlap_refresh_after_secs
+    binds only its ordinary owned-process queue-INFO plus token-parity Item.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -1846,6 +1924,9 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == SESSION_TTL_ROW:
             _assert_session_ttl_binding(row, item_list)
+            continue
+        if row.name == OVERLAP_REFRESH_ROW:
+            _assert_overlap_refresh_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -3085,7 +3166,9 @@ def _assert_positional_factory_uses_radix() -> None:
         if not path.is_file()
     ]
     if missing:
-        raise AssertionError("positional factory sources missing: " + ", ".join(missing))
+        raise AssertionError(
+            "positional factory sources missing: " + ", ".join(missing)
+        )
     factory = _stripped_production_rust_text(LLM_INDEXER_MOD)
     if _positional_reference_hits(factory) or POSITIONAL_ENV in factory:
         raise AssertionError(
@@ -3192,6 +3275,250 @@ def run_positional_search_not_fe_honored(monkeypatch) -> None:
             f"{POSITIONAL_ENV}={POSITIONAL_SENTINEL!r} changed FE native JSON "
             f"{baseline} -> {changed}"
         )
+
+
+def _collapsed_rust(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def _assert_overlap_refresh_source_contract() -> None:
+    missing = [
+        str(path)
+        for path in (OVERLAP_REFRESH_RS, QUEUE_RS, INDEXER_BACKEND_RS, WORKERS_RS)
+        if not path.is_file()
+    ]
+    if missing:
+        raise AssertionError(
+            "overlap refresh sources missing: " + ", ".join(missing)
+        )
+    refresh = _stripped_production_rust_text(OVERLAP_REFRESH_RS)
+    defaults = list(_DEFAULT_OVERLAP_REFRESH_RE.finditer(refresh))
+    if len(defaults) != 1:
+        raise AssertionError(
+            "DEFAULT_OVERLAP_REFRESH_AFTER_SECS is missing, duplicate, or "
+            f"ambiguous: found {len(defaults)}"
+        )
+    default_secs = int(defaults[0].group(1))
+    if default_secs != OVERLAP_REFRESH_DEFAULT_SECS or default_secs <= 0:
+        raise AssertionError(
+            "DEFAULT_OVERLAP_REFRESH_AFTER_SECS="
+            f"{default_secs} is not the documented positive "
+            f"{OVERLAP_REFRESH_DEFAULT_SECS}s default; sentinel "
+            f"{OVERLAP_REFRESH_SENTINEL} would no longer be nondefault"
+        )
+    read_body = _unique_scoped_rust_body(
+        refresh,
+        _READ_OVERLAP_REFRESH_RE,
+        "read_overlap_refresh_after",
+    )
+    if f'"{OVERLAP_REFRESH_ENV}"' not in read_body:
+        raise AssertionError(
+            "read_overlap_refresh_after no longer consumes "
+            f"{OVERLAP_REFRESH_ENV}"
+        )
+    if "ifparsed<=0.0{returnNone;}" not in _collapsed_rust(read_body):
+        raise AssertionError(
+            "read_overlap_refresh_after no longer maps parsed<=0 to None"
+        )
+    queue = _stripped_production_rust_text(QUEUE_RS)
+    if queue.count(OVERLAP_REFRESH_DISABLED) != 1:
+        raise AssertionError(
+            "queue.rs must contain exactly one disabled overlap-refresh INFO"
+        )
+    if queue.count(OVERLAP_REFRESH_ENABLED) != 1:
+        raise AssertionError(
+            "queue.rs must contain exactly one enabled overlap-refresh INFO"
+        )
+    if_body = _unique_scoped_rust_body(
+        queue,
+        _QUEUE_REFRESH_IF_RE,
+        "overlap_refresh_after constructor branch",
+    )
+    collapsed_if = _collapsed_rust(if_body)
+    if "read_overlap_refresh_after()" not in if_body:
+        raise AssertionError(
+            "queue constructor no longer calls read_overlap_refresh_after()"
+        )
+    if (
+        "None=>tracing::info!(\""
+        + _collapsed_rust(OVERLAP_REFRESH_DISABLED)
+        + "\")"
+        not in collapsed_if
+    ):
+        raise AssertionError(
+            "queue constructor no longer logs disabled only for the None "
+            "read_overlap_refresh_after result"
+        )
+    if _collapsed_rust(OVERLAP_REFRESH_ENABLED) not in collapsed_if:
+        raise AssertionError(
+            "queue constructor no longer logs enabled for a Some refresh delay"
+        )
+    backend = _stripped_production_rust_text(INDEXER_BACKEND_RS)
+    supports_body = _unique_scoped_rust_body(
+        backend,
+        _SUPPORTS_OVERLAP_REFRESH_RE,
+        "Indexer::supports_overlap_refresh",
+    )
+    if (
+        "matches!(self,Self::Single{..}|Self::Concurrent{..})"
+        not in _collapsed_rust(supports_body)
+    ):
+        raise AssertionError(
+            "supports_overlap_refresh no longer matches Single or Concurrent"
+        )
+    workers = _stripped_production_rust_text(WORKERS_RS)
+    if "indexer.supports_overlap_refresh()" not in workers:
+        raise AssertionError(
+            "workers.rs no longer gates the refresher on supports_overlap_refresh"
+        )
+    if "TieredOverlapRefresher::new" not in workers:
+        raise AssertionError(
+            "workers.rs no longer constructs TieredOverlapRefresher"
+        )
+
+
+def _owned_process_log_text(
+    process, *, label: str, node_name: str
+) -> tuple[int, Path, str]:
+    if process is None:
+        raise AssertionError(f"EppFrontendParityStack.{label} was not saved")
+    proc = process.proc
+    if proc is None or proc.poll() is not None:
+        raise AssertionError(f"owned {label} process is not live")
+    log_path = process.log_path
+    if not log_path:
+        raise AssertionError(f"owned {label} process has no log_path")
+    log = Path(log_path)
+    if node_name not in log.as_posix():
+        raise AssertionError(f"{label} log_path {log} is not this node {node_name}")
+    if not log.is_file():
+        raise AssertionError(f"{label} log is missing: {log}")
+    data = log.read_bytes()
+    if data.endswith(b"\n"):
+        completed = data
+    else:
+        last_nl = data.rfind(b"\n")
+        completed = data[: last_nl + 1] if last_nl >= 0 else b""
+    try:
+        text = completed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssertionError(
+            f"{label} log {log} completed prefix is not valid UTF-8: {exc}"
+        ) from exc
+    return proc.pid, log, text
+
+
+def _overlap_refresh_log_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        cleaned = ANSI_RE.sub("", raw)
+        if "overlap-score refresh" in cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def _assert_exactly_one_disabled_refresh(
+    text: str, *, label: str, pid: int, log: Path
+) -> None:
+    lines = _overlap_refresh_log_lines(text)
+    if not lines:
+        raise AssertionError(
+            f"{label} pid={pid} log={log} has no overlap-score refresh "
+            "queue-construction message"
+        )
+    if len(lines) != 1:
+        raise AssertionError(
+            f"{label} pid={pid} log={log} expected exactly one overlap-score "
+            f"refresh message, found {len(lines)}: {lines}"
+        )
+    line = lines[0]
+    if OVERLAP_REFRESH_ENABLED in line:
+        raise AssertionError(
+            f"{label} pid={pid} log={log} logged enabled overlap refresh: "
+            f"{line}"
+        )
+    if OVERLAP_REFRESH_DISABLED not in line:
+        raise AssertionError(
+            f"{label} pid={pid} log={log} logged unknown refresh message: "
+            f"{line}"
+        )
+    if OVERLAP_REFRESH_TARGET not in line:
+        raise AssertionError(
+            f"{label} pid={pid} log={log} refresh message is not from "
+            f"{OVERLAP_REFRESH_TARGET}: {line}"
+        )
+
+
+def _require_owned_disabled_refresh(
+    process, *, label: str, node_name: str
+) -> tuple[int, Path]:
+    deadline = time.monotonic() + OVERLAP_REFRESH_LOG_FLUSH_S
+    while True:
+        pid, log, text = _owned_process_log_text(
+            process, label=label, node_name=node_name
+        )
+        if _overlap_refresh_log_lines(text):
+            _assert_exactly_one_disabled_refresh(
+                text, label=label, pid=pid, log=log
+            )
+            return pid, log
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{label} pid={pid} log={log} has no overlap-score refresh "
+                "queue-construction message"
+            )
+        time.sleep(0.05)
+
+
+def run_overlap_refresh_effective_config(
+    request,
+    tmp_path: Path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    from tests.router.common import (
+        frontend_epp_token_parity_cases,
+        run_frontend_epp_token_parity,
+    )
+
+    _assert_overlap_refresh_source_contract()
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    monkeypatch.setenv(OVERLAP_REFRESH_ENV, OVERLAP_REFRESH_SENTINEL)
+    cases = frontend_epp_token_parity_cases(model_name)
+    plain = [case for case in cases if case.name == "plain_chat"]
+    if len(plain) != 1:
+        raise AssertionError(
+            f"expected exactly one plain_chat token case, found {len(plain)}"
+        )
+    with stack_cls(request, tmp_path, model_name) as stack:
+        run_frontend_epp_token_parity(
+            stack, plain, include_negative_control=False
+        )
+        frontend_pid, frontend_log = _require_owned_disabled_refresh(
+            getattr(stack, "frontend_process", None),
+            label="frontend_process",
+            node_name=request.node.name,
+        )
+        epp_pid, epp_log = _require_owned_disabled_refresh(
+            getattr(stack, "epp_process", None),
+            label="epp_process",
+            node_name=request.node.name,
+        )
+    LOGGER.info(
+        "overlap refresh %s=%s default=%ss frontend_disabled=True "
+        "epp_disabled=True frontend pid=%s log=%s epp pid=%s log=%s",
+        OVERLAP_REFRESH_ENV,
+        OVERLAP_REFRESH_SENTINEL,
+        OVERLAP_REFRESH_DEFAULT_SECS,
+        frontend_pid,
+        frontend_log,
+        epp_pid,
+        epp_log,
+    )
 
 
 def run_effective_config_profile(

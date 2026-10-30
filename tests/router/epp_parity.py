@@ -81,8 +81,13 @@ PRIORITY_HOLD_DEADLINE_S = 10.0
 PRIORITY_QUEUE_LIMIT = 2
 PRIORITY_POLICY_CLASS = "default"
 PRIORITY_FE_QUEUE_LOG = "info,dynamo_kv_router::scheduling::queue=trace"
+PRIORITY_EPP_QUEUE_LOG = "debug,dynamo_kv_router::scheduling::queue=trace"
 QUEUE_ORDERING_TARGET = "dynamo_kv_router::scheduling::queue"
 QUEUE_ORDERING_MESSAGE = "ordering request"
+EPP_PREFILL_FALLBACK_TARGET = "dynamo_ext_proc::epp"
+EPP_PREFILL_FALLBACK_MESSAGE = (
+    "Prefill routing failed; falling back to aggregated mode"
+)
 HELD_STREAM_JOIN_S = 2.0
 FRONTEND_CONTAINER_NAME = "frontend"
 EPP_CONTAINER_NAME = "epp"
@@ -1418,6 +1423,15 @@ def _typed_queue_rejection_display() -> str:
     )
 
 
+def _typed_prefill_queue_rejection_error() -> str:
+    return (
+        "Prefill reservation failed: prefill router policy-class "
+        "queue rejection: "
+        f"policy_class={PRIORITY_POLICY_CLASS}, limit_kind=requests, "
+        f"current={PRIORITY_QUEUE_LIMIT}, limit={PRIORITY_QUEUE_LIMIT}"
+    )
+
+
 def _typed_queue_rejection_outcome(response: Any) -> QueueRejectionOutcome:
     """Validate native ImmediateResponse HTTP 503 + QueueRejection Display."""
     immediate = response.immediate_response
@@ -1473,9 +1487,7 @@ def _typed_fe_queue_rejection(response: Any) -> Any:
     expected = _typed_queue_rejection_display()
     message = parsed.get("message")
     if message != expected:
-        raise AssertionError(
-            f"FE sentinel message is {message!r}, not {expected!r}"
-        )
+        raise AssertionError(f"FE sentinel message is {message!r}, not {expected!r}")
     details = parsed.get("details")
     if not isinstance(details, dict):
         raise AssertionError(f"FE sentinel details is not an object: {details!r}")
@@ -1499,7 +1511,7 @@ def _typed_fe_queue_rejection(response: Any) -> Any:
     return response
 
 
-def _queue_ordering_policy_class(line: str) -> str | None:
+def _queue_ordering_policy_class(line: str, *, label: str = "owned FE") -> str | None:
     """Return policy_class from a complete readable queue ordering line."""
     if QUEUE_ORDERING_TARGET not in line or QUEUE_ORDERING_MESSAGE not in line:
         return None
@@ -1507,17 +1519,40 @@ def _queue_ordering_policy_class(line: str) -> str | None:
     start = line.find(marker)
     if start < 0:
         raise AssertionError(
-            "owned FE queue ordering record missing quoted policy_class: "
+            f"{label} queue ordering record missing quoted policy_class: "
             f"{line[:300]!r}"
         )
     start += len(marker)
     end = line.find('"', start)
     if end <= start:
         raise AssertionError(
-            "owned FE queue ordering record missing quoted policy_class: "
+            f"{label} queue ordering record missing quoted policy_class: "
             f"{line[:300]!r}"
         )
     return line[start:end]
+
+
+def _epp_prefill_fallback_match(line: str) -> bool:
+    if (
+        EPP_PREFILL_FALLBACK_TARGET not in line
+        or EPP_PREFILL_FALLBACK_MESSAGE not in line
+    ):
+        return False
+    expected = _typed_prefill_queue_rejection_error()
+    marker = "error="
+    start = line.find(marker)
+    if start < 0:
+        raise AssertionError(
+            "owned EPP prefill fallback is not the native queue rejection "
+            f"{expected!r}: {line[:300]!r}"
+        )
+    tail = line[start + len(marker) :]
+    if tail != expected:
+        raise AssertionError(
+            "owned EPP prefill fallback is not the native queue rejection "
+            f"{expected!r}: {line[:300]!r}"
+        )
+    return True
 
 
 class ExtProcParityDriver:
@@ -2435,6 +2470,7 @@ class EppFrontendParityStack:
         self.mockers = None
         self.frontend_port: int | None = None
         self.driver: ExtProcParityDriver | None = None
+        self.frontend_process: FrontendRouterProcess | None = None
         self.epp_process: RuntimeEppProcess | None = None
         self._allocated_ports: list[int] = []
 
@@ -2515,7 +2551,7 @@ class EppFrontendParityStack:
         frontend_env = loopback_process_env(
             kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
         )
-        self._stack.enter_context(
+        self.frontend_process = self._stack.enter_context(
             FrontendRouterProcess(
                 self.request,
                 16,
@@ -4028,8 +4064,8 @@ class EppFrontendPriorityParityStack:
         epp_env.update(
             {
                 "DYN_NAMESPACE": namespace,
-                "DYN_LOG": "debug",
-                "RUST_LOG": "debug",
+                "DYN_LOG": PRIORITY_EPP_QUEUE_LOG,
+                "RUST_LOG": PRIORITY_EPP_QUEUE_LOG,
             }
         )
         epp = RuntimeEppProcess(
@@ -4274,32 +4310,57 @@ class EppFrontendPriorityParityStack:
             return 0
         return path.stat().st_size
 
-    def epp_queue_rejection_errors(self, *, after_bytes: int = 0) -> list[str]:
+    def _owned_epp_completed_log(self, *, after_bytes: int = 0) -> str:
         log_path = getattr(self.epp_process, "log_path", None)
         if not log_path:
             raise AssertionError("owned EPP process has no log_path")
         path = Path(log_path)
         if self.epp_process is None or path != Path(self.epp_process.log_path):
-            raise AssertionError("EPP rejection proof is not the owned process log")
+            raise AssertionError("EPP queue proof is not the owned process log")
         if not path.is_file():
-            return []
+            return ""
         data = path.read_bytes()
         if after_bytes > len(data):
-            return []
-        text = data[after_bytes:].decode("utf-8", errors="ignore")
-        tail = (
-            f"queue requests limit reached (current={PRIORITY_QUEUE_LIMIT}, "
-            f"limit={PRIORITY_QUEUE_LIMIT})"
-        )
-        class_quoted = f'router policy class "{PRIORITY_POLICY_CLASS}"'
-        class_escaped = f'router policy class \\"{PRIORITY_POLICY_CLASS}\\"'
+            return ""
+        data = data[after_bytes:]
+        if not data:
+            return ""
+        split_at = data.rfind(b"\n")
+        if not data.endswith(b"\n"):
+            if split_at < 0:
+                return ""
+            data = data[: split_at + 1]
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError("owned EPP log completed bytes are not UTF-8") from exc
+
+    def epp_queue_ordering_records(self, *, after_bytes: int = 0) -> list[str]:
+        text = self._owned_epp_completed_log(after_bytes=after_bytes)
+        records = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            policy_class = _queue_ordering_policy_class(line, label="owned EPP")
+            if policy_class is None:
+                continue
+            if policy_class != PRIORITY_POLICY_CLASS:
+                raise AssertionError(
+                    "owned EPP queue ordering policy_class is "
+                    f"{policy_class!r}, not {PRIORITY_POLICY_CLASS!r}: "
+                    f"{line[:300]!r}"
+                )
+            records.append(policy_class)
+        return records
+
+    def epp_prefill_fallback_rejections(self, *, after_bytes: int = 0) -> list[str]:
+        text = self._owned_epp_completed_log(after_bytes=after_bytes)
         matches = []
         for line in text.splitlines():
-            if tail not in line:
+            if not line.strip():
                 continue
-            if class_quoted not in line and class_escaped not in line:
-                continue
-            matches.append(line)
+            if _epp_prefill_fallback_match(line):
+                matches.append(line)
         return matches
 
     def track_http_thread(self, thread: threading.Thread, label: str) -> None:
