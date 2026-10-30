@@ -72,6 +72,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
+	// Helm installs the Run admission rule only when the v1beta2 APIs are enabled.
+	dgdrRunHandler := webhookvalidation.NewDynamoGraphDeploymentRunHandler()
+	if err := dgdrRunHandler.RegisterWithManager(mgr, gate); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRun webhook: %w", err)
+	}
+
 	if isClusterWide {
 		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {

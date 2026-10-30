@@ -18,12 +18,7 @@
 package validation
 
 import (
-	"errors"
-
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
-	"github.com/santhosh-tekuri/jsonschema/v6"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -32,21 +27,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	allErrs := v.validateNativeSearchInput(&spec.NativeSearchInput, fldPath)
-
-	// The upstream schema applies to the merged input, independently of typed API rules.
-	input, err := aisimulate.Lower(&spec.NativeSearchInput)
-	if err != nil {
-		return append(allErrs, field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error()))
-	}
-	if err := aisimulate.ValidateInput(input); err != nil {
-		var schemaErr *jsonschema.ValidationError
-		if !errors.As(err, &schemaErr) {
-			return append(allErrs, field.InternalError(fldPath, err))
-		}
-		allErrs = append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
-	}
-	return allErrs
+	return v.validateNativeSearchInput(&spec.NativeSearchInput, fldPath, true)
 }
 
 // validateDynamoGraphDeploymentRequestSpecUpdateV1beta2 validates a spec update.
@@ -56,10 +37,5 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	oldSpec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	// A schema upgrade must not prevent metadata updates to persisted requests.
-	// Structural rules still apply; any spec edit requires the entire input to be valid.
-	if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
-		return v.validateNativeSearchInput(&newSpec.NativeSearchInput, fldPath)
-	}
-	return v.validateDynamoGraphDeploymentRequestSpecV1beta2(newSpec, fldPath)
+	return v.validateNativeSearchInputUpdate(&newSpec.NativeSearchInput, &oldSpec.NativeSearchInput, fldPath)
 }
