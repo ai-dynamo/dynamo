@@ -15,9 +15,9 @@ mod local_indexer_tests {
     use tokio::time;
     use tokio_util::sync::CancellationToken;
 
-    use crate::indexer::*;
-    use crate::protocols::*;
-    use crate::test_utils::make_store_event_with_dp_rank;
+    use crate::prelude::*;
+    use crate::testing::make_store_event_with_dp_rank;
+    use crate::*;
 
     fn make_local_store_event(event_id: u64, block_hash: u64) -> RouterEvent {
         RouterEvent::new(

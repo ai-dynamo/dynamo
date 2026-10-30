@@ -16,7 +16,7 @@ use super::{
     KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
     record_unsupported_residency_event,
 };
-use crate::protocols::*;
+use crate::prelude::*;
 
 type LowerTierRegistry = Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>;
 
@@ -503,7 +503,7 @@ impl LocalKvIndexer {
             .rposition(|event| {
                 matches!(
                     event.reset_scope(),
-                    Ok(Some(crate::protocols::ResetScope::All))
+                    Ok(Some(crate::prelude::ResetScope::All))
                 )
             })
             .map_or(start_idx, |idx| start_idx + idx)
@@ -798,17 +798,17 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::LocalKvIndexer;
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
-    use crate::indexer::{
-        KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, WorkerKvQueryResponse,
-    };
-    use crate::protocols::{
+    use crate::prelude::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, ResidencyProjection,
         RouterEvent, StorageTier, WorkerWithDpRank,
+    };
+    use crate::{
+        KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, WorkerKvQueryResponse,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
 
     fn cache_owner_id() -> CacheOwnerId {

@@ -10,17 +10,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
-use crate::approx::PruneConfig;
-use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
-use crate::indexer::{
+use crate::config::{ApproximateCachePolicyKind, IndexerConfig};
+use crate::prelude::{
+    DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
+    ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
+};
+use crate::pruning::PruneConfig;
+use crate::{
     ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, LowerTierQueryOptions,
     MatchDetails, RoutingDecisionHashes, SyncIndexer, TieredMatchDetails, TieredMatchProvider,
     record_unsupported_residency_event,
-};
-use crate::protocols::{
-    DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
-    ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 
 use super::lookup::{HashInput, merge_side_or_warn};
@@ -37,9 +37,9 @@ pub enum PrimaryRetention {
     ApproximateTtl(Duration),
 }
 
-/// Indexer shape derived from router configuration, mirroring the frontend
-/// `KvRouter` indexer resolution so a selection service built from the same
-/// `KvRouterConfig` indexes the same way.
+/// Indexer shape derived from the router's indexer configuration slice, mirroring the
+/// frontend `KvRouter` indexer resolution so a selection service built from the same
+/// configuration indexes the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexerPolicy {
     pub primary: PrimaryRetention,
@@ -67,15 +67,15 @@ impl IndexerPolicy {
     /// Rejects the same combinations the frontend rejects. The local side indexer
     /// is TTL-only, so `router_approximate_cache_policy=lru` is rejected with
     /// `use_kv_events=true` and falls back to TTL with a warning otherwise.
-    pub fn from_router_config(config: &KvRouterConfig) -> Result<Self> {
+    pub fn from_config(config: &IndexerConfig) -> Result<Self> {
         if config.use_kv_events
-            && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+            && config.approximate_cache_policy == ApproximateCachePolicyKind::Lru
         {
             anyhow::bail!(
                 "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
             );
         }
-        if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
+        if config.predicted_ttl_secs.is_some() && !config.use_kv_events {
             anyhow::bail!(
                 "router_predicted_ttl_secs requires use_kv_events=true; \
                  do not combine a primary approximate indexer with a side approximate indexer"
@@ -84,20 +84,16 @@ impl IndexerPolicy {
         if config.use_kv_events {
             return Ok(Self {
                 primary: PrimaryRetention::EventDriven,
-                side_ttl: config
-                    .router_predicted_ttl_secs
-                    .map(Duration::from_secs_f64),
+                side_ttl: config.predicted_ttl_secs.map(Duration::from_secs_f64),
             });
         }
-        if config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru {
+        if config.approximate_cache_policy == ApproximateCachePolicyKind::Lru {
             tracing::warn!(
                 "router_approximate_cache_policy=lru is not supported by the selection service yet; falling back to TTL retention"
             );
         }
         Ok(Self {
-            primary: PrimaryRetention::ApproximateTtl(Duration::from_secs_f64(
-                config.router_ttl_secs,
-            )),
+            primary: PrimaryRetention::ApproximateTtl(Duration::from_secs_f64(config.ttl_secs)),
             side_ttl: None,
         })
     }
@@ -890,9 +886,12 @@ impl TieredMatchProvider for Indexer {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_util {
-    use crate::protocols::{
+/// Event builders shared with kv-router's service tests.
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util {
+    use super::{Indexer, SideIndexer};
+    use crate::KvIndexerInterface;
+    use crate::prelude::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
         compute_seq_hash_for_block,
@@ -949,18 +948,58 @@ pub(crate) mod test_util {
             storage_tier,
         )
     }
+
+    /// Waits for the side indexer, if any, to apply everything queued.
+    pub async fn flush_side(approx: &Option<SideIndexer>) {
+        match approx {
+            Some(SideIndexer::KvIndexer(side)) => {
+                let _ = side.flush().await;
+            }
+            Some(SideIndexer::Concurrent(side)) => {
+                let _ = side.flush().await;
+            }
+            None => {}
+        }
+    }
+
+    /// Wait until every locally enqueued event and routing decision is applied.
+    pub async fn flush(indexer: &Indexer) {
+        match indexer {
+            Indexer::Single {
+                primary, approx, ..
+            } => {
+                let _ = primary.flush().await;
+                flush_side(approx).await;
+            }
+            Indexer::Concurrent {
+                primary, approx, ..
+            } => {
+                let _ = primary.flush().await;
+                flush_side(approx).await;
+            }
+            Indexer::Remote { approx, .. } => flush_side(approx).await,
+            Indexer::None => {}
+        }
+    }
+
+    impl Indexer {
+        /// Test hook: waits until every locally enqueued event and routing decision is applied.
+        pub async fn flush(&self) {
+            flush(self).await
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_util::store_event;
+    use super::test_util::{flush, store_event};
     use super::*;
-    use crate::indexer::KvIndexerInterface;
-    #[cfg(feature = "metrics")]
-    use crate::indexer::{METRIC_EVENT_CLEARED, METRIC_STATUS_OK};
-    use crate::protocols::{
+    use crate::KvIndexerInterface;
+    use crate::prelude::{
         KvCacheEvent, LocalBlockHash, ResidencyDomain, StorageTier, WorkerWithDpRank,
     };
+    #[cfg(feature = "export")]
+    use crate::{METRIC_EVENT_CLEARED, METRIC_STATUS_OK};
 
     /// Apply a Device store and a HostPinned store anchored on it. The tiered
     /// query must surface both tier hits, and the device-tier `find_matches`
@@ -1200,45 +1239,6 @@ mod tests {
             Arc::new(KvIndexerMetrics::new_unregistered()),
             &policy,
         )
-    }
-
-    async fn flush_side(approx: &Option<SideIndexer>) {
-        match approx {
-            Some(SideIndexer::KvIndexer(side)) => {
-                let _ = side.flush().await;
-            }
-            Some(SideIndexer::Concurrent(side)) => {
-                let _ = side.flush().await;
-            }
-            None => {}
-        }
-    }
-
-    /// Wait until every locally enqueued event and routing decision is applied.
-    async fn flush(indexer: &Indexer) {
-        match indexer {
-            Indexer::Single {
-                primary, approx, ..
-            } => {
-                let _ = primary.flush().await;
-                flush_side(approx).await;
-            }
-            Indexer::Concurrent {
-                primary, approx, ..
-            } => {
-                let _ = primary.flush().await;
-                flush_side(approx).await;
-            }
-            Indexer::Remote { approx, .. } => flush_side(approx).await,
-            Indexer::None => {}
-        }
-    }
-
-    #[cfg(feature = "standalone-selection")]
-    impl Indexer {
-        pub(crate) async fn flush(&self) {
-            flush(self).await
-        }
     }
 
     #[tokio::test]
@@ -1494,61 +1494,61 @@ mod tests {
 
     #[test]
     fn indexer_policy_mirrors_frontend_resolution() {
-        let event_driven = KvRouterConfig::default();
+        let event_driven = IndexerConfig::default();
         assert_eq!(
-            IndexerPolicy::from_router_config(&event_driven).unwrap(),
+            IndexerPolicy::from_config(&event_driven).unwrap(),
             IndexerPolicy::event_driven()
         );
 
-        let side = KvRouterConfig {
-            router_predicted_ttl_secs: Some(2.5),
+        let side = IndexerConfig {
+            predicted_ttl_secs: Some(2.5),
             ..Default::default()
         };
         assert_eq!(
-            IndexerPolicy::from_router_config(&side).unwrap().side_ttl,
+            IndexerPolicy::from_config(&side).unwrap().side_ttl,
             Some(Duration::from_secs_f64(2.5))
         );
 
-        let approximate = KvRouterConfig {
+        let approximate = IndexerConfig {
             use_kv_events: false,
-            router_ttl_secs: 30.0,
+            ttl_secs: 30.0,
             ..Default::default()
         };
         assert_eq!(
-            IndexerPolicy::from_router_config(&approximate).unwrap(),
+            IndexerPolicy::from_config(&approximate).unwrap(),
             IndexerPolicy {
                 primary: PrimaryRetention::ApproximateTtl(Duration::from_secs(30)),
                 side_ttl: None,
             }
         );
 
-        let lru_without_events = KvRouterConfig {
+        let lru_without_events = IndexerConfig {
             use_kv_events: false,
-            router_approximate_cache_policy: ApproximateCachePolicyKind::Lru,
+            approximate_cache_policy: ApproximateCachePolicyKind::Lru,
             ..Default::default()
         };
         assert!(matches!(
-            IndexerPolicy::from_router_config(&lru_without_events)
+            IndexerPolicy::from_config(&lru_without_events)
                 .unwrap()
                 .primary,
             PrimaryRetention::ApproximateTtl(_)
         ));
 
-        let lru_with_events = KvRouterConfig {
-            router_approximate_cache_policy: ApproximateCachePolicyKind::Lru,
+        let lru_with_events = IndexerConfig {
+            approximate_cache_policy: ApproximateCachePolicyKind::Lru,
             ..Default::default()
         };
-        assert!(IndexerPolicy::from_router_config(&lru_with_events).is_err());
+        assert!(IndexerPolicy::from_config(&lru_with_events).is_err());
 
-        let side_without_events = KvRouterConfig {
+        let side_without_events = IndexerConfig {
             use_kv_events: false,
-            router_predicted_ttl_secs: Some(1.0),
+            predicted_ttl_secs: Some(1.0),
             ..Default::default()
         };
-        assert!(IndexerPolicy::from_router_config(&side_without_events).is_err());
+        assert!(IndexerPolicy::from_config(&side_without_events).is_err());
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "export")]
     #[tokio::test]
     async fn acknowledged_clear_records_primary_event_for_both_indexers() {
         for num_threads in [1, 2] {
@@ -1660,7 +1660,7 @@ pub fn create_indexer_with_policy(
 mod session_tests {
     use super::test_util::store_event;
     use super::*;
-    use crate::protocols::{KvCacheEvent, KvCacheRemoveData, StorageTier};
+    use crate::prelude::{KvCacheEvent, KvCacheRemoveData, StorageTier};
     use crate::{SessionPrefixIndexer, SessionResidencyOwner};
 
     fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
@@ -1721,7 +1721,7 @@ mod session_tests {
         }
     }
 
-    pub(crate) fn remove_event(
+    pub fn remove_event(
         worker_id: u64,
         dp_rank: u32,
         event_id: u64,
@@ -1737,7 +1737,7 @@ mod session_tests {
         )
     }
 
-    pub(crate) fn clear_event(worker_id: u64, dp_rank: u32, event_id: u64) -> RouterEvent {
+    pub fn clear_event(worker_id: u64, dp_rank: u32, event_id: u64) -> RouterEvent {
         RouterEvent::new(
             worker_id,
             KvCacheEvent {

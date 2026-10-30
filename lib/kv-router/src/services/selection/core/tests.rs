@@ -59,7 +59,9 @@ fn core_with(
     let tracking_hash = Arc::new(
         TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
     );
-    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
+    let indexer_policy =
+        IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
+            .expect("indexer policy");
     SelectionCore::new_inner(
         config,
         1,

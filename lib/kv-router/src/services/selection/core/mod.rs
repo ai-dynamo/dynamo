@@ -389,7 +389,9 @@ impl SelectionCore {
             .validate_config()
             .map_err(anyhow::Error::msg)?;
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&kv_router_config)?);
-        let indexer_policy = IndexerPolicy::from_router_config(&kv_router_config)?;
+        let indexer_policy = IndexerPolicy::from_config(
+            &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
+        )?;
         Ok(Self::new_inner(
             kv_router_config,
             indexer_threads,

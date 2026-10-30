@@ -3,14 +3,16 @@
 
 //! KV events in, prefix knowledge out: the Dynamo router's KV indexer stage.
 //!
-//! Lands in slices. This crate now holds the radix trees (`radix_tree`, `positional`, the
-//! concurrent compressed tree), the thread-pool and branch-sharded wrappers, approximate
-//! LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash lifecycle
-//! delegate (`delegate`), the indexer counters (`metrics`), the residency projection
-//! (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`), and the
-//! lower-tier continuation index with its per-tier registry. The request-plane DTOs, the
-//! local indexer, and the ingest backend follow. Until then `lib/kv-router` re-exports every
-//! item here at its old path.
+//! The crate holds the radix trees (`radix_tree`, `positional`, the concurrent compressed
+//! tree), the thread-pool and branch-sharded wrappers, `KvIndexer` and `LocalKvIndexer`,
+//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash
+//! lifecycle delegate (`delegate`), the indexer counters (`metrics`), the residency
+//! projection (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`),
+//! the lower-tier continuation index with its per-tier registry, the ingest backend
+//! (`backend`, `lookup`, `recording`, `session_updates`), the session prefix index, the
+//! request-plane DTOs (`api`), explicit identity material (`identity`), and its configuration
+//! slice (`config`). `lib/kv-router` re-exports every item here at its old path and keeps the
+//! HTTP, ZMQ, peer-recovery, and Prometheus adapters.
 //!
 //! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, and `dynamo-kv-hashing`.
 //! The `export` feature (Prometheus counter vectors) is transitional: the design replaces it
@@ -47,14 +49,20 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 mod active_set;
+pub mod api;
 mod approximate_lru;
+pub mod backend;
 mod branch_sharded;
 mod compressed_radix;
 pub mod concurrent_radix_tree_compressed;
+pub mod config;
 pub mod cuckoo;
 pub mod delegate;
+pub mod identity;
 pub mod kv_hints;
 mod kv_indexer;
+mod local;
+pub mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
 pub mod metrics;
@@ -65,7 +73,10 @@ pub mod positional;
 mod prelude;
 pub mod pruning;
 pub mod radix_tree;
+pub mod recording;
 pub mod residency;
+pub mod session_prefix_index;
+pub mod session_updates;
 mod shard_handle;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub mod testing;
@@ -73,6 +84,10 @@ mod thread_pool;
 mod traits;
 mod types;
 
+#[cfg(test)]
+mod delegate_tests;
+#[cfg(test)]
+mod local_tests;
 #[cfg(test)]
 mod tests;
 
@@ -100,17 +115,20 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
     }
 }
 
+pub use api::*;
 pub use approximate_lru::*;
 pub use branch_sharded::*;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use delegate::{HashLifecycle, KvIndexerDelegate};
 pub use kv_indexer::*;
+pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;
 pub use radix_tree::RadixTree;
+pub use session_prefix_index::{SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend};
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

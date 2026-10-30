@@ -29,17 +29,14 @@
 //! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
 //! response struct in [`server`] for the exact semantics.
 
-pub mod backend;
 pub mod listener;
 pub mod logging;
-pub mod lookup;
 pub mod metrics;
-pub mod recording;
 pub mod recovery;
 pub mod registry;
 pub mod server;
-#[doc(hidden)]
-pub mod session_updates;
+
+pub use dynamo_kv_indexer::{backend, lookup, recording, session_updates};
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -18,7 +18,7 @@ pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;
-pub mod session_prefix_index;
+pub use dynamo_kv_indexer::session_prefix_index;
 pub mod tracking_hash;
 pub mod worker_type;
 pub use dynamo_kv_events::zmq_wire;

@@ -10,14 +10,16 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
 
-use crate::protocols::{ExternalSequenceBlockHash, StorageTier, WorkerId, WorkerWithDpRank};
+use crate::prelude::{ExternalSequenceBlockHash, StorageTier, WorkerId, WorkerWithDpRank};
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
 
 const DEFAULT_MAX_SESSIONS: usize = 16_384;
 const MAX_SESSION_PREFIX_ID_BYTES: usize = 256;
-const CLEANUP_INTERVAL: Duration = Duration::from_millis(crate::cleanup::CLEANUP_INTERVAL_MS);
+/// Same cadence as kv-router's `cleanup::CLEANUP_INTERVAL_MS`; each stage owns its constant.
+const CLEANUP_INTERVAL_MS: u64 = 5 * 60 * 1000;
+const CLEANUP_INTERVAL: Duration = Duration::from_millis(CLEANUP_INTERVAL_MS);
 
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
@@ -1095,7 +1097,7 @@ impl IndexState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::make_blocks;
+    use crate::testing::make_blocks;
 
     fn hashes(ids: Vec<u64>) -> Vec<ExternalSequenceBlockHash> {
         make_blocks(ids)

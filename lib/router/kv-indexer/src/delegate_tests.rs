@@ -7,8 +7,8 @@ use rstest::rstest;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::protocols::*;
-use crate::test_utils::{
+use crate::prelude::*;
+use crate::testing::{
     make_clear_event_with_dp_rank, make_remove_event, make_store_event_with_dp_rank,
 };
 
@@ -180,7 +180,7 @@ async fn delegate_rejected_store_is_silent(
     let recorder = Arc::new(Recorder::default());
     let indexer = indexer(variant, recorder.clone());
     indexer
-        .apply_event(crate::test_utils::make_store_event_with_parent(
+        .apply_event(crate::testing::make_store_event_with_parent(
             1,
             &[99],
             &[100],

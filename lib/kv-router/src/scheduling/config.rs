@@ -431,42 +431,7 @@ pub enum SharedCacheType {
     Hicache,
 }
 
-/// Retention policy for a router-local primary approximate indexer.
-///
-/// This selector is intentionally process-local. Workers do not advertise it in
-/// model cards because request lifetime and release ownership live in the router.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ApproximateCachePolicyKind {
-    /// Expire predicted entries after `router_ttl_secs`.
-    #[default]
-    Ttl,
-    /// Retain predicted entries until per-rank KV capacity requires LRU eviction.
-    Lru,
-}
-
-impl fmt::Display for ApproximateCachePolicyKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ttl => f.write_str("ttl"),
-            Self::Lru => f.write_str("lru"),
-        }
-    }
-}
-
-impl FromStr for ApproximateCachePolicyKind {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "ttl" => Ok(Self::Ttl),
-            "lru" => Ok(Self::Lru),
-            _ => Err(format!(
-                "unknown approximate cache policy {value:?}, expected 'ttl' or 'lru'"
-            )),
-        }
-    }
-}
+pub use dynamo_kv_indexer::config::ApproximateCachePolicyKind;
 
 impl fmt::Display for SharedCacheType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1632,6 +1597,17 @@ impl KvRouterConfig {
 
 fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
     (0..num_blocks).map(|_| fastrand::u64(..)).collect()
+}
+
+impl From<&KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig {
+    fn from(config: &KvRouterConfig) -> Self {
+        Self {
+            use_kv_events: config.use_kv_events,
+            approximate_cache_policy: config.router_approximate_cache_policy,
+            predicted_ttl_secs: config.router_predicted_ttl_secs,
+            ttl_secs: config.router_ttl_secs,
+        }
+    }
 }
 
 #[cfg(test)]

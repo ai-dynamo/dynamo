@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::WireTieredMatchDetails;
-use crate::identity::CacheOwnerId;
-use crate::protocols::*;
+use crate::prelude::*;
+use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_tokens::SequenceHash;
 
 /// Trait for types that may represent an error response.

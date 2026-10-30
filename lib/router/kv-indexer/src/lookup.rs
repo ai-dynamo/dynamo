@@ -4,12 +4,12 @@
 //! Match lookups over an [`Indexer`]: primary device tier, lower tiers seeded
 //! from confirmed primary matches, and the predict-on-route side overlay.
 
-use crate::indexer::{
+use crate::prelude::{LocalBlockHash, OverlapScores};
+use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
+use crate::{
     KvIndexer, KvRouterError, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
     TieredMatchDetails, query_lower_tiers_with_options,
 };
-use crate::protocols::{LocalBlockHash, OverlapScores};
-use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
 
@@ -425,18 +425,17 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use crate::indexer::{LowerTierIndexers, LowerTierQueryOptions};
-    use crate::services::indexer::backend::Indexer;
-    use crate::services::indexer::backend::test_util::store_event;
-    use crate::{
-        ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
-        approx::PruneConfig,
-        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, RoutingDecisionHashes},
-        protocols::{
-            BlockHashOptions, LocalBlockHash, StorageTier, TokensWithHashes, WorkerWithDpRank,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
-        },
+    use crate::backend::Indexer;
+    use crate::backend::test_util::store_event;
+    use crate::prelude::{
+        BlockHashOptions, LocalBlockHash, StorageTier, TokensWithHashes, WorkerWithDpRank,
+        compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
+    use crate::{
+        ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+        RoutingDecisionHashes, ThreadPoolIndexer, pruning::PruneConfig,
+    };
+    use crate::{LowerTierIndexers, LowerTierQueryOptions};
 
     fn make_test_indexer() -> Indexer {
         Indexer::Single {

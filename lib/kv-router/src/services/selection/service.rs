@@ -198,7 +198,9 @@ impl SelectionServiceBuilder {
                 .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
-        let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
+        let indexer_policy = IndexerPolicy::from_config(
+            &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
+        )?;
         let recover_from_peers = !self.indexer_peers.is_empty();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());

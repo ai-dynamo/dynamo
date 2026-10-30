@@ -11,13 +11,13 @@ use std::sync::{
 
 use dynamo_tokens::SequenceHash;
 
-use crate::indexer::{
+use crate::prelude::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank};
+use crate::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation, ApproximateLruLease,
     ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes,
 };
-use crate::protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank};
-use crate::scheduling::AttemptId;
 use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
+use dynamo_router_protocol::attempt::AttemptId;
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
 

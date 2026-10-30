@@ -9,13 +9,13 @@ use std::{
     },
 };
 
+use crate::prelude::{
+    ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+    WorkerId, WorkerWithDpRank,
+};
 use crate::{
-    ConcurrentRadixTreeCompressed, SessionPrefixIndexer, SessionResidencyOwner,
-    indexer::{KvIndexer, KvRouterError, LowerTierIndexers, ThreadPoolIndexer},
-    protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
-        WorkerId, WorkerWithDpRank,
-    },
+    ConcurrentRadixTreeCompressed, KvIndexer, KvRouterError, LowerTierIndexers,
+    SessionPrefixIndexer, SessionResidencyOwner, ThreadPoolIndexer,
 };
 use dashmap::{DashMap, mapref::entry::Entry};
 use tokio::sync::{mpsc, oneshot};
