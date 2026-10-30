@@ -308,6 +308,13 @@ pub(crate) enum EngineKind {
 }
 
 impl EngineKind {
+    fn model_taints(&self) -> Option<crate::model_taints::ModelTaints> {
+        match self {
+            Self::Llm(engine) => engine.model_taints(),
+            Self::Raw(_) => None,
+        }
+    }
+
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.start(worker_id).await,
@@ -930,6 +937,7 @@ impl Worker {
                 endpoint.clone(),
                 self.engine_route_lifecycle.clone(),
                 self.engine_route_shutdown.clone(),
+                self.engine.model_taints().is_some(),
             ),
         );
     }
@@ -1062,6 +1070,20 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+
+        let mut model_taints = self
+            .engine
+            .model_taints()
+            .map(|source| (source, local_model.runtime_config().taints.clone()));
+        if let Some((taints, initial)) = &mut model_taints {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                result = taints.publish(&endpoint, initial) => result.map_err(|error| {
+                    err(ErrorType::Backend(BackendError::Unknown), format!("model taints: {error}"))
+                })?,
+            }
+        }
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
@@ -1289,6 +1311,15 @@ impl Worker {
 
         let serve_result = tokio::select! {
             biased;
+            result = async {
+                match model_taints {
+                    Some((taints, initial)) => taints.follow(&endpoint, initial).await,
+                    None => std::future::pending().await,
+                }
+            } => Err(err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("model taint observer exited: {result:?}"),
+            )),
             result = &mut serve_fut => {
                 match result {
                     // Endpoint exited cleanly (e.g. DRT primary token
@@ -1751,12 +1782,18 @@ fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
     route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_shutdown: CancellationToken,
+    engine_owned: bool,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let endpoint = endpoint.clone();
         let route_lifecycle = route_lifecycle.clone();
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
+            if engine_owned {
+                return Ok(control_error_response(
+                    "model taints are engine-owned; manual full-set replacement is disabled",
+                ));
+            }
             let taints = parse_model_taint_update_request(body)?;
             let _lifecycle =
                 match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
@@ -2316,6 +2353,35 @@ mod tests {
             let error = parse_model_taint_update_request(body).unwrap_err();
             assert_eq!(error.to_string(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn engine_owned_taints_reject_manual_replacement() {
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("owned_taints")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        let callback = model_taint_update_callback(
+            endpoint,
+            Arc::new(tokio::sync::RwLock::new(EngineRouteLifecycle::Running)),
+            CancellationToken::new(),
+            true,
+        );
+        let response = callback(serde_json::json!({"taints": ["manual"]}))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "error");
+        assert!(response.to_string().contains("engine-owned"));
+        runtime.shutdown();
     }
 
     #[test]

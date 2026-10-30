@@ -36,4 +36,12 @@ pub struct Args {
         default_value_t = DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES
     )]
     pub native_http_max_event_bytes: NonZeroUsize,
+
+    /// Publish observed weight versions as namespace-scoped routing taints.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_POLICY_VERSION_TAINTS",
+        default_value_t = false
+    )]
+    pub policy_version_taints: bool,
 }

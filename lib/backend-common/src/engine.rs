@@ -194,6 +194,12 @@ pub struct EngineConfig {
 ///   5. `cleanup()` — called once on shutdown, release all resources.
 #[async_trait]
 pub trait LLMEngine: Send + Sync + 'static {
+    /// Optional engine-owned taints. The worker publishes these before serving
+    /// and on changes; caller-managed full-set replacement is disabled.
+    fn model_taints(&self) -> Option<crate::model_taints::ModelTaints> {
+        None
+    }
+
     /// Start the engine and return registration metadata.
     ///
     /// After this returns, the engine MUST be ready to accept `generate()`

@@ -18,6 +18,7 @@ pub mod disagg;
 pub mod engine;
 pub mod error;
 pub mod metrics;
+pub mod model_taints;
 mod publisher;
 mod rl;
 pub mod run;
