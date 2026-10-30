@@ -263,50 +263,6 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
     assert workers["decode"]["replicas"] == 1
 
 
-@pytest.mark.parametrize(
-    "make_workload", [dict, lambda **fields: SimpleNamespace(**fields)]
-)
-def test_aic_renderer_gives_trace_workloads_placeholder_lengths(
-    monkeypatch, make_workload
-) -> None:
-    captured = []
-
-    def fake_from_sweeper_candidate(candidate, *, workload, **_kwargs):
-        captured.append(workload)
-        return "request"
-
-    monkeypatch.setattr(
-        aic_renderer,
-        "_load_generator_api",
-        lambda: (
-            fake_from_sweeper_candidate,
-            lambda _request: {"k8s_deploy.yaml": "kind: DynamoGraphDeployment\n"},
-        ),
-    )
-    monkeypatch.setattr(
-        aic_renderer, "patch_dgd_manifest", lambda rendered, *_args, **_kwargs: rendered
-    )
-    fields = {
-        "trace_path": "/traces/window.jsonl",
-        "trace_paths": ["/traces/window.jsonl"],
-        "trace_format": "dynamo",
-        "isl": None,
-        "osl": None,
-    }
-    workload = make_workload(**fields)
-
-    render_dgd(_candidate(), workload, _options(), dgd_name="sweeper-dgd")
-
-    assert captured == [{**fields, "isl": 1, "osl": 1}]
-    assert _workload_lengths(workload) == (None, None)
-
-
-def _workload_lengths(workload):
-    if isinstance(workload, dict):
-        return workload["isl"], workload["osl"]
-    return workload.isl, workload.osl
-
-
 @dataclass(frozen=True)
 class _SweeperCandidate:
     config: dict
@@ -362,6 +318,20 @@ def _transfer_buffer_args(rendered: str) -> dict[str, dict[str, str]]:
     return flags
 
 
+def _without_transfer_buffer_size(rendered: str) -> dict:
+    buffer_arg = "--trtllm.cache_transceiver_config.max_tokens_in_buffer"
+    dgd = yaml.safe_load(rendered)
+    for component in dgd["spec"]["components"]:
+        for container in (
+            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        ):
+            args = container.get("args") or []
+            if buffer_arg in args:
+                start = args.index(buffer_arg)
+                del args[start : start + 2]
+    return dgd
+
+
 @pytest.mark.parametrize(
     ("backend", "backend_version", "image"),
     [
@@ -408,11 +378,9 @@ def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
     )
     synthetic = render({"isl": 4000, "osl": 1000})
 
-    # Apart from TensorRT-LLM's transfer buffer size, nothing may depend on
-    # the placeholder lengths a trace workload gives AIC.
-    assert yaml.safe_load(traced) == yaml.safe_load(
-        aic_renderer._drop_transfer_buffer_size(synthetic)
-    )
+    # AIC derives only TensorRT-LLM's transfer buffer size from request
+    # lengths, so a trace DGD is the synthetic one without that size.
+    assert yaml.safe_load(traced) == _without_transfer_buffer_size(synthetic)
     if backend == "trtllm":
         # The trace keeps the transceiver backend; TensorRT-LLM sizes the buffer.
         assert _transfer_buffer_args(traced) == {
@@ -423,63 +391,6 @@ def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
             "--trtllm.cache_transceiver_config.max_tokens_in_buffer" in flags
             for flags in _transfer_buffer_args(synthetic).values()
         )
-
-
-def test_dropping_transfer_buffer_size_keeps_other_arguments() -> None:
-    buffer_arg = "--trtllm.cache_transceiver_config.max_tokens_in_buffer"
-
-    def component(component_type, args):
-        return {
-            "type": component_type,
-            "podTemplate": {"spec": {"containers": [{"name": "main", "args": args}]}},
-        }
-
-    rendered = yaml.safe_dump(
-        {
-            "kind": "DynamoGraphDeployment",
-            "spec": {
-                "components": [
-                    {"name": "Frontend", "type": "frontend"},
-                    component(
-                        "prefill",
-                        [
-                            "--trtllm.cache_transceiver_config.backend",
-                            "DEFAULT",
-                            buffer_arg,
-                            "6528",
-                            "--max-num-tokens",
-                            "4096",
-                        ],
-                    ),
-                    component(
-                        "decode", [f"{buffer_arg}=6528", "--max-batch-size", "64"]
-                    ),
-                ]
-            },
-        },
-        sort_keys=False,
-    )
-    unrelated = yaml.safe_dump(
-        {"spec": {"components": [component("worker", ["--block-size", "64"])]}}
-    )
-
-    dgd = yaml.safe_load(aic_renderer._drop_transfer_buffer_size(rendered))
-
-    args = {
-        component["type"]: component["podTemplate"]["spec"]["containers"][0]["args"]
-        for component in dgd["spec"]["components"]
-        if "podTemplate" in component
-    }
-    assert args == {
-        "prefill": [
-            "--trtllm.cache_transceiver_config.backend",
-            "DEFAULT",
-            "--max-num-tokens",
-            "4096",
-        ],
-        "decode": ["--max-batch-size", "64"],
-    }
-    assert aic_renderer._drop_transfer_buffer_size(unrelated) is unrelated
 
 
 def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:

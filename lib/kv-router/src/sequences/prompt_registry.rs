@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crossbeam_utils::sync::ShardedLockReadGuard;
 use dynamo_tokens::SequenceHash;
 use indexmap::IndexMap;
 #[cfg(test)]
@@ -71,6 +72,20 @@ impl WorkerLoadSnapshot {
         self.prefill.active_tokens_at(decay_now)
     }
 
+    /// This rank's load as a request's projection sees it at `decay_now`.
+    fn projection(
+        &self,
+        decay_now: Instant,
+        additional_active_blocks: usize,
+    ) -> WorkerLoadProjection {
+        WorkerLoadProjection {
+            active_prefill_tokens: self.active_tokens(decay_now),
+            active_decode_blocks: self.active_blocks,
+            active_requests: self.active_requests,
+            additional_active_blocks,
+        }
+    }
+
     pub(super) fn modeled_remaining_prefill_time_ms(
         &self,
         now: Instant,
@@ -134,6 +149,10 @@ impl WorkerLoadTable {
         self.entries.len()
     }
 
+    fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadSnapshot> {
+        self.entries.get(&worker).map(WorkerLoadSlot::snapshot)
+    }
+
     fn iter(&self) -> impl Iterator<Item = (WorkerWithDpRank, WorkerLoadSnapshot)> + '_ {
         self.entries
             .iter()
@@ -195,6 +214,26 @@ impl WorkerLoadTable {
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
         }
+    }
+}
+
+/// Per-rank load at one decay instant, read on demand instead of projected for every rank.
+///
+/// Holds the load table's read lock, so ranks are not added or removed while it is
+/// alive. Each lookup copies that rank's latest load, so load updates from other tasks
+/// can land between two lookups.
+pub(crate) struct WorkerLoadReader<'a> {
+    loads: ShardedLockReadGuard<'a, WorkerLoadTable>,
+    decay_now: Instant,
+}
+
+impl WorkerLoadReader<'_> {
+    /// `worker`'s load as a projection without a token sequence sees it, or `None` for a
+    /// rank the table does not hold.
+    pub(crate) fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadProjection> {
+        self.loads
+            .get(worker)
+            .map(|load| load.projection(self.decay_now, 0))
     }
 }
 
@@ -362,12 +401,7 @@ impl PromptRegistry {
         let loads = self.loads.read();
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
-            WorkerLoadProjection {
-                active_prefill_tokens: load.active_tokens(decay_now),
-                active_decode_blocks: load.active_blocks,
-                active_requests: load.active_requests,
-                additional_active_blocks: query_len.saturating_sub(overlap_depth),
-            }
+            load.projection(decay_now, query_len.saturating_sub(overlap_depth))
         };
 
         // A reused map usually still holds the previous request's projection over the same
@@ -421,6 +455,13 @@ impl PromptRegistry {
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
+    }
+
+    pub(super) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+        WorkerLoadReader {
+            loads: self.loads.read(),
+            decay_now,
+        }
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
@@ -680,6 +721,18 @@ mod tests {
 
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
+        let mut projections = FxHashMap::default();
+        registry.project_worker_loads_into(None, now, &mut projections, None);
+        assert_eq!(
+            registry.worker_load_reader(now).get(worker),
+            projections.get(&worker).copied()
+        );
+        assert_eq!(
+            registry
+                .worker_load_reader(now)
+                .get(WorkerWithDpRank::new(2, 0)),
+            None
+        );
 
         let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
