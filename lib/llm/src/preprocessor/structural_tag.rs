@@ -65,17 +65,22 @@ pub(crate) enum SelectedStructuralTagBuilder {
 
 impl SelectedStructuralTagBuilder {
     fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            Some(parser_name),
-            reasoning_parser,
-        )
-        .is_some()
-            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
-        {
-            return Some(Self::V2(builder));
+        if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
+            return Some(builder);
         }
 
         v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    pub(super) fn for_unified_parser(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<(&'static str, Self)> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            tool_call_parser,
+            reasoning_parser,
+        )?;
+        v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
     fn build(
@@ -122,8 +127,31 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("kimi_k2")
 }
 
+// Beam tool calls live on the Harmony wire: an analysis channel first, then the
+// `<|start|>assistant to=NAME<|channel|>analysis <|constrain|>xml<|message|>` call
+// header with an `rfl:parameter` body. The generic forced-tool JSON grammar replaces
+// that whole wire with a bare JSON object, so the model emits no analysis channel and
+// the response carries no `reasoning_content`; the Beam chat template then rejects the
+// follow-up request whose history replays that tool-call turn without its reasoning.
+// Forced choices therefore stay on the parser path; the preprocessor installs a regex
+// over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
+// and still forces the call header of an allowed tool.
+pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
+    parser_name == Some("beam")
+}
+
+fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
+    matches!(parser_name, Some("muse_spark_open" | "muse_spark"))
+}
+
+// Spark's unified parser can be selected through either parser slot. Its
+// forced-tool grammar must use that same family when only reasoning is set.
+fn structural_tag_parser<'a>(tool: Option<&'a str>, reasoning: Option<&'a str>) -> Option<&'a str> {
+    tool.or_else(|| reasoning.filter(|parser| is_muse_spark_parser(Some(parser))))
+}
+
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
-    // K2 forced calls and K3 named calls cannot use Dynamo's generic JSON-schema
+    // K2/Muse Spark forced calls and K3 named calls cannot use the generic JSON-schema
     // fallback because both families emit native, marker-delimited formats.
     // Treat their structural tags as part of implementing these standard OpenAI
     // request shapes, not as an operator opt-in. K3 required remains on its
@@ -131,6 +159,8 @@ fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &To
     (is_kimi_k2_parser(parser_name)
         && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
         || (is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_)))
+        || (is_muse_spark_parser(parser_name)
+            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
 }
 
 pub(super) fn requires_native_tool_call_format(
@@ -138,20 +168,38 @@ pub(super) fn requires_native_tool_call_format(
     tool_choice: &ToolChoice,
 ) -> bool {
     // The generic forced-tool JSON grammar describes a different wire format
-    // from Kimi's native marker-delimited calls. This also covers K3 required,
-    // which uses its prompt/parser path when structural guidance is off.
-    (is_kimi_k2_parser(parser_name)
-        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
-        || (is_kimi_k3_parser(parser_name)
-            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
+    // from Kimi's native marker-delimited calls, Beam's Harmony calls and Muse Spark's
+    // calls. Required/named choices use best-effort prompting when no structural-tag
+    // builder is available. This also covers K3 required, which uses its prompt/parser
+    // path when structural guidance is off.
+    let forced = matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_));
+    forced
+        && (is_kimi_k2_parser(parser_name)
+            || is_kimi_k3_parser(parser_name)
+            || is_beam_parser(parser_name)
+            || is_muse_spark_parser(parser_name))
 }
 
 fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Whether a request is entitled to use a structural tag, bundled with proof the
-/// parser registry can actually build one.
+pub(super) fn uses_gpt_oss_required_array(
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        parser_name,
+        reasoning_parser,
+    ) == Some("gpt_oss")
+        && matches!(tool_choice, ToolChoice::Required)
+        && parallel_tool_calls != Some(false)
+}
+
+/// Whether a request uses a native tool-call structural tag, bundled with proof
+/// the parser registry can actually build one. Required GPT-OSS arrays keep their
+/// guided-JSON parser mode even when their JSON payload has a structural envelope.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering model-family/tool-choice intrinsic eligibility, the configured
@@ -199,6 +247,17 @@ pub(crate) fn structural_tag_decision(
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
+    let parser_name = structural_tag_parser(parser_name, reasoning_parser);
+
+    // A native Harmony handoff stops vLLM after the first call. Required parallel
+    // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
+    if uses_gpt_oss_required_array(
+        (parser_name, reasoning_parser),
+        tool_choice,
+        parallel_tool_calls,
+    ) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
 
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
@@ -268,6 +327,44 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
+    pub(super) fn apply_structured_output_tag(
+        &self,
+        parser_name: &str,
+        builder: SelectedStructuralTagBuilder,
+        schema: &serde_json::Value,
+        starts_in_reasoning: bool,
+        request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let config = self
+            .runtime_config
+            .structural_tag
+            .clone()
+            .unwrap_or_default();
+        let applied = apply_structural_tag(
+            parser_name,
+            builder.build(&StructuralTagBuildRequest {
+                tool_choice: &ToolChoice::None,
+                tools: &[],
+                parallel_tool_calls: None,
+                schema_mode: config.schema,
+                exclude_special_tokens: config.exclude_special_tokens,
+                reasoning_boundary: ResolvedReasoningBoundary::StructuralTag,
+                tool_arguments_any_order: false,
+                starts_in_reasoning,
+                structured_output_schema: Some(schema),
+            }),
+            request,
+        )?;
+        if applied {
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        Ok(applied)
+    }
+
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
@@ -278,16 +375,25 @@ impl OpenAIPreprocessor {
         response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        let parser_name = self.tool_call_parser.as_deref();
+        let parser_name = structural_tag_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
         let explicit_config = self.runtime_config.structural_tag.as_ref();
 
         let config = explicit_config.cloned().unwrap_or_default();
-        let reasoning_boundary = if config.reasoning_boundary
-            == StructuralTagReasoningBoundary::Auto
+        let reasoning_boundary = if is_muse_spark_parser(parser_name) {
+            // Muse's backend reasoner may not leave reasoning until a tool has
+            // already been selected. The native grammar must own the entire
+            // generation to enforce required/named choice. Setting require_reasoning
+            // false below disables SGLang's per-request reasoning gate.
+            ResolvedReasoningBoundary::StructuralTag
+        } else if config.reasoning_boundary == StructuralTagReasoningBoundary::Auto
             && preprocessed_request.require_reasoning
             && self.structural_tag_reasoning_metadata(
                 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
-            ) {
+            )
+        {
             // SGLang consumes the prefix only for requests that activate its gate.
             ResolvedReasoningBoundary::Backend
         } else {
@@ -337,7 +443,18 @@ impl OpenAIPreprocessor {
 
         let built_tag = match builder.build(&request) {
             Err(error)
-                if !matches!(tool_choice, ToolChoice::None)
+                if is_muse_spark_parser(Some(parser_name))
+                    && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)) =>
+            {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::InvalidArgument)
+                    .message(format!("cannot constrain native Muse Spark tools: {error}"))
+                    .build());
+            }
+            Err(error)
+                if !(matches!(tool_choice, ToolChoice::None)
+                    || (is_muse_spark_parser(Some(parser_name))
+                        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))))
                     && structured_output_schema.is_none() =>
             {
                 tracing::warn!(
@@ -359,7 +476,9 @@ impl OpenAIPreprocessor {
                 .get_or_insert_default()
                 .json = None;
         }
-        if applied
+        if applied && is_muse_spark_parser(Some(parser_name)) {
+            preprocessed_request.require_reasoning = false;
+        } else if applied
             && prompt_injected_reasoning
             && config.reasoning_boundary != StructuralTagReasoningBoundary::Auto
         {
@@ -437,6 +556,15 @@ pub(super) fn validate_runtime_config(
     let backend_excludes_reasoning = match runtime_config
         .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
     {
+        // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
+        Ok(_)
+            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                runtime_config.tool_call_parser.as_deref(),
+                runtime_config.reasoning_parser.as_deref(),
+            ) == Some("gpt_oss") =>
+        {
+            false
+        }
         Ok(value) => value.unwrap_or(false),
         Err(error) if runtime_config.structural_tag.is_none() => {
             tracing::warn!(
@@ -454,6 +582,23 @@ pub(super) fn validate_runtime_config(
         .map_or(StructuralTagReasoningBoundary::default(), |config| {
             config.reasoning_boundary
         });
+    if is_muse_spark_parser(structural_tag_parser(
+        runtime_config.tool_call_parser.as_deref(),
+        runtime_config.reasoning_parser.as_deref(),
+    )) {
+        anyhow::ensure!(
+            !backend_excludes_reasoning
+                && configured_boundary != StructuralTagReasoningBoundary::Backend,
+            "Muse Spark structural tags require grammar-owned reasoning; enable vLLM structured_outputs_config.enable_in_reasoning and use reasoning_boundary=auto or structural_tag"
+        );
+        anyhow::ensure!(
+            !runtime_config
+                .structural_tag
+                .as_ref()
+                .is_some_and(|config| config.tool_arguments_any_order),
+            "Muse Spark does not support structural_tag.tool_arguments_any_order"
+        );
+    }
     let reasoning_boundary =
         resolve_reasoning_boundary(configured_boundary, backend_excludes_reasoning)
             .map_err(anyhow::Error::msg)?;
@@ -597,6 +742,29 @@ mod tests {
             .clone()
     }
 
+    fn kimi_k2_call_section(format: &serde_json::Value) -> &serde_json::Value {
+        if format["type"] == "triggered_tags" {
+            assert_eq!(
+                format["triggers"],
+                serde_json::json!(["<|tool_calls_section_begin|>"])
+            );
+            assert_eq!(format["at_least_one"], true);
+            let section = &format["tags"][0];
+            assert_eq!(section["begin"], "<|tool_calls_section_begin|>");
+            assert_eq!(section["end"], "<|tool_calls_section_end|>");
+            &section["content"]
+        } else {
+            assert_eq!(format["type"], "sequence");
+            assert_eq!(format["elements"][0]["type"], "const_string");
+            assert_eq!(
+                format["elements"][0]["value"],
+                "<|tool_calls_section_begin|>"
+            );
+            assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
+            &format["elements"][1]
+        }
+    }
+
     #[test]
     fn reasoning_metadata_controls_whether_forced_tool_tag_models_reasoning() {
         for policy in [None, Some(false)] {
@@ -607,12 +775,7 @@ mod tests {
         }
 
         let format = kimi_k2_required_format(Some(true));
-        assert_eq!(format["type"], "sequence");
-        assert_eq!(format["elements"][0]["type"], "const_string");
-        assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
+        assert_eq!(kimi_k2_call_section(&format)["type"], "tags_with_separator");
     }
 
     #[test]
@@ -672,6 +835,188 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_only_spark_forced_choice_installs_native_grammar() {
+        for parser in ["muse_spark", "muse_spark_open"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = None;
+            mdc.runtime_config.reasoning_parser = Some(parser.into());
+            // Startup must protect the same family selected for forced-call guidance.
+            let mut late_config = mdc.runtime_config.clone();
+            late_config
+                .set_engine_specific(
+                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    true,
+                )
+                .unwrap();
+            assert!(
+                validate_runtime_config(&late_config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("grammar-owned reasoning")
+            );
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type":"function","function":{"name":"get_weather"}}),
+            ] {
+                let chat:crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest=serde_json::from_value(serde_json::json!({
+                    "model":"m","messages":[{"role":"user","content":"Weather"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}}],"tool_choice":choice,"parallel_tool_calls":false
+                })).unwrap();
+                let mut request = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&chat, &mut request, false)
+                    .unwrap();
+                assert!(
+                    matches!(
+                        constraint,
+                        crate::protocols::openai::GuidedToolConstraint::StructuralTag
+                    ),
+                    "{parser}: {constraint:?}"
+                );
+                let guidance = request.sampling_options.guided_decoding.unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_forced_choices_install_native_grammar_without_operator_opt_in() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object", "properties": {"city": {"type": "string"}},
+                "required": ["city"], "additionalProperties": false
+            })),
+            strict: Some(true),
+        }];
+        for parser in ["muse_spark_open", "muse_spark"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                ToolChoice::Required,
+                ToolChoice::Named("get_weather".into()),
+            ] {
+                let mut request = preprocessed_request();
+                assert!(
+                    preprocessor
+                        .apply_tool_choice_structural_tag(
+                            &choice,
+                            &tools,
+                            Some(false),
+                            false,
+                            None,
+                            &mut request
+                        )
+                        .unwrap(),
+                    "{parser} {choice:?} must be enforced by the native grammar"
+                );
+                let guidance = request.sampling_options.guided_decoding.as_ref().unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .as_ref()
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_grammar_disables_sglang_gate_and_rejects_late_vllm_gate() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        mdc.runtime_config
+            .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, true)
+            .unwrap();
+        let mut late_config = mdc.runtime_config.clone();
+        late_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                true,
+            )
+            .unwrap();
+        assert!(
+            validate_runtime_config(&late_config)
+                .unwrap_err()
+                .to_string()
+                .contains("grammar-owned reasoning")
+        );
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "ping".into(),
+            parameters: Some(serde_json::json!({"type":"object", "properties":{}})),
+            strict: Some(true),
+        }];
+        let mut request = preprocessed_request();
+        request.require_reasoning = true;
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Required,
+                    &tools,
+                    Some(false),
+                    false,
+                    None,
+                    &mut request
+                )
+                .unwrap()
+        );
+        assert!(
+            !request.require_reasoning,
+            "SGLang must apply the complete ATEM grammar from the first generated token"
+        );
+    }
+
+    #[test]
+    fn muse_spark_unsupported_constraints_do_not_silently_fall_back_to_prompting() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "lookup".into(),
+            parameters: Some(
+                serde_json::json!({"type":"object", "properties":{"q":{"type":"string", "pattern":"^A", "minLength":4, "contentMediaType":"text/plain"}}}),
+            ),
+            strict: Some(true),
+        }];
+        let error = preprocessor
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &tools,
+                None,
+                false,
+                None,
+                &mut preprocessed_request(),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot constrain native Muse Spark tools")
+        );
+    }
+
+    #[test]
     fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
         let named = ToolChoice::Named("get_weather".to_string());
         assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
@@ -705,6 +1050,13 @@ mod tests {
             ("kimi_k2", ToolChoice::Named("get_weather".to_string())),
             ("kimi_k3", ToolChoice::Named("get_weather".to_string())),
             ("kimi-k3", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark", ToolChoice::Required),
+            ("muse_spark", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark_open", ToolChoice::Required),
+            (
+                "muse_spark_open",
+                ToolChoice::Named("get_weather".to_string()),
+            ),
         ];
         for (parser, choice) in cases {
             assert!(
@@ -871,18 +1223,13 @@ mod tests {
             .structural_tag
             .as_ref()
             .unwrap()["format"];
-        assert_eq!(format["type"], "sequence");
+        let section = kimi_k2_call_section(format);
+        assert_eq!(section["type"], "tags_with_separator");
+        assert_eq!(section["at_least_one"], true);
         assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
-        assert_eq!(format["elements"][1]["type"], "tags_with_separator");
-        assert_eq!(format["elements"][1]["at_least_one"], true);
-        assert_eq!(
-            format["elements"][1]["tags"][0]["begin"],
+            section["tags"][0]["begin"],
             "<|tool_call_begin|>functions.get_weather:"
         );
-        assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
     }
 
     #[test]
@@ -1085,9 +1432,21 @@ mod tests {
             ("qwen3_coder", None),
             ("glm47", Some("glm45")),
             ("qwen3_coder", Some("deepseek_r1")),
+            ("harmony", Some("gpt_oss")),
+            ("gpt_oss", None),
+            ("harmony", Some("deepseek_r1")),
         ] {
             let compatible = reasoning != Some("deepseek_r1");
             let uses_v2 = version != "1" && compatible;
+            assert_eq!(
+                uses_gpt_oss_required_array((Some(tool), reasoning), &ToolChoice::Required, None),
+                uses_v2 && matches!(tool, "harmony" | "gpt_oss")
+            );
+            assert!(!uses_gpt_oss_required_array(
+                (Some(tool), reasoning),
+                &ToolChoice::Required,
+                Some(false),
+            ));
             assert_eq!(
                 matches!(
                     SelectedStructuralTagBuilder::for_parser(tool, reasoning),
@@ -1288,6 +1647,24 @@ mod tests {
         assert!(!requires_native_tool_call_format(
             Some("kimi_k2"),
             &ToolChoice::Auto
+        ));
+    }
+
+    #[test]
+    fn beam_forced_choices_keep_the_harmony_wire_and_its_analysis_channel() {
+        let named = ToolChoice::Named("get_weather".to_string());
+        assert!(requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Required
+        ));
+        assert!(requires_native_tool_call_format(Some("beam"), &named));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Auto
+        ));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::None
         ));
     }
 

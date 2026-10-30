@@ -24,9 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
 	"sort"
-	"strings"
 	"text/template"
 	"time"
 
@@ -60,6 +60,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 )
 
 const (
@@ -390,13 +391,6 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
 	OperatorImagePullPolicy corev1.PullPolicy
-	// RBACMgr handles RBAC setup for profiling jobs
-	RBACManager RBACManager
-}
-
-// RBACManager interface for managing RBAC resources
-type RBACManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
 }
 
 // GetRecorder implements commonController.Reconciler interface
@@ -994,9 +988,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build labels (start with generated DGD's labels)
 	labels := make(map[string]string)
 	if generatedDGD.Labels != nil {
-		for k, v := range generatedDGD.Labels {
-			labels[k] = v
-		}
+		maps.Copy(labels, generatedDGD.Labels)
 	}
 	// Add/override with managed labels
 	labels[nvidiacomv1beta1.LabelDGDRName] = dgdr.Name
@@ -1006,21 +998,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build annotations (start with generated DGD's annotations)
 	annotations := make(map[string]string)
 	if generatedDGD.Annotations != nil {
-		for k, v := range generatedDGD.Annotations {
-			annotations[k] = v
-		}
+		maps.Copy(annotations, generatedDGD.Annotations)
 	}
 	annotations[AnnotationDGDRUID] = string(dgdr.UID)
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        dgdName,
-			Namespace:   dgdNamespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: generatedDGD.Spec,
+		Name:        dgdName,
+		Namespace:   dgdNamespace,
+		Labels:      labels,
+		Annotations: annotations,
+		Spec:        generatedDGD.Spec,
 	}
 
 	// Note: We don't set owner reference on DGD
@@ -1503,52 +1491,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
-// GetGPUDiscoveryFailureReason classifies a GPU discovery error and
-// returns a stable, actionable reason string suitable for structured logging.
-//
-// The classification is based on known error message patterns produced during:
-//   - DCGM exporter pod discovery
-//   - Helm-based GPU operator and DCGM discovery
-//   - Metrics scraping
-//   - Prometheus parsing
-//
-// If the error does not match any known category, "unknown" is returned.
+// GetGPUDiscoveryFailureReason classifies a GPU discovery error into a stable reason string
+// for structured logging. The classification lives in the gpu package so the v1beta2
+// admission path reports the same reasons.
 func GetGPUDiscoveryFailureReason(err error) string {
-	const unknownReason = "unknown"
-
-	if err == nil {
-		return unknownReason
-	}
-	errMsg := strings.ToLower(err.Error())
-
-	switch {
-	case strings.Contains(errMsg, "list pods"):
-		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
-	case strings.Contains(errMsg, "gpu operator is not installed"):
-		return "GPU Operator not installed in expected namespace"
-	case strings.Contains(errMsg, "helm init failed"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
-		return "timeout while waiting for DCGM exporter pods to become ready"
-	case strings.Contains(errMsg, "http get"):
-		return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
-	case strings.Contains(errMsg, "metrics endpoint") &&
-		strings.Contains(errMsg, "status"):
-		return "DCGM pod metrics endpoint returned non-200 status"
-	case strings.Contains(errMsg, "parse prometheus metrics"):
-		return "failed to parse dcgm Prometheus metrics (invalid format)"
-	case strings.Contains(errMsg, "no gpus detected"):
-		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
-	case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
-		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
-	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
-		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
-		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "failed to create helm path"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	}
-	return unknownReason
+	return gpu.DiscoveryFailureReason(err)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
@@ -1600,8 +1547,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
 	if r.Config.Namespace.Restricted == "" {
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		if err := rbac.EnsureServiceAccountWithRBAC(
 			ctx,
+			r.Client,
 			dgdr.Namespace,
 			ServiceAccountProfilingJob,
 			r.Config.RBAC.DGDRProfilingClusterRoleName,
@@ -1632,10 +1580,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name: "HUGGING_FACE_HUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "hf-token-secret",
-						},
-						Key: "HF_TOKEN",
+						Name: "hf-token-secret",
+						Key:  "HF_TOKEN",
 					},
 				},
 			},
@@ -1752,18 +1698,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			logger.Info("Using PVC for profiling output (from v1alpha1 compatibility fields)", "pvc", outputPVC)
 			profilingOutputVolume = corev1.Volume{
 				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: outputPVC,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: outputPVC,
 				},
 			}
 		} else {
 			profilingOutputVolume = corev1.Volume{
-				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{},
-				},
+				Name:     VolumeNameProfilingOutput,
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			}
 		}
 		volumes := []corev1.Volume{profilingOutputVolume}
@@ -1772,11 +1714,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if modelCachePVC != "" {
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameModelCache,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: modelCachePVC,
-						ReadOnly:  true,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: modelCachePVC,
+					ReadOnly:  true,
 				},
 			})
 		}
@@ -1789,16 +1729,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameProfilingConfig,
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cmRef.Name,
-						},
-						Items: []corev1.KeyToPath{{
-							Key:  cmKey,
-							Path: ProfilingConfigDefaultKey,
-						}},
-					},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: cmRef.Name,
+					Items: []corev1.KeyToPath{{
+						Key:  cmKey,
+						Path: ProfilingConfigDefaultKey,
+					}},
 				},
 			})
 		}
@@ -1811,7 +1747,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			ServiceAccountName: ServiceAccountProfilingJob,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptr.To(true),
+				RunAsNonRoot: new(true),
 				RunAsUser:    ptr.To[int64](1000),
 				RunAsGroup:   ptr.To[int64](1000),
 				FSGroup:      ptr.To[int64](1000),
@@ -1824,14 +1760,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      jobName,
-				Namespace: dgdr.Namespace,
-				Labels: map[string]string{
-					nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
-					nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
-					nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
-				},
+			Name:      jobName,
+			Namespace: dgdr.Namespace,
+			Labels: map[string]string{
+				nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
+				nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
+				nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
 			},
 			Spec: batchv1.JobSpec{
 				BackoffLimit: &backoffLimit,
@@ -1924,7 +1858,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.TotalGPUs,
+		"selectedShapeGpus", gpuInfo.SelectedShapeGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU,
 		"system", gpuInfo.System,
@@ -1933,6 +1868,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		"interconnectTier", gpuInfo.InterconnectTier,
 		"rdma", gpuInfo.RDMAEnabled,
 		"rdmaType", gpuInfo.RDMAType)
+
+	// An automatically derived budget is valid only for discovery's selected node shape.
+	if err := validateAutomaticGPUShape(hw, gpuInfo); err != nil {
+		return changed, err
+	}
 
 	if hw.GPUSKU == "" {
 		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
@@ -1959,14 +1899,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.TotalGPUs == nil && gpuInfo != nil {
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
 		// Will be removed once a fix is in the Profiler/AIC.
-		const defaultMaxAutoGPUs = int32(32)
-		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		const defaultMaxAutoGPUs = 32
+		total := gpuInfo.SelectedShapeGPUs
 		if total > defaultMaxAutoGPUs {
-			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
-				"discovered", total, "cap", defaultMaxAutoGPUs)
+			logger.Info("Capping auto-discovered GPU budget at default limit; set hardware.totalGpus to override",
+				"selectedShapeGpus", total, "cap", defaultMaxAutoGPUs)
 			total = defaultMaxAutoGPUs
 		}
-		hw.TotalGPUs = &total
+		hw.TotalGPUs = new(int32(total))
 		changed = true
 	}
 	if hw.Interconnect == "" && gpuInfo != nil && gpuInfo.Interconnect != "" {
@@ -1986,6 +1926,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	return changed, nil
 }
 
+func validateAutomaticGPUShape(hw *nvidiacomv1beta1.HardwareSpec, gpuInfo *gpu.GPUInfo) error {
+	if hw.TotalGPUs != nil {
+		return nil
+	}
+	if hw.NumGPUsPerNode != nil && int(*hw.NumGPUsPerNode) != gpuInfo.GPUsPerNode {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.numGpusPerNode=%d does not match the selected discovered shape with %d GPUs per node; set hardware.totalGpus explicitly", *hw.NumGPUsPerNode, gpuInfo.GPUsPerNode)
+	}
+	if hw.VRAMMB != nil && !sameVRAMShape(*hw.VRAMMB, gpuInfo.VRAMPerGPU) {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.vramMb=%g does not match the selected discovered shape with %d MiB per GPU; set hardware.totalGpus explicitly", *hw.VRAMMB, gpuInfo.VRAMPerGPU)
+	}
+	return nil
+}
+
+// sameVRAMShape accepts nominal memory sizes while rejecting a materially different GPU variant.
+func sameVRAMShape(requestedMiB float64, discoveredMiB int) bool {
+	discovered := float64(discoveredMiB)
+	return max(requestedMiB-discovered, discovered-requestedMiB) <= discovered/10
+}
+
 func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Attempting GPU discovery for profiling job")
@@ -1999,41 +1958,21 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		return nil, nil
 	}
 
-	var dcgmErr error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err == nil {
-			return discoveredInfo, nil
-		}
-		dcgmErr = err
-
-		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("DCGM discovery failed, falling back to node-label discovery",
-			"reason", reason, "error", err.Error())
+	discoverer := &gpu.Discoverer{
+		Reader:     reader,
+		DCGM:       r.GPUDiscovery,
+		Cache:      r.GPUDiscoveryCache,
+		NodeLabels: r.gpuDiscoveryEnabled,
 	}
-
-	if !r.gpuDiscoveryEnabled() {
+	info, err := discoverer.Discover(ctx, hw.GPUSKU)
+	if err != nil {
 		if discoveryRequired {
-			if dcgmErr != nil {
-				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
-			}
-			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
+			return nil, err
 		}
-		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+		logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged", "error", err.Error())
 		return nil, nil
 	}
-
-	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
-	if err == nil {
-		return discoveredInfo, nil
-	}
-
-	logger.Info("Node-label discovery also failed", "error", err.Error())
-	if discoveryRequired {
-		return nil, fmt.Errorf("auto-discovery failed: %w", err)
-	}
-	logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
-	return nil, nil
+	return info, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.
@@ -2594,10 +2533,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 		).
@@ -2613,10 +2550,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 			builder.WithPredicates(predicate.Funcs{

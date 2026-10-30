@@ -19,10 +19,12 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+    SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -59,19 +61,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
@@ -1256,6 +1245,23 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
+    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
+        self.runtime_config
+            .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+            && self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1)
+            && self.runtime_config.max_num_seqs == Some(1)
+            && self.runtime_config.data_parallel_size == 1
+            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+            && self.needs.is_empty()
+            && self.lora.is_none()
+            && !self
+                .runtime_config
+                .runtime_data
+                .contains_key(SPEC_DECODE_RUNTIME_KEY)
+    }
+
     pub fn mdcsum(&self) -> &str {
         self.checksum
             .get_or_init(|| {
@@ -1387,6 +1393,11 @@ impl ModelDeploymentCard {
                 ) {
                     bytes_to_hash
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
+                }
+
+                // Preserve legacy checksums when serial scoring is unavailable.
+                if self.is_systemone_serial_eligible() {
+                    bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -3667,6 +3678,72 @@ mod ownership_tests {
     }
 
     #[test]
+    fn systemone_serial_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+        };
+
+        fn card(configure: impl FnOnce(&mut ModelDeploymentCard)) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(1);
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_GENERATE_CAPABILITY.to_string(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), true.into());
+            configure(&mut card);
+            card
+        }
+
+        let enabled = card(|_| {});
+        assert!(enabled.is_systemone_serial_eligible());
+        assert!(card(|card| card.migration_limit = 1).is_systemone_serial_eligible());
+        let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_SYSTEMONE_SERIAL_V1);
+            },
+            |card| card.runtime_config.max_num_seqs = None,
+            |card| card.runtime_config.max_num_seqs = Some(2),
+            |card| card.runtime_config.data_parallel_size = 0,
+            |card| card.runtime_config.data_parallel_size = 2,
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_GENERATE_CAPABILITY);
+            },
+            |card| card.worker_type = Some(crate::worker_type::WorkerType::Prefill),
+            |card| card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]],
+            |card| {
+                card.lora = Some(LoraInfo {
+                    name: "adapter".to_string(),
+                    max_gpu_lora_count: None,
+                });
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            let unsupported = card(configure);
+            assert!(!unsupported.is_systemone_serial_eligible());
+            assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
+            let feature_off = card(|card| {
+                configure(card);
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_SYSTEMONE_SERIAL_V1);
+            });
+            assert_eq!(feature_off.mdcsum(), unsupported.mdcsum());
+        }
+    }
+
+    #[test]
     fn qwen_video_processor_contract_stays_out_of_the_checksum() {
         use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 
@@ -3773,12 +3850,32 @@ mod ownership_tests {
         );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.5}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
+        );
+        let same_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "note": null,
+                "enabled": true,
+                "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+                "video_pruning_rate": 0.5,
+            }),
         );
         let different_nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.25}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
         );
+
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
@@ -3790,6 +3887,12 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+        assert_eq!(nemotron.mdcsum(), same_nemotron.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            nemotron.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
     }
 }
 

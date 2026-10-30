@@ -127,6 +127,7 @@ Unsupported values stop startup. Explicit selections validate the configured too
 
 | Configured family | Unset or `auto` selection |
 | --- | --- |
+| Beam 1.0 | V2; `beam` must be set as both the tool-call and the reasoning parser (there is no V1 route) |
 | Muse Glimmer | V2 |
 | DeepSeek V4.1 | V2 |
 | DeepSeek V4 | V2 |

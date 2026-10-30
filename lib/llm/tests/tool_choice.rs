@@ -41,6 +41,7 @@ fn drive_moved_jail(
     jail.apply_with_finish_reason(input)
         .filter_map(|a| async move {
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner,
                 nvext: None,
                 prompt_logprobs: None,
@@ -59,6 +60,8 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     )];
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner: CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages,
@@ -495,6 +498,7 @@ fn make_text_chunk(
     };
     #[allow(deprecated)]
     dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test-named-parser".to_string(),
             choices: vec![ChatChoiceStream {
@@ -665,6 +669,7 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
     )
     .filter_map(|a| async move {
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner,
             nvext: None,
             prompt_logprobs: None,
@@ -995,6 +1000,26 @@ async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
+const QWEN3_DOTTED: &str = "<tool_call>\n<function=my-tool.v2>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
     let responses =
@@ -1067,6 +1092,7 @@ async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
 
 const HARMONY_GET_WEATHER: &str = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 const HARMONY_SEARCH: &str = "<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"Paris weather\"}<|call|>";
+const HARMONY_DOTTED: &str = "<|channel|>commentary to=functions.my-tool.v2 <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 
 #[tokio::test]
 async fn test_harmony_tool_choice_auto() {
@@ -1081,6 +1107,24 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
 }
 
 #[tokio::test]

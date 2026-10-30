@@ -20,6 +20,8 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
+mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;
@@ -37,6 +39,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -124,8 +127,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -222,10 +225,15 @@ mod tests {
                     let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
                     assert_eq!(
                         result.reasoning_disabled,
-                        if family == "gemma4" {
-                            thinking != Some(true)
-                        } else {
-                            thinking == Some(false)
+                        match family {
+                            "gpt_oss" => false,
+                            "beam" => false,
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
+                            _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
                     );
@@ -437,6 +445,105 @@ mod tests {
             "an operator-configured structural tag must apply to any registry-supported \
              parser, not only the Kimi-intrinsic case"
         );
+    }
+
+    #[test]
+    fn harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "1",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, parallel, expected) in [
+                (
+                    json!("required"),
+                    None,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(true),
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(false),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!("auto"),
+                    Some(true),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    None,
+                    GuidedToolConstraint::StructuralTag,
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
+                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut request = request(choice);
+                request.inner.parallel_tool_calls = parallel;
+                let result = apply_request_tool_call_parsing_options(options, &request).unwrap();
+                assert_eq!(
+                    result.guided_tool_constraint, expected,
+                    "{parser} {parallel:?}"
+                );
+            }
+        }
     }
 
     // The low-level ParsingOptions default remains conservative. Regular
@@ -771,6 +878,8 @@ pub enum OpenApiRouteKind {
     Completions,
     Embeddings,
     Responses,
+    Decisions,
+    SystemOne,
 }
 
 /// Documentation for a route, with optional handler-specific schema metadata.

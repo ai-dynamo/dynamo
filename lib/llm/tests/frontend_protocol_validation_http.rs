@@ -13,8 +13,9 @@ use dynamo_llm::{
 };
 use dynamo_runtime::{
     config::environment_names::llm::{
-        DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API,
-        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
+        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -33,10 +34,11 @@ mod scripted_chat_engine;
 use http_harness::{HarnessService, MODEL, load_agent_fixture};
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
-const BASE_ENV: [(&str, Option<&str>); 3] = [
+const BASE_ENV: [(&str, Option<&str>); 4] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+    (DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None),
 ];
 
 fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -59,6 +61,190 @@ async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Re
         .post(format!("{}{path}", svc.base_url))
         .json(&body);
     bounded(request.send()).await.unwrap()
+}
+
+fn custom_chat_request(streaming: bool) -> Value {
+    json!({"model":MODEL,"messages":[{"role":"user","content":"Calculate and look up"}],
+        "tools":[{"type":"custom","custom":{"name":"run_python","format":{"type":"text"}}},
+                 {"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+        "tool_choice":"auto","stream":streaming})
+}
+
+fn custom_chat_script(input: &str) -> Script {
+    let arguments = json!({"input":input}).to_string();
+    // Split an escape sequence to prove the JSON wrapper cannot leak into input.
+    let split = arguments
+        .find("\\\"")
+        .map(|i| i + 1)
+        .unwrap_or(arguments.len() / 2);
+    [
+        json!({"tool_calls":[{"index":0,"id":"custom-1","type":"function","function":{"name":"run_python","arguments":&arguments[..split]}}]}),
+        json!({"tool_calls":[{"index":0,"function":{"arguments":&arguments[split..]}},
+                            {"index":1,"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}),
+        json!({})
+    ].into_iter().enumerate().map(|(index,delta)| Annotated::from_data(serde_json::from_value(json!({
+        "id":"chat-custom","object":"chat.completion.chunk","created":1,"model":MODEL,
+        "choices":[{"index":0,"delta":delta,"finish_reason":if index==2 {json!("tool_calls")} else {json!(null)},"logprobs":null}]
+    })).unwrap())).collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_tools_unary_stream_and_replay_preserve_openai_shapes() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let input = "print(\"café 日本語\")\n# \\backslash";
+        for streaming in [false,true] {
+            let final_answer = vec![Annotated::from_data(serde_json::from_value(json!({
+                "id":"chat-final","object":"chat.completion.chunk","created":1,"model":MODEL,
+                "choices":[{"index":0,"delta":{"role":"assistant","content":"5"},"finish_reason":"stop","logprobs":null}]
+            })).unwrap())];
+            let svc = HarnessService::start([custom_chat_script(input), final_answer]).await;
+            let body = custom_chat_request(streaming);
+            let response = post_json(&svc,"/v1/chat/completions",body.clone()).await;
+            assert_eq!(response.status(),reqwest::StatusCode::OK);
+            let call = json!({"id":"custom-1","type":"custom","custom":{"name":"run_python","input":input}});
+            let function = json!({"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}});
+            if streaming {
+                let raw = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&raw).await.unwrap();
+                assert_eq!(raw.lines().filter_map(|line|line.strip_prefix("data:")).next_back().map(str::trim), Some("[DONE]"));
+                let mut custom_input = String::new();
+                let mut ordinary_arguments = String::new();
+                let mut custom_name = None;
+                let mut terminal = false;
+                for event in &events {
+                    assert_ne!(event.event,"error","{raw}");
+                    for choice in event.data["choices"].as_array().into_iter().flatten() {
+                        terminal |= choice["finish_reason"] == "tool_calls";
+                        for delta in choice["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                            if delta["index"] == 0 {
+                                assert!(delta.get("function").is_none());
+                                if let Some(name) = delta["custom"]["name"].as_str() { custom_name = Some(name.to_owned()); }
+                                if let Some(input) = delta["custom"]["input"].as_str() { custom_input.push_str(input); }
+                            } else if let Some(arguments) = delta["function"]["arguments"].as_str() { ordinary_arguments.push_str(arguments); }
+                        }
+                    }
+                }
+                assert_eq!(custom_name.as_deref(),Some("run_python"));
+                assert_eq!(custom_input,input);
+                assert_eq!(ordinary_arguments,"{}");
+                assert!(terminal);
+            } else {
+                let value: Value = bounded(response.json()).await.unwrap();
+                assert_eq!(value["choices"][0]["message"]["tool_calls"],json!([call.clone(),function.clone()]));
+                assert_eq!(value["choices"][0]["finish_reason"],"tool_calls");
+            }
+            let mut replay = body;
+            replay["stream"] = json!(false);
+            replay["tool_choice"] = json!("none");
+            replay["messages"].as_array_mut().unwrap().extend([
+                json!({"role":"assistant","tool_calls":[call,function]}),
+                json!({"role":"tool","tool_call_id":"custom-1","content":"5"}),
+                json!({"role":"tool","tool_call_id":"function-1","content":"Found"})
+            ]);
+            let response = post_json(&svc,"/v1/chat/completions",replay).await;
+            assert_eq!(response.status(),reqwest::StatusCode::OK);
+            let value: Value = bounded(response.json()).await.unwrap();
+            assert_eq!(value["choices"][0]["message"]["content"],"5");
+            let captured = svc.engine.take_requests().await;
+            assert_eq!(captured.len(),2);
+            for request in &captured {
+                let worker = request.python_chat_processor_request_json(&Default::default()).unwrap();
+                assert_eq!(worker["tools"][0]["type"],"function");
+                assert!(worker["tools"][0].get("custom").is_none());
+                assert_eq!(worker["tools"][0]["function"]["parameters"]["properties"]["input"]["type"],"string");
+            }
+            let replay = serde_json::to_value(&captured[1]).unwrap();
+            let arguments: Value = serde_json::from_str(replay["messages"][1]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["input"],input);
+            svc.shutdown().await;
+        }
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_malformed_output_preserves_valid_siblings_over_http() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        for arguments in [r#"{"code":"print(1)"}"#, r#"{"input":42}"#] {
+            for streaming in [false, true] {
+                let script = vec![Annotated::from_data(serde_json::from_value(json!({
+                    "id":"chat-custom","object":"chat.completion.chunk","created":1,"model":MODEL,
+                    "choices":[{"index":0,"delta":{"content":"Checking.","tool_calls":[
+                        {"index":0,"id":"custom-1","type":"function","function":{"name":"run_python","arguments":arguments}},
+                        {"index":1,"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                    ]},"finish_reason":"tool_calls","logprobs":null}],
+                    "usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}
+                })).unwrap())];
+                let svc = HarnessService::start([script]).await;
+                let mut body = custom_chat_request(streaming);
+                if streaming {
+                    body["stream_options"] = json!({"include_usage":true});
+                }
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                if streaming {
+                    let raw = bounded(response.text()).await.unwrap();
+                    assert_eq!(raw.lines().filter_map(|line| line.strip_prefix("data:")).next_back().map(str::trim), Some("[DONE]"));
+                    let events = http_harness::parse_json_sse(&raw).await.unwrap();
+                    assert!(events.iter().all(|event| event.event != "error"), "{raw}");
+                    let choice = events.iter().find_map(|event| event.data["choices"].as_array().and_then(|choices| choices.first())).unwrap();
+                    let calls = choice["delta"]["tool_calls"].as_array().unwrap();
+                    assert_eq!(calls.len(), 2, "one entry per tool-call index: {raw}");
+                    assert_eq!(calls[0]["custom"]["input"], arguments);
+                    assert_eq!(calls[1]["function"]["arguments"], "{}");
+                    assert_eq!(choice["delta"]["content"], "Checking.");
+                    assert_eq!(choice["finish_reason"], "tool_calls");
+                    assert!(events.iter().any(|event| event.data["usage"]["total_tokens"] == 7));
+                } else {
+                    let value: Value = bounded(response.json()).await.unwrap();
+                    assert_eq!(value["choices"][0]["message"]["tool_calls"][0]["custom"]["input"], arguments);
+                    assert_eq!(value["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"], "{}");
+                    assert_eq!(value["choices"][0]["message"]["content"], "Checking.");
+                    assert_eq!(value["usage"]["total_tokens"], 7);
+                }
+                svc.shutdown().await;
+            }
+        }
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_unsupported_grammar_and_wrong_choice_do_not_reach_engine() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start([]).await;
+        for streaming in [false, true] {
+            let mut grammar = custom_chat_request(streaming);
+            grammar["tools"][0]["custom"]["format"] =
+                json!({"type":"grammar","grammar":{"syntax":"regex","definition":".*"}});
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", grammar).await,
+                ExpectedError::Validation,
+                "grammar formats are not supported",
+            )
+            .await;
+            let mut wrong = custom_chat_request(streaming);
+            wrong["tool_choice"] = json!({"type":"custom","custom":{"name":"lookup"}});
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", wrong).await,
+                ExpectedError::Validation,
+                "not present in tools",
+            )
+            .await;
+            let mut ambiguous = custom_chat_request(streaming);
+            ambiguous["tools"][1]["function"]["name"] = json!("run_python");
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", ambiguous).await,
+                ExpectedError::Validation,
+                "both custom and function",
+            )
+            .await;
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[derive(Clone, Copy)]
@@ -401,6 +587,249 @@ async fn strict_tool_schema_rejected_before_dispatch() {
     .await;
 }
 
+// Beam route: the handler normalizes the request from the parsing options of the engine
+// it then dispatches to, and does so before generic validation, which would otherwise
+// reject exactly the shapes being normalized (noncompliant `strict` schema; legacy
+// `builtin_tools` declaration with `tool_choice: "required"` and no top-level `tools`).
+#[tokio::test]
+#[serial]
+async fn beam_request_normalization_precedes_generic_validation() {
+    let noncompliant_strict = json!({
+        "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+        "tools": [{"type": "function", "function": {
+            "name": "search", "strict": true, "parameters": {
+                "type": "object", "properties": {"query": {"type": "string", "minLength": 1}}
+            }
+        }}]
+    });
+    let legacy_builtin_required = json!({
+        "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+        "tool_choice": "required",
+        "chat_template_kwargs": {"builtin_tools": [{
+            "name": "lookup", "parameters": {"type": "object", "properties": {}}
+        }]}
+    });
+    let cases = [
+        ("noncompliant strict", noncompliant_strict),
+        ("legacy builtin_tools", legacy_builtin_required),
+    ];
+    temp_env::async_with_vars(BASE_ENV, async {
+        // Control: without the Beam parsers, generic validation rejects both shapes.
+        let svc = HarnessService::start(Vec::new()).await;
+        for (case, body) in &cases {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "{case} stream={stream} must be rejected off the Beam route"
+                );
+                assert!(svc.engine.take_requests().await.is_empty());
+            }
+        }
+        svc.shutdown().await;
+
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only(MODEL);
+        card.runtime_config.tool_call_parser = Some("beam".to_string());
+        card.runtime_config.reasoning_parser = Some("beam".to_string());
+        let engine = Arc::new(ScriptedChatEngine::new(
+            std::iter::repeat_n(script, cases.len() * 2).map(Ok),
+        ));
+        let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+        for (case, body) in &cases {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                let status = response.status();
+                let body = bounded(response.text()).await.unwrap_or_default();
+                assert_eq!(
+                    status,
+                    reqwest::StatusCode::OK,
+                    "{case} stream={stream}: {body}"
+                );
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1, "{case} stream={stream} dispatches once");
+                let tools = requests[0].inner.tools.as_ref().unwrap();
+                assert_eq!(tools.len(), 1, "{case} stream={stream}");
+                match *case {
+                    "noncompliant strict" => {
+                        assert_eq!(tools[0].function.name, "search");
+                        assert_eq!(tools[0].function.strict, None, "served as non-strict");
+                    }
+                    _ => {
+                        assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
+                    }
+                }
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+// The process-wide startup policy needs a fresh process for opt-in cases.
+async fn run_compatibility_subprocess(test_name: &str) -> bool {
+    const CHILD: &str = "DYNAMO_STRICT_SCHEMA_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, test_name)
+            .env(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("compatibility subprocess must finish")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "compatibility subprocess failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+        "subprocess must execute the selected test: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    true
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+            "options": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 5}}
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    });
+    if run_compatibility_subprocess(
+        "strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters",
+    )
+    .await
+    {
+        temp_env::async_with_vars(BASE_ENV, async {
+            let svc = HarnessService::start(Vec::new()).await;
+            temp_env::async_with_vars(
+                [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, Some("1"))],
+                async {
+                    let response = post_json(
+                        &svc,
+                        "/v1/messages",
+                        json!({
+                            "model": MODEL, "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+                        }),
+                    )
+                    .await;
+                    assert_anthropic_error(response, ExpectedError::Validation, "must include property").await;
+                    assert!(svc.engine.take_requests().await.is_empty());
+                },
+            )
+            .await;
+            svc.shutdown().await;
+        })
+        .await;
+        return;
+    }
+
+    let function = json!({"name": "search", "strict": true, "parameters": parameters});
+    let mut requests = strict_tool_requests(function).to_vec();
+    requests.push((
+        "/v1/messages",
+        json!({
+            "model": MODEL, "max_tokens": 64,
+            "messages": [{"role": "user", "content": "ping"}],
+            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+        }),
+    ));
+
+    let script = load_agent_fixture("text.sse").await.unwrap();
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(vec![script; requests.len()]).await;
+        temp_env::async_with_vars(
+            [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None::<&str>)],
+            async {
+                for (path, body) in requests {
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    bounded(response.bytes()).await.unwrap();
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let tools = requests[0].inner.tools.as_ref().unwrap();
+                    assert_eq!(tools.len(), 1);
+                    assert_eq!(tools[0].function.name, "search");
+                    assert_eq!(tools[0].function.strict, Some(true));
+                    assert_eq!(tools[0].function.parameters.as_ref(), Some(&parameters));
+                }
+            },
+        )
+        .await;
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_retains_basic_validation() {
+    if run_compatibility_subprocess("strict_tool_schema_compatibility_retains_basic_validation")
+        .await
+    {
+        return;
+    }
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for (function, message) in [
+            (
+                json!({"name": "invalid name", "strict": true, "parameters": {}}),
+                "invalid name",
+            ),
+            (
+                json!({"name": "search", "strict": true, "parameters": []}),
+                "must be a JSON Schema object",
+            ),
+        ] {
+            for (path, body) in strict_tool_requests(function) {
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(response, ExpectedError::Validation, message).await;
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn strict_tool_schema_diagnostics_are_bounded() {
@@ -683,6 +1112,47 @@ async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
         }
 
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_named_tool_choice_requires_a_name_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let mut body = json!({
+            "model": MODEL,
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "List the current directory."}],
+            "tools": [
+                {"name": "list_directory", "input_schema": {
+                    "type": "object", "properties": {"path": {"type": "string"}}
+                }},
+                {"name": "get_weather", "input_schema": {
+                    "type": "object", "properties": {"city": {"type": "string"}}
+                }}
+            ],
+            "tool_choice": {"type": "tool"}
+        });
+
+        let response = post_json(&svc, "/v1/messages", body.clone()).await;
+        assert_anthropic_error(response, ExpectedError::Validation, "tool_choice.name").await;
+        assert!(svc.engine.take_requests().await.is_empty());
+
+        body["tool_choice"]["name"] = json!("list_directory");
+        let response = post_json(&svc, "/v1/messages", body).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&requests[0].inner.tool_choice).unwrap(),
+            json!({"type": "function", "function": {"name": "list_directory"}})
+        );
         svc.shutdown().await;
     })
     .await;
@@ -1187,4 +1657,32 @@ async fn tool_name_limit_is_shared_across_protocols() {
         svc.shutdown().await;
     })
     .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_rejects_custom_kind_mismatch_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc=HarnessService::start([]).await;
+        let function=json!({"type":"function","name":"run","parameters":{"type":"object"}});
+        let custom=json!({"type":"custom","name":"run"});
+        let search=json!({"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"query":{"type":"string"}}}});
+        for stream in [false,true] {
+            for (tools,choice) in [
+                (json!([function.clone()]),json!({"type":"custom","name":"run"})),
+                (json!([custom.clone()]),json!({"type":"function","name":"run"})),
+                (json!([function.clone(),custom.clone()]),json!("auto")),
+                (json!([custom.clone(),function.clone()]),json!("auto")),
+                (json!([search.clone()]),json!({"type":"custom","name":"tool_search"})),
+                (json!([search.clone()]),json!({"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"tool_search"}]})),
+                (json!([]),json!({"type":"custom","name":"missing"})),
+                (json!([function.clone()]),json!({"type":"custom","name":"missing"}))
+            ] {
+                let response=post_json(&svc,"/v1/responses",json!({"model":MODEL,"input":"hi","tools":tools,"tool_choice":choice,"stream":stream})).await;
+                assert_eq!(response.status(),reqwest::StatusCode::BAD_REQUEST,"kind mismatch dispatched");
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    }).await;
 }
