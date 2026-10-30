@@ -27,7 +27,8 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_anthropic_sse,
 };
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
@@ -35,6 +36,27 @@ const ENV: [(&str, Option<&str>); 2] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
 ];
+
+#[tokio::test]
+async fn sse_parser_requires_anthropic_termination() {
+    for terminal in ["message_stop", "error"] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_anthropic_sse(&body).await.is_ok());
+        for trailer in ["data: [DONE]\n\n", body.as_str()] {
+            assert!(
+                parse_anthropic_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_anthropic_sse("").await.is_err());
+    assert!(
+        parse_anthropic_sse("event: message_start\ndata: {}\n\n")
+            .await
+            .is_err()
+    );
+}
 
 fn user_text(
     request: &dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
@@ -142,7 +164,7 @@ async fn matched_stop_sequence_reaches_messages_without_client_opt_in(
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             let stop_fields = if streaming {
                 let raw = response.text().await.unwrap();
-                let events = parse_json_sse(&raw).await.unwrap();
+                let events = parse_anthropic_sse(&raw).await.unwrap();
                 assert_eq!(
                     events
                         .iter()
@@ -219,13 +241,9 @@ async fn streaming_graceful_stop_drains_tail_and_kill_terminates() {
 
             assert_eq!(raw.matches("event: message_stop\n").count(), 1);
             assert_eq!(raw.matches("event: message_delta\n").count(), 1);
-            if kill_after_stop {
-                // Best-effort finalizers still drain on kill, but it must not
-                // be recorded (or signaled with [DONE]) as successful completion.
-                assert!(!raw.contains("data: [DONE]"));
-            } else {
-                assert_eq!(raw.matches("data: [DONE]").count(), 1);
-                let events = parse_json_sse(&raw).await.unwrap();
+            assert!(!raw.contains("data: [DONE]"));
+            if !kill_after_stop {
+                let events = parse_anthropic_sse(&raw).await.unwrap();
                 insta::assert_json_snapshot!(
                     "anthropic_streaming_text",
                     canonicalize(serde_json::to_value(events).unwrap())
@@ -270,8 +288,12 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        assert!(!raw.contains("data: [DONE]"));
+        assert!(
+            raw.trim_end()
+                .ends_with("data: {\"type\":\"message_stop\"}")
+        );
+        let events = parse_anthropic_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "anthropic_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -301,7 +323,7 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_anthropic_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -408,8 +430,8 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        assert!(!raw.contains("data: [DONE]"));
+        let events = parse_anthropic_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -489,7 +511,7 @@ async fn tool_choice_controls_parallel_calls() {
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let expected_count = if parallel == Some(false) { 1 } else { 2 };
                 if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let starts: Vec<_> = events
@@ -588,7 +610,7 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                     "end_turn"
                 };
                 let inputs: Vec<Value> = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let mut arguments = BTreeMap::<u64, String>::new();
@@ -661,7 +683,7 @@ async fn parallel_tools_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_anthropic_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -757,7 +779,7 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
             &svc,
             &json!({
                 "model": MODEL,
-                "max_tokens": 128,
+                "max_tokens": 2048,
                 "stream": false,
                 "thinking": {"type": "enabled", "budget_tokens": 1024},
                 "tools": [tool("list_directory")],
