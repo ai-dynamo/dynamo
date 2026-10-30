@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: operator ServiceMonitor honorLabels
+templates:
+  - charts/dynamo-operator/templates/operator-servicemonitor.yaml
+tests:
+  - it: should honor metric labels on the metrics endpoint
+    set:
+      dynamo-operator.metricsService.enabled: true
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: spec.endpoints[0].honorLabels
+          value: true
