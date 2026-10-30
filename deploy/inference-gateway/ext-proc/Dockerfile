@@ -85,7 +85,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
-    cargo build --release -p dynamo-ext-proc && \
+    cargo build --release -p dynamo-ext-proc --features mm-routing && \
     cp target/release/dynamo-ext-proc /epp && \
     case "$TARGETARCH" in \
         arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \

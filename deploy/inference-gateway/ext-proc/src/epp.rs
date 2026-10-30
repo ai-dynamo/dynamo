@@ -11,18 +11,19 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
+use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
@@ -51,11 +52,23 @@ const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 /// batch. Chat and single/pre-tokenized completion requests are always safe.
 struct TokenizeResult {
     tokens: Vec<u32>,
+    mm_routing_info: Option<MmRoutingInfo>,
     cache_namespace: Option<String>,
     priority_jump: f64,
     strict_priority: u32,
     routing_constraints: RoutingConstraints,
     tokens_safe_to_inject: bool,
+}
+
+/// Match the Frontend's `PreprocessedRequest::block_mm_routing_info` view.
+fn routing_view<'a>(
+    tokens: &'a [u32],
+    mm: Option<&'a MmRoutingInfo>,
+) -> (&'a [u32], Option<&'a [Option<BlockExtraInfo>]>) {
+    match mm.filter(|mm| !mm.routing_token_ids.is_empty()) {
+        Some(mm) => (&mm.routing_token_ids, Some(&mm.block_mm_infos)),
+        None => (tokens, None),
+    }
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -117,6 +130,7 @@ pub struct Router {
     prefill_bookings: DashMap<String, PrefillReservation>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
+    frontend_decoding: bool,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
@@ -244,16 +258,36 @@ impl Router {
         // and pod reflector all clone whatever they need from these
         // constructor-locals before this scope ends, so dropping them here
         // does not tear down any background work.
-        Ok(Self {
+        Ok(Self::new(
+            prefill_router,
+            decode_router,
+            bootstrap,
+            runtime,
+            worker_index,
+            pod_store_ready,
+        ))
+    }
+
+    /// Assemble routing state and take the decoding mode from the discovered card.
+    fn new(
+        prefill_router: Arc<PrefillRouter>,
+        decode_router: ManagedKvRouter,
+        bootstrap: DiscoveredModelBootstrap,
+        runtime: Runtime,
+        worker_index: Arc<RwLock<WorkerEndpointIndex>>,
+        pod_store_ready: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
             prefill_router,
             prefill_bookings: DashMap::new(),
             decode_router,
             preprocessor: bootstrap.preprocessor,
+            frontend_decoding: bootstrap.card.media_decoder.is_some(),
             runtime,
             worker_index,
             pod_store_ready,
-            served_model: model_name,
-        })
+            served_model: bootstrap.card.display_name,
+        }
     }
 
     /// The model this pool serves, from the discovered model card.
@@ -310,29 +344,66 @@ impl Router {
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(value)?;
-        self.tokenize_chat(&request, headers)
+        Self::tokenize_chat(
+            &self.preprocessor,
+            &request,
+            headers,
+            self.frontend_decoding,
+        )
+        .await
     }
 
-    /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(
-        &self,
+    /// Use image-aware preprocessing only when workers own media decoding.
+    /// Frontend-decoded models keep template-only routing to avoid decoding twice.
+    async fn tokenize_chat(
+        preprocessor: &OpenAIPreprocessor,
         request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
         headers: &[(String, String)],
+        frontend_decoding: bool,
     ) -> Result<TokenizeResult> {
-        // TODO(epp-request-routing): Reuse shared preprocessing so expected output
-        // length, LoRA, pins, sessions, topology constraints, additional protocols,
-        // and multimodal routing hashes are preserved.
+        // TODO(epp-request-routing): Preserve expected output length, LoRA, pins,
+        // sessions, topology constraints, and additional protocols when routing.
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = cache_namespace_from_request(request, headers);
 
-        let encoding = match self.preprocessor.apply_template(request)? {
-            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
-            None => self.preprocessor.tokenize("")?,
+        let start = Instant::now();
+        let preprocessed = if frontend_decoding {
+            // Keep decoded-pixel hashing on the worker-side Frontend until EPP can share media.
+            None
+        } else {
+            preprocessor
+                .preprocess_request(request, None)
+                .await
+                .inspect_err(|error| {
+                    tracing::debug!(%error, "EPP preprocessing failed; using template tokens");
+                })
+                .ok()
         };
+        let (tokens, mm_routing_info) = match preprocessed {
+            Some((preprocessed, _, _)) => (
+                Arc::unwrap_or_clone(preprocessed.token_ids),
+                preprocessed.mm_routing_info,
+            ),
+            None => {
+                // Media checks belong to the worker; optional routing must not reject its requests.
+                let encoding = match preprocessor.apply_template(request)? {
+                    Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt)?,
+                    None => preprocessor.tokenize("")?,
+                };
+                (encoding.token_ids().to_vec(), None)
+            }
+        };
+        tracing::debug!(
+            preprocessing_seconds = start.elapsed().as_secs_f64(),
+            multimodal = mm_routing_info.is_some(),
+            frontend_decoding,
+            "EPP chat routing preprocessing completed"
+        );
         Ok(TokenizeResult {
-            tokens: encoding.token_ids().to_vec(),
+            tokens,
+            mm_routing_info,
             cache_namespace,
             priority_jump,
             strict_priority,
@@ -375,6 +446,7 @@ impl Router {
         };
 
         Ok(TokenizeResult {
+            mm_routing_info: None,
             tokens,
             cache_namespace,
             priority_jump,
@@ -482,6 +554,7 @@ impl Router {
         &self,
         reservation_id: &str,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
@@ -493,7 +566,7 @@ impl Router {
             .reserve_prefill_worker(
                 reservation_id,
                 tokens,
-                None,
+                block_mm_infos,
                 None,
                 cache_namespace,
                 priority_jump,
@@ -521,6 +594,7 @@ impl Router {
     pub async fn route_decode(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         is_disaggregated: bool,
         cache_namespace: Option<String>,
         priority_jump: f64,
@@ -536,7 +610,7 @@ impl Router {
             .find_best_match_details_with_policy_class(
                 None,
                 tokens,
-                None,
+                block_mm_infos,
                 config_override.as_ref(),
                 false,
                 false,
@@ -567,10 +641,12 @@ impl Router {
     }
 
     /// Register a request with the decode router for bookkeeping.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,
         request_id: &str,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker_id: u64,
         dp_rank: u32,
         is_disaggregated: bool,
@@ -585,7 +661,13 @@ impl Router {
             let router_config_override = decode_router_config_override(is_disaggregated);
 
             let overlap_blocks = decode_router
-                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
+                .get_overlap_blocks(
+                    &tokens,
+                    block_mm_infos,
+                    worker,
+                    None,
+                    cache_namespace.as_deref(),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
 
@@ -595,7 +677,7 @@ impl Router {
                 .add_request(
                     request_id,
                     &tokens,
-                    None,
+                    block_mm_infos,
                     cached_tokens,
                     None,
                     worker,
@@ -863,6 +945,12 @@ async fn fetch_preprocessor_from_discovery(
         "Found model card via discovery"
     );
 
+    if card.media_decoder.is_some() {
+        tracing::info!(
+            model = %card.display_name,
+            "Frontend media decoding is enabled; EPP will use token-only routing"
+        );
+    }
     card.download_config(None).await?;
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
 
@@ -1333,6 +1421,208 @@ fn apply_subset_filter<'a>(
         .collect()
 }
 
+impl Router {
+    /// Route preprocessed inputs while keeping worker tokens separate from routing tokens.
+    async fn pick_tokenized(
+        &self,
+        req: &RequestInfo,
+        endpoints: &[Endpoint],
+        allowed_worker_ids: Option<HashSet<u64>>,
+        worker_map: Vec<(u64, &Endpoint)>,
+        tokenized: TokenizeResult,
+        pick_start: Instant,
+    ) -> Result<PickResult, PickError> {
+        let TokenizeResult {
+            tokens,
+            mm_routing_info,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+            tokens_safe_to_inject,
+        } = tokenized;
+        // The expanded view belongs only to routing. Forward the original
+        // placeholder tokens to the worker so image expansion happens once.
+        let (routing_tokens, block_mm_infos) = routing_view(&tokens, mm_routing_info.as_ref());
+        let policy_class = requested_policy_class(&req.headers)?;
+        let reservation_id = Uuid::new_v4().to_string();
+
+        // Try prefill routing first (disaggregated mode).
+        //
+        // If the prefill router is not activated (no prefill workers discovered yet, or the inner
+        // router has been deactivated), fall back to aggregated routing.
+        let prefill_booking = self
+            .route_prefill(
+                &format!("epp-prefill/{reservation_id}"),
+                routing_tokens,
+                block_mm_infos,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                policy_class.clone(),
+                allowed_worker_ids.clone(),
+                routing_constraints.clone(),
+            )
+            .await;
+
+        let is_disaggregated = match &prefill_booking {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "Prefill routing failed; falling back to aggregated mode"
+                );
+                false
+            }
+        };
+
+        let (decode_worker, overlap_blocks) = self
+            .route_decode(
+                routing_tokens,
+                block_mm_infos,
+                is_disaggregated,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                policy_class,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+
+        // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
+        // pod reflector and retry selection when the chosen worker has no endpoint.
+        let endpoint = if worker_map.is_empty() {
+            self.resolve_worker_endpoint(decode_worker.worker_id)
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        worker_id = decode_worker.worker_id,
+                        "Selected worker has no resolved endpoint"
+                    );
+                    PickError::NoEndpoints
+                })?
+        } else {
+            worker_map
+                .iter()
+                .find(|(wid, _)| *wid == decode_worker.worker_id)
+                .map(|(_, ep)| ep.address_port())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        worker_id = decode_worker.worker_id,
+                        "Selected worker not in endpoint list, using first available"
+                    );
+                    endpoints[0].address_port()
+                })
+        };
+
+        // Register the request with the router for bookkeeping (load tracking).
+        if let Err(e) = self
+            .add_request(
+                &reservation_id,
+                routing_tokens,
+                block_mm_infos,
+                decode_worker.worker_id,
+                decode_worker.dp_rank,
+                is_disaggregated,
+                cache_namespace.clone(),
+            )
+            .await
+        {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Failed to register request with router bookkeeping"
+            );
+        }
+
+        let prefill_worker = prefill_booking
+            .as_ref()
+            .ok()
+            .map(|booking| (booking.worker_id(), booking.dp_rank()));
+        if let Ok(booking) = prefill_booking {
+            self.prefill_bookings
+                .insert(reservation_id.clone(), booking);
+        }
+
+        // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
+        // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
+        let mut headers = vec![
+            (
+                "x-dynamo-worker-instance-id".to_string(),
+                format!("{}", decode_worker.worker_id),
+            ),
+            (
+                "x-dynamo-dp-rank".to_string(),
+                decode_worker.dp_rank.to_string(),
+            ),
+        ];
+
+        if let Some((prefill_worker_id, prefill_dp_rank)) = prefill_worker {
+            headers.push((
+                "x-dynamo-routing-mode".to_string(),
+                "disaggregated".to_string(),
+            ));
+            headers.push((
+                "x-dynamo-prefill-instance-id".to_string(),
+                format!("{}", prefill_worker_id),
+            ));
+            if let Some(prefill_dp_rank) = prefill_dp_rank {
+                headers.push((
+                    "x-dynamo-prefill-dp-rank".to_string(),
+                    prefill_dp_rank.to_string(),
+                ));
+            }
+        } else {
+            headers.push((
+                "x-dynamo-routing-mode".to_string(),
+                "aggregated".to_string(),
+            ));
+        }
+
+        tracing::info!(
+            worker_id = decode_worker.worker_id,
+            worker_id_hex = format!("{:x}", decode_worker.worker_id),
+            dp_rank = decode_worker.dp_rank,
+            is_disaggregated,
+            endpoint = %endpoint,
+            token_count = tokens.len(),
+            routing_token_count = routing_tokens.len(),
+            overlap_blocks,
+            priority_jump,
+            model = %req.model,
+            header_count = headers.len(),
+            pick_seconds = pick_start.elapsed().as_secs_f64(),
+            "Picked endpoint"
+        );
+        for (k, v) in &headers {
+            tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
+        }
+
+        // Only inject token_data when it covers the whole request; a
+        // multi-prompt text batch's tokens cover prompt 1 alone and the
+        // backend applies nvext.token_data to every split (see
+        // `TokenizeResult`), so omit it and let the backend tokenize each
+        // prompt itself.
+        let token_ids = tokens_safe_to_inject.then_some(tokens);
+
+        Ok(PickResult {
+            endpoint,
+            fallbacks: vec![],
+            headers,
+            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
+            // worker to a callable endpoint for authoritative sidecar injection.
+            selected_prefill_endpoint: None,
+            token_ids,
+            cache_namespace,
+            // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
+            cache_salt_forwarding: CacheSaltForwarding::Preserve,
+            strip_nvext: false,
+            reservation_id: Some(reservation_id),
+        })
+    }
+}
+
 #[tonic::async_trait]
 impl EndpointPicker for Router {
     async fn pick(
@@ -1340,6 +1630,7 @@ impl EndpointPicker for Router {
         req: &RequestInfo,
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
+        let pick_start = Instant::now();
         if !self.pod_store_ready.load(Ordering::Acquire) {
             return Err(PickError::RoutingFailed(
                 "Pod reflector is not ready yet; endpoint cache is still syncing".to_string(),
@@ -1445,187 +1736,19 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
-        let TokenizeResult {
-            tokens,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            routing_constraints,
-            tokens_safe_to_inject,
-        } = self
+        let tokenized = self
             .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
-        let policy_class = requested_policy_class(&req.headers)?;
-        let reservation_id = Uuid::new_v4().to_string();
-
-        // Try prefill routing first (disaggregated mode).
-        //
-        // If the prefill router is not activated (no prefill workers discovered yet, or the inner
-        // router has been deactivated), fall back to aggregated routing.
-        let prefill_booking = self
-            .route_prefill(
-                &format!("epp-prefill/{reservation_id}"),
-                &tokens,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class.clone(),
-                allowed_worker_ids.clone(),
-                routing_constraints.clone(),
-            )
-            .await;
-
-        let is_disaggregated = match &prefill_booking {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
-        };
-
-        let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
-                is_disaggregated,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
-
-        // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
-        // pod reflector and retry selection when the chosen worker has no endpoint.
-        let endpoint = if worker_map.is_empty() {
-            self.resolve_worker_endpoint(decode_worker.worker_id)
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        worker_id = decode_worker.worker_id,
-                        "Selected worker has no resolved endpoint"
-                    );
-                    PickError::NoEndpoints
-                })?
-        } else {
-            worker_map
-                .iter()
-                .find(|(wid, _)| *wid == decode_worker.worker_id)
-                .map(|(_, ep)| ep.address_port())
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        worker_id = decode_worker.worker_id,
-                        "Selected worker not in endpoint list, using first available"
-                    );
-                    endpoints[0].address_port()
-                })
-        };
-
-        // Register the request with the router for bookkeeping (load tracking).
-        if let Err(e) = self
-            .add_request(
-                &reservation_id,
-                &tokens,
-                decode_worker.worker_id,
-                decode_worker.dp_rank,
-                is_disaggregated,
-                cache_namespace.clone(),
-            )
-            .await
-        {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Failed to register request with router bookkeeping"
-            );
-        }
-
-        let prefill_worker = prefill_booking
-            .as_ref()
-            .ok()
-            .map(|booking| (booking.worker_id(), booking.dp_rank()));
-        if let Ok(booking) = prefill_booking {
-            self.prefill_bookings
-                .insert(reservation_id.clone(), booking);
-        }
-
-        // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
-        // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
-        let mut headers = vec![
-            (
-                "x-dynamo-worker-instance-id".to_string(),
-                format!("{}", decode_worker.worker_id),
-            ),
-            (
-                "x-dynamo-dp-rank".to_string(),
-                decode_worker.dp_rank.to_string(),
-            ),
-        ];
-
-        if let Some((prefill_worker_id, prefill_dp_rank)) = prefill_worker {
-            headers.push((
-                "x-dynamo-routing-mode".to_string(),
-                "disaggregated".to_string(),
-            ));
-            headers.push((
-                "x-dynamo-prefill-instance-id".to_string(),
-                format!("{}", prefill_worker_id),
-            ));
-            if let Some(prefill_dp_rank) = prefill_dp_rank {
-                headers.push((
-                    "x-dynamo-prefill-dp-rank".to_string(),
-                    prefill_dp_rank.to_string(),
-                ));
-            }
-        } else {
-            headers.push((
-                "x-dynamo-routing-mode".to_string(),
-                "aggregated".to_string(),
-            ));
-        }
-
-        tracing::info!(
-            worker_id = decode_worker.worker_id,
-            worker_id_hex = format!("{:x}", decode_worker.worker_id),
-            dp_rank = decode_worker.dp_rank,
-            is_disaggregated,
-            endpoint = %endpoint,
-            token_count = tokens.len(),
-            priority_jump,
-            model = %req.model,
-            header_count = headers.len(),
-            "Picked endpoint"
-        );
-        for (k, v) in &headers {
-            tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
-        }
-
-        // Only inject token_data when it covers the whole request; a
-        // multi-prompt text batch's tokens cover prompt 1 alone and the
-        // backend applies nvext.token_data to every split (see
-        // `TokenizeResult`), so omit it and let the backend tokenize each
-        // prompt itself.
-        let token_ids = tokens_safe_to_inject.then_some(tokens);
-
-        Ok(PickResult {
-            endpoint,
-            fallbacks: vec![],
-            headers,
-            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
-            // worker to a callable endpoint for authoritative sidecar injection.
-            selected_prefill_endpoint: None,
-            token_ids,
-            cache_namespace,
-            // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
-            cache_salt_forwarding: CacheSaltForwarding::Preserve,
-            strip_nvext: false,
-            reservation_id: Some(reservation_id),
-        })
+        self.pick_tokenized(
+            req,
+            endpoints,
+            allowed_worker_ids,
+            worker_map,
+            tokenized,
+            pick_start,
+        )
+        .await
     }
 
     async fn on_prefill_complete(&self, booking_id: &str) {
@@ -1673,6 +1796,590 @@ mod tests {
 
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
+
+    /// Use the real KV chooser and bookkeeping with process-local discovery.
+    async fn test_router(
+        card: ModelDeploymentCard,
+        preprocessor: Arc<OpenAIPreprocessor>,
+    ) -> Router {
+        use dynamo_kv_router::config::{ApproximateCachePolicyKind, KvRouterConfig};
+        use dynamo_llm::kv_router::{
+            KvRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
+        };
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("epp-mm-test")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers_rx) = tokio::sync::watch::channel(HashMap::from([
+            (11, ModelRuntimeConfig::default()),
+            (22, ModelRuntimeConfig::default()),
+        ]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::Ttl,
+            ..Default::default()
+        };
+        let chooser = Box::pin(KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers_rx,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            WORKER_TYPE_DECODE,
+            None,
+            false,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        let load = RoutingLoadContext::start(
+            client,
+            RouterLoadSource::Aggregated,
+            dynamo_llm::discovery::LoadThresholdHandle::new(Default::default()),
+            &drt.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut index = WorkerEndpointIndex::default();
+        index
+            .endpoints
+            .insert(11, "127.0.0.1:8011".parse().unwrap());
+        index
+            .endpoints
+            .insert(22, "127.0.0.1:8022".parse().unwrap());
+        Router::new(
+            PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None),
+            ManagedKvRouter::new(load, Arc::new(chooser)),
+            DiscoveredModelBootstrap {
+                card,
+                preprocessor,
+                actual_namespace: "epp-mm-test".into(),
+            },
+            runtime,
+            Arc::new(RwLock::new(index)),
+            Arc::new(AtomicBool::new(true)),
+        )
+    }
+
+    /// Cover metadata at the picker boundary, including selection, bookkeeping and forwarding.
+    #[tokio::test]
+    async fn pick_preserves_multimodal_routing_and_worker_tokens() {
+        use dynamo_kv_router::protocols::{BlockMmObjectInfo, TokensWithHashes};
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
+        let worker_tokens = vec![10, 99, 20];
+        let mm = MmRoutingInfo {
+            routing_token_ids: vec![10, 11, 0, 0, 0, 0, 20, 21],
+            block_mm_infos: vec![
+                None,
+                Some(BlockExtraInfo {
+                    mm_objects: vec![BlockMmObjectInfo {
+                        mm_hash: 42,
+                        offsets: vec![(0, 2)],
+                    }],
+                }),
+                None,
+                None,
+            ],
+            expanded_prompt_len: 8,
+        };
+        for seeded in [true, false] {
+            let router = Box::pin(test_router(card.clone(), preprocessor.clone())).await;
+            assert!(!router.frontend_decoding);
+            if seeded {
+                // Dropping metadata favors worker 11; correct image hashes favor worker 22.
+                for (worker, infos) in [(11, None), (22, Some(mm.block_mm_infos.clone()))] {
+                    let mut cached = TokensWithHashes::new(mm.routing_token_ids.clone(), 2);
+                    if let Some(infos) = infos {
+                        cached = cached.with_mm_infos(infos);
+                    }
+                    router
+                        .decode_router
+                        .record_routing_decision(cached, WorkerWithDpRank::new(worker, 0))
+                        .await
+                        .unwrap();
+                }
+            }
+            let req = RequestInfo {
+                request_id: "image-pick".into(),
+                headers: vec![],
+                body: bytes::Bytes::new(),
+                model: "vision".into(),
+                candidate_subset: vec![],
+            };
+            let result = router
+                .pick_tokenized(
+                    &req,
+                    &[],
+                    (!seeded).then(|| HashSet::from([22])),
+                    vec![],
+                    TokenizeResult {
+                        tokens: worker_tokens.clone(),
+                        mm_routing_info: Some(mm.clone()),
+                        cache_namespace: None,
+                        priority_jump: 0.0,
+                        strict_priority: 0,
+                        routing_constraints: Default::default(),
+                        tokens_safe_to_inject: true,
+                    },
+                    Instant::now(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.endpoint, "127.0.0.1:8022",
+                "selection must use image metadata"
+            );
+            assert_eq!(
+                result.token_ids,
+                Some(worker_tokens.clone()),
+                "worker tokens must not expand"
+            );
+            if !seeded {
+                let loads = router
+                    .decode_router
+                    .get_potential_loads(
+                        &mm.routing_token_ids,
+                        None,
+                        Some(&mm.block_mm_infos),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let load = loads.iter().find(|load| load.worker_id == 22).unwrap();
+                assert_eq!(load.active_requests, 1);
+                assert_eq!(
+                    load.potential_decode_blocks, 4,
+                    "bookkeeping must deduplicate the same image's expanded blocks"
+                );
+                let different = router
+                    .decode_router
+                    .get_potential_loads(&mm.routing_token_ids, None, None, None, None)
+                    .await
+                    .unwrap();
+                assert!(
+                    different
+                        .iter()
+                        .find(|load| load.worker_id == 22)
+                        .unwrap()
+                        .potential_decode_blocks
+                        > load.potential_decode_blocks,
+                    "different image metadata must not share active blocks"
+                );
+            }
+            router
+                .on_request_complete_with_usage(result.reservation_id.as_deref().unwrap(), None)
+                .await;
+            router.runtime.shutdown();
+        }
+    }
+
+    /// Exercise image identity and prefix reuse through EPP preprocessing, with Frontend parity.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn chat_images_match_frontend_routing_without_expanding_worker_tokens() {
+        use dynamo_kv_router::protocols::{
+            BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+        };
+
+        // Reuse the local tokenizer with a minimal Qwen vision contract;
+        // preprocessing needs no model weights, network access, or GPU.
+        let model = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+        ));
+        std::fs::copy(
+            fixture.join("tokenizer.json"),
+            model.path().join("tokenizer.json"),
+        )
+        .unwrap();
+        let config = serde_json::json!({
+            "model_type": "qwen3_vl", "architectures": ["Qwen3VLForConditionalGeneration"],
+            "image_token_id": 32000, "eos_token_id": 2,
+            "text_config": {"vocab_size": 32001, "max_position_embeddings": 4096}
+        });
+        std::fs::write(model.path().join("config.json"), config.to_string()).unwrap();
+        std::fs::write(model.path().join("preprocessor_config.json"), "{}").unwrap();
+        let tokenizer_config = serde_json::json!({
+            "bos_token": "<s>", "eos_token": "</s>", "add_bos_token": false,
+            "added_tokens_decoder": {"32000": {
+                "content": "<|image_pad|>", "special": true,
+                "lstrip": false, "rstrip": false, "normalized": false, "single_word": false
+            }},
+            "chat_template": "{% for message in messages %}{% for part in message['content'] %}{% if part['type'] == 'image' %}{{ '<|image_pad|>' }}{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endfor %}"
+        });
+        std::fs::write(
+            model.path().join("tokenizer_config.json"),
+            tokenizer_config.to_string(),
+        )
+        .unwrap();
+        let mut card = ModelDeploymentCard::load_from_disk(model.path(), None).unwrap();
+        card.kv_cache_block_size = 2;
+        let router = Box::pin(test_router(
+            card.clone(),
+            OpenAIPreprocessor::new(card.clone()).unwrap(),
+        ))
+        .await;
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        // Valid 28x28 RGB PNGs with different content and identical geometry.
+        let images = [
+            "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAJUlEQVR4nGP4z8BAdUR9E0cNHTV01NBRQ0cNHTV01NBRQweloQAOyg0e8L+IEAAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAI0lEQVR4nGNg+M9AfTRq6Kiho4aOGjpq6Kiho4aOGjoyDAUAAa0NHvjGCKUAAAAASUVORK5CYII=",
+        ];
+        let mut observed_hashes = Vec::new();
+        let mut routing_tokens = Vec::new();
+        let prefix = "Inspect this image carefully: ";
+        let suffix = " Describe the scene.";
+        for (image, before, after) in [
+            (images[0], prefix, suffix),
+            (images[0], prefix, suffix),
+            (images[1], prefix, suffix),
+            (images[0], prefix, " Count the objects."),
+            (images[0], "Different preceding text: ", suffix),
+        ] {
+            let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "vision", "max_tokens": 1,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": before},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{image}")}},
+                    {"type": "text", "text": after}
+                ]}]
+            })).unwrap();
+            let epp = Router::tokenize_chat(&preprocessor, &request, &[], false)
+                .await
+                .unwrap();
+            let (frontend, _, _) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            let view = routing_view(&epp.tokens, epp.mm_routing_info.as_ref());
+            assert!(
+                epp.mm_routing_info.is_some(),
+                "image routing must not silently fall back"
+            );
+            assert_eq!(view, frontend.block_mm_routing_info());
+            assert_eq!(epp.tokens, *frontend.token_ids);
+            let picked = router
+                .pick(
+                    &RequestInfo {
+                        request_id: "real-image-pick".into(),
+                        headers: vec![],
+                        body: serde_json::to_vec(&request).unwrap().into(),
+                        model: "vision".into(),
+                        candidate_subset: vec![],
+                    },
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(picked.token_ids.as_deref(), Some(epp.tokens.as_slice()));
+            let worker: u64 = picked
+                .headers
+                .iter()
+                .find(|(key, _)| key == "x-dynamo-worker-instance-id")
+                .unwrap()
+                .1
+                .parse()
+                .unwrap();
+            let loads = router
+                .decode_router
+                .get_potential_loads(view.0, None, view.1, None, None)
+                .await
+                .unwrap();
+            let load = loads.iter().find(|load| load.worker_id == worker).unwrap();
+            assert_eq!(load.active_requests, 1);
+            assert_eq!(load.potential_decode_blocks, view.0.len() / 2);
+            router
+                .on_request_complete_with_usage(picked.reservation_id.as_deref().unwrap(), None)
+                .await;
+
+            assert_eq!(epp.tokens.iter().filter(|&&id| id == 32000).count(), 1);
+            assert!(
+                view.0.len() > epp.tokens.len(),
+                "only routing expands the image"
+            );
+            routing_tokens.push(view.0.to_vec());
+            observed_hashes.push(compute_seq_hash_for_block(&compute_block_hash_for_seq(
+                view.0,
+                2,
+                BlockHashOptions {
+                    block_mm_infos: view.1,
+                    ..Default::default()
+                },
+            )));
+        }
+        let original = &observed_hashes[0];
+        assert_eq!(
+            *original, observed_hashes[1],
+            "repeated image reuses the prefix"
+        );
+        // Image-only routing may encode identity in virtual tokens instead of block metadata.
+        let changed_positions: Vec<_> = routing_tokens[0]
+            .iter()
+            .zip(&routing_tokens[2])
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i))
+            .collect();
+        assert!(
+            !changed_positions.is_empty(),
+            "image identity must affect routing"
+        );
+        let first_image_block = changed_positions[0] / 2;
+        let last_image_block = changed_positions.last().unwrap() / 2;
+        assert!(
+            first_image_block > 0,
+            "fixture needs a complete text-prefix block"
+        );
+        assert_eq!(
+            original[..first_image_block],
+            observed_hashes[2][..first_image_block]
+        );
+        for (before, after) in original[first_image_block..]
+            .iter()
+            .zip(&observed_hashes[2][first_image_block..])
+        {
+            assert_ne!(
+                before, after,
+                "changed image invalidates its block and later blocks"
+            );
+        }
+        let unchanged_suffix_blocks = routing_tokens[0]
+            .iter()
+            .zip(&routing_tokens[3])
+            .take_while(|(a, b)| a == b)
+            .count()
+            / 2;
+        assert!(unchanged_suffix_blocks >= last_image_block);
+        assert!(unchanged_suffix_blocks > first_image_block);
+        assert_eq!(
+            original[..unchanged_suffix_blocks],
+            observed_hashes[3][..unchanged_suffix_blocks]
+        );
+        assert_ne!(
+            *original, observed_hashes[3],
+            "changed suffix affects later hashes"
+        );
+        for (before, after) in original.iter().zip(&observed_hashes[4]) {
+            assert_ne!(
+                before, after,
+                "changed preceding text invalidates the image prefix chain"
+            );
+        }
+
+        let text_request = serde_json::from_value(serde_json::json!({
+            "model": "vision", "max_tokens": 1,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}]
+        }))
+        .unwrap();
+        let epp = Router::tokenize_chat(&preprocessor, &text_request, &[], false)
+            .await
+            .unwrap();
+        let prompt = preprocessor.apply_template(&text_request).unwrap().unwrap();
+        assert_eq!(
+            epp.tokens,
+            preprocessor
+                .tokenize_rendered_prompt(&prompt)
+                .unwrap()
+                .token_ids()
+        );
+        assert!(epp.mm_routing_info.is_none());
+        for url in [
+            "http://localhost/cat.png",
+            "http://10.0.0.5/cat.png",
+            "https://images.example.com:8443/cat.png",
+        ] {
+            let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "vision", "max_tokens": 1,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Inspect this image: "},
+                    {"type": "image_url", "image_url": {"url": url}}
+                ]}]
+            })).unwrap();
+            assert!(
+                preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .is_err()
+            );
+            let fallback = router
+                .tokenize(&serde_json::to_string(&request).unwrap(), &[])
+                .await
+                .expect("media policy errors must leave acceptance to the worker");
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(
+                fallback.tokens,
+                preprocessor
+                    .tokenize_rendered_prompt(&prompt)
+                    .unwrap()
+                    .token_ids()
+            );
+            assert!(fallback.mm_routing_info.is_none());
+        }
+        router.runtime.shutdown();
+    }
+
+    /// Frontend-decoded models must retain the old tokens without loading media in EPP.
+    #[tokio::test]
+    async fn frontend_decoding_keeps_legacy_chat_tokenization() {
+        let template = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            template.path(),
+            "{{ messages[0]['content'][0]['text'] }}<image>",
+        )
+        .unwrap();
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            Some(template.path()),
+        )
+        .unwrap();
+        // The fallback needs only a tokenizer; no decoder or NIXL agent is needed.
+        let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut frontend_card = card;
+        frontend_card.media_decoder = Some(serde_json::from_value(serde_json::json!({})).unwrap());
+        let router = Box::pin(test_router(frontend_card, preprocessor.clone())).await;
+        assert!(router.frontend_decoding);
+        let image_url = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(dynamo_llm::preprocessor::media::max_data_url_bytes() + 1)
+        );
+        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "vision", "max_tokens": 1,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {
+                        "url": image_url
+                    }}
+                ]}]
+            }))
+            .unwrap();
+        // Full preprocessing rejects this oversized data URL before decoding it.
+        // The legacy routing path must leave media validation/loading to the worker.
+        #[cfg(feature = "mm-routing")]
+        assert!(
+            preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .is_err()
+        );
+        let result = router
+            .tokenize(&serde_json::to_string(&request).unwrap(), &[])
+            .await
+            .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            result.tokens,
+            preprocessor
+                .tokenize_rendered_prompt(&prompt)
+                .unwrap()
+                .token_ids()
+        );
+        let fallback = Router::tokenize_chat(&preprocessor, &request, &[], false)
+            .await
+            .expect("optional routing preprocessing must not reject a worker request");
+        assert_eq!(fallback.tokens, result.tokens);
+        assert!(fallback.mm_routing_info.is_none());
+        assert!(result.mm_routing_info.is_none());
+        assert!(result.tokens_safe_to_inject);
+        assert_eq!(
+            routing_view(&result.tokens, None),
+            (&result.tokens[..], None)
+        );
+        router.runtime.shutdown();
+    }
+
+    /// Keep expanded routing and empty-metadata fallback consistent with the Frontend.
+    #[test]
+    fn multimodal_routing_view_matches_frontend() {
+        use dynamo_kv_router::protocols::{
+            BlockHashOptions, BlockMmObjectInfo, compute_block_hash_for_seq,
+        };
+        use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+
+        // Worker placeholders differ from the expanded routing view. Image
+        // identity is represented by the same per-block info the Frontend emits.
+        let mut request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "vision", "token_ids": [10, 99, 20],
+            "stop_conditions": {}, "sampling_options": {}, "output_options": {}
+        }))
+        .unwrap();
+        for image_hash in [42, 43] {
+            request.mm_routing_info = Some(MmRoutingInfo {
+                routing_token_ids: vec![10, 11, 0, 0, 0, 0, 20, 21],
+                block_mm_infos: vec![
+                    None,
+                    Some(BlockExtraInfo {
+                        mm_objects: vec![BlockMmObjectInfo {
+                            mm_hash: image_hash,
+                            offsets: vec![(0, 2)],
+                        }],
+                    }),
+                    Some(BlockExtraInfo {
+                        mm_objects: vec![BlockMmObjectInfo {
+                            mm_hash: image_hash,
+                            offsets: vec![(0, 2)],
+                        }],
+                    }),
+                    None,
+                ],
+                expanded_prompt_len: 8,
+            });
+            let frontend = request.block_mm_routing_info();
+            let epp = routing_view(&request.token_ids, request.mm_routing_info.as_ref());
+            assert_eq!(epp, frontend);
+            let hashes = |(tokens, infos)| {
+                compute_block_hash_for_seq(
+                    tokens,
+                    2,
+                    BlockHashOptions {
+                        block_mm_infos: infos,
+                        ..Default::default()
+                    },
+                )
+            };
+            assert_eq!(hashes(epp), hashes(frontend));
+            assert_ne!(hashes(epp), hashes((&request.token_ids, None)));
+            assert_eq!(request.token_ids.as_slice(), [10, 99, 20]);
+        }
+        request.mm_routing_info = Some(MmRoutingInfo::default());
+        assert_eq!(
+            routing_view(&request.token_ids, request.mm_routing_info.as_ref()),
+            request.block_mm_routing_info()
+        );
+        assert_eq!(
+            routing_view(&request.token_ids, None),
+            (&request.token_ids[..], None)
+        );
+    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
