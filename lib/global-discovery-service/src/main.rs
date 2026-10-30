@@ -322,7 +322,22 @@ where
              --heartbeat-interval-secs, so that copies stay alive between refreshes",
         ));
     }
+    // A Service name must not match both suffixes.
+    if parsed.pool_discovery.mcs().is_some()
+        && let Err(error) = frontend_service(&parsed).check(&parsed.pool_service_suffix)
+    {
+        return Err(command.error(ErrorKind::ArgumentConflict, error));
+    }
     Ok(parsed)
+}
+
+/// The pool frontend Service that `--frontend-service-suffix` and
+/// `--frontend-port-name` describe.
+fn frontend_service(args: &Args) -> FrontendService {
+    FrontendService {
+        suffix: args.frontend_service_suffix.clone(),
+        port_name: args.frontend_port_name.clone(),
+    }
 }
 
 #[tokio::main]
@@ -410,10 +425,7 @@ async fn mcs_backend(
         client.clone(),
         mcs,
         args.pool_service_suffix.clone(),
-        FrontendService {
-            suffix: args.frontend_service_suffix.clone(),
-            port_name: args.frontend_port_name.clone(),
-        },
+        frontend_service(args),
     )
     .context("check --frontend-service-suffix and --pool-service-suffix")?;
     let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease);
@@ -643,6 +655,15 @@ mod tests {
             let error = parse_args(karmada(&[flag, "--listen=127.0.0.1:18496"])).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
         }
+    }
+
+    #[test]
+    fn the_frontend_and_pool_suffixes_must_differ() {
+        // The default PoolRelay suffix, `-pool-relay`, ends with `-relay`.
+        let error = parse_args(karmada(&["--frontend-service-suffix=-relay"])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert!(parse_args(karmada(&["--frontend-service-suffix=-web"])).is_ok());
     }
 
     #[test]

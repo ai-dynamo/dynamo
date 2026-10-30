@@ -689,11 +689,18 @@ mod tests {
 
         // No heartbeat for longer than the lease, as when the pool's cluster
         // is cut off but its imported slices still say Ready: the pool goes
-        // within one sweep.
-        tokio::time::advance(lease().duration() + SWEEP_EVERY).await;
-        assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
-        );
+        // at the first sweep after its lease ends. The last heartbeat falls
+        // between two heartbeat intervals, so a sweep that ran only once per
+        // heartbeat interval would be seconds late. `sleep`, unlike
+        // `advance`, lets each sweep run at its own time, before the lease
+        // ends.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        fx.register("mocker", "m2").await;
+        tokio::time::sleep(lease().duration() + Duration::from_millis(1)).await;
+        let removed = tokio::time::timeout(SWEEP_EVERY + Duration::from_millis(100), watch.next())
+            .await
+            .expect("removed within one sweep of the lease's end");
+        assert!(matches!(removed, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker")));
         assert!(find(&*fx.mcs, &key("mocker")).await.is_some());
     }
 
