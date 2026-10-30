@@ -378,6 +378,7 @@ impl
     /// 2. Query-only requests go straight to decode in every activation state.
     /// 3. Activation gate: `Pending` fails closed with a migratable error,
     ///    `Untargeted` passes through to decode unchanged, `Active` continues.
+    ///    Direct routing mode then requires a preselected prefill worker.
     /// 4. Ensure the request has a `RequestTracker`.
     /// 5. Conditional disagg, when enabled: if the plan keeps the request on
     ///    its decode worker, set the Decode phase, add the bypass marker, and
@@ -388,7 +389,7 @@ impl
     ///    independent cancellation context, session affinity copied over).
     /// 7. Load the binding. If the target was replaced since the gate, resolve
     ///    it again with the same `Pending`/`Untargeted` rules.
-    /// 8. Direct routing mode requires a preselected prefill worker.
+    /// 8. Check Direct routing mode again against the reloaded binding.
     /// 9. Select the prefill worker, then dispatch to it. KV routing books the
     ///    worker before sending; built-in modes choose while sending. With
     ///    early bootstrap info, prefill continues in a background task.
@@ -412,6 +413,11 @@ impl
         strip_client_bypass_marker(&mut req);
         if is_query_only(&req) || !self.activation_gate(context.id())? {
             return next.generate(context.map(|_| req)).await;
+        }
+        // Fail before any routing work. The binding is reloaded and checked
+        // again below, since a replaced target can change the mode.
+        if let Some(binding) = self.binding.load_full() {
+            require_direct_prefill_worker(&binding, &req)?;
         }
         ensure_tracker(&mut req);
         let session_affinity = session_affinity(&context)?;
@@ -1258,6 +1264,80 @@ mod tests {
         };
         assert!(
             error.to_string().contains("no endpoints available"),
+            "{error:#}"
+        );
+        assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_mode_without_prefill_worker_fails_before_routing() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("direct-missing-prefill-worker")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+        let endpoint_id = endpoint.id();
+        let client = endpoint.client().await.unwrap();
+        let load_context = crate::kv_router::RoutingLoadContext::start(
+            client.clone(),
+            crate::kv_router::RouterLoadSource::Aggregated,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::Direct)
+                .load_context(load_context)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let router = fresh_decode_router();
+        router.binding.store(Some(Arc::new(PrefillBinding {
+            target_id: WorkerSetTargetId::Committed {
+                group: "direct-missing-prefill-worker/prefill/generate".to_string(),
+                generation: 1,
+            },
+            endpoint_id,
+            router: host,
+            prefill_router_mode: RouterMode::Direct,
+        })));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+
+        // Hold the Prefill phase barrier. A check that ran after it would
+        // never return.
+        let tracker = Arc::new(RequestTracker::new());
+        let _barrier = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut request = inference_request();
+        request.tracker = Some(tracker);
+
+        let downstream = Arc::new(CountingDecodeHost::default());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.generate(SingleIn::new(request), downstream.clone()),
+        )
+        .await
+        .expect("the Direct-mode check must run before the Prefill phase barrier");
+        let Err(error) = result else {
+            panic!("Direct mode without a prefill worker must fail");
+        };
+        assert!(
+            error.to_string().contains("Prefill worker ID required"),
             "{error:#}"
         );
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
