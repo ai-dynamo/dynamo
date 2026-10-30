@@ -20,6 +20,8 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
+mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;
@@ -37,6 +39,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -222,10 +225,14 @@ mod tests {
                     let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
                     assert_eq!(
                         result.reasoning_disabled,
-                        if family == "gemma4" {
-                            thinking != Some(true)
-                        } else {
-                            thinking == Some(false)
+                        match family {
+                            "gpt_oss" => false,
+                            "beam" => false,
+                            "gemma4" => thinking != Some(true),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
+                            _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
                     );

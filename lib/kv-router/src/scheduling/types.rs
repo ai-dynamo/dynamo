@@ -45,7 +45,7 @@ impl std::fmt::Display for AttemptId {
 }
 
 pub type OverloadedWorkerProvider =
-    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Supplies the authoritative set of workers currently available for selection.
 ///
@@ -580,13 +580,17 @@ impl SchedulingRequest {
         self.worker_loads
             .get(&worker)
             .copied()
-            .unwrap_or_else(|| WorkerLoadProjection {
-                // A configured worker can precede its load projection. With no
-                // active-prefix evidence, count the full tracked request rather
-                // than treating its blocks as already present on that worker.
-                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
-                ..Default::default()
-            })
+            .unwrap_or_else(|| self.unobserved_worker_load())
+    }
+
+    /// Load assumed for a configured worker that precedes its load projection. With no
+    /// active-prefix evidence, count the full tracked request rather than treating its
+    /// blocks as already present on that worker.
+    pub(crate) fn unobserved_worker_load(&self) -> WorkerLoadProjection {
+        WorkerLoadProjection {
+            additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+            ..Default::default()
+        }
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {

@@ -24,9 +24,10 @@ rules:
   - ""
   resources:
   - nodes
-  - pods/log
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -51,12 +52,28 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -296,6 +313,7 @@ rules:
   resources:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
+  - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
   - lpxgraphdeployments/finalizers
@@ -305,7 +323,9 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentcandidates/status
   - dynamographdeploymentrequests/status
+  - dynamographdeploymentruns/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
@@ -317,8 +337,11 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
+  - dynamographdeploymentcandidates
+  - dynamographdeploymentruns
+  - snapshotjobs
   verbs:
+  - create
   - delete
   - get
   - list
@@ -327,9 +350,8 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - snapshotjobs
+  - podsnapshots
   verbs:
-  - create
   - delete
   - get
   - list
@@ -352,6 +374,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -362,6 +385,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:

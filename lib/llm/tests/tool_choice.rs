@@ -41,6 +41,7 @@ fn drive_moved_jail(
     jail.apply_with_finish_reason(input)
         .filter_map(|a| async move {
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner,
                 nvext: None,
                 prompt_logprobs: None,
@@ -59,6 +60,8 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     )];
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner: CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages,
@@ -495,6 +498,7 @@ fn make_text_chunk(
     };
     #[allow(deprecated)]
     dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test-named-parser".to_string(),
             choices: vec![ChatChoiceStream {
@@ -665,6 +669,7 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
     )
     .filter_map(|a| async move {
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner,
             nvext: None,
             prompt_logprobs: None,
