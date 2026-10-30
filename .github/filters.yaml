@@ -341,10 +341,12 @@ deploy:
 
 dgdr:
   - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'components/src/dynamo/aisimulate/output/dgdr_run/**'
   - 'tests/conftest.py'
   - 'tests/deploy/conftest.py'
   - 'tests/deploy/dgdr_utils.py'
   - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_v1beta2.py'
   - 'tests/deploy/test_dgdr_h100.py'
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
