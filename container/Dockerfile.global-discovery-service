@@ -14,7 +14,8 @@ WORKDIR /workspace
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --locked --release -p dynamo-global-discovery-service --bin global-discovery-service
+    cargo build --locked --release -p dynamo-global-discovery-service --features dynamodb \
+        --bin global-discovery-service
 
 FROM debian:trixie-slim AS global-discovery-service
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

@@ -170,7 +170,7 @@ async fn sweep(
 
 /// Sorts a registration's lists and drops repeats, so the same lists in
 /// another order are not a change.
-fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
+pub(super) fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
     registration.capabilities.sort_unstable();
     registration.capabilities.dedup();
     registration.frontends.sort_unstable();
@@ -182,7 +182,7 @@ fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
 
 /// A registration as listed. The store does not know the PoolRelay's
 /// addresses.
-fn listing(registration: &PoolRegistration) -> PoolListing {
+pub(super) fn listing(registration: &PoolRegistration) -> PoolListing {
     PoolListing {
         key: registration.key.clone(),
         location: registration.location.clone(),

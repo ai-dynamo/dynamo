@@ -8,9 +8,9 @@
 //!   and [`PoolDiscoveryBackend`], the backend behind it.
 //! - [`pool_discovery`]: the traits that backend is built from.
 //!
-//! [`backends`] implements those traits: registrations kept in memory, and
-//! the EndpointSlices that SIG Multicluster (MCS) imports, joined with
-//! registrations.
+//! [`backends`] implements those traits: registrations kept in memory or in
+//! DynamoDB, and the EndpointSlices that SIG Multicluster (MCS) imports,
+//! joined with registrations.
 
 pub mod backends;
 pub mod pool_discovery;
