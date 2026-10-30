@@ -398,10 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_legacy_and_the_core_takes_peers() {
+    fn selection_defaults_to_current_and_the_core_takes_peers() {
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Legacy);
+        assert_eq!(args.selection, SelectionPath::Current);
         assert_eq!(replica_sync(&args), None);
 
         let args = Args::try_parse_from([
