@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# After a release branch is cut, move main to the next minor version.
+#
+#   release/1.6.0 cut (main at 1.6.0) -> PR bumping main to 1.7.0
+#   release/1.6.1 cut (main at 1.7.0) -> no-op, main is already ahead
+#   release/1.6.2 cut (main at 1.7.0) -> no-op
+#   release/1.7.0 cut (main at 1.7.0) -> PR bumping main to 1.8.0
+#
+# The decision is "is main's version lower than the next minor of the branch
+# that was cut", not "is the patch number zero", so reruns and out-of-order
+# patch cuts stay correct. The file edits live in
+# .github/scripts/bump_main_version.py.
+#
+# The PR is opened with OPS_BOT_PAT because this repo does not allow
+# GitHub Actions to create pull requests, and because pushes made with
+# GITHUB_TOKEN would not trigger the PR checks.
+
+name: Bump Main Version
+
+on:
+  push:
+    # Stable release branches only. Prerelease forms such as
+    # release/1.3.0-dev.1 do not match and never move main.
+    branches:
+      - 'release/[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version that was cut (e.g., 1.6.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize runs: two near-simultaneous cuts must see each other's result.
+concurrency:
+  group: bump-main-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump main after branch cut
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release version
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.release_version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#release/}"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release version '$VERSION'; expected MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Always work from main, not from the release branch that triggered this.
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.OPS_BOT_PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Decide whether main needs a bump
+        id: plan
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT=$(python3 .github/scripts/bump_main_version.py plan \
+                  --release-version "$RELEASE_VERSION")
+          echo "$OUT"
+          {
+            echo "current=$(echo "$OUT" | jq -r .current)"
+            echo "target=$(echo "$OUT" | jq -r .target)"
+            echo "bump_needed=$(echo "$OUT" | jq -r .bump_needed)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Main is already ahead
+        if: steps.plan.outputs.bump_needed != 'true'
+        run: |
+          echo "main is at ${{ steps.plan.outputs.current }}, already at or past ${{ steps.plan.outputs.target }}. Nothing to do."
+
+      - name: Skip if a bump PR or branch already exists
+        if: steps.plan.outputs.bump_needed == 'true'
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/bump-version-${TARGET}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "Branch $BRANCH already exists on origin; skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply bump
+        if: steps.plan.outputs.bump_needed == 'true' && steps.existing.outputs.exists == 'false'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 .github/scripts/bump_main_version.py apply \
+            --release-version "$RELEASE_VERSION"
+          git status --short
+
+      - name: Commit, push and open PR
+        if: steps.plan.outputs.bump_needed == 'true' && steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          BRANCH: ${{ steps.existing.outputs.branch }}
+        run: |
+          set -euo pipefail
+          TITLE="chore: bump version to ${TARGET} post ${RELEASE_VERSION} branch cut"
+          git config user.name  "dynamo-ops"
+          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -s -m "$TITLE"
+          git push origin "$BRANCH"
+
+          BODY=$(cat <<EOF
+          ## Summary
+
+          \`release/${RELEASE_VERSION}\` was cut, so main moves from ${CURRENT} to ${TARGET}.
+          This updates the workspace and crate versions, the Python package versions and
+          pins, the Helm chart versions, and the matching lock files.
+
+          Opened automatically by the \`Bump Main Version\` workflow.
+
+          ## Validation
+
+          Generated by \`.github/scripts/bump_main_version.py\`. Please check that the PR checks pass.
+          EOF
+          )
+          gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY"
