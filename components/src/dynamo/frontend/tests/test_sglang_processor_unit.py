@@ -1123,7 +1123,9 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
                 self.tool_call_parser = tool_call_parser
 
         class FakeReasoningParser:
-            def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+            def __init__(
+                self, *, model_type, stream_reasoning, force_reasoning, request=None
+            ):
                 self.model_type = model_type
                 self.stream_reasoning = stream_reasoning
                 self.force_reasoning = force_reasoning
@@ -1812,7 +1814,7 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
 
 
 class _CapturingReasoningParser:
-    def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+    def __init__(self, *, model_type, stream_reasoning, force_reasoning, request=None):
         self.model_type = model_type
         self.stream_reasoning = stream_reasoning
         self.force_reasoning = force_reasoning
@@ -6332,6 +6334,187 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
+
+
+class TestContinuationFlags:
+    @pytest.mark.core
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+    @pytest.mark.parametrize("reasoning_closed", [False, True])
+    @pytest.mark.parametrize(
+        "flag_location", ["top_level", "chat_template_kwargs", "chat_template_args"]
+    )
+    def test_continued_reasoning_state(
+        self, tokenizer, monkeypatch, use_pool, reasoning_closed, flag_location
+    ):
+        prefix = "<think>\nCount carefully."
+        if reasoning_closed:
+            prefix += "\n</think>\n\nOne, two,"
+        flags = {"add_generation_prompt": False, "continue_final_message": True}
+        request = {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Count to three."},
+                {"role": "assistant", "content": prefix},
+            ],
+            **(flags if flag_location == "top_level" else {flag_location: flags}),
+        }
+        engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": [token], "finish_reason": None}
+                for token in tokenizer.encode(" three.", add_special_tokens=False)
+            ]
+            + [{"token_ids": [], "finish_reason": "length"}]
+        )
+        if use_pool:
+            for name, value in {
+                "_w_tokenizer": tokenizer,
+                "_w_tool_call_parser_name": None,
+                "_w_reasoning_parser_name": "qwen3",
+                "_w_exclude_tools_when_tool_choice_none": True,
+                "_w_template_force_reasoning": False,
+                "_w_default_thinking_mode": None,
+            }.items():
+                monkeypatch.setattr(sglang_processor_module, name, value)
+
+        with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+            processor = SglangProcessor(
+                tokenizer, engine, None, "qwen3", None, preprocess_pool=pool
+            )
+
+            async def collect():
+                return [item async for item in processor.generator(request)]
+
+            output = asyncio.run(collect())
+
+        fields = {
+            field: "".join(
+                choice["delta"].get(field) or ""
+                for item in output
+                for choice in item.get("data", {}).get("choices", [])
+            )
+            for field in ("content", "reasoning_content")
+        }
+        assert fields == {
+            "content": " three." if reasoning_closed else "",
+            "reasoning_content": "" if reasoning_closed else " three.",
+        }
+
+    @pytest.mark.parametrize(
+        "flags, add_prompt, continue_final",
+        [
+            ({}, True, False),
+            ({"add_generation_prompt": False}, False, False),
+            (
+                {
+                    "add_generation_prompt": False,
+                    "continue_final_message": True,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": True,
+                        "continue_final_message": False,
+                    },
+                },
+                False,
+                True,
+            ),
+            ({"chat_template_kwargs": {"add_generation_prompt": False}}, False, False),
+            (
+                {
+                    "add_generation_prompt": None,
+                    "continue_final_message": None,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": False,
+                        "continue_final_message": True,
+                    },
+                },
+                False,
+                True,
+            ),
+        ],
+    )
+    def test_rendered_prompt(self, tokenizer, flags, add_prompt, continue_final):
+        messages = [
+            {"role": "user", "content": "Count to three."},
+            {"role": "assistant", "content": "One, two,"},
+        ]
+        result = preprocess_chat_request(
+            {"model": MODEL, "messages": messages, **flags},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        expected = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=add_prompt,
+            continue_final_message=continue_final,
+            return_dict=False,
+        )
+        assert result.prompt_token_ids == expected
+        if continue_final:
+            assert tokenizer.decode(result.prompt_token_ids).endswith("One, two,")
+
+    @pytest.mark.parametrize(
+        "flags, reject",
+        [
+            ({"add_generation_prompt": False}, True),
+            (
+                {
+                    "add_generation_prompt": None,
+                    "chat_template_kwargs": {"add_generation_prompt": False},
+                },
+                True,
+            ),
+            ({"chat_template_args": {"continue_final_message": True}}, True),
+            (
+                {
+                    "add_generation_prompt": True,
+                    "continue_final_message": False,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": False,
+                        "continue_final_message": True,
+                    },
+                },
+                False,
+            ),
+        ],
+    )
+    def test_deepseek_v4_encoder_boundary(self, flags, reject, tokenizer):
+        tokenizer = copy.copy(tokenizer)
+        tokenizer.chat_template = None
+        expected = (
+            pytest.raises(PreprocessError, match="DeepSeek-V4 encoder")
+            if reject
+            else nullcontext()
+        )
+        with expected:
+            result = preprocess_chat_request(
+                {
+                    "model": "deepseek-ai/DeepSeek-V4-Pro",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    **flags,
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            assert result.prompt_token_ids
+
+    def test_conflicting_effective_flags_are_client_errors(self, tokenizer):
+        with pytest.raises(
+            PreprocessError,
+            match="continue_final_message requires add_generation_prompt=false",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "assistant", "content": "One, two,"}],
+                    "chat_template_args": {"continue_final_message": True},
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
 
 
 class TestThinkingControlParity:  # FRONTEND.10
