@@ -21,8 +21,8 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > - Aggregated Qwen3-VL and Qwen3.5 workers on CUDA support VP8 and VP9 with
 >   `--frontend-decoding`. Dynamo's Rust frontend decodes and transfers the
 >   sampled frames; SGLang still runs model-specific preprocessing and vision
->   encoding. The multimodal router launcher uses this path for exact
->   video-aware KV routing.
+>   encoding. The multimodal router launcher uses this path for video-aware KV
+>   routing on [compatible SGLang builds](#newer-sglang-image-identities).
 > - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
 >   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
 >   decode before the vision encoder produces embeddings.
@@ -114,9 +114,11 @@ Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image car
 
 SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
 
+The compatibility behavior below requires a Dynamo build containing [wide-token compatibility support](https://github.com/ai-dynamo/dynamo/pull/17126).
+
 On these builds, Dynamo accepts the wide values in KV events and indexes only complete text blocks before the first image or video block. The media block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache, but image- and video-aware routing is unavailable. This applies both to URL passthrough and to `--frontend-decoding`.
 
-Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must register those sources with `engine_owned_mm_identity: true`; the field defaults to `false` for legacy sources. Without the flag, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. Without it, values exceeding 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
 
 Exclusion tracking is bounded to 1,048,576 block IDs per event normalizer across cache tiers. If it fills up, Dynamo logs a warning and accepts only stores with no parent for the affected worker rank until an `AllBlocksCleared` event. Existing text evictions continue to apply. This fallback can miss additional text-prefix hits, but prevents an unknown-parent store from invalidating the relay's worker state.
 
