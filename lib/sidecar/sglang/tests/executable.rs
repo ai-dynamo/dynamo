@@ -31,6 +31,8 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
         "--grpc-startup-deadline-secs",
         "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
+        "--policy-version-taints",
+        "DYN_SGLANG_POLICY_VERSION_TAINTS",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
     }
