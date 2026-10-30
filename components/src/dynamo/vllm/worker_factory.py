@@ -1817,7 +1817,11 @@ class WorkerFactory:
         # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
         if config.embedding_worker:
             await self._create_embedding_worker(
-                runtime, config, shutdown_event, shutdown_endpoints
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
             )
             return
 
@@ -2028,6 +2032,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize an aggregated text-embedding worker.
 
@@ -2077,17 +2082,31 @@ class WorkerFactory:
         # because vLLM unconditionally invokes it during AsyncLLM init,
         # but it returns a no-op stat logger and setup_vllm_engine() skips
         # the chat-shaped LLMBackendMetrics registration.
-        factory = StatLoggerFactory(
-            endpoint=generate_endpoint,
-            embedding_worker=True,
-        )
-        (
-            engine_client,
-            vllm_config,
-            _default_sampling_params,
-            engine_cleanup_resource,
-            _component_gauges,
-        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        if snapshot_engine is not None:
+            # The pooling engine is already loaded and restored. Creating a
+            # second engine here would allocate against its live GPU memory.
+            engine_setup, factory = snapshot_engine
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                engine_cleanup_resource,
+                _component_gauges,
+            ) = engine_setup
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            factory.bind_endpoint(generate_endpoint)
+        else:
+            factory = StatLoggerFactory(
+                endpoint=generate_endpoint,
+                embedding_worker=True,
+            )
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                engine_cleanup_resource,
+                _component_gauges,
+            ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
         handler = EmbeddingWorkerHandler(
             runtime=runtime,
