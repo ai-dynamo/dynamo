@@ -169,10 +169,8 @@ rule violation is a contract defect, not a style preference.
 Do not report:
 
 - A violation on a line that the change does not add or modify, including code that the change
-  only moves, and the names that the guidelines list under "Existing names that break these
-  rules" when they already exist before the change (check with `git grep -n <name> <base>`). A
-  metric that the change registers, exports, or updates for the first time is not pre-existing
-  (step 4).
+  only moves. A metric that the change registers, exports, or updates for the first time is not
+  pre-existing (step 4).
 - Engine metrics that Dynamo passes through (`vllm:`, `sglang:`, `lmcache:`, and the engine's
   `trtllm_` metrics), or changes to the prefix filters that pass them.
 - A rule for which the pull request description records an exception with a reason. Mention the
