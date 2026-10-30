@@ -1933,11 +1933,14 @@ def scrape_provider_query_count(
     if response.status_code != 200:
         raise AssertionError(f"provider /metrics returned HTTP {response.status_code}")
     metric_name = provider_query_metric_name()
+    # Fixture MockerProcess uses test-namespace-{random lowercase}; native
+    # metrics sanitize that NAMESPACE label by replacing '-' with '_'.
+    namespace_label = namespace.replace("-", "_")
     samples = find_metric_samples(
         response.text,
         metric_name,
         {
-            labels.NAMESPACE: namespace,
+            labels.NAMESPACE: namespace_label,
             labels.COMPONENT: component,
             labels.ENDPOINT: KV_INDEXER_QUERY_ENDPOINT,
             labels.WORKER_ID: format(provider_instance_id, "x"),
@@ -1947,6 +1950,8 @@ def scrape_provider_query_count(
         raise AssertionError(
             "provider did not export "
             f"{metric_name} with "
+            f"{labels.NAMESPACE}={namespace_label!r} "
+            f"(raw namespace={namespace!r}) "
             f"{labels.ENDPOINT}={KV_INDEXER_QUERY_ENDPOINT!r} "
             f"{labels.WORKER_ID}={format(provider_instance_id, 'x')!r}"
         )
