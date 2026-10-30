@@ -189,7 +189,6 @@ wait_any_exit() {
         exit 1
     fi
     if [[ "${DYN_LAUNCH_WAIT_ALL:-}" == "1" ]]; then
-        # Fault-injection tests kill one worker and keep serving on the rest.
         wait
         dynamo_reap_and_exit 0
     fi
