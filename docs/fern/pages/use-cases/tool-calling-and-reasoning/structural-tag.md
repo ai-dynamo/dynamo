@@ -222,6 +222,8 @@ validate_structural_tag_parser("deepseek_v41", "deepseek_v41")
 
 `supports_structural_tag_parser` returns a boolean. `validate_structural_tag_parser` raises `ValueError` when no builder is available. Both accept an optional reasoning-parser name and raise `ValueError` for an invalid parser-generation configuration or incompatible V2 parser pair. Set `DYN_PARSER_VERSION` before the first parser lookup; the process caches that selection.
 
+When structural tags are active, `deepseek_v41` requests on a V2 parser route now use grammar-constrained generation by default. Before the V4.1 builder was available, those requests could use best-effort tool calling. Set `--dyn-structural-tag false` to disable optional structural-tag guidance.
+
 The `deepseek_v41` builder emits the V4.1 framing and `deepseek_v4_1_xml` argument style. `deepseek_v4` retains its own framing and `deepseek_xml` argument style. These checks report Dynamo's builder availability; they do not compile the grammar with the backend's installed XGrammar version. Qualify backend support separately before enabling enforcement. Existing best-effort serving behavior remains unchanged for parsers without a builder.
 
 ## Activation Scope

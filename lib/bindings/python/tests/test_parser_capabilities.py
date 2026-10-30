@@ -32,9 +32,9 @@ def _probe(case, parser_name, reasoning_parser=None):
         assert validate_structural_tag_parser(parser_name, reasoning_parser) is None
     elif case == "missing":
         assert parser_name in get_tool_parser_names()
-        assert supports_structural_tag_parser(parser_name) is False
+        assert supports_structural_tag_parser(parser_name, reasoning_parser) is False
         with pytest.raises(ValueError, match="No structural-tag grammar"):
-            validate_structural_tag_parser(parser_name)
+            validate_structural_tag_parser(parser_name, reasoning_parser)
     elif case == "unknown":
         assert parser_name not in get_tool_parser_names()
         assert supports_structural_tag_parser(parser_name) is False
@@ -95,6 +95,10 @@ def test_deepseek_grammar_is_available(parser_name):
 
 def test_selectable_parser_without_grammar_is_rejected_by_preflight():
     _run_probe("missing", "gemma4")
+
+
+def test_mixed_parser_pair_has_no_grammar_by_default():
+    _run_probe("missing", "deepseek_v41", "qwen3")
 
 
 def test_unknown_family_is_not_grammar_capable():
