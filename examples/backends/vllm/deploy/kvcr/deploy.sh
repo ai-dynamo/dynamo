@@ -10,37 +10,52 @@ set -eu
 DYNAMO_RDMA_RESOURCE=${DYNAMO_RDMA_RESOURCE:-rdma/shared_ib}
 KVCR_MEMORY_SERVICE_ENABLED=${KVCR_MEMORY_SERVICE_ENABLED:-false}
 NAMESPACE=${NAMESPACE:-default}
-export DYNAMO_KVCR_COMPATIBILITY_DIGEST DYNAMO_RDMA_RESOURCE
+export DYNAMO_KVCR_COMPATIBILITY_DIGEST DYNAMO_RDMA_RESOURCE KVCR_STATE_AGENT_MAX_SLOTS
 export DYNAMO_UCX_NET_DEVICES DYNAMO_VLLM_IMAGE
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "$KVCR_MEMORY_SERVICE_ENABLED" in
   false)
-    manifest=$script_dir/agg.yaml
+    manifests=agg.yaml
     deployment_name=vllm-agg-kvcr
     ;;
   true)
-    manifest=$script_dir/agg-memory-service.yaml
+    manifests=agg-memory-service.yaml
     deployment_name=vllm-agg-kvcr-memory-service
-    : "${DYNAMO_KVCR_COMPATIBILITY_DIGEST:?set a versioned KVCR compatibility value}"
-    case "$DYNAMO_KVCR_COMPATIBILITY_DIGEST" in
-      *[!A-Za-z0-9._:/-]*)
-        echo "DYNAMO_KVCR_COMPATIBILITY_DIGEST contains an unsupported character" >&2
-        exit 2
-        ;;
-    esac
+    ;;
+  external)
+    manifests="guard-daemonset.yaml agg-state-agent.yaml agg-guard-daemonset.yaml"
+    deployment_name=vllm-agg-kvcr-guard-daemonset
+    : "${KVCR_STATE_AGENT_MAX_SLOTS:?set the state agent lifetime slot budget}"
     ;;
   *)
-    echo "KVCR_MEMORY_SERVICE_ENABLED must be true or false" >&2
+    echo "KVCR_MEMORY_SERVICE_ENABLED must be true, false, or external" >&2
     exit 2
     ;;
 esac
+
+if [ "$KVCR_MEMORY_SERVICE_ENABLED" != false ]; then
+  : "${DYNAMO_KVCR_COMPATIBILITY_DIGEST:?set a versioned KVCR compatibility value}"
+  case "$DYNAMO_KVCR_COMPATIBILITY_DIGEST" in
+    *[!A-Za-z0-9._:/-]*)
+      echo "DYNAMO_KVCR_COMPATIBILITY_DIGEST contains an unsupported character" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 render() {
   substitution_vars='${DYNAMO_VLLM_IMAGE} ${DYNAMO_RDMA_RESOURCE}'
   substitution_vars="$substitution_vars "'${DYNAMO_UCX_NET_DEVICES}'
   substitution_vars="$substitution_vars "'${DYNAMO_KVCR_COMPATIBILITY_DIGEST}'
-  envsubst "$substitution_vars" < "$manifest"
+  substitution_vars="$substitution_vars "'${KVCR_STATE_AGENT_MAX_SLOTS}'
+  separator=
+  for manifest in $manifests; do
+    printf '%s' "$separator"
+    envsubst "$substitution_vars" < "$script_dir/$manifest"
+    separator='---
+'
+  done
 }
 
 case "${1:-}" in

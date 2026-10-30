@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-node Guard outside any DGD, so its pool outlives the DGD. Render with
+# envsubst (see deploy.sh). Needs a KVCR build that passes the pool to the worker as
+# a file descriptor (ai-dynamo/kvcr#131).
+#
+# hostNetwork: the Guard binds the control address the worker advertises, so both
+# share the node's network namespace. Only the Guard mounts the pool dir; the worker
+# receives the pool over the claim socket and mounts only the socket dir. The root
+# init container chowns the dirs to uid 1000, which both run as. The state agent and
+# its ServiceAccount/Role are in agg-state-agent.yaml and README.md.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kvcr-qwen3-0-6b-guard
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kvcr-qwen3-0-6b-guard
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kvcr-qwen3-0-6b-guard
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 0
+      initContainers:
+      - name: perms
+        image: ${DYNAMO_VLLM_IMAGE}
+        command:
+        - sh
+        - -c
+        - >-
+          chown 1000:0 /run/kvcr/qwen3-0.6b /dev/shm/kvcr/qwen3-0.6b &&
+          chmod 0770 /run/kvcr/qwen3-0.6b /dev/shm/kvcr/qwen3-0.6b
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - FOWNER
+            - DAC_OVERRIDE
+        volumeMounts:
+        - mountPath: /run/kvcr/qwen3-0.6b
+          name: kvcr-socket
+        - mountPath: /dev/shm/kvcr/qwen3-0.6b
+          name: kvcr-pool
+      containers:
+      - name: kvcr-service
+        image: ${DYNAMO_VLLM_IMAGE}
+        command:
+        - python3
+        - -m
+        - kvcr.kvcr_service
+        - --socket-path
+        - /run/kvcr/qwen3-0.6b/memory.sock
+        - --pool-dir
+        - /dev/shm/kvcr/qwen3-0.6b
+        - --guard-count
+        - "1"
+        - --pool-sizes-gb
+        - "2"
+        - --compatibility-digest
+        - ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
+        env:
+        - name: UCX_TLS
+          value: rc_x,cuda
+        - name: UCX_NET_DEVICES
+          value: ${DYNAMO_UCX_NET_DEVICES}
+        resources:
+          limits:
+            ${DYNAMO_RDMA_RESOURCE}: "1"
+            memory: 4Gi
+          requests:
+            ${DYNAMO_RDMA_RESOURCE}: "1"
+            cpu: "1"
+            memory: 3Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - IPC_LOCK
+        readinessProbe:
+          exec:
+            command:
+            - python3
+            - -c
+            - import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/qwen3-0.6b/memory.sock'); s.close()
+          failureThreshold: 3
+          periodSeconds: 5
+          timeoutSeconds: 4
+        volumeMounts:
+        - mountPath: /run/kvcr/qwen3-0.6b
+          name: kvcr-socket
+        - mountPath: /dev/shm/kvcr/qwen3-0.6b
+          name: kvcr-pool
+      volumes:
+      - hostPath:
+          path: /run/kvcr/qwen3-0.6b
+          type: DirectoryOrCreate
+        name: kvcr-socket
+      - hostPath:
+          path: /dev/shm/kvcr/qwen3-0.6b
+          type: DirectoryOrCreate
+        name: kvcr-pool
