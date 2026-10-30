@@ -18,6 +18,7 @@ from typing import Any
 # Tunables and conventional return codes (kept here to avoid magic numbers).
 DEFAULT_KUBECTL_TIMEOUT_SEC = 30
 DEFAULT_LOG_TAIL_LINES = 200
+DGD_POD_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 # POSIX-conventional return codes used when the wrapper itself fails before
 # kubectl can produce a real one.
 RETURNCODE_COMMAND_NOT_FOUND = 127  # `kubectl` not installed
@@ -113,6 +114,15 @@ def pod_names(namespace: str, selector: str | None, timeout: int) -> list[str]:
     ]
 
 
+def deployment_pod_selector(
+    deployment_name: str | None, selector: str | None
+) -> str | None:
+    if not deployment_name:
+        return selector
+    deployment_selector = f"{DGD_POD_LABEL}={deployment_name}"
+    return f"{deployment_selector},{selector}" if selector else deployment_selector
+
+
 def container_names(namespace: str, pod: str, timeout: int) -> list[tuple[str, str]]:
     body = kubectl_json(["get", "pod", pod, "-n", namespace], timeout)
     if not body:
@@ -155,6 +165,11 @@ def main() -> int:
         # guessable /tmp/dynamo-debug-<timestamp> path on a shared host.
         outdir = Path(tempfile.mkdtemp(prefix="dynamo-debug-")).resolve()
 
+    pod_selector = deployment_pod_selector(args.deployment_name, args.selector)
+    pod_command = ["kubectl", "get", "pods", "-n", args.namespace, "-o", "wide"]
+    if pod_selector:
+        pod_command.extend(["-l", pod_selector])
+
     commands: list[tuple[str, list[str]]] = [
         ("context", ["kubectl", "config", "current-context"]),
         ("nodes", ["kubectl", "get", "nodes", "-o", "wide"]),
@@ -172,7 +187,7 @@ def main() -> int:
                 "wide",
             ],
         ),
-        ("pods", ["kubectl", "get", "pods", "-n", args.namespace, "-o", "wide"]),
+        ("pods", pod_command),
         ("services", ["kubectl", "get", "svc", "-n", args.namespace, "-o", "wide"]),
         ("pvc", ["kubectl", "get", "pvc", "-n", args.namespace, "-o", "wide"]),
         ("jobs", ["kubectl", "get", "jobs", "-n", args.namespace, "-o", "wide"]),
@@ -215,7 +230,11 @@ def main() -> int:
             {"name": name, "cmd": cmd, "returncode": result["returncode"]}
         )
 
-    pods = pod_names(args.namespace, args.selector, args.timeout)
+    pods = pod_names(
+        args.namespace,
+        pod_selector,
+        args.timeout,
+    )
     summary["pods"] = pods
     for pod in pods:
         result = run(
