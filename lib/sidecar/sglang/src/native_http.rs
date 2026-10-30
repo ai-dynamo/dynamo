@@ -21,7 +21,7 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-use crate::{client, client::Discovery, protocol};
+use crate::{client, client::Discovery, http_auth::HttpAuth, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 /// SGLang's default `SGLANG_DISAGGREGATION_WAITING_TIMEOUT`, so a healthy engine ends the wait first.
@@ -149,6 +149,7 @@ pub(crate) struct NativeHttp {
     max_event_bytes: usize,
     abort_timeout: Duration,
     decode_drain_timeout: Duration,
+    auth: HttpAuth,
 }
 
 // Closing the SSE connection does not reliably stop SGLang scheduler work.
@@ -243,6 +244,11 @@ fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, Dynam
 }
 
 impl NativeHttp {
+    pub(crate) fn with_auth(mut self, auth: HttpAuth) -> Self {
+        self.auth = auth;
+        self
+    }
+
     pub(crate) fn discover(
         grpc_endpoint: &GrpcEndpoint,
         discovery: &Discovery,
@@ -282,6 +288,7 @@ impl NativeHttp {
             max_event_bytes,
             abort_timeout: connect_timeout,
             decode_drain_timeout: DECODE_DRAIN_TIMEOUT,
+            auth: HttpAuth::default(),
         }))
     }
 
@@ -326,8 +333,8 @@ impl NativeHttp {
     }
 
     pub(crate) async fn abort(&self, rid: &str, timeout: Duration) -> Result<(), reqwest::Error> {
-        self.client
-            .post(self.endpoint.with_path("/abort_request"))
+        self.auth
+            .abort(self.client.post(self.endpoint.with_path("/abort_request")))
             .json(&serde_json::json!({"rid": rid, "abort_all": false}))
             .timeout(timeout)
             .send()
@@ -338,8 +345,8 @@ impl NativeHttp {
 
     async fn open(self, body: Value) -> Result<Response, DynamoError> {
         let response = self
-            .client
-            .post(self.endpoint.with_path("/generate"))
+            .auth
+            .generate(self.client.post(self.endpoint.with_path("/generate")))
             .header(header::ACCEPT, "text/event-stream")
             .json(&body)
             .send()
@@ -652,7 +659,7 @@ fn request_error(error: reqwest::Error) -> DynamoError {
 
 fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
     client::protocol_error(format!(
-        "SGLang HTTP {operation} returned HTTP {status}; the sidecar does not have backend authentication configured"
+        "SGLang HTTP {operation} returned HTTP {status}; check the sidecar HTTP API key and admin key files"
     ))
 }
 
@@ -683,9 +690,10 @@ mod tests {
     use futures::StreamExt;
     use reqwest::StatusCode;
     use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
     use tokio::sync::watch;
+    use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
     use tracing_subscriber::prelude::*;
 
@@ -693,7 +701,7 @@ mod tests {
         NativeHttp, NativeRequest, authentication_error, build_http_client, output, request,
         response_error, response_has_output,
     };
-    use crate::client::Discovery;
+    use crate::{client::Discovery, http_auth::HttpAuth};
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
 
@@ -727,6 +735,7 @@ mod tests {
             max_event_bytes: MAX_EVENT_BYTES,
             abort_timeout: Duration::from_secs(1),
             decode_drain_timeout: Duration::from_secs(1),
+            auth: HttpAuth::default(),
         }
     }
 
@@ -1174,6 +1183,63 @@ mod tests {
             .unwrap()
             .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn native_http_authenticates_generation_and_abort() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let api_file = dir.path().join("api");
+            let admin_file = dir.path().join("admin");
+            std::fs::write(&api_file, "user-secret\n").unwrap();
+            std::fs::write(&admin_file, "admin-secret\n").unwrap();
+            for (api, admin) in [(false, false), (true, false), (true, true), (false, true)] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let server = tokio::spawn(async move {
+                    for route in ["/health", "/generate", "/abort_request"] {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = BufReader::new(socket);
+                        let mut line = String::new();
+                        socket.read_line(&mut line).await.unwrap();
+                        assert_eq!(line.split_whitespace().nth(1), Some(route));
+                        let mut authorization = None;
+                        let mut length = 0;
+                        loop {
+                            line.clear();
+                            socket.read_line(&mut line).await.unwrap();
+                            if line == "\r\n" {
+                                break;
+                            }
+                            let (name, value) = line.split_once(':').unwrap();
+                            if name.eq_ignore_ascii_case("authorization") {
+                                authorization = Some(value.trim().to_string());
+                            }
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = value.trim().parse::<usize>().unwrap();
+                            }
+                        }
+                        socket.read_exact(&mut vec![0; length]).await.unwrap();
+                        let expected = match route {
+                            "/abort_request" if admin => Some("Bearer admin-secret"),
+                            "/generate" | "/abort_request" if api => Some("Bearer user-secret"),
+                            _ => None,
+                        };
+                        assert_eq!(authorization.as_deref(), expected);
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    }
+                });
+                let auth = HttpAuth::from_files(
+                    api.then_some(api_file.as_path()),
+                    admin.then_some(admin_file.as_path()),
+                ).unwrap();
+                let native = native_http(port).with_auth(auth);
+                native.await_ready(Instant::now() + Duration::from_secs(1), Duration::from_millis(10)).await.unwrap();
+                assert!(native.clone().open(json!({"input_ids": [1]})).await.unwrap().status().is_success());
+                native.abort("request-id", Duration::from_secs(1)).await.unwrap();
+                server.await.unwrap();
+            }
+        }).await.expect("authenticated native HTTP requests timed out");
     }
 
     #[tokio::test]

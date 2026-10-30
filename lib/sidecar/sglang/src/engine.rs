@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::http_auth::HttpAuth;
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -44,6 +45,7 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     native_http_max_event_bytes: usize,
+    http_auth: HttpAuth,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -150,6 +152,10 @@ impl SglangSidecarEngine {
         discovery: Discovery,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::validate_args(&args)?;
+        let http_auth = HttpAuth::from_files(
+            args.http_api_key_file.as_deref(),
+            args.http_admin_api_key_file.as_deref(),
+        )?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
@@ -213,6 +219,7 @@ impl SglangSidecarEngine {
                 bootstrap_host,
                 bootstrap_port,
                 native_http_max_event_bytes,
+                http_auth,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -298,6 +305,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.native_http_max_event_bytes,
         )? {
             Some(native_http) => {
+                let native_http = native_http.with_auth(self.http_auth.clone());
                 match native_http
                     .await_ready(deadline, self.transport.retry_interval)
                     .await
@@ -1269,8 +1277,15 @@ mod tests {
 
     #[test]
     fn worker_preserves_options_and_uses_discovered_identity_and_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let api_file = dir.path().join("api");
+        let admin_file = dir.path().join("admin");
+        std::fs::write(&api_file, "user-secret\n").unwrap();
+        std::fs::write(&admin_file, "admin-secret\n").unwrap();
         for (mode, component) in [("aggregated", "custom-component"), ("decode", "backend")] {
             let mut args = args();
+            args.http_api_key_file = Some(api_file.clone());
+            args.http_admin_api_key_file = Some(admin_file.clone());
             args.sidecar.common.disaggregation_mode = DisaggregationMode::Prefill;
             let mut discovery = discovery(json!({"disaggregation_mode": mode}));
             discovery.served_model_name = Some("public-model".into());
@@ -1304,6 +1319,26 @@ mod tests {
             assert_eq!(engine.transport.connect_attempt_timeout.as_secs(), 7);
             assert_eq!(engine.transport.retry_interval.as_secs(), 2);
             assert_eq!(engine.transport.startup_deadline.as_secs(), 11);
+            let http = reqwest::Client::new();
+            for (request, expected) in [
+                (
+                    engine
+                        .http_auth
+                        .generate(http.get("http://localhost/generate")),
+                    "Bearer user-secret",
+                ),
+                (
+                    engine
+                        .http_auth
+                        .abort(http.get("http://localhost/abort_request")),
+                    "Bearer admin-secret",
+                ),
+            ] {
+                assert_eq!(
+                    request.build().unwrap().headers()[reqwest::header::AUTHORIZATION],
+                    expected
+                );
+            }
             assert!(engine.bootstrap_host.is_none());
             assert!(engine.bootstrap_port.is_none());
             assert!(!engine.state.initialized());

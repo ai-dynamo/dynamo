@@ -3,7 +3,7 @@
 
 //! Command-line arguments for the SGLang sidecar.
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, path::PathBuf};
 
 use dynamo_sidecar_common::SidecarArgs;
 
@@ -27,6 +27,15 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    /// File containing the SGLang HTTP API key for native /generate requests.
+    #[arg(long, env = "DYN_SGLANG_HTTP_API_KEY_FILE")]
+    pub http_api_key_file: Option<PathBuf>,
+
+    /// File containing the SGLang HTTP admin key for /abort_request.
+    /// Falls back to the API key when unset, matching SGLang's API-key-only mode.
+    #[arg(long, env = "DYN_SGLANG_HTTP_ADMIN_API_KEY_FILE")]
+    pub http_admin_api_key_file: Option<PathBuf>,
 
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.

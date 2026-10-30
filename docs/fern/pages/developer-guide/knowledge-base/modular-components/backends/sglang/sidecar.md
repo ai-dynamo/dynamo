@@ -100,3 +100,27 @@ dispatches each one to the right scheduler. The follower sidecar
 accepts no requests and relays its node's KV events directly to the frontend.
 
 ![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)
+
+
+## Authenticate Native HTTP Requests
+
+When the SGLang engine uses `--api-key`, mount the same key into the sidecar and
+set `DYN_SGLANG_HTTP_API_KEY_FILE` to its file path. The sidecar sends that key as
+a bearer token on native `/generate` requests. If the engine also uses
+`--admin-api-key`, set `DYN_SGLANG_HTTP_ADMIN_API_KEY_FILE` for `/abort_request`.
+Without an admin key file, cancellation uses the API key, matching SGLang's
+API-key-only mode. Health probes do not send credentials.
+
+```bash
+export DYN_SGLANG_HTTP_API_KEY_FILE=/run/secrets/sglang/api-key
+export DYN_SGLANG_HTTP_ADMIN_API_KEY_FILE=/run/secrets/sglang/admin-api-key
+
+dynamo-sglang-sidecar --grpc-endpoint 127.0.0.1:30001
+```
+
+The equivalent flags are `--http-api-key-file` and `--http-admin-api-key-file`.
+Files contain the raw key; a trailing newline is accepted. The sidecar reads
+both files during initialization. Restart it after rotating the files. When
+neither file is configured, HTTP requests remain unauthenticated. This configures
+only the sidecar's native HTTP calls; configure authentication separately on the
+SGLang engine and the Dynamo frontend.
