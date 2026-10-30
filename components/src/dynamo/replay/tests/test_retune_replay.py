@@ -271,6 +271,7 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
             60.0,
             100.0,
             8.0,
+            "GoodputPerGPU",
         )
 
     baseline = evaluate({})
@@ -687,6 +688,7 @@ _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "_deterministic",
 }
 _REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "conversation_affinity",  # rejected before constructing the Planner
     "replay_concurrency",
     "agentic_lanes",
     "agentic_snapshot",
@@ -741,6 +743,7 @@ def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
                 100.0,
                 10.0,
                 60.0,
+                "GoodputPerGPU",
             )
     assert set().union(*calls) == _PINNED | _PER_CANDIDATE
     # Common random numbers; an inner planner is warmed from the read task's

@@ -27,7 +27,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode TP and attention-DP | Experimental; explicit leader and worker PodTemplates |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
 
 ## Run locally
 
@@ -63,20 +63,9 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: sglang` and complete `leader` and
-`worker` role PodTemplates. The templates own the native engine commands and
-sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
-with matching attention-DP metadata support. Engine-failure KV recovery remains
-incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
-
-The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which require
-a DGD originally created by operator 1.6.0 or later. Upgrading the operator or
-switching to sidecar mode does not enable these variables for older DGDs.
-For an older DGD, delete and recreate it after upgrading, or replace the topology
-arguments in both role templates with Grove or LeaderWorkerSet variables. See the
-[SGLang sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
-for the provider-specific arguments.
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ### Kubernetes manifest notes
 

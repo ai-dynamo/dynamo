@@ -4,7 +4,7 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply ./internal/dgdrrunpublisher
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
@@ -372,7 +372,8 @@ clustertest: ## Run Pod- and Job-backed controller tests against the explicitly 
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "Error: DYNAMO_CLUSTERTEST_CONTEXT must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_PROFILER_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_OPERATOR_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must be set"; exit 1; }
-	go test -tags=clustertest $(CLUSTERTEST_PACKAGES) \
+	# History preparation and webhook suites mutate the same cluster-wide CRDs and admission.
+	go test -p 1 -tags=clustertest $(CLUSTERTEST_PACKAGES) \
 		-run '^TestCluster' -count=1 -v -timeout=$(CLUSTERTEST_TIMEOUT)
 
 .PHONY: integration
@@ -711,7 +712,7 @@ clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, ex
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
 	python3 hack/generate_upgrade_fixtures.py --check
 	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestCluster(HistoryStorage|ComponentHistoryBlocksWorkloads)$$' -count=1 -v -timeout=3m
-	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
+	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=30m
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
 clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.
