@@ -323,7 +323,8 @@ async fn run_with_router_plugins(
             .collect::<Vec<String>>()
     );
 
-    let run_result = http_service.run(distributed_runtime.primary_token()).await;
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let run_result = http_service.run(distributed_runtime.child_token()).await;
 
     // Initiate runtime shutdown whenever the server exits, including bind
     // failures, for both discovery-backed and in-process engines.
