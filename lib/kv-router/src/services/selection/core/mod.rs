@@ -72,8 +72,8 @@ pub use operation::{
 };
 
 use super::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, ReplicaApplyOutcome, SessionAffinity,
-    SessionAffinityConfig,
+    AcquireStep, AffinityError, AffinityLease, HeldReplicaGuard, HeldReplicaTracker, Hold,
+    ReplicaApplyOutcome, SessionAffinity, SessionAffinityConfig, WeakHeldReplicaTracker,
 };
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
@@ -137,6 +137,7 @@ struct SelectionEntry {
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
+    held_replica: HeldReplicaTracker,
     replica_config: Option<ReplicaSyncConfig>,
     affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
 }
@@ -149,7 +150,9 @@ impl SelectionEntry {
         let table = self
             .affinity
             .get_or_try_init(|| -> Result<_, SelectionError> {
-                let table = SessionAffinity::with_config(config).map_err(affinity_error)?;
+                let table =
+                    SessionAffinity::with_replica_tracker(config, self.held_replica.clone())
+                        .map_err(affinity_error)?;
                 if let Some(config) = &self.replica_config
                     && let Some(sink) = config.affinity_sink(&self.key)
                 {
@@ -559,15 +562,39 @@ impl SelectionCore {
         // placement under this lock means a binding is applied here or still held.
         let mut held = self.held_bindings.lock();
         let entry = self.entry(&event.partition);
+        let table = entry.as_ref().and_then(|entry| entry.affinity.get());
+        // Register before placement checks, so a commit followed by invalidation
+        // cannot slip between an ignored update and the receiver holding it.
+        let guard = if let Some(table) = table {
+            table.observe_replica_sequence(event.sequence);
+            let Ok(guard) = table.track_replica_update(&event.session_id, event.version()) else {
+                return;
+            };
+            guard
+        } else {
+            if event.session_id.len()
+                > self
+                    .session_affinity
+                    .map_or(super::affinity::MAX_SESSION_AFFINITY_ID_BYTES, |config| {
+                        config.max_session_id_bytes
+                    })
+            {
+                return;
+            }
+            let tracker = entry.as_ref().map_or_else(
+                || held.tracker(&event.partition),
+                |entry| entry.held_replica.clone(),
+            );
+            tracker.track(&event.session_id, event.version())
+        };
         let Some(table) = entry.as_ref().and_then(|entry| entry.affinity.get()) else {
             tracing::trace!(
                 key = %event.partition,
                 "Holding session affinity replica update: no selector entry or affinity table"
             );
-            held.hold(event, tokio::time::Instant::now());
+            held.hold(event, tokio::time::Instant::now(), guard);
             return;
         };
-        table.observe_replica_sequence(event.sequence);
         if !self.worker_in_partition(event.worker_id, &event.partition) {
             if table.has_newer_binding(&event.session_id, event.version()) {
                 tracing::trace!(
@@ -582,15 +609,15 @@ impl SelectionCore {
                 worker_id = event.worker_id,
                 "Holding session affinity replica update: worker not in partition"
             );
-            held.hold(event, tokio::time::Instant::now());
+            held.hold(event, tokio::time::Instant::now(), guard);
             return;
         }
         let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
-        let outcome = table.apply_replica_update(event.session_id.clone(), target, version);
+        let outcome = table.apply_tracked_replica_update(&guard, target, version, Duration::ZERO);
         // A local request is binding the session; keep the peer binding in case
         // it is cancelled, and retry on the next drain.
         if outcome == ReplicaApplyOutcome::IgnoredInitializing {
-            held.hold(event, tokio::time::Instant::now());
+            held.hold(event, tokio::time::Instant::now(), guard);
         } else {
             held.discard_superseded(&event);
         }

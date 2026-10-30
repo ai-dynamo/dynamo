@@ -288,6 +288,9 @@ impl SelectionCore {
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         });
+        // Obtain the same tracker as bindings held before entry discovery.
+        // Do this outside the entries lock: dispatch takes held before entries.
+        let held_replica = self.held_bindings.lock().tracker(&key);
         let entry = entry_cell
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
@@ -389,6 +392,7 @@ impl SelectionCore {
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
+                    held_replica,
                     replica_config: self.replica_config.clone(),
                     affinity_replication: self.session_binding_sink(&key),
                 }))

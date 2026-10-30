@@ -11,6 +11,7 @@
 //! response stream ends. Bindings are versioned so replicas can exchange them
 //! through an [`AffinityReplicaSink`]; the transport is the host's.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -98,6 +99,92 @@ pub enum ReplicaApplyOutcome {
     RejectedCapacity,
 }
 
+// Only outstanding peer updates retain ordering after a binding disappears.
+// The receiver owns a guard until it applies, expires or evicts the update.
+#[derive(Clone, Default)]
+pub(crate) struct HeldReplicaTracker {
+    inner: Arc<HeldReplicaTrackerInner>,
+}
+
+pub(crate) struct WeakHeldReplicaTracker {
+    inner: Weak<HeldReplicaTrackerInner>,
+}
+
+impl WeakHeldReplicaTracker {
+    pub(crate) fn upgrade(&self) -> Option<HeldReplicaTracker> {
+        self.inner
+            .upgrade()
+            .map(|inner| HeldReplicaTracker { inner })
+    }
+}
+
+#[derive(Default)]
+struct HeldReplicaTrackerInner {
+    sessions: parking_lot::Mutex<HashMap<String, HeldReplicaSession>>,
+    next_sequence: AtomicU64,
+}
+
+#[derive(Default)]
+struct HeldReplicaSession {
+    guards: usize,
+    committed: Option<AffinityVersion>,
+}
+
+pub struct HeldReplicaGuard {
+    tracker: HeldReplicaTracker,
+    session_id: String,
+}
+
+impl HeldReplicaTracker {
+    pub(crate) fn downgrade(&self) -> WeakHeldReplicaTracker {
+        WeakHeldReplicaTracker {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub(crate) fn track(&self, session_id: &str, version: AffinityVersion) -> HeldReplicaGuard {
+        let mut sessions = self.inner.sessions.lock();
+        self.inner
+            .next_sequence
+            .fetch_max(version.sequence.saturating_add(1), Ordering::Relaxed);
+        sessions.entry(session_id.to_string()).or_default().guards += 1;
+        HeldReplicaGuard {
+            tracker: self.clone(),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    fn record(&self, session_id: &str, version: AffinityVersion) {
+        if let Some(session) = self.inner.sessions.lock().get_mut(session_id) {
+            session.committed = Some(session.committed.map_or(version, |old| old.max(version)));
+        }
+    }
+}
+
+impl HeldReplicaGuard {
+    fn superseded(&self, version: AffinityVersion) -> bool {
+        self.tracker
+            .inner
+            .sessions
+            .lock()
+            .get(&self.session_id)
+            .and_then(|session| session.committed)
+            .is_some_and(|committed| committed > version)
+    }
+}
+
+impl Drop for HeldReplicaGuard {
+    fn drop(&mut self) {
+        let mut sessions = self.tracker.inner.sessions.lock();
+        if let Some(session) = sessions.get_mut(&self.session_id) {
+            session.guards -= 1;
+            if session.guards == 0 {
+                sessions.remove(&self.session_id);
+            }
+        }
+    }
+}
+
 enum AffinityEntry {
     Initializing {
         revision: u64,
@@ -153,6 +240,7 @@ struct Inner {
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
     next_sequence: AtomicU64,
+    held_replica: HeldReplicaTracker,
     writer_id: AtomicU64,
     cancel: CancellationToken,
     replica: OnceLock<Arc<dyn AffinityReplicaSink>>,
@@ -234,7 +322,7 @@ impl SessionAffinity {
     }
 
     pub fn with_config(config: SessionAffinityConfig) -> Result<Self, AffinityError> {
-        Self::build(config, None)
+        Self::build(config, None, HeldReplicaTracker::default())
     }
 
     /// Use a host-owned monotonic clock for this table's affinity lifecycle.
@@ -247,12 +335,20 @@ impl SessionAffinity {
         config: SessionAffinityConfig,
         now: Instant,
     ) -> Result<Self, AffinityError> {
-        Self::build(config, Some(now))
+        Self::build(config, Some(now), HeldReplicaTracker::default())
+    }
+
+    pub(crate) fn with_replica_tracker(
+        config: SessionAffinityConfig,
+        tracker: HeldReplicaTracker,
+    ) -> Result<Self, AffinityError> {
+        Self::build(config, None, tracker)
     }
 
     fn build(
         config: SessionAffinityConfig,
         manual_now: Option<Instant>,
+        held_replica: HeldReplicaTracker,
     ) -> Result<Self, AffinityError> {
         Self::validate_ttl(config.ttl)?;
         if let Some(now) = manual_now {
@@ -278,6 +374,7 @@ impl SessionAffinity {
                     .unwrap_or_default()
                     .as_nanos() as u64,
             ),
+            held_replica,
             writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
@@ -520,7 +617,7 @@ impl SessionAffinity {
         };
         let revision = *revision;
         let notify = Arc::clone(notify);
-        let version = self.inner.next_version();
+        let version = self.inner.next_binding_version(session_id);
         *entry = AffinityEntry::Bound {
             target,
             revision,
@@ -616,7 +713,7 @@ impl SessionAffinity {
         version: AffinityVersion,
     ) -> ReplicaApplyOutcome {
         self.inner
-            .apply_replica_update(session_id, target, version, self.inner.ttl)
+            .apply_replica_update(session_id, target, version, self.inner.ttl, None)
     }
 
     /// Apply a replica update that waited `held_for` before it could be placed.
@@ -631,7 +728,36 @@ impl SessionAffinity {
     ) -> ReplicaApplyOutcome {
         let lifetime = self.inner.ttl.saturating_sub(held_for);
         self.inner
-            .apply_replica_update(session_id, target, version, lifetime)
+            .apply_replica_update(session_id, target, version, lifetime, None)
+    }
+
+    /// Register before deciding whether an update must wait for discovery.
+    pub fn track_replica_update(
+        &self,
+        session_id: &str,
+        version: AffinityVersion,
+    ) -> Result<HeldReplicaGuard, AffinityError> {
+        self.validate_session_id(session_id)?;
+        let _entry = self.inner.entries.entry(session_id.to_string());
+        Ok(self.inner.held_replica.track(session_id, version))
+    }
+
+    /// Apply a tracked peer update without reviving a binding superseded while held.
+    pub fn apply_tracked_replica_update(
+        &self,
+        guard: &HeldReplicaGuard,
+        target: AffinityTarget,
+        version: AffinityVersion,
+        held_for: Duration,
+    ) -> ReplicaApplyOutcome {
+        let lifetime = self.inner.ttl.saturating_sub(held_for);
+        self.inner.apply_replica_update(
+            guard.session_id.clone(),
+            target,
+            version,
+            lifetime,
+            Some(guard),
+        )
     }
 
     /// Whether `session_id` has a live binding newer than `version`. A replica
@@ -651,7 +777,7 @@ impl SessionAffinity {
         })
     }
 
-    fn validate_session_id(&self, session_id: &str) -> Result<(), AffinityError> {
+    pub(crate) fn validate_session_id(&self, session_id: &str) -> Result<(), AffinityError> {
         if session_id.len() > self.inner.max_session_id_bytes {
             return Err(AffinityError::InvalidArgument(format!(
                 "session affinity ID must not exceed {} bytes",
@@ -756,10 +882,29 @@ impl Inner {
     }
 
     fn next_version(&self) -> AffinityVersion {
+        // Updates held before table creation must precede its local bindings.
+        self.next_sequence.fetch_max(
+            self.held_replica
+                .inner
+                .next_sequence
+                .load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         AffinityVersion {
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
             writer_id: self.writer_id.load(Ordering::Relaxed),
         }
+    }
+
+    fn next_binding_version(&self, session_id: &str) -> AffinityVersion {
+        // Serialize early registration with both version creation and recording.
+        // The caller already holds this session's table entry lock.
+        let mut sessions = self.held_replica.inner.sessions.lock();
+        let version = self.next_version();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.committed = Some(session.committed.map_or(version, |old| old.max(version)));
+        }
+        version
     }
 
     fn observe_replica_sequence(&self, sequence: u64) {
@@ -774,6 +919,7 @@ impl Inner {
         target: AffinityTarget,
         version: AffinityVersion,
         lifetime: Duration,
+        held: Option<&HeldReplicaGuard>,
     ) -> ReplicaApplyOutcome {
         if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
@@ -781,12 +927,19 @@ impl Inner {
         self.observe_replica_sequence(version.sequence);
 
         let now = self.now();
-        match self.entries.entry(session_id) {
+        let entry = self.entries.entry(session_id);
+        // Local commits record while holding this same entry lock. Their version
+        // survives invalidation and reaping for as long as the receiver's guard.
+        if held.is_some_and(|guard| guard.superseded(version)) {
+            return ReplicaApplyOutcome::IgnoredConflict;
+        }
+        match entry {
             Entry::Vacant(entry) => {
                 if !self.reserve_entry() {
                     return ReplicaApplyOutcome::RejectedCapacity;
                 }
                 let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                self.held_replica.record(entry.key(), version);
                 entry.insert(AffinityEntry::Bound {
                     target,
                     revision,
@@ -796,46 +949,52 @@ impl Inner {
                 });
                 ReplicaApplyOutcome::Inserted
             }
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                AffinityEntry::Initializing { .. } => ReplicaApplyOutcome::IgnoredInitializing,
-                AffinityEntry::Bound {
-                    active_leases,
-                    idle_deadline,
-                    ..
-                } if *active_leases == 0 && *idle_deadline <= now => {
-                    let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
-                    *entry.get_mut() = AffinityEntry::Bound {
-                        target,
-                        revision,
-                        version,
-                        active_leases: 0,
-                        idle_deadline: now + lifetime,
-                    };
-                    ReplicaApplyOutcome::ReplacedExpired
+            Entry::Occupied(mut entry) => {
+                let session_id = entry.key().clone();
+                match entry.get_mut() {
+                    AffinityEntry::Initializing { .. } => ReplicaApplyOutcome::IgnoredInitializing,
+                    AffinityEntry::Bound {
+                        active_leases,
+                        idle_deadline,
+                        ..
+                    } if *active_leases == 0 && *idle_deadline <= now => {
+                        let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                        self.held_replica.record(&session_id, version);
+                        *entry.get_mut() = AffinityEntry::Bound {
+                            target,
+                            revision,
+                            version,
+                            active_leases: 0,
+                            idle_deadline: now + lifetime,
+                        };
+                        ReplicaApplyOutcome::ReplacedExpired
+                    }
+                    AffinityEntry::Bound {
+                        target: existing,
+                        version: existing_version,
+                        idle_deadline,
+                        ..
+                    } if *existing == target && version >= *existing_version => {
+                        self.held_replica.record(&session_id, version);
+                        *existing_version = version;
+                        *idle_deadline = (*idle_deadline).max(now + lifetime);
+                        ReplicaApplyOutcome::Refreshed
+                    }
+                    AffinityEntry::Bound {
+                        target: existing,
+                        version: existing_version,
+                        idle_deadline,
+                        ..
+                    } if version > *existing_version => {
+                        *existing = target;
+                        self.held_replica.record(&session_id, version);
+                        *existing_version = version;
+                        *idle_deadline = now + lifetime;
+                        ReplicaApplyOutcome::ReplacedNewer
+                    }
+                    AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
                 }
-                AffinityEntry::Bound {
-                    target: existing,
-                    version: existing_version,
-                    idle_deadline,
-                    ..
-                } if *existing == target && version >= *existing_version => {
-                    *existing_version = version;
-                    *idle_deadline = (*idle_deadline).max(now + lifetime);
-                    ReplicaApplyOutcome::Refreshed
-                }
-                AffinityEntry::Bound {
-                    target: existing,
-                    version: existing_version,
-                    idle_deadline,
-                    ..
-                } if version > *existing_version => {
-                    *existing = target;
-                    *existing_version = version;
-                    *idle_deadline = now + lifetime;
-                    ReplicaApplyOutcome::ReplacedNewer
-                }
-                AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
-            },
+            }
         }
     }
 }
@@ -900,7 +1059,7 @@ impl AffinityInitialization {
                 "session affinity initialization changed".to_string(),
             ));
         }
-        let version = inner.next_version();
+        let version = inner.next_binding_version(&self.session_id);
         *entry = AffinityEntry::Bound {
             target,
             revision: self.revision,
@@ -997,7 +1156,7 @@ impl AffinityLease {
         if *revision != self.revision || *version != self.version || *current != expected {
             return false;
         }
-        let next_version = inner.next_version();
+        let next_version = inner.next_binding_version(&self.session_id);
         *current = target;
         *version = next_version;
         self.version = next_version;
@@ -1161,6 +1320,60 @@ pub fn validate_dispatch_target(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn held_version_survives_local_commit_and_binding_removal() {
+        for commit in ["initialize", "join", "rebind"] {
+            for removal in ["invalidate", "expire", "reap"] {
+                let table = SessionAffinity::with_config(
+                    SessionAffinityConfig::new(Duration::from_secs(10))
+                        .with_mode(SessionAffinityMode::Soft),
+                )
+                .unwrap();
+                if commit == "rebind" {
+                    let hold = table.acquire("s", None).await.unwrap();
+                    drop(table.commit(hold, AffinityTarget::new(3, None)).unwrap());
+                }
+                let version = AffinityVersion {
+                    sequence: table.next_version().sequence + 100,
+                    writer_id: 9,
+                };
+                let guard = table.track_replica_update("s", version).unwrap();
+                let hold = table.acquire("s", None).await.unwrap();
+                let mut lease = if commit == "join" {
+                    let lease = table
+                        .join_initializing("s", AffinityTarget::new(2, None))
+                        .unwrap();
+                    drop(hold);
+                    lease
+                } else {
+                    table.commit(hold, AffinityTarget::new(2, None)).unwrap()
+                };
+                if removal == "invalidate" {
+                    lease.invalidate();
+                } else {
+                    drop(lease);
+                    table.expire_for_test("s");
+                    if removal == "reap" {
+                        table.inner.expire_idle(table.inner.now());
+                    }
+                }
+                assert_eq!(
+                    table.apply_tracked_replica_update(
+                        &guard,
+                        AffinityTarget::new(1, None),
+                        version,
+                        Duration::ZERO
+                    ),
+                    ReplicaApplyOutcome::IgnoredConflict,
+                    "{commit}/{removal}"
+                );
+                assert_eq!(table.query_target("s", None).unwrap(), None);
+                drop(guard);
+                assert!(table.inner.held_replica.inner.sessions.lock().is_empty());
+            }
+        }
+    }
+
     use super::*;
 
     const TTL: Duration = Duration::from_secs(10);

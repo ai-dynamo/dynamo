@@ -4211,11 +4211,59 @@ async fn held_binding_survives_a_cancelled_local_initialization() {
     assert!(peer.held_bindings.lock().is_empty());
 }
 
+#[tokio::test]
+async fn oversized_peer_binding_is_never_held() {
+    for partition_exists in [false, true] {
+        let (mut peer, _updates) = core_with_binding_stream(22);
+        peer.session_affinity.as_mut().unwrap().max_session_id_bytes = 16;
+        if partition_exists {
+            peer.upsert_worker(worker(2)).await.unwrap();
+        }
+        peer.dispatch_affinity_event(peer_binding(&"s".repeat(17), 1, 1));
+        assert!(peer.held_bindings.lock().is_empty());
+        let valid = "s".repeat(16);
+        peer.dispatch_affinity_event(peer_binding(&valid, 1, 2));
+        assert_eq!(peer.held_bindings.lock().len(), 1);
+        peer.upsert_worker(worker(1)).await.unwrap();
+        assert_eq!(bound_worker(&peer, &valid), Some(1));
+        assert!(peer.held_bindings.lock().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn held_binding_cannot_return_after_a_local_binding_is_invalidated() {
+    for partition_exists in [false, true] {
+        let (peer, _updates) = core_with_binding_stream(22);
+        if partition_exists {
+            peer.upsert_worker(worker(2)).await.unwrap();
+        }
+        // A clock ahead of this process also tests observation before table creation.
+        peer.dispatch_affinity_event(peer_binding("s", 1, u64::MAX - 100));
+        peer.upsert_worker(worker(2)).await.unwrap();
+        let table = peer
+            .entry(&default_key())
+            .unwrap()
+            .affinity
+            .get()
+            .unwrap()
+            .clone();
+        let hold = table.acquire("s", None).await.unwrap();
+        let mut lease = table
+            .commit(hold, WorkerAffinityTarget::new(2, Some(0)))
+            .unwrap();
+        lease.invalidate();
+        peer.upsert_worker(worker(1)).await.unwrap();
+        assert_eq!(bound_worker(&peer, "s"), None);
+        assert!(peer.held_bindings.lock().is_empty());
+    }
+}
+
 #[test]
 fn held_bindings_drop_the_oldest_past_the_limit() {
     let start = tokio::time::Instant::now();
     let mut held = HeldBindings::default();
     let limit = AFFINITY_EVENT_CHANNEL_CAPACITY;
+    let tracker = held.tracker(&default_key());
     for index in 0..=limit {
         held.hold(
             AffinityBindingEvent {
@@ -4227,12 +4275,19 @@ fn held_bindings_drop_the_oldest_past_the_limit() {
                 writer_id: 11,
             },
             start + Duration::from_millis(index as u64),
+            tracker.track(
+                &format!("s{index}"),
+                super::super::affinity::AffinityVersion {
+                    sequence: index as u64,
+                    writer_id: 11,
+                },
+            ),
         );
     }
     assert_eq!(held.len(), limit);
     let ready = held.take_placeable(&default_key(), Duration::from_secs(3600), start, |_| true);
     assert_eq!(ready.len(), limit);
-    assert!(ready.iter().all(|(event, _)| event.session_id != "s0"));
+    assert!(ready.iter().all(|(event, _, _)| event.session_id != "s0"));
     assert!(held.is_empty());
 }
 

@@ -16,6 +16,7 @@ const MAX_HELD_BINDINGS: usize = AFFINITY_EVENT_CHANNEL_CAPACITY;
 struct HeldBinding {
     event: AffinityBindingEvent,
     received: Instant,
+    guard: HeldReplicaGuard,
 }
 
 /// The newest unplaced binding per `(partition, session_id)`.
@@ -23,9 +24,27 @@ struct HeldBinding {
 pub(super) struct HeldBindings {
     partitions: HashMap<RoutingPartitionId, HashMap<String, HeldBinding>>,
     len: usize,
+    trackers: HashMap<RoutingPartitionId, WeakHeldReplicaTracker>,
 }
 
 impl HeldBindings {
+    pub(super) fn tracker(&mut self, partition: &RoutingPartitionId) -> HeldReplicaTracker {
+        if let Some(tracker) = self
+            .trackers
+            .get(partition)
+            .and_then(WeakHeldReplicaTracker::upgrade)
+        {
+            return tracker;
+        }
+        // Dead partitions retain no ordering state. Live entries and held guards
+        // keep their tracker alive, including while an entry is being created.
+        self.trackers
+            .retain(|_, tracker| tracker.upgrade().is_some());
+        let tracker = HeldReplicaTracker::default();
+        self.trackers.insert(partition.clone(), tracker.downgrade());
+        tracker
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -38,7 +57,12 @@ impl HeldBindings {
     /// Keep `event` unless a newer version is already held for its session.
     /// An equal version refreshes the arrival time, as the owner's refresh does
     /// for a placed binding. When full, the oldest held binding is dropped.
-    pub(super) fn hold(&mut self, event: AffinityBindingEvent, now: Instant) {
+    pub(super) fn hold(
+        &mut self,
+        event: AffinityBindingEvent,
+        now: Instant,
+        guard: HeldReplicaGuard,
+    ) {
         if let Some(held) = self
             .partitions
             .get_mut(&event.partition)
@@ -48,6 +72,7 @@ impl HeldBindings {
                 *held = HeldBinding {
                     event,
                     received: now,
+                    guard,
                 };
             }
             return;
@@ -63,6 +88,7 @@ impl HeldBindings {
                 HeldBinding {
                     event,
                     received: now,
+                    guard,
                 },
             );
         self.len += 1;
@@ -95,7 +121,7 @@ impl HeldBindings {
         ttl: Duration,
         now: Instant,
         placeable: impl Fn(WorkerId) -> bool,
-    ) -> Vec<(AffinityBindingEvent, Instant)> {
+    ) -> Vec<(AffinityBindingEvent, Instant, HeldReplicaGuard)> {
         let Some(sessions) = self.partitions.get_mut(partition) else {
             return Vec::new();
         };
@@ -105,7 +131,7 @@ impl HeldBindings {
             now.saturating_duration_since(held.received) >= ttl || placeable(held.event.worker_id)
         }) {
             if now.saturating_duration_since(held.received) < ttl {
-                ready.push((held.event, held.received));
+                ready.push((held.event, held.received, held.guard));
             }
         }
         self.len -= before - sessions.len();
@@ -172,10 +198,10 @@ impl SelectionCore {
         let ready = held.take_placeable(partition, table.ttl(), now, |worker_id| {
             self.worker_in_partition(worker_id, partition)
         });
-        for (event, received) in ready {
+        for (event, received, guard) in ready {
             let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
-            let outcome = table.apply_held_replica_update(
-                event.session_id.clone(),
+            let outcome = table.apply_tracked_replica_update(
+                &guard,
                 target,
                 version,
                 now.saturating_duration_since(received),
@@ -183,7 +209,7 @@ impl SelectionCore {
             // A local request is binding the session; keep the peer binding in
             // case it is cancelled, and retry on the next drain.
             if outcome == ReplicaApplyOutcome::IgnoredInitializing {
-                held.hold(event, received);
+                held.hold(event, received, guard);
             }
             tracing::trace!(
                 key = %partition,

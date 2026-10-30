@@ -26,14 +26,13 @@ use crate::direct_zmq_fan_in::{
     ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
 };
 use dynamo_kv_router::services::selection::affinity::{
-    AffinityReplicaSink, AffinityTarget, AffinityVersion, ReplicaApplyOutcome, SessionAffinity,
-    WeakSessionAffinity,
+    AffinityReplicaSink, AffinityTarget, AffinityVersion, HeldReplicaGuard, ReplicaApplyOutcome,
+    SessionAffinity, WeakSessionAffinity,
 };
 
 pub(super) const SESSION_AFFINITY_SUBJECT: &str = "session_affinity_events";
 const OUTBOUND_CHANNEL_CAPACITY: usize = 4_096;
 const DIRECT_ZMQ_RCVHWM: i32 = 1_024;
-/// Peer bindings held for undiscovered workers, the same bound as the outbound queue.
 const MAX_HELD_UPDATES: usize = OUTBOUND_CHANNEL_CAPACITY;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,16 +82,16 @@ impl SessionAffinityUpdate {
 /// session. They stay out of the table until discovery lists the worker.
 #[derive(Default)]
 struct HeldUpdates {
-    sessions: HashMap<String, (SessionAffinityUpdate, Instant)>,
+    sessions: HashMap<String, (SessionAffinityUpdate, Instant, HeldReplicaGuard)>,
 }
 
 impl HeldUpdates {
     /// Keep `update` unless a newer version is already held for its session.
     /// When full, the oldest held update is dropped.
-    fn hold(&mut self, update: SessionAffinityUpdate, now: Instant) {
-        if let Some((held, received)) = self.sessions.get_mut(&update.session_id) {
+    fn hold(&mut self, update: SessionAffinityUpdate, now: Instant, guard: HeldReplicaGuard) {
+        if let Some((held, received, held_guard)) = self.sessions.get_mut(&update.session_id) {
             if update.version() >= held.version() {
-                (*held, *received) = (update, now);
+                (*held, *received, *held_guard) = (update, now, guard);
             }
             return;
         }
@@ -100,14 +99,14 @@ impl HeldUpdates {
             && let Some(oldest) = self
                 .sessions
                 .iter()
-                .min_by_key(|(_, (_, received))| *received)
+                .min_by_key(|(_, (_, received, _))| *received)
                 .map(|(session_id, _)| session_id.clone())
         {
             tracing::debug!("dropping oldest held session affinity update: hold limit reached");
             self.sessions.remove(&oldest);
         }
         self.sessions
-            .insert(update.session_id.clone(), (update, now));
+            .insert(update.session_id.clone(), (update, now, guard));
     }
 }
 
@@ -129,6 +128,9 @@ impl ReplicaUpdateApplier {
             return false;
         };
         table.observe_replica_sequence(update.sequence);
+        let Ok(guard) = table.track_replica_update(&update.session_id, update.version()) else {
+            return true;
+        };
         // `apply_held` reads discovery under this lock after each change, so an
         // update is either applied here or still held when that check runs.
         let mut held = self.held.lock();
@@ -149,19 +151,19 @@ impl ReplicaUpdateApplier {
                 worker_id = update.worker_id,
                 "holding session affinity update until its worker is discovered"
             );
-            held.hold(update, Instant::now());
+            held.hold(update, Instant::now(), guard);
             return true;
         }
         // A local request is binding the session; keep the peer binding in case
         // it is cancelled, and retry on the next discovery change.
-        if apply_update(&table, update.clone(), Duration::ZERO)
+        if apply_update(&table, &update, &guard, Duration::ZERO)
             == ReplicaApplyOutcome::IgnoredInitializing
         {
-            held.hold(update, Instant::now());
+            held.hold(update, Instant::now(), guard);
         } else if held
             .sessions
             .get(&update.session_id)
-            .is_some_and(|(pending, _)| pending.version() <= update.version())
+            .is_some_and(|(pending, _, _)| pending.version() <= update.version())
         {
             held.sessions.remove(&update.session_id);
         }
@@ -187,22 +189,22 @@ impl ReplicaUpdateApplier {
         let (now, ttl) = (Instant::now(), table.ttl());
         let ready: Vec<_> = held
             .sessions
-            .extract_if(|_, (update, received)| {
+            .extract_if(|_, (update, received, _)| {
                 now.saturating_duration_since(*received) >= ttl
                     || discovered.contains(&update.worker_id)
             })
             .map(|(_, held)| held)
-            .filter(|(_, received)| now.saturating_duration_since(*received) < ttl)
+            .filter(|(_, received, _)| now.saturating_duration_since(*received) < ttl)
             .collect();
-        for (update, received) in ready {
+        for (update, received, guard) in ready {
             let held_for = now.saturating_duration_since(received);
             // A local request is binding the session; keep the peer binding in
             // case it is cancelled, and retry on the next discovery change.
-            if apply_update(&table, update.clone(), held_for)
+            if apply_update(&table, &update, &guard, held_for)
                 == ReplicaApplyOutcome::IgnoredInitializing
             {
                 held.sessions
-                    .insert(update.session_id.clone(), (update, received));
+                    .insert(update.session_id.clone(), (update, received, guard));
             }
         }
         true
@@ -213,12 +215,13 @@ impl ReplicaUpdateApplier {
 /// lifetime it had left.
 fn apply_update(
     table: &SessionAffinity,
-    update: SessionAffinityUpdate,
+    update: &SessionAffinityUpdate,
+    guard: &HeldReplicaGuard,
     held_for: Duration,
 ) -> ReplicaApplyOutcome {
     let target = AffinityTarget::new(update.worker_id, update.dp_rank);
     let version = update.version();
-    let outcome = table.apply_held_replica_update(update.session_id, target, version, held_for);
+    let outcome = table.apply_tracked_replica_update(guard, target, version, held_for);
     tracing::trace!(
         worker_id = target.worker_id,
         dp_rank = ?target.dp_rank,
@@ -518,8 +521,7 @@ mod tests {
             sequence.saturating_add(1)
         );
 
-        // The update waits for discovery instead of being lost, and a held
-        // update still loses to a newer binding applied in the meantime.
+        // The update waits for discovery instead of being lost.
         let table = coordinator.table_for_test().upgrade().unwrap();
         let bound = |session_id| {
             table
@@ -527,16 +529,85 @@ mod tests {
                 .unwrap()
                 .map(|target| target.worker_id)
         };
-        assert!(applier.apply(8, update("superseded", 11, sequence)));
         assert_eq!(bound("unknown-worker"), None);
-        tx.send_modify(|instances| instances.push(instance(12)));
-        assert!(applier.apply(8, update("superseded", 12, sequence + 1)));
-        assert_eq!(bound("superseded"), Some(12));
 
-        tx.send_modify(|instances| instances.extend([instance(10), instance(11)]));
+        tx.send_modify(|instances| instances.push(instance(10)));
         assert!(applier.apply_held());
         assert_eq!(bound("unknown-worker"), Some(10));
-        assert_eq!(bound("superseded"), Some(12));
+        assert!(applier.held.lock().sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_update_is_never_held() {
+        let coordinator = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
+        let (tx, discovered_instances) = watch::channel(Vec::new());
+        let applier = ReplicaUpdateApplier {
+            local_publisher_id: 7,
+            discovered_instances,
+            table: coordinator.table_for_test(),
+            held: Arc::default(),
+        };
+        let limit = dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+        let update = |size| SessionAffinityUpdate {
+            session_id: "s".repeat(size),
+            worker_id: 1,
+            dp_rank: Some(0),
+            sequence: 1,
+            writer_id: 9,
+        };
+        assert!(applier.apply(8, update(limit + 1)));
+        assert!(applier.held.lock().sessions.is_empty());
+        assert!(applier.apply(8, update(limit)));
+        assert_eq!(applier.held.lock().sessions.len(), 1);
+        tx.send_modify(|instances| instances.push(instance(1)));
+        assert!(applier.apply_held());
+        let table = coordinator.table_for_test().upgrade().unwrap();
+        assert_eq!(
+            table
+                .query_target(&"s".repeat(limit), None)
+                .unwrap()
+                .unwrap()
+                .worker_id,
+            1
+        );
+        assert!(applier.held.lock().sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_update_cannot_return_after_a_local_binding_is_invalidated() {
+        let coordinator = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
+        let (tx, discovered_instances) = watch::channel(vec![instance(2)]);
+        let applier = ReplicaUpdateApplier {
+            local_publisher_id: 7,
+            discovered_instances,
+            table: coordinator.table_for_test(),
+            held: Arc::default(),
+        };
+        assert!(applier.apply(
+            8,
+            SessionAffinityUpdate {
+                session_id: "s".to_string(),
+                worker_id: 1,
+                dp_rank: Some(0),
+                sequence: u64::MAX - 100,
+                writer_id: 9,
+            }
+        ));
+        let table = coordinator.table_for_test().upgrade().unwrap();
+        let hold = table.acquire("s", None).await.unwrap();
+        let mut lease = table.commit(hold, AffinityTarget::new(2, Some(0))).unwrap();
+        lease.invalidate();
+        tx.send_modify(|instances| instances.push(instance(1)));
+        assert!(applier.apply_held());
+        assert_eq!(table.query_target("s", None).unwrap(), None);
         assert!(applier.held.lock().sessions.is_empty());
     }
 
