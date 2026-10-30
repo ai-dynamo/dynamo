@@ -19,7 +19,9 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{DiscoveryClientError, GlobalDiscoveryClient};
 
-/// Whether a cache holds the service's current list.
+/// Whether a cache holds the service's current list. A cache that has stopped
+/// keeps the value from its last refresh, so check that its channel is open
+/// before trusting `Current`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Freshness {
     /// No refresh has finished yet, so the list is empty.
@@ -227,7 +229,8 @@ impl PoolSource for GlobalDiscoveryClient {
     }
 }
 
-/// `was_complete` is whether the last list read was complete.
+/// `was_complete` is whether the last list read was complete. It starts
+/// `true`, so a partial first list is logged.
 async fn refresh_pools(
     source: &impl PoolSource,
     pools: &watch::Sender<HashMap<PoolKey, PoolListing>>,
@@ -675,5 +678,53 @@ mod tests {
         cancel.cancel();
         let closed = tokio::time::timeout(Duration::from_secs(5), pools.changed()).await;
         assert!(closed.expect("the channel did not close").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_partial_list_after_an_outage_keeps_the_missing_pools() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8), ("b", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8", "b=8"]);
+
+        source.fail();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(matches!(cache.freshness(), Freshness::Stale(_)));
+
+        // A restarted service may list only some pools at first.
+        source.answer(false, &[("a", 8)]);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(cache.freshness(), Freshness::Current);
+        assert!(!pools.has_changed().unwrap());
+        assert_eq!(pool_workers(&pools.borrow()), ["a=8", "b=8"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_complete_empty_list_removes_every_pool() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8), ("b", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8", "b=8"]);
+
+        source.answer(true, &[]);
+        assert!(next_pools(&mut pools).await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_pool_cache_stops_it() {
+        let source = FakePools::default();
+        source.answer(true, &[("a", 8)]);
+        let cache = spawn_pool_cache(&source);
+        let mut pools = cache.subscribe();
+        assert_eq!(next_pools(&mut pools).await, ["a=8"]);
+
+        // A subscriber outliving the cache sees its channel close, and the
+        // task releases the source.
+        drop(cache);
+        let closed = tokio::time::timeout(Duration::from_secs(5), pools.changed()).await;
+        assert!(closed.expect("the channel did not close").is_err());
+        assert_eq!(Arc::strong_count(&source.0), 1);
     }
 }
