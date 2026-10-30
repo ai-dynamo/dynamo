@@ -15,5 +15,6 @@ dist/
 runs/
 artifacts/
 planner_reports/
-data/
+data/*
+!data/README.md
 analysis/

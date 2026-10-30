@@ -1,0 +1,263 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: planner-vs-baselines-agg-all-datasets
+description: >
+  Aggregated-topology leaderboard: Planner, the TypeSafe Jev decision engine,
+  KEDA, reactive, static-4, CloudAI MPC (cloudai-mpc) and the CloudAI
+  offline-RL planner (cloudai-rl) in DynoSim over every locally available
+  dataset — the 8 registry workloads (Mooncake anchor + 7 synthetic) and the 6
+  Astra GPT-OSS Golden Set traces — against the single relaxed SLO (TTFT
+  2000 ms, ITL 50 ms), 3 repetitions. Results are published under
+  runs/match-sim-agg-all-datasets/ with "agg" in every file name; the published
+  sweep was assembled from --autoscaler <entry> --merge sessions (see
+  provenance.merged_sessions in the results JSON).
+
+# Expected local layout (data/ is gitignored; see data/README.md). The registry
+# "mooncake" anchor comes from this checkout's lib/bench/testdata/.
+#
+#   data/golden-set/astra-gpt-oss/*.jsonl            <- 6 Golden Set traces
+#   data/golden-set/astra-gpt-oss/manifest.json      <- checksums, seed, reference RPS
+#
+# The CloudAI entries need `pip install -e '.[cloudai]'` (numpy; torch for the
+# RL policy) and the CQL checkpoint under checkpoints/. The Jev entry
+# needs the `jev` extra (httpx) and TYPESAFE_API_KEY in the environment.
+
+backend:
+  type: sim
+  topology: agg
+  gpu_budget: 32
+
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+
+  # In agg every worker runs the single aggregated engine; the disagg-only KV
+  # transfer settings do not apply. vLLM 0.24.0 is the maintained ("current")
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: "0.24.0"
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        cold_start_delay_s: 30
+      # Pin the per-worker KV capacity instead of letting AIS estimate it, so
+      # every Dynamo/aiconfigurator build simulates the same substrate. 29920
+      # is what the estimator produced for this engine on 2026-09-22.
+      extra_args:
+        num_gpu_blocks: 29920
+    aggregate: {}
+
+  router:
+    mode: round_robin
+
+  planner_config: planner.sim.example.yaml
+
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    # Replay-owned telemetry cadence in simulated seconds (needs the
+    # telemetry-capable Dynamo bindings). Set null to disable.
+    telemetry_sample_interval_s: 5
+
+  # Agg topology: a single worker pool, so every entry declares only its decode
+  # (worker) count and the prefill-specific knobs are omitted.
+  autoscalers:
+    - name: planner
+      type: planner
+      start:
+        decode: 1
+
+    # TypeSafe Jev decision engine over the hosted API (https://api.typesafe.ai;
+    # TYPESAFE_API_KEY must be set in the environment, never in this file). In
+    # agg it decides only the decode pool; the bounds default to min_decode 1 /
+    # max_decode 8 like the rivals. max_calls covers the longest Golden Set
+    # trace (60 min / 15 s = 240 ticks) with headroom. failure_mode hold: the
+    # 2026-09-29 merges saw ~1.1% of hosted calls fail (transient validation
+    # rejections, one HTTP error, one timeout), which under `raise` aborted 29
+    # of 84 cells, nearly all hour-long Golden Set traces. `hold` keeps the
+    # fleet for that tick and logs it; per-cell error counts are reported in
+    # each result's runtime.jev. An exhausted budget still fails the cell.
+    - name: jev
+      type: jev
+      start:
+        decode: 1
+      config:
+        model: jev-1.13.0
+        poll_interval_s: 15
+        step: 1
+        max_calls: 500
+        failure_mode: hold
+        min_confidence: 0
+
+    - name: keda-default
+      type: keda
+      start:
+        decode: 1
+      config:
+        poll_interval_s: 15
+        queue_threshold: 5
+        min_decode: 1
+        max_decode: 8
+        tolerance: 0.1
+        scale_up_stabilization_s: 0
+        scale_down_stabilization_s: 300
+
+    - name: reactive-default
+      type: reactive
+      start:
+        decode: 1
+      config:
+        poll_interval_s: 15
+        step: 1
+        agg_queue_up: 4
+        agg_queue_down: 1
+        min_decode: 1
+        max_decode: 8
+
+    # Fixed four-worker baseline (the agg counterpart of static-4p4d).
+    - name: static-4
+      type: static
+      config:
+        num_decode: 4
+        poll_interval_s: 5
+
+    # CloudAI MPC v3 (adapters/cloudai_mpc_v3.py): saturated-capacity plant
+    # model over AIS prefill+decode, cold-start order book, model-based
+    # scale-down rule, goodput-per-GPU (Dinkelbach) objective with ITL,
+    # binned arrival forecaster. Replaced the v1 MPC entry on 2026-09-30; the
+    # v1 adapter was removed from the tree on 2026-10-02.
+    - name: cloudai-mpc
+      type: cloudai_mpc_v3
+      start:
+        decode: 1
+      config:
+        forward_model: ais
+        poll_interval_s: 5
+        horizon: 5
+        slo_ttft_ms: 2000
+        slo_itl_ms: 50
+        # Switching penalties are in good-request units under the ratio
+        # objective; hysteresis is the scale-down rule's job.
+        scale_up_penalty: 0
+        scale_down_penalty: 0
+        reactive_queue_threshold: 6
+        min_replicas: 1
+        max_replicas: 8
+        # Replica cold start the plan accounts for (matches
+        # engines.common.runtime.cold_start_delay_s).
+        cold_start_s: 30
+
+    # CloudAI RL planner (adapters/cloudai_rl_lstm.py, type cloudai_rl_lstm): the
+    # cql_trainer v3 + LSTM export. Every 5 s it encodes the replay telemetry
+    # (pre-decision sample) into 27 current-interval features (demand and
+    # completed ISL/OSL, waiting and running requests, KV usage, active /
+    # starting / draining fleet, startup ETAs, trends, SLO-relative latency,
+    # validity, counts, shape age, interval and observation-validity flags),
+    # passes the last ten observations through a 32-unit LSTM and picks one of
+    # nine relative deltas [-8,-4,-2,-1,0,1,2,4,8] for the 1-8 fleet with exact
+    # bounded-target masks, Q-only. Trained with CQL on the seed-0 agg collection
+    # (11 training workloads; flash_crowd, diurnal and random-bursts held out and
+    # used to select epoch 300 of 400) with the efficiency reward
+    # (good_completions - allocated_gpu_seconds) / 10. SLO, replica bound, cold
+    # start and the decode engine's KV capacity must equal the checkpoint's
+    # settings (checked at load) and backend.replay.telemetry_sample_interval_s
+    # must be 5. Checkpoint: checkpoints/cql_autoscaler_best_v3_lstm.pt
+    # (cql_trainer export of 2026-10-01).
+    - name: cloudai-rl
+      type: cloudai_rl_lstm
+      start:
+        decode: 1
+      config:
+        checkpoint_path: ../checkpoints/cql_autoscaler_best_v3_lstm.pt
+        slo_ttft_ms: 2000
+        slo_itl_ms: 50
+        min_replicas: 1
+        max_replicas: 8
+        cold_start_s: 30
+
+evaluations:
+  # Registry dataset: "all" = mooncake anchor + flat, staircase, square_wave,
+  # flash_crowd, diurnal, decode_heavy, shared_prefix.
+  suites:
+    - all
+
+  # Astra GPT-OSS Golden Set (block size 16, timestamp-sorted). Paths resolve
+  # relative to this file.
+  traces:
+    - name: steady-near-capacity
+      path: ../data/golden-set/astra-gpt-oss/steady-near-capacity.jsonl
+      block_size: 16
+      presorted: true
+    - name: step-and-recovery
+      path: ../data/golden-set/astra-gpt-oss/step-and-recovery.jsonl
+      block_size: 16
+      presorted: true
+    - name: gradual-ramp
+      path: ../data/golden-set/astra-gpt-oss/gradual-ramp.jsonl
+      block_size: 16
+      presorted: true
+    - name: repeated-cycles
+      path: ../data/golden-set/astra-gpt-oss/repeated-cycles.jsonl
+      block_size: 16
+      presorted: true
+    - name: composition-shift
+      path: ../data/golden-set/astra-gpt-oss/composition-shift.jsonl
+      block_size: 16
+      presorted: true
+    - name: random-bursts
+      path: ../data/golden-set/astra-gpt-oss/random-bursts.jsonl
+      block_size: 16
+      presorted: true
+
+  # Replay every trace in full. Cap individual workloads with overrides, e.g.
+  #   overrides:
+  #     composition-shift: {max_requests: 1000}
+  defaults:
+    seed: 0
+    max_requests: null
+    arrival_speedup: 1.0
+
+# Single profile, matching configs/match.jev.example.yaml and the Planner
+# policy targets in planner.sim.example.yaml.
+slo_profiles:
+  - name: relaxed
+    ttft_ms: 2000
+    itl_ms: 50
+
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+    - good_rate
+    - goodput_per_gpu
+    - goodput_rps
+    - gpu_hours
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - oscillation_count
+    - scale_events
+
+execution:
+  # Repetition r uses seed + r: synthetic registry workloads regenerate per
+  # seed, while the recorded Mooncake anchor and the Golden Set traces are
+  # fixed inputs, so their repetitions measure simulator determinism only.
+  repetitions: 3
+  fail_fast: false
+  # 7 autoscalers x 14 workloads x 1 SLA target x 3 repetitions.
+  max_runs: 294
+
+publish:
+  # "agg" is part of the directory and of every result file name.
+  artifact_root: ../runs/match-sim-agg-all-datasets/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-sim-agg-all-datasets/results.agg.json
+    - type: html
+      path: ../runs/match-sim-agg-all-datasets/report.agg.html
