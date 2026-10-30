@@ -286,12 +286,20 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
     use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
     use dynamo_global_router::InFlightTracker;
+    use dynamo_llm::pool_relay::wan::grpc::protocol as proto;
     use dynamo_llm::pool_relay::wan::grpc::protocol::{
         KvPoolLoadEntry, LoadView, ModelServingLoad, PoolDeploymentStatus, PoolServingLoad,
         RELAY_PROTOCOL_VERSION, RelayIdentity, RequestLifecycleStats,
     };
+    use futures::{Stream, StreamExt};
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status};
 
     use super::*;
 
@@ -463,5 +471,149 @@ mod tests {
         assert_eq!(pool_kv(&update(vec![entry(10, 100, 3, 4)])), None);
         assert_eq!(pool_kv(&update(vec![entry(0, 0, 4, 4)])), None);
         assert_eq!(pool_kv(&update(vec![])), None);
+    }
+
+    type TestStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+
+    struct MockRelay {
+        serving: ServingLoadUpdate,
+        kv: KvPoolLoadUpdate,
+        peers: Arc<Mutex<Vec<SocketAddr>>>,
+    }
+
+    fn open_stream<T: Send + 'static>(value: T) -> TestStream<T> {
+        Box::pin(
+            futures::stream::once(async move { Ok(value) })
+                .chain(futures::stream::pending::<Result<T, Status>>()),
+        )
+    }
+
+    #[tonic::async_trait]
+    impl proto::KvEventRelay for MockRelay {
+        type WatchKvPoolCatalogStream = TestStream<proto::KvPoolCatalogUpdate>;
+        type SubscribeKvPoolStream = TestStream<proto::FilterUpdate>;
+        type SubscribeServingReadinessStream = TestStream<proto::ServingReadinessUpdate>;
+        type SubscribeKvPoolLoadStream = TestStream<KvPoolLoadUpdate>;
+        type SubscribeServingLoadStream = TestStream<ServingLoadUpdate>;
+
+        async fn get_relay_info(
+            &self,
+            _: Request<proto::RelayInfoRequest>,
+        ) -> Result<Response<proto::RelayInfo>, Status> {
+            Err(Status::unimplemented("unused in this test"))
+        }
+
+        async fn watch_kv_pool_catalog(
+            &self,
+            _: Request<proto::WatchKvPoolCatalogRequest>,
+        ) -> Result<Response<Self::WatchKvPoolCatalogStream>, Status> {
+            Err(Status::unimplemented("unused in this test"))
+        }
+
+        async fn subscribe_kv_pool(
+            &self,
+            _: Request<proto::SubscribeKvPoolRequest>,
+        ) -> Result<Response<Self::SubscribeKvPoolStream>, Status> {
+            Err(Status::unimplemented("unused in this test"))
+        }
+
+        async fn subscribe_serving_readiness(
+            &self,
+            _: Request<proto::SubscribeServingReadinessRequest>,
+        ) -> Result<Response<Self::SubscribeServingReadinessStream>, Status> {
+            Err(Status::unimplemented("unused in this test"))
+        }
+
+        async fn subscribe_serving_load(
+            &self,
+            request: Request<proto::SubscribeServingLoadRequest>,
+        ) -> Result<Response<Self::SubscribeServingLoadStream>, Status> {
+            self.peers
+                .lock()
+                .unwrap()
+                .push(request.remote_addr().unwrap());
+            Ok(Response::new(open_stream(self.serving.clone())))
+        }
+
+        async fn subscribe_kv_pool_load(
+            &self,
+            request: Request<proto::SubscribeKvPoolLoadRequest>,
+        ) -> Result<Response<Self::SubscribeKvPoolLoadStream>, Status> {
+            self.peers
+                .lock()
+                .unwrap()
+                .push(request.remote_addr().unwrap());
+            Ok(Response::new(open_stream(self.kv.clone())))
+        }
+    }
+
+    #[tokio::test]
+    async fn grpc_load_streams_share_a_connection_and_record_matching_replica() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            listener
+                .accept()
+                .await
+                .ok()
+                .map(|(stream, _)| (Ok::<_, std::io::Error>(stream), listener))
+        });
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let server_cancel = CancellationToken::new();
+        let server = {
+            let cancel = server_cancel.clone();
+            let relay = MockRelay {
+                serving: serving_update(7),
+                kv: kv_update(7),
+                peers: peers.clone(),
+            };
+            tokio::spawn(async move {
+                Server::builder()
+                    .add_service(proto::KvEventRelayServer::new(relay))
+                    .serve_with_incoming_shutdown(incoming, cancel.cancelled())
+                    .await
+                    .unwrap();
+            })
+        };
+
+        let pool = pool_id();
+        let signals = Arc::new(PoolSignals::new(Arc::new(InFlightTracker::new())));
+        let url = Url::parse(&format!("http://{address}")).unwrap();
+        let client = {
+            let pool = pool.clone();
+            let signals = signals.clone();
+            tokio::spawn(async move { stream_pool(&pool, "qwen", &url, &signals).await })
+        };
+        let occupancy = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(occupancy) = signals.occupancy(&pool)
+                    && occupancy.kv.is_some()
+                {
+                    break occupancy;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(occupancy.slots, 23.0 / 128.0);
+        assert_eq!(occupancy.kv, Some(0.46));
+        assert_eq!(occupancy.load, 0.46);
+        let peers = peers.lock().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0], peers[1]);
+        drop(peers);
+
+        client.abort();
+        let _ = client.await;
+        server_cancel.cancel();
+        let mut server = server;
+        match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                server.abort();
+                panic!("mock Relay server did not stop");
+            }
+        }
     }
 }
