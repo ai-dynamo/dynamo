@@ -107,6 +107,26 @@ for each family.
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
 
+## Replica sync wire contract
+
+With `--router-policy affinity`, each Global Frontend's embedded router core
+books requests on pools and pins sessions to them. Replicas share those
+bookings and pins so every frontend sees every frontend's requests in flight
+(DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639), companion
+[#17638](https://github.com/ai-dynamo/dynamo/issues/17638)). The contract they
+share them over is the gRPC `ReplicaSync` service in
+`lib/global-common/proto/replica_sync.proto`, package
+`dynamo.globalrouter.replica.v1`: a subscriber opens
+`SubscribeReplicaEvents` with its process id and `CONTRACT_MARKER`, receives
+a snapshot of the publisher's open bookings and session bindings, then event
+batches as they happen. Each event names its core partition (`model_name`,
+`routing_group`) and its publisher (`router_id` / `writer_id`), which a
+receiver uses to drop its own echoes; a prompt's `token_sequence` is never
+carried, since a pool has no KV blocks the core could match.
+`dynamo-global-common` generates the code behind its `grpc` feature;
+`dynamo_global_router::replica_sync::wire` converts the messages to and from
+the core's event types. Nothing serves or dials the stream yet.
+
 ## Limitations
 
 Pools are given on the command line; there is no discovery client, polling, or
