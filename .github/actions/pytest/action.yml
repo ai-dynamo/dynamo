@@ -5,6 +5,18 @@ inputs:
     description: 'Pytest marks'
     required: true
     default: 'e2e and vllm and gpu_1 and not slow'
+  pytest_keyword:
+    description: 'Optional pytest -k expression (fork-only)'
+    required: false
+    default: ''
+  models_dir:
+    description: 'Optional pre-populated HF cache; mounted read-only and passed as pytest --models-dir (fork-only)'
+    required: false
+    default: ''
+  hf_home:
+    description: 'Host HF cache dir mounted into the test container and used as HF_HOME'
+    required: false
+    default: '/models'
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
@@ -175,6 +187,7 @@ runs:
           --shm-size=200m \
           --ulimit nofile=65536:65536 \
           --network host \
+          --add-host localhost:127.0.0.1 \
           --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
           ${COVERAGE_ENV} \
@@ -205,7 +218,7 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
-        HF_HOME: /models
+        HF_HOME: ${{ inputs.hf_home }}
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -281,7 +294,7 @@ runs:
             DIST_OPTS="--dist=loadscope"
           fi
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\"${{ inputs.pytest_keyword != '' && format(' -k \"{0}\"', inputs.pytest_keyword) || '' }}${{ inputs.models_dir != '' && format(' --models-dir={0}', inputs.models_dir) || '' }}"
 
         fi
 
@@ -310,10 +323,11 @@ runs:
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
           --network host \
+          --add-host localhost:127.0.0.1 \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          -v "/models:${HF_HOME}" \
+          ${{ inputs.models_dir != '' && format('-v {0}:{0}:ro', inputs.models_dir) || '-v "${HF_HOME}:${HF_HOME}"' }} \
           ${{ inputs.image_tag }} \
           sh -c "umask 0022 && ${PYTEST_CMD}"
 
