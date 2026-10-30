@@ -5,15 +5,10 @@
 
 mod sources;
 
-use std::sync::Arc;
-
-use crate::protocols::{
-    ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
-};
-
+pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
 pub use sources::{
-    CacheOwnerKvTransferKeys, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
-    KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
+    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+    WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 
 pub use dynamo_router_protocol::kv_hints::{
@@ -21,28 +16,12 @@ pub use dynamo_router_protocol::kv_hints::{
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum KvTransferCandidateSource {
-    Worker(WorkerWithDpRank),
-    CacheOwner(ResidencyOwnerKey),
-}
-
-impl From<WorkerWithDpRank> for KvTransferCandidateSource {
-    fn from(worker: WorkerWithDpRank) -> Self {
-        Self::Worker(worker)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KvTransferCandidates {
-    pub block_hashes: Vec<ExternalSequenceBlockHash>,
-    pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
-    pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
-}
+pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::ExternalSequenceBlockHash;
 
     #[test]
     fn serializes_versioned_fetch_action() {

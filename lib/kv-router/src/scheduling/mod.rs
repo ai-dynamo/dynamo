@@ -15,6 +15,7 @@ pub mod queue;
 mod queue_admission;
 pub mod request_classifier;
 pub mod selector;
+pub mod shared_cache;
 
 mod types;
 pub use filter::*;

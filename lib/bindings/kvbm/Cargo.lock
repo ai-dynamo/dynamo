@@ -2113,15 +2113,26 @@ dependencies = [
 name = "dynamo-kv-indexer"
 version = "1.7.0"
 dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "blake3",
+ "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-router-protocol",
+ "dynamo-tokens",
+ "fastrand",
  "flume",
  "parking_lot",
  "prometheus",
  "rustc-hash 2.1.2",
+ "seqlock",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tracing",
  "xxhash-rust",
 ]

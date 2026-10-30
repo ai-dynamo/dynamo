@@ -13,34 +13,15 @@
 //! qualifies.
 
 use std::collections::HashMap;
-use std::collections::hash_map::{DefaultHasher, Entry};
-use std::hash::{Hash, Hasher};
+use std::collections::hash_map::Entry;
+use std::hash::Hash;
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
 use super::{KvTransferCandidateSource, KvTransferCandidates};
-use crate::protocols::{
-    KvTransferEnforcement, RouterHintSourceMetadata, WorkerConfigLike, WorkerId, WorkerWithDpRank,
-};
-
-/// Hash a label once, when its config or snapshot is published, so matching
-/// sources to targets per request compares integers instead of strings.
-fn label_key(label: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    label.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Sorted, so keys built from equal labels compare equal.
-fn topology_keys(topology: &HashMap<String, String>) -> Vec<(u64, u64)> {
-    let mut keys: Vec<_> = topology
-        .iter()
-        .map(|(domain, value)| (label_key(domain), label_key(value)))
-        .collect();
-    keys.sort_unstable();
-    keys
-}
+use crate::protocols::{KvTransferEnforcement, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use dynamo_kv_indexer::kv_hints::{label_key, topology_keys};
 
 /// A worker's router-hint identity, with its labels hashed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -194,24 +175,6 @@ impl WorkerKvTransferKeysCache {
 impl PartialEq for WorkerKvTransferKeysCache {
     fn eq(&self, _other: &Self) -> bool {
         true
-    }
-}
-
-/// A cache owner's router-hint identity, hashed when its routing snapshot is built.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CacheOwnerKvTransferKeys {
-    worker_type: u64,
-    is_source: bool,
-    topology: Vec<(u64, u64)>,
-}
-
-impl CacheOwnerKvTransferKeys {
-    pub fn new(metadata: &RouterHintSourceMetadata) -> Self {
-        Self {
-            worker_type: label_key(&metadata.worker_type),
-            is_source: !metadata.source_control_endpoint.is_empty(),
-            topology: topology_keys(&metadata.topology_domains),
-        }
     }
 }
 
@@ -425,7 +388,7 @@ mod tests {
     };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, ResidencyOwner,
-        ResidencyProjection, ResidencyRoutingSnapshot,
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
 
     struct Worker;

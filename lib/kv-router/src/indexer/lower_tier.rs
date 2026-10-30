@@ -27,7 +27,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use super::WorkerObservationState;
 use super::concurrent_radix_tree_compressed::mix_worker;
 use super::{
-    EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
+    EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WireLowerTierMatchDetails,
+    WorkerLookupStats, WorkerTask,
 };
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
@@ -654,6 +655,28 @@ pub struct LowerTierMatchDetails {
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub kv_transfer_extensions: Option<KvTransferExtensions>,
+}
+
+impl From<&LowerTierMatchDetails> for WireLowerTierMatchDetails {
+    fn from(d: &LowerTierMatchDetails) -> Self {
+        Self {
+            hits: d.hits.iter().map(|(w, h)| (*w, *h)).collect(),
+        }
+    }
+}
+
+impl From<WireLowerTierMatchDetails> for LowerTierMatchDetails {
+    fn from(w: WireLowerTierMatchDetails) -> Self {
+        // `next_continuations` is server-side intermediate state; consumers of
+        // the tiered result never read it, so we reconstruct an empty map on
+        // the wire-inbound path.
+        Self {
+            hits: w.hits.into_iter().collect(),
+            next_continuations: Default::default(),
+            kv_transfer_candidates: None,
+            kv_transfer_extensions: None,
+        }
+    }
 }
 
 /// Standalone lower-tier continuation index.

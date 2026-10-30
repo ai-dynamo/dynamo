@@ -18,14 +18,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
-    KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
-    ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
+    KvIndexerMetrics, KvRouterError, LowerTierContinuation, LowerTierIndexer,
+    LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
+    record_unsupported_residency_event,
 };
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
     LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
 };
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
@@ -205,6 +207,23 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LowerTierQueryOptions {
     pub retain_kv_transfer_chain: bool,
+}
+
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let _ = options;
+        self.find_tiered_matches(sequence).await
+    }
 }
 
 fn merge_kv_transfer_tier_candidates(

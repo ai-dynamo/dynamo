@@ -85,6 +85,7 @@ reqwest = { version = "0.12.24", default-features = false, features = ["json", "
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
+dynamo-kv-indexer = { workspace = true, features = ["testing"] }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rstest = "0.18.2"
@@ -100,10 +101,6 @@ harness = false
 
 [[bench]]
 name = "tracking_hash"
-harness = false
-
-[[bench]]
-name = "indexer_delegate"
 harness = false
 
 [[bench]]
