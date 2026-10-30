@@ -23,7 +23,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Dict, Literal, Optional, Protocol, cast
 from urllib.parse import parse_qsl, urlsplit
 
@@ -847,6 +847,375 @@ RETUNE_PER_GPU_OBJECTIVES: tuple[RetuneObjective, ...] = (
 )
 
 
+class DgdrRunConfig(BaseModel):
+    """How each DGDR v1beta2 Run of a live retune sweep evaluates its points."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parallelism: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "AISimulate optimizer.parallelism of each Run. The Run Job's CPU "
+            "and memory may lower the effective value."
+        ),
+    )
+    candidate_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="AISimulate optimizer.candidate_timeout_seconds of each Run.",
+    )
+    max_shards: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description=(
+            "Most grid shards (Requests) per window. A shard is a Cartesian "
+            "sub-grid of at most 100 points; off-grid points and the CRN probe "
+            "are extra single-point Requests and do not count."
+        ),
+    )
+
+
+class DgdrExecutorConfig(BaseModel):
+    """Live retune through DGDR v1beta2 (``retune.executor: dgdr``).
+
+    The planner cuts each window from the frontend request traces on a shared
+    RWX claim, creates DGDR v1beta2 Requests that replay it, scores their
+    Candidates and applies the winner to the frontends' routers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Window phase: windows are [phase + k*interval, phase + (k+1)*interval) "
+            "in epoch seconds, so they survive planner restarts."
+        ),
+    )
+    claim_name: str = Field(
+        min_length=1,
+        description="RWX PersistentVolumeClaim, in the DGD namespace, holding traces.",
+    )
+    mount_path: str = Field(
+        default="/trace",
+        min_length=1,
+        description="Where the planner container mounts claim_name.",
+    )
+    segments_dir: str = Field(
+        default="segments",
+        min_length=1,
+        description="Claim-relative directory of frontend trace segments: <segments_dir>/<dgd>/<pod>/.",
+    )
+    windows_dir: str = Field(
+        default="windows",
+        min_length=1,
+        description="Claim-relative directory of window files: <windows_dir>/<dgd>/.",
+    )
+    startup_router_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional startup KvRouterConfig JSON. It must equal what the planner "
+            "parses from the frontend's args and env; parsing is the source."
+        ),
+    )
+    model: str = Field(
+        min_length=1,
+        description="HF repo id the workers serve (worker --model); AISimulate resolves it.",
+    )
+    sku: str = Field(min_length=1, description="spec.hardware.gpu.sku of each Request.")
+    engine: dict[str, Any] = Field(
+        description=(
+            "AISimulate public engine section with every leaf a scalar "
+            "(mode, backend, backend_version, context_length, "
+            "workers.<role>.parallelism.preset, scheduler, kv_cache). Replicas "
+            "come from the DGD spec at each launch and must not be set here."
+        ),
+    )
+    cut_budget_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Deadline of the subprocess that cuts a window file.",
+    )
+    job_startup_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Run Job start-up time reserved when deciding whether a shard can still finish.",
+    )
+    run: DgdrRunConfig = Field(default_factory=DgdrRunConfig)
+    keep_requests: int = Field(
+        default=5,
+        ge=0,
+        description="Windows whose terminal Requests are kept for audit.",
+    )
+    max_window_rows: int = Field(
+        default=5_000_000,
+        ge=1,
+        description="A window with more requests fails (window_too_large).",
+    )
+    promote_last_advisory: bool = Field(
+        default=False,
+        description=(
+            "When switching from advisory to active, apply the last advisory "
+            "recommendation if it is recent and its fingerprint still matches."
+        ),
+    )
+    lease_duration_seconds: float = Field(
+        default=60.0,
+        ge=15,
+        allow_inf_nan=False,
+        description="Leadership Lease duration; renewed every third of it.",
+    )
+    actuator_interval_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Period of the router actuator and reconciler rounds.",
+    )
+    trace_incomplete_threshold: float = Field(
+        default=0.05,
+        ge=0,
+        le=1,
+        description=(
+            "With a Prometheus endpoint, a window whose request count is below "
+            "the frontend's by more than this fraction fails (trace_incomplete)."
+        ),
+    )
+
+
+# Live retune (``retune.executor: dgdr``) limits. A sweep must end this long
+# before the next window's launch: harvest, the decision write and clean-up
+# run in that margin.
+DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
+# DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
+# grid shard) carries at most this many router points.
+DGDR_MAX_SHARD_POINTS = 100
+# Router knobs a DGDR v1beta2 Request can search, by public name
+# (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
+# place for the retune extension knobs.
+_DGDR_ROUTER_SECTION_KEYS = frozenset(
+    {
+        "overlap_score_credit",
+        "prefill_load_scale",
+        "temperature",
+        "policy",
+        "prefill_load_model",
+    }
+)
+_DGDR_ENGINE_MODES = {"agg": "aggregated", "disagg": "disaggregated"}
+_DGDR_ENGINE_ROLES = {"agg": ("aggregated",), "disagg": ("prefill", "decode")}
+# ``parallelism.preset`` entry keys: AISimulate requires all of these plus
+# ``replicas``, which the executor sets from the DGD spec at each launch.
+_DGDR_PRESET_KEYS = ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert")
+_DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context", "decode_context")
+# Scheduler knobs AISimulate searches over a default domain when omitted.
+_DGDR_SCHEDULER_KNOBS = ("max_batched_tokens", "max_sequences")
+
+
+def dgdr_need_seconds(
+    points: int, dgdr: DgdrExecutorConfig, *, needs_cut: bool
+) -> float:
+    """Wall-clock seconds one DGDR shard of ``points`` router points needs.
+
+    ``cut_budget`` (when the window file must still be cut) + Run Job
+    start-up + one round per ``run.parallelism`` candidates, plus one: the
+    AISimulate optimizer evaluates its first candidate alone. ``parallelism``
+    is the configured value; Job resources may lower it, so this is
+    optimistic.
+    """
+
+    if points < 1:
+        raise ValueError(f"a DGDR shard has at least one point, got {points}")
+    rounds = 1 + math.ceil((points - 1) / dgdr.run.parallelism)
+    cut = dgdr.cut_budget_seconds if needs_cut else 0.0
+    return cut + dgdr.job_startup_seconds + rounds * dgdr.run.candidate_timeout_seconds
+
+
+def balanced_shard_parts(sizes: Sequence[int], max_shards: int) -> tuple[int, ...]:
+    """How many chunks to cut each grid dimension into for DGDR sharding.
+
+    ``sizes`` are the value counts of the router grid dimensions. Cutting
+    dimension ``i`` into ``parts[i]`` contiguous chunks of at most
+    ``ceil(sizes[i] / parts[i])`` values gives ``prod(parts)`` Cartesian
+    shards, the largest with ``largest_shard_points(sizes, parts)`` points.
+    Returns the parts with ``prod(parts) <= max_shards`` that minimize the
+    largest shard, then the shard count, then lexicographically, so every
+    caller derives the same split: the default 3 x 9 x 4 grid with
+    ``max_shards=3`` gives ``(1, 3, 1)``, three shards of 36 points.
+    """
+
+    if max_shards < 1:
+        raise ValueError(f"max_shards must be at least 1, got {max_shards}")
+    if any(size < 1 for size in sizes):
+        raise ValueError(f"every grid dimension needs a value, got sizes {sizes}")
+
+    def splits(index: int, budget: int):
+        if index == len(sizes):
+            yield ()
+            return
+        for part in range(1, min(sizes[index], budget) + 1):
+            for rest in splits(index + 1, budget // part):
+                yield (part, *rest)
+
+    return min(
+        splits(0, max_shards),
+        key=lambda parts: (
+            largest_shard_points(sizes, parts),
+            math.prod(parts),
+            parts,
+        ),
+    )
+
+
+def largest_shard_points(sizes: Sequence[int], parts: Sequence[int]) -> int:
+    """Points in the largest shard of ``balanced_shard_parts``' split."""
+
+    return math.prod(
+        math.ceil(size / part) for size, part in zip(sizes, parts, strict=True)
+    )
+
+
+def _validate_dgdr_engine(
+    engine: Mapping[str, Any], planner_mode: str, backend: str
+) -> None:
+    """P5: ``retune.dgdr.engine`` pins one engine with scalars only.
+
+    The section is the Request's ``inputOverrides.engine`` merge patch, so
+    any AISimulate search domain left in it (a ``choices`` or ``range``
+    mapping, a parallelism preset list or a default domain) would make the
+    Run search engine settings next to the router knobs. A written
+    ``backend`` must be the deployed one (``PlannerConfig.backend``), which
+    every Request names and which fills an omitted ``backend``.
+    """
+
+    name = "retune.dgdr.engine"
+    _check_dgdr_engine_scalars(engine, (name,))
+    written = engine.get("backend")
+    if written is not None and written != backend:
+        raise ValueError(
+            f"{name}.backend {written!r} differs from the deployed backend "
+            f"{backend!r} (P5); remove it or set it to {backend!r}"
+        )
+    expected_mode = _DGDR_ENGINE_MODES[planner_mode]
+    if engine.get("mode") != expected_mode:
+        raise ValueError(
+            f"{name}.mode must be {expected_mode!r} for planner mode "
+            f"{planner_mode!r} (P5), got {engine.get('mode')!r}; an omitted mode "
+            "searches both aggregated and disaggregated engines"
+        )
+    for key, owner in (("model", "model"), ("hardware", "sku")):
+        if key in engine:
+            raise ValueError(
+                f"{name}.{key} would override the Request's typed field (P5); "
+                f"set retune.dgdr.{owner} instead"
+            )
+    workers = engine.get("workers")
+    if not isinstance(workers, Mapping):
+        raise ValueError(
+            f"{name}.workers must be a mapping that pins every worker role of "
+            f"planner mode {planner_mode!r} (P5)"
+        )
+    used = _DGDR_ENGINE_ROLES[planner_mode]
+    for role, worker in workers.items():
+        if role not in used and worker is not None:
+            raise ValueError(
+                f"{name}.workers.{role} is not a worker role of planner mode "
+                f"{planner_mode!r}; write it as null or remove it (P5)"
+            )
+    for role in used:
+        path = f"{name}.workers.{role}"
+        worker = workers.get(role)
+        if not isinstance(worker, Mapping):
+            raise ValueError(
+                f"{path} is required for planner mode {planner_mode!r} (P5)"
+            )
+        _validate_dgdr_parallelism(worker.get("parallelism"), f"{path}.parallelism")
+        scheduler = worker.get("scheduler")
+        scheduler = scheduler if isinstance(scheduler, Mapping) else {}
+        for knob in _DGDR_SCHEDULER_KNOBS:
+            if not _is_positive_int(scheduler.get(knob)):
+                raise ValueError(
+                    f"{path}.scheduler.{knob} must be a positive integer (P5); "
+                    "omitted, AISimulate searches its default domain"
+                )
+
+
+def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
+    preset = parallelism.get("preset") if isinstance(parallelism, Mapping) else None
+    if not (
+        isinstance(preset, list) and len(preset) == 1 and isinstance(preset[0], Mapping)
+    ):
+        raise ValueError(
+            f"{path}.preset must be a list of exactly one mapping with "
+            f"{', '.join(_DGDR_PRESET_KEYS)} (P5); got {preset!r}"
+        )
+    others = sorted(set(parallelism) - {"preset"})
+    if others:
+        raise ValueError(
+            f"{path} sets {others} next to preset; pin the parallelism in the "
+            "single preset entry (P5)"
+        )
+    entry = preset[0]
+    missing = [key for key in _DGDR_PRESET_KEYS if key not in entry]
+    unknown = sorted(
+        set(entry) - set(_DGDR_PRESET_KEYS) - set(_DGDR_PRESET_OPTIONAL_KEYS)
+    )
+    if missing or unknown:
+        raise ValueError(
+            f"{path}.preset[0] must set exactly {', '.join(_DGDR_PRESET_KEYS)} "
+            f"(P5); missing={missing}, unknown={unknown}"
+        )
+    for key, value in entry.items():
+        if not _is_positive_int(value):
+            raise ValueError(
+                f"{path}.preset[0].{key} must be a positive integer (P5), got {value!r}"
+            )
+
+
+def _check_dgdr_engine_scalars(value: Any, path: tuple[str, ...]) -> None:
+    dotted = ".".join(path)
+    if isinstance(value, Mapping):
+        domain = sorted({"choices", "range"} & set(value))
+        if domain:
+            raise ValueError(
+                f"{dotted} is a search domain ({domain[0]}); every "
+                "retune.dgdr.engine value must be a scalar (P5)"
+            )
+        for key, item in value.items():
+            if key == "replicas":
+                raise ValueError(
+                    f"{dotted}.replicas must not be set: the DGD spec provides "
+                    "replicas at each launch (P5)"
+                )
+            _check_dgdr_engine_scalars(item, (*path, str(key)))
+    elif isinstance(value, list):
+        # Only workers.<role>.parallelism.preset is a list; its shape is
+        # checked per used role.
+        if not (
+            len(path) == 5
+            and path[1] == "workers"
+            and path[3:] == ("parallelism", "preset")
+        ):
+            raise ValueError(
+                f"{dotted} is a list; every retune.dgdr.engine value except "
+                "workers.<role>.parallelism.preset must be a scalar (P5)"
+            )
+        for index, item in enumerate(value):
+            _check_dgdr_engine_scalars(item, (*path[:-1], f"{path[-1]}[{index}]"))
+    elif value is not None and not isinstance(value, (str, int, float)):
+        raise ValueError(f"{dotted} must be a scalar, got {type(value).__name__} (P5)")
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 class RetuneConfig(BaseModel):
     """Periodic replay-based retune of router and planner runtime parameters.
 
@@ -981,6 +1350,17 @@ class RetuneConfig(BaseModel):
             "AISimulate default domain; null does not search the router."
         ),
     )
+    executor: Literal["local", "dgdr"] = Field(
+        default="local",
+        description=(
+            "Where sweeps run: local worker processes (replay) or DGDR v1beta2 "
+            "Requests (live; requires dgdr)."
+        ),
+    )
+    dgdr: DgdrExecutorConfig | None = Field(
+        default=None,
+        description="Live DGDR executor settings; required iff executor is dgdr.",
+    )
     planner: Literal["default"] | dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -1018,6 +1398,12 @@ class RetuneConfig(BaseModel):
 
         parse_retune_section(section, value)  # type: ignore[call-overload]
         return value
+
+    @model_validator(mode="after")
+    def _validate_executor(self) -> "RetuneConfig":
+        if (self.executor == "dgdr") != (self.dgdr is not None):
+            raise ValueError("retune.dgdr is required iff retune.executor is 'dgdr'")
+        return self
 
     @model_validator(mode="after")
     def _validate_timing(self) -> "RetuneConfig":
@@ -1456,8 +1842,8 @@ class PlannerConfig(BaseModel):
     )
 
     # Advisory mode: compute, log and report scaling decisions without
-    # executing them, live and in planner-in-the-loop replay; replay records
-    # retune decisions (replay-only) the same way.
+    # executing them, live and in planner-in-the-loop replay; retune records
+    # a decision that would apply as advisory and applies nothing.
     advisory: bool = SLAPlannerDefaults.advisory
 
     # --- Power-aware budget (read-only caps; DGD-owned) ---
@@ -1952,6 +2338,9 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 f"retune requires mode='agg' or mode='disagg', got {self.mode!r}"
             )
+        if retune.executor == "dgdr":
+            # Before the domain expansion, whose errors assume replay.
+            self._validate_live_retune(retune)
         if self.scaling_enabled() and retune.objective not in RETUNE_PER_GPU_OBJECTIVES:
             raise ValueError(
                 f"retune.objective {retune.objective!r} does not divide by "
@@ -1995,6 +2384,172 @@ class PlannerConfig(BaseModel):
                 f"({describe_grid(router_domain, planner_domain.grid)}); an "
                 "omitted AISimulate knob searches its default domain, so pin "
                 "knobs with a scalar to shrink the grid"
+            )
+        if retune.executor == "dgdr":
+            self._validate_live_retune_budget(retune, router_domain)
+
+    def _validate_live_retune(self, retune: RetuneConfig) -> None:
+        """Configuration premises P1, P2, P3 and P5 of live retune.
+
+        A live planner sweeps through DGDR v1beta2 Requests in the Kubernetes
+        namespace of its DGD, retunes the frontend router only (Scenario 1),
+        and decides when a sweep returns; the frontend-side premises are
+        checked at runtime against the DGD.
+        """
+
+        dgdr = retune.dgdr
+        if dgdr is None:  # RetuneConfig requires it with executor dgdr
+            raise ValueError("retune.dgdr is required iff retune.executor is 'dgdr'")
+        if self.environment != "kubernetes":
+            raise ValueError(
+                "retune.executor 'dgdr' requires environment='kubernetes' (P1), "
+                f"got {self.environment!r}"
+            )
+        latency = retune.decision_latency_seconds
+        if latency == "measured":
+            if retune.decision_latency_scale != 1.0:
+                raise ValueError(
+                    "retune.executor 'dgdr' decides when the sweep returns, so "
+                    "decision_latency_seconds: measured requires "
+                    "decision_latency_scale 1 (P1), got "
+                    f"{retune.decision_latency_scale}"
+                )
+        elif latency != 0:
+            raise ValueError(
+                "retune.executor 'dgdr' decides when the sweep returns, so "
+                "retune.decision_latency_seconds must be 0 or 'measured' (P1), "
+                f"got {latency}"
+            )
+        if retune.timeout_seconds is None:
+            raise ValueError(
+                "retune.executor 'dgdr' requires an explicit "
+                "retune.timeout_seconds (P1): the sweep deadline, window cut "
+                "included"
+            )
+        limit = retune.interval_seconds - DGDR_TIMEOUT_MARGIN_SECONDS
+        if retune.timeout_seconds > limit:
+            raise ValueError(
+                f"retune.timeout_seconds must be <= interval_seconds - "
+                f"{DGDR_TIMEOUT_MARGIN_SECONDS:g} = {limit:g} with executor "
+                f"'dgdr' (P1), got {retune.timeout_seconds:g}"
+            )
+        if self.scaling_enabled():
+            raise ValueError(
+                "retune.executor 'dgdr' supports retune-only mode (P2): set "
+                "enable_load_scaling and enable_throughput_scaling both to false"
+            )
+        if retune.planner is not None:
+            raise ValueError(
+                "retune.executor 'dgdr' retunes the router only (P2); remove "
+                "retune.planner"
+            )
+        self._validate_live_retune_router(retune)
+        _validate_dgdr_engine(dgdr.engine, self.mode, self.backend)
+        # Claim paths: the planner, the frontends and the Run Jobs mount the
+        # same claim, and clean-up deletes under these directories. A DGDR
+        # trace path rejects empty, '.' and '..' segments.
+        dirs: dict[str, list[str]] = {}
+        for name in ("segments_dir", "windows_dir"):
+            value = getattr(dgdr, name)
+            dirs[name] = value.split("/")
+            if any(segment in ("", ".", "..") for segment in dirs[name]):
+                raise ValueError(
+                    f"retune.dgdr.{name} must be a relative directory inside "
+                    "the claim: '/'-separated names without empty, '.' or "
+                    f"'..' segments, got {value!r}"
+                )
+        if not PurePosixPath(dgdr.mount_path).is_absolute():
+            raise ValueError(
+                f"retune.dgdr.mount_path must be absolute, got {dgdr.mount_path!r}"
+            )
+        segments, windows = dirs["segments_dir"], dirs["windows_dir"]
+        shorter = min(len(segments), len(windows))
+        if segments[:shorter] == windows[:shorter]:
+            raise ValueError(
+                "retune.dgdr.segments_dir and retune.dgdr.windows_dir must not "
+                f"contain one another, got {dgdr.segments_dir!r} and "
+                f"{dgdr.windows_dir!r}"
+            )
+
+    @staticmethod
+    def _validate_live_retune_router(retune: RetuneConfig) -> None:
+        """P3: the router domain fits the DGDR v1beta2 router section.
+
+        A Request searches ``overlap_score_credit``, ``prefill_load_scale``
+        and ``temperature`` of a ``kv_router`` with ``prefill_load_model:
+        none``; ``RouterRetuneConfig`` already pins the policy.
+        """
+
+        spec = retune.router
+        if not isinstance(spec, Mapping):
+            return
+        extra = sorted(set(spec) - _DGDR_ROUTER_SECTION_KEYS)
+        if extra:
+            raise ValueError(
+                f"retune.router {extra} cannot be searched with executor 'dgdr' "
+                "(P3): a DGDR Request searches only overlap_score_credit, "
+                "prefill_load_scale and temperature"
+            )
+        if "prefill_load_model" not in spec:
+            return
+        # Imported on use: the adapter schema imports this module.
+        from aisimulate.config.common import Choices
+
+        from dynamo.planner.retune.domains import parse_retune_section
+
+        model = parse_retune_section("router", spec).prefill_load_model
+        if "type" not in model.model_fields_set:
+            return
+        written = (
+            list(model.type.choices)
+            if isinstance(model.type, Choices)
+            else [model.type]
+        )
+        if written != ["none"]:
+            raise ValueError(
+                "retune.router.prefill_load_model.type must be 'none' with "
+                f"executor 'dgdr' (P3), got {written}"
+            )
+
+    @staticmethod
+    def _validate_live_retune_budget(
+        retune: RetuneConfig, router_domain: Mapping[str, Sequence[float]]
+    ) -> None:
+        """P13: the largest grid shard can finish within the sweep deadline.
+
+        The baseline can fall in any grid shard, and a window whose baseline
+        shard cannot finish fails with ``launch_too_late``, so the largest
+        shard must fit. The domain is the widest one: a zero startup credit
+        only narrows it at runtime.
+        """
+
+        dgdr = retune.dgdr
+        if dgdr is None or retune.timeout_seconds is None:
+            # _validate_live_retune rejects both first.
+            raise ValueError("retune.executor 'dgdr' requires dgdr and timeout_seconds")
+        sizes = [len(values) for values in router_domain.values()]
+        parts = balanced_shard_parts(sizes, dgdr.run.max_shards)
+        points = largest_shard_points(sizes, parts)
+        if points > DGDR_MAX_SHARD_POINTS:
+            raise ValueError(
+                f"the retune router grid of {math.prod(sizes)} points cannot be "
+                f"split into at most retune.dgdr.run.max_shards="
+                f"{dgdr.run.max_shards} Cartesian shards of at most "
+                f"{DGDR_MAX_SHARD_POINTS} points (P13); the largest would have "
+                f"{points}. Raise max_shards or pin router knobs with a scalar"
+            )
+        need = dgdr_need_seconds(points, dgdr, needs_cut=True)
+        if need > retune.timeout_seconds:
+            rounds = 1 + math.ceil((points - 1) / dgdr.run.parallelism)
+            raise ValueError(
+                f"the largest retune grid shard ({points} points) needs "
+                f"{need:g}s: cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
+                f"job_startup_seconds {dgdr.job_startup_seconds:g} + {rounds} "
+                f"rounds x candidate_timeout_seconds "
+                f"{dgdr.run.candidate_timeout_seconds:g}, more than "
+                f"retune.timeout_seconds={retune.timeout_seconds:g} (P13), so "
+                "every window would fail launch_too_late. Raise timeout_seconds "
+                "or run.parallelism, add run.max_shards, or shrink the grid"
             )
 
     def _validate_retune_planner_grid(
