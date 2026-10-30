@@ -22,24 +22,27 @@ mod catalog;
 mod directory;
 mod policies;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use dynamo_global_common::PoolId;
-use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::multi_worker_sequence::ReplicaRequestLeaseObserver;
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::queue::SchedulerBookingDescriptor;
 use dynamo_kv_router::scheduling::RouterPolicyConfig;
-use dynamo_kv_router::services::selection::affinity::SessionAffinityMode;
+use dynamo_kv_router::services::selection::affinity::{
+    MAX_SESSION_AFFINITY_ENTRIES, SessionAffinityMode,
+};
 use dynamo_kv_router::services::selection::{
     CatalogReconciler, HostReplication, PromptRequest, SelectAndReserveRequest, SelectRequest,
-    SelectionHost, SelectionService, SelectionServiceBuilder,
+    SelectResponse, SelectionHost, SelectionService, SelectionServiceBuilder,
 };
+use dynamo_kv_router::{WorkerId, WorkerType};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -88,13 +91,54 @@ pub struct CoreSelector {
     service: Arc<SelectionService>,
     directory: Arc<PoolDirectory>,
     frontends: Cursors<PoolId>,
-    /// Whether the policy's picker reads the core's bookings, as it declares
-    /// ([`policies::reads_bookings`]). A picker that does not gets advisory
-    /// selections, with nothing booked or freed.
+    /// Whether the policy reads the core's bookings. Only least-requests
+    /// does; the others pick with advisory selections that book nothing.
     books: bool,
     /// Whether requests carry their session to the core, which only keeps
     /// sessions under [`CorePolicy::Affinity`].
     sessions: bool,
+    /// Under affinity, when each session's pin was last booked.
+    pins: Option<PinRefresh>,
+}
+
+/// When each session's pin was last booked, so only the requests that set,
+/// move or keep alive a pin book. The core binds a session only on a
+/// booking, and a pin's idle time runs from its last booking's release, so
+/// a session books on its first request, whenever the picker moves it, and
+/// at least once per half idle window; the requests between pick with an
+/// advisory selection that honours the pin and books nothing.
+struct PinRefresh {
+    refresh: Duration,
+    booked: parking_lot::Mutex<HashMap<String, (WorkerId, Instant)>>,
+}
+
+impl PinRefresh {
+    /// The most sessions remembered; the core keeps no more pins than this.
+    const CAPACITY: usize = MAX_SESSION_AFFINITY_ENTRIES;
+
+    fn new(idle: Duration) -> Self {
+        Self {
+            refresh: idle / 2,
+            booked: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The pool `session` was last booked on, if that was within the
+    /// refresh window as of `now`.
+    fn fresh(&self, session: &str, now: Instant) -> Option<WorkerId> {
+        let booked = self.booked.lock();
+        let &(worker, at) = booked.get(session)?;
+        (now.saturating_duration_since(at) < self.refresh).then_some(worker)
+    }
+
+    fn record(&self, session: &str, worker: WorkerId, now: Instant) {
+        let mut booked = self.booked.lock();
+        if booked.len() >= Self::CAPACITY && !booked.contains_key(session) {
+            let refresh = self.refresh;
+            booked.retain(|_, (_, at)| now.saturating_duration_since(*at) < refresh);
+        }
+        booked.insert(session.to_owned(), (worker, now));
+    }
 }
 
 impl CoreSelector {
@@ -128,6 +172,10 @@ impl CoreSelector {
             frontends: Cursors::default(),
             books: policies::reads_bookings(&policy, &directory),
             sessions: matches!(policy, CorePolicy::Affinity(_)),
+            pins: match &policy {
+                CorePolicy::Affinity(affinity) => Some(PinRefresh::new(affinity.idle)),
+                _ => None,
+            },
         })
     }
 
@@ -194,27 +242,25 @@ impl RequestSelector for CoreSelector {
             return None;
         }
         let session = request.session.filter(|_| self.sessions);
-        let selected = if self.books {
-            self.service
-                .select_and_reserve(booking(request.model, candidates.iter().copied(), session))
-                .await
-        } else {
-            self.service
-                .select(advisory(request.model, candidates.iter().copied()))
-                .await
-        };
-        let selected = match selected {
-            Ok(selected) => selected,
-            Err(error) => {
-                tracing::warn!(model = request.model, %error, "the router core selected no pool");
-                return None;
-            }
-        };
+        let now = Instant::now();
+        let pinned = session
+            .zip(self.pins.as_ref())
+            .and_then(|(session, pins)| pins.fresh(session, now));
+        // A session books when its pin is new or due for a refresh.
+        let mut book = self.books || (session.is_some() && pinned.is_none());
+        let mut selected = self.pick(request.model, &candidates, session, book).await?;
+        if !book && pinned.is_some_and(|pinned| pinned != selected.worker_id) {
+            // The picker moved the session: only a booking moves its pin.
+            book = true;
+            selected = self.pick(request.model, &candidates, session, true).await?;
+        }
+        if let (true, Some(session), Some(pins)) = (book, session, &self.pins) {
+            pins.record(session, selected.worker_id, now);
+        }
         // Taken before the pool lookup so a worker the frontend cannot map
         // back is freed, not leaked.
-        let reservation = self
-            .books
-            .then(|| Reservation::new(self.service.clone(), selected.selection_id));
+        let reservation =
+            book.then(|| Reservation::new(self.service.clone(), selected.selection_id.clone()));
         let Some(pool) = candidates
             .into_iter()
             .find(|pool| worker_id(&pool.id) == selected.worker_id)
@@ -235,10 +281,39 @@ impl RequestSelector for CoreSelector {
     }
 }
 
+impl CoreSelector {
+    /// The core's pick among `candidates`, booked or advisory.
+    async fn pick(
+        &self,
+        model: &str,
+        candidates: &[&Pool],
+        session: Option<&str>,
+        book: bool,
+    ) -> Option<SelectResponse> {
+        let selected = if book {
+            self.service
+                .select_and_reserve(booking(model, candidates.iter().copied(), session))
+                .await
+        } else {
+            self.service
+                .select(advisory(model, candidates.iter().copied(), session))
+                .await
+        };
+        selected
+            .map_err(|error| tracing::warn!(model, %error, "the router core selected no pool"))
+            .ok()
+    }
+}
+
 /// A pick among `candidates` that books nothing: no queue admission, no
-/// reservation, no sequence tracking, nothing to free.
-fn advisory<'a>(model: &str, candidates: impl Iterator<Item = &'a Pool>) -> SelectRequest {
-    let booking = booking(model, candidates, None);
+/// reservation, no sequence tracking, nothing to free. A `session`'s pin is
+/// honoured but neither set nor refreshed.
+fn advisory<'a>(
+    model: &str,
+    candidates: impl Iterator<Item = &'a Pool>,
+    session: Option<&str>,
+) -> SelectRequest {
+    let booking = booking(model, candidates, session);
     SelectRequest {
         model_name: booking.model_name,
         routing_group: booking.routing_group,
@@ -248,7 +323,7 @@ fn advisory<'a>(model: &str, candidates: impl Iterator<Item = &'a Pool>) -> Sele
         expected_output_tokens: None,
         priority_jump: None,
         strict_priority: None,
-        session_id: None,
+        session_id: booking.session_id,
         session_context: None,
         affinity_target: None,
         pinned_worker: None,
@@ -701,6 +776,50 @@ mod tests {
         // against 0.6 is under twice, so no flip back.
         set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
         assert_eq!(host_for(&core, &pools, Some("s")).await, "ohio-b");
+    }
+
+    #[test]
+    fn a_pin_is_due_for_a_booking_after_half_its_idle_window() {
+        let pins = PinRefresh::new(Duration::from_secs(60));
+        let start = Instant::now();
+        assert_eq!(pins.fresh("s", start), None);
+        pins.record("s", 7, start);
+        assert_eq!(pins.fresh("s", start + Duration::from_secs(29)), Some(7));
+        assert_eq!(pins.fresh("s", start + Duration::from_secs(30)), None);
+        assert_eq!(pins.fresh("t", start), None);
+    }
+
+    #[tokio::test]
+    async fn affinity_books_only_to_set_move_or_refresh_a_pin() {
+        let (pools, signals) = fleet();
+        let (core, _catalog) = selector(affinity(&signals), &pools).await;
+        let candidates = pools.iter().collect::<Vec<_>>();
+        let model = pools[0].model.clone();
+        let route = |session: Option<&'static str>| {
+            let request = RoutingRequest::new(&model).with_session(session);
+            let core = &core;
+            let candidates = &candidates;
+            async move {
+                let selection = core.route(&request, candidates).await.unwrap();
+                let booked = selection.lifecycle.is_some();
+                let pool = &selection.target.pool.name;
+                (pool.rsplit('/').next().unwrap_or(pool).to_owned(), booked)
+            }
+        };
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+
+        // The first request sets the pin; the next ones only read it.
+        assert_eq!(route(Some("s")).await, ("ohio-a".to_owned(), true));
+        assert_eq!(route(Some("s")).await, ("ohio-a".to_owned(), false));
+        assert_eq!(route(Some("s")).await, ("ohio-a".to_owned(), false));
+        // No session, no pin to keep: nothing is booked.
+        assert!(!route(None).await.1);
+
+        // A move books, so the pin follows the session.
+        set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
+        assert_eq!(route(Some("s")).await, ("ohio-b".to_owned(), true));
+        set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
+        assert_eq!(route(Some("s")).await, ("ohio-b".to_owned(), false));
     }
 
     #[tokio::test]
