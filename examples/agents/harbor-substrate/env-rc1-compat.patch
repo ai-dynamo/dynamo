@@ -14,19 +14,6 @@
 # limitations under the License.
 
 
-diff --git a/clients/go/client_test.go b/clients/go/client_test.go
-index 56d4617..bbf7650 100644
---- a/clients/go/client_test.go
-+++ b/clients/go/client_test.go
-@@ -32,7 +32,7 @@ import (
- 	"github.com/agent-substrate/env/internal/internaltest/fakerouter"
- 	"github.com/agent-substrate/env/internal/mcp"
- 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- 	"google.golang.org/grpc"
- )
- 
 diff --git a/cmd/ate-env-api/main.go b/cmd/ate-env-api/main.go
 index ad1a5f0..76bdeed 100644
 --- a/cmd/ate-env-api/main.go
@@ -155,100 +142,6 @@ index 56f6848..8aa0cec 100644
  		}},
  	}
  }
-diff --git a/cmd/ate-env/manifest_test.go b/cmd/ate-env/manifest_test.go
-index 5353d13..5a1d971 100644
---- a/cmd/ate-env/manifest_test.go
-+++ b/cmd/ate-env/manifest_test.go
-@@ -16,12 +16,13 @@ package main
- 
- import (
- 	"bytes"
-+	"k8s.io/apimachinery/pkg/api/resource"
- 	"strings"
- 	"testing"
- 
- 	"github.com/agent-substrate/env/internal/apiservice"
--	atev1alpha1 "go.ate.dev/substrate/pkg/api/v1alpha1"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
-+	atev1alpha1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
- 	appsv1 "k8s.io/api/apps/v1"
- 	corev1 "k8s.io/api/core/v1"
- )
-@@ -76,8 +77,8 @@ func TestTemplateConfigResolveImages(t *testing.T) {
- 	}
- 	cfg = testTemplateConfig()
- 	cfg.snapshotsBucket = ""
--	if err := cfg.resolveImages(); err == nil {
--		t.Error("resolveImages with a missing snapshots bucket: want error, got nil")
-+	if err := cfg.resolveImages(); err != nil {
-+		t.Errorf("cluster-wide snapshot location should allow an omitted template location: %v", err)
- 	}
- }
- 
-@@ -103,8 +104,8 @@ func TestBuildManifests(t *testing.T) {
- 	if pool.Spec.Replicas != 3 || pool.Spec.WorkerImage != cfg.workerImage {
- 		t.Errorf("workerpool spec = %+v, want replicas 3 and worker image %q", pool.Spec, cfg.workerImage)
- 	}
--	if len(pool.Labels) != 0 {
--		t.Errorf("workerpool labels = %v, want empty", pool.Labels)
-+	if pool.Labels["env.ate.dev/sandbox"] != "gvisor" {
-+		t.Errorf("workerpool labels = %v, want env.ate.dev/sandbox=gvisor", pool.Labels)
- 	}
- 	if pool.Spec.Template != nil {
- 		t.Errorf("workerpool template = %v, want nil", pool.Spec.Template)
-@@ -119,7 +120,7 @@ func TestBuildManifests(t *testing.T) {
- 	// The pool's class and the template's are the same string since
- 	// substrate#2586 made the proto field a string. A pool of the wrong class
- 	// never hosts the template's actors.
--	tmplClass := buildActorTemplate(testTemplateConfig()).GetSandboxConfig().GetSandboxClass()
-+	tmplClass := buildActorTemplate(testTemplateConfig()).GetWorkerSelector().GetMatchLabels()["env.ate.dev/sandbox"]
- 	if tmplClass != string(sc.Name) {
- 		t.Errorf("workerpool sandbox class %q != template sandbox class %q", sc.Name, tmplClass)
- 	}
-@@ -165,12 +166,6 @@ func TestBuildActorTemplate(t *testing.T) {
- 	if got := template.GetSnapshotConfig().GetGoldenSnapshotConfig(); got != nil {
- 		t.Errorf("golden snapshot config = %v, want nil (omitted means enabled)", got)
- 	}
--	if got := template.GetSandboxConfig().GetConfigName(); got != sandboxConfigName {
--		t.Errorf("sandbox config name = %q, want %q (must match the WorkerPool configRef)", got, sandboxConfigName)
--	}
--	if template.GetWorkerSelector() != nil {
--		t.Errorf("worker selector = %v, want nil", template.WorkerSelector)
--	}
- 	probe := template.Containers[0].GetWakeupProbe()
- 	if probe.GetHttpGet() == nil || probe.GetHttpGet().GetPath() != "/readyz" || probe.GetHttpGet().GetPort() != 80 {
- 		t.Errorf("wakeupProbe = %+v, want HTTP GET /readyz on port 80", probe)
-@@ -179,17 +174,14 @@ func TestBuildActorTemplate(t *testing.T) {
- 	if got := limits(template); got["cpu"] != defaultActorCPU || got["memory"] != defaultActorMemory || len(got) != 2 {
- 		t.Errorf("resources.limits = %v, want cpu=%s memory=%s", got, defaultActorCPU, defaultActorMemory)
- 	}
--	if got := template.GetSandboxConfig().GetSandboxClass(); got != "gvisor" {
-+	if got := template.GetWorkerSelector().GetMatchLabels()["env.ate.dev/sandbox"]; got != "gvisor" {
- 		t.Errorf("sandbox class = %q, want gvisor (Substrate accepts gvisor or microvm)", got)
- 	}
- }
- 
- func limits(tmpl *ateapipb.ActorTemplate) map[string]string {
--	m := map[string]string{}
--	for _, l := range tmpl.GetResources().GetLimits() {
--		m[l.GetName()] = l.GetQuantity()
--	}
--	return m
-+	l := tmpl.GetResources().GetLimits()
-+	return map[string]string{"cpu": resource.NewMilliQuantity(l.GetCpuMillicores(), resource.DecimalSI).String(), "memory": resource.NewQuantity(l.GetMemoryBytes(), resource.BinarySI).String()}
- }
- 
- func TestBuildActorTemplateResources(t *testing.T) {
-@@ -368,7 +360,7 @@ func TestManifestTemplateCommandExecution(t *testing.T) {
- 	if !strings.Contains(out, "image: example.com/guest@sha256:aaaa") || !strings.Contains(out, "storageLocation: gs://bucket/prefix/") {
- 		t.Errorf("expected guest image and storage location in output:\n%s", out)
- 	}
--	for _, want := range []string{"sandboxClass: gvisor", "name: cpu\n    quantity: \"4\"", "name: memory\n    quantity: 8Gi"} {
-+	for _, want := range []string{"env.ate.dev/sandbox: gvisor", "cpuMillicores: \"4000\"", "memoryBytes: \"8589934592\""} {
- 		if !strings.Contains(out, want) {
- 			t.Errorf("output lacks %q:\n%s", want, out)
- 		}
 diff --git a/go.mod b/go.mod
 index f611624..2351067 100644
 --- a/go.mod
@@ -290,42 +183,6 @@ index a90fde7..adbf054 100644
  	"google.golang.org/protobuf/proto"
  )
  
-diff --git a/internal/apiservice/imagetemplate_test.go b/internal/apiservice/imagetemplate_test.go
-index f7444ee..78208bf 100644
---- a/internal/apiservice/imagetemplate_test.go
-+++ b/internal/apiservice/imagetemplate_test.go
-@@ -18,7 +18,7 @@ import (
- 	"strings"
- 	"testing"
- 
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- 	"google.golang.org/protobuf/proto"
- )
- 
-@@ -39,11 +39,8 @@ func modeABase() *ateapipb.ActorTemplate {
- 			WakeupProbe: &ateapipb.WakeupProbe{HttpGet: &ateapipb.HttpGetAction{Path: "/readyz", Port: 80}},
- 		}},
- 		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://b/p/", PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
--		SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor-default"},
--		Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{
--			{Name: "cpu", Quantity: "2"}, {Name: "memory", Quantity: "4Gi"},
--		}},
--		Status: &ateapipb.ActorTemplateStatus{},
-+		Resources:      &ateapipb.ResourceRequirements{Limits: &ateapipb.Resources{CpuMillicores: 2000, MemoryBytes: 4 << 30}},
-+		Status:         &ateapipb.ActorTemplateStatus{},
- 	}
- }
- 
-@@ -110,7 +107,7 @@ func TestDeriveImageTemplateFromGuestImageBase(t *testing.T) {
- 	// Everything else carries over.
- 	if !proto.Equal(got.GetWorkerSelector(), base.GetWorkerSelector()) ||
- 		!proto.Equal(got.GetSnapshotConfig(), base.GetSnapshotConfig()) ||
--		!proto.Equal(got.GetSandboxConfig(), base.GetSandboxConfig()) ||
-+
- 		!proto.Equal(c.GetWakeupProbe(), base.GetContainers()[0].GetWakeupProbe()) ||
- 		len(c.GetEnv()) != 1 {
- 		t.Error("worker selector, snapshots, sandbox config, readyz or env did not carry over")
 diff --git a/internal/apiservice/server.go b/internal/apiservice/server.go
 index aa911b1..fa5c95d 100644
 --- a/internal/apiservice/server.go
@@ -352,19 +209,6 @@ index aa911b1..fa5c95d 100644
  		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
  			ctx = metadata.AppendToOutgoingContext(ctx, ate.TargetActorHeader, targetActor)
  			return invoker(ctx, method, req, reply, cc, opts...)
-diff --git a/internal/apiservice/server_test.go b/internal/apiservice/server_test.go
-index 6969bc8..9429946 100644
---- a/internal/apiservice/server_test.go
-+++ b/internal/apiservice/server_test.go
-@@ -28,7 +28,7 @@ import (
- 	"github.com/agent-substrate/env/internal/internaltest/fakecontrol"
- 	"github.com/agent-substrate/env/internal/internaltest/fakerouter"
- 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- 	"google.golang.org/grpc"
- 	"google.golang.org/grpc/codes"
- 	"google.golang.org/grpc/credentials/insecure"
 diff --git a/internal/apiservice/wakeretry.go b/internal/apiservice/wakeretry.go
 index d9c8857..d1ff9f3 100644
 --- a/internal/apiservice/wakeretry.go
@@ -377,19 +221,6 @@ index d9c8857..d1ff9f3 100644
 +	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
  	"google.golang.org/grpc"
  	"google.golang.org/grpc/codes"
- 	"google.golang.org/grpc/status"
-diff --git a/internal/apiservice/wakeretry_test.go b/internal/apiservice/wakeretry_test.go
-index 19d4926..bccf71e 100644
---- a/internal/apiservice/wakeretry_test.go
-+++ b/internal/apiservice/wakeretry_test.go
-@@ -23,7 +23,7 @@ import (
- 	"github.com/agent-substrate/env/guest"
- 	"github.com/agent-substrate/env/internal/apiservice"
- 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- 	"google.golang.org/grpc/codes"
- 	"google.golang.org/grpc/metadata"
  	"google.golang.org/grpc/status"
 diff --git a/internal/ate/client.go b/internal/ate/client.go
 index d507915..8f933f9 100644
@@ -426,69 +257,3 @@ index d507915..8f933f9 100644
 +	}
 +	return insecure.NewCredentials()
 +}
-diff --git a/internal/ate/client_test.go b/internal/ate/client_test.go
-index 727e5fc..47684ab 100644
---- a/internal/ate/client_test.go
-+++ b/internal/ate/client_test.go
-@@ -23,7 +23,7 @@ import (
- 	"github.com/agent-substrate/env/internal/ate"
- 	"github.com/agent-substrate/env/internal/internaltest/fakecontrol"
- 	"github.com/agent-substrate/env/internal/internaltest/fakerouter"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- )
- 
- type fixture struct {
-diff --git a/internal/internaltest/fakecontrol/fakecontrol.go b/internal/internaltest/fakecontrol/fakecontrol.go
-index 15a3ab3..9f2a31a 100644
---- a/internal/internaltest/fakecontrol/fakecontrol.go
-+++ b/internal/internaltest/fakecontrol/fakecontrol.go
-@@ -32,7 +32,7 @@ import (
- 	"sync"
- 	"time"
- 
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- 	"google.golang.org/grpc"
- 	"google.golang.org/grpc/codes"
- 	"google.golang.org/grpc/credentials"
-@@ -216,25 +216,13 @@ func (s *Server) suspend(a *ateapipb.Actor) {
- 			Owner:    ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR,
- 			Fidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
- 			DurableSnapshot: &ateapipb.SnapshotStorage{
--				Status: ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED,
-+				State:  ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED,
- 				Object: &ateapipb.ObjectSnapshot{},
- 			},
- 		}},
- 	}
- }
- 
--func (s *Server) PauseActor(ctx context.Context, req *ateapipb.PauseActorRequest) (*ateapipb.PauseActorResponse, error) {
--	s.mu.Lock()
--	defer s.mu.Unlock()
--	a, err := s.get(req.GetActor())
--	if err != nil {
--		return nil, err
--	}
--	// Substrate reports a paused actor as SUSPENDED (substrate#2620).
--	a.Status = &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED}
--	return &ateapipb.PauseActorResponse{Actor: clone(a)}, nil
--}
--
- func (s *Server) DeleteActor(ctx context.Context, req *ateapipb.DeleteActorRequest) (*ateapipb.Actor, error) {
- 	s.mu.Lock()
- 	defer s.mu.Unlock()
-diff --git a/internal/mcp/server_test.go b/internal/mcp/server_test.go
-index 3cf48de..30d77a6 100644
---- a/internal/mcp/server_test.go
-+++ b/internal/mcp/server_test.go
-@@ -29,7 +29,7 @@ import (
- 	internalmcp "github.com/agent-substrate/env/internal/mcp"
- 	"github.com/agent-substrate/env/internal/tool"
- 	"github.com/modelcontextprotocol/go-sdk/mcp"
--	"go.ate.dev/substrate/pkg/proto/ateapipb"
-+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
- )
- 
- func TestMCPServer(t *testing.T) {

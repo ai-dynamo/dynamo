@@ -142,7 +142,9 @@ After saving results and stopping actors, restore the complete ConfigMap data.
 Replacing the data field also removes settings added by this walkthrough:
 
 ```bash
-.venv/bin/python - <<'PY'
+python3 -m venv .local/metrics-tools
+.local/metrics-tools/bin/pip install pyyaml
+.local/metrics-tools/bin/python - <<'PY'
 import json
 from pathlib import Path
 import yaml

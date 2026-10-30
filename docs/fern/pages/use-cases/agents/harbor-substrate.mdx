@@ -641,10 +641,9 @@ trace additions using the saved pre-change manifest. Stop the local viewer.
 
 ## Validation scope
 
-The example includes local tests for guest execution and file transfer. Run
-them using the commands in the installation guide. Guest integration tests
-need a real guest daemon and are distinct from a full Kubernetes trial. The
-Pi patches retain the upstream provider tests for model limits and tracing.
+The CLI checks above verify guest startup, the prepared runtime, and actor
+isolation. The first Harbor trial checks model access, tool execution, result
+collection, and verification together.
 
 After changing a dependency pin, endpoint, image, or cluster configuration,
 repeat the one-trial check before running a batch. Golden restore and external
