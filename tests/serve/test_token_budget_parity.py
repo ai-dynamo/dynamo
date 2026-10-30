@@ -69,7 +69,7 @@ PARITY_SPECS = (
             "vllm",
             "default",
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            reject_total_overflow=False,
         ),
         id="vllm-default",
         marks=[

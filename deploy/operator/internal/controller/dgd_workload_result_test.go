@@ -12,7 +12,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/utils/ptr"
 )
 
 func TestApplyAndClearComponentGPUShapes(t *testing.T) {
@@ -36,8 +35,8 @@ func TestApplyAndClearComponentGPUShapes(t *testing.T) {
 
 	t.Log("Clear both fields before a later provider render can fail")
 	statuses["unobserved"] = nvidiacomv1beta1.ComponentReplicaStatus{
-		GPUsPerEngine:  ptr.To(int64(2)),
-		GPUsPerReplica: ptr.To(int64(2)),
+		GPUsPerEngine:  new(int64(2)),
+		GPUsPerReplica: new(int64(2)),
 	}
 	clearComponentGPUShapes(statuses)
 	assert.Nil(t, statuses["worker"].GPUsPerEngine)
@@ -57,7 +56,7 @@ func TestApplyAndClearComponentRuntimeStatuses(t *testing.T) {
 		"decode": {
 			ServedModelName:      "Qwen/Qwen3-8B",
 			RuntimeComponentName: "custom-decode",
-			GPUPowerLimitWatts:   ptr.To(int64(300)),
+			GPUPowerLimitWatts:   new(int64(300)),
 		},
 		"unobserved": {ServedModelName: "ignored"},
 	})

@@ -130,6 +130,46 @@ Tool calling lets Dynamo connect models to external tools and services by return
   </Step>
 </Steps>
 
+## Custom Freeform Tools
+
+Chat Completions accepts custom tools whose input is freeform text, such as code or
+a patch. Use the existing tool parser for your model and declare a custom tool:
+
+```json
+{
+  "tools": [{
+    "type": "custom",
+    "custom": {
+      "name": "run_python",
+      "description": "Execute Python source code.",
+      "format": {"type": "text"}
+    }
+  }],
+  "tool_choice": {"type": "custom", "custom": {"name": "run_python"}}
+}
+```
+
+Returned `message.tool_calls` entries use `type: "custom"` with
+`custom.name` and `custom.input`. Your application executes the tool and replays
+the assistant call followed by a `role: "tool"` result with its matching
+`tool_call_id`. Ordinary function tools can appear in the same request.
+
+Responses supports the same capability using its own
+[custom-tool API format](https://developers.openai.com/api/docs/guides/function-calling#custom-tools).
+Custom grammar formats are rejected before generation. Streaming custom input is
+buffered until the call completes, then emitted as text in `custom.input`. This
+streamed custom delta is a Dynamo extension to the published
+[OpenAI Chat streaming schema](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
+The optional `tool_call_dispatch` events currently cover function tools only;
+custom calls arrive through ordinary data chunks.
+
+Function-oriented engines generate a JSON wrapper with a string `input` field.
+If a completed call does not match that wrapper, Dynamo returns the raw argument
+text as `custom.input`, preserving other calls, content, and usage. Applications
+must validate tool input before executing it. If the token limit interrupts the
+wrapper, Dynamo preserves `finish_reason: "length"` without emitting the
+truncated input.
+
 ## Supported Tool Call Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
@@ -265,6 +305,20 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
         **Upstream name:** vLLM: `gemma4`
 
         **Notes:** Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja`.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Beam">
+    <AccordionGroup>
+      <Accordion title="Beam channel-grammar models">
+        **Parser:** `beam`
+
+        **Upstream name:** none (Dynamo-native, served by the `dynamo-parsers-v2` unified family)
+
+        **Notes:** Channel grammar: reasoning in `<\|channel\|>analysis<\|message\|>...<\|end\|>`, the answer in `<\|channel\|>final<\|message\|>...<\|return\|>`, and one `<\|start\|>assistant to=NAME<\|channel\|>analysis <\|constrain\|>xml<\|message\|>...<\|call\|>` message per tool call with `<rfl:parameter name="KEY">VALUE</rfl:parameter>` arguments typed from the tool schema. Pair with `--dyn-reasoning-parser beam`; both flags are required and the pair routes to the unified parser without `DYN_PARSER_VERSION=2`. The route accepts the request field `preserve_thinking` (supplied prior assistant reasoning always stays in the rendered history; `true` and omitted are the same, `false` is accepted and has no effect — omit `reasoning_content` to drop it) and defaults `allow_missing_thinking=true` so history turns without reasoning render an empty analysis block instead of failing and `chat_template_kwargs.builtin_tools` (names resolved against `tools` for rendering only).
+
+        **Per-turn grammar:** on the Beam route the frontend holds every chat turn to this channel grammar with a structural tag (a non-empty analysis channel, then either tool calls whose `rfl:parameter` values are held to their JSON-schema types or the final answer), mirroring the model builder's SGLang serving layer; `required` and named tool choices reuse the same tag, so they are enforced on the Harmony wire. A `response_format` (`json_object` or `json_schema`) is held inside the final channel behind the analysis, so the response keeps its reasoning and the channel structure the parser expects; a forced tool choice ignores `response_format`, and the `nvext` guided-decoding fields (`guided_json`, `guided_regex`, ...) stay bare constraints from the first token. Set `DYN_BEAM_TURN_GRAMMAR=0` on the frontend to disable it for automatic tool choice (forced choices keep theirs; `response_format` then falls back to the bare JSON constraint). A tool declared `strict: true` whose schema is outside OpenAI's strict subset is served as non-strict on this route (logged as a warning) instead of the HTTP 400 other routes return; the grammar holds every typeable tool either way.
       </Accordion>
     </AccordionGroup>
   </Accordion>

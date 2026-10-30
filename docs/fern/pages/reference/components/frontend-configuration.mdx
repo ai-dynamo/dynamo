@@ -13,6 +13,26 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 </Note>
 
+## Decision APIs
+
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+
+| Environment variable | Default | Maximum | Meaning |
+| --- | --- | --- | --- |
+| `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
+| `DYN_SYSTEMONE_MAX_INPUT_TOKENS` | 65,536 | 1,048,576 | Cumulative rendered input tokens across all questions in one request |
+| `DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS` | 300 | 3,600 | End-to-end request deadline in seconds |
+
+Positive values above a default log a warning. Values above the maximum are clamped with a warning; invalid values fall back to the default. Admission rejects excess work immediately rather than placing it in a frontend queue. Capacity responses use `DYN_HTTP_OVERLOAD_STATUS_CODE`.
+
+Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded` error code regardless of the configured HTTP status. OpenAI responses expose this code at `error.code`; Jev responses expose it at `code`. An unavailable worker returns `server_error`, not a capacity rejection. A native worker-abort HTTP 503 can also carry `Retry-After`, so the status and header alone do not identify capacity exhaustion.
+
+Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
+
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+
+Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
+
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
@@ -56,7 +76,7 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
-<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
+<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="45">
   Maximum HTTP request body size in MB. This is the client-facing ingress cap.
   After preprocessing, the frontend sends the worker-bound frame over the request
   plane. On the default TCP plane that frame is independently limited by
@@ -445,7 +465,24 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 ## Fault tolerance
 
 <ParamField path="--migration-limit" type="integer" default="0">
-  Maximum request migrations per worker disconnect. `0` disables migration.
+  Maximum replacement worker attempts per request. `0` disables migration.
+
+  For `/v1/realtime`, this is a lifetime budget for one client WebSocket. Recovery is
+  experimental and supports acknowledged transcription sessions with PCM input,
+  `audio.input.turn_detection: null`, and explicit client commits. The frontend replays
+  unfinished audio to a compatible warm replica in the original worker group while keeping
+  the client connection open. Completed turns are not replayed. Other realtime modes,
+  server-side voice activity detection, and frontend failure are outside this scope.
+
+  Each recovery has a five-second deadline covering connection, session acknowledgement,
+  and replay submission. Normal transcription completion has no recovery deadline.
+  A subsequent session update, unsupported event, application error, or retention limit
+  disables further recovery for that socket. Retention is bounded to 16 MiB of accounted
+  session, event, and transcript data and 4,096 events per eligible socket. Exceeding a
+  limit leaves a healthy stream working. Replayed deltas that differ from text already
+  delivered terminate the session with an error; final transcripts may still revise
+  interim text. Recovery requires another warm worker and adds inference work and an
+  output gap.
 
   Environment variable: `DYN_MIGRATION_LIMIT`
 </ParamField>
@@ -454,6 +491,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
   strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`
   through `4294967295`. Unset means no sequence-length limit.
+
+  This token limit does not control realtime audio retention.
 
   Environment variable: `DYN_MIGRATION_MAX_SEQ_LEN`
 </ParamField>
@@ -467,6 +506,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
@@ -823,22 +864,27 @@ The frontend exposes the following HTTP endpoints.
 
 ### Image API Compatibility
 
-The built-in image routes use JSON requests. Route availability does not imply that every
-backend or model supports reference-image conditioning.
+**Experimental.** Image editing requires a backend and model that support
+reference-image conditioning.
 
 | Endpoint | Request contract | Support |
 |---|---|---|
-| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` for a reference-capable backend/model | Supported |
-| `POST /v1/images/edits` | JSON with a `prompt` and required `input_reference` | Requires a reference-capable backend/model; see the version requirements in the image-edit example |
-| `POST /v1/images/variations` | Legacy image-variation API | Unsupported (HTTP 404) and [deprecated by OpenAI](https://developers.openai.com/api/reference/resources/images/methods/create_variation); use `/v1/images/edits` instead. |
+| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` | Supported |
+| `POST /v1/images/edits` | Multipart files or JSON references, with a required `prompt` | Supported |
+| `POST /v1/images/variations` | Legacy image-variation API | Unsupported |
 
-With vLLM-Omni, `input_reference` is a single HTTP(S) image URL or a base64 data URL such as
-`data:image/png;base64,...`. It is not an uploaded file or a local filesystem path. The
-frontend rejects multipart image edits with HTTP 415; direct uploads are tracked in
-[#15818](https://github.com/ai-dynamo/dynamo/issues/15818).
+Reference-capable models can also perform edits through the generations JSON
+endpoint. The variations endpoint returns HTTP 404; OpenAI has
+[deprecated it](https://developers.openai.com/api/reference/resources/images/methods/create_variation).
+Use `/v1/images/edits` for prompt-guided variations.
 
-See [Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
-for a reference-image-plus-prompt example.
+- Multipart: upload PNG, JPEG, or WebP using `image`, or repeat `image` or
+  `image[]` for multiple files. Choose one name per request; preserve part order.
+- JSON: `input_reference` accepts an HTTP(S) URL, a base64 data URL, or an ordered
+  array of those strings.
+
+See the [Image Edits API](../api/image-edits.mdx) for build requirements,
+accepted fields, limits, errors, and rolling upgrades.
 
 ### Anthropic (Experimental)
 
@@ -862,8 +908,9 @@ for a reference-image-plus-prompt example.
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 
@@ -874,6 +921,20 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
   request fields instead of rejecting the request. This does not forward arbitrary fields to a
   backend. Named passthrough fields remain subject to their normal validation and handling.
+</ParamField>
+
+<ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
+  When truthy, the frontend skips Dynamo's preflight validation of function parameter schemas
+  with explicit `strict: true`. This applies to `/v1/chat/completions`, `/v1/responses` (including
+  namespace tools), and strict tools converted from `/v1/messages`. The setting affects all
+  models served by the frontend process. The value is captured during HTTP frontend startup;
+  restart the process after changing it. Use this compatibility mode for legacy requests
+  accepted before strict-schema preflight was introduced, including schemas with optional
+  properties, open objects, or `oneOf`. Submitted schemas and `strict` declarations remain
+  unchanged. The preflight's schema structure, reference, depth, and size checks are skipped;
+  basic tool validation and HTTP body limits remain active. This does not disable
+  structured-output guidance or downstream
+  processor and backend checks, so a schema can still fail later in the request pipeline.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
