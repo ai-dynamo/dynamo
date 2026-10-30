@@ -174,9 +174,9 @@ impl EngineAdapter {
     }
 
     /// `token` is cancelled when the worker starts `engine.cleanup()`. A
-    /// request the engine then ends as cancelled, while its client is still
-    /// waiting, becomes `EngineShutdown`, which the frontend migrates to
-    /// another worker.
+    /// request the engine then ends as cancelled (a `Cancelled` terminal or a
+    /// cancellation error), while its client is still waiting, becomes
+    /// `EngineShutdown`, which the frontend migrates to another worker.
     pub(crate) fn with_engine_cleanup(mut self, token: CancellationToken) -> Self {
         self.engine_cleanup = token;
         self
@@ -184,14 +184,18 @@ impl EngineAdapter {
 }
 
 fn ended_by_engine_cleanup(
-    chunk: &LLMEngineOutput,
+    item: &Result<LLMEngineOutput, DynamoError>,
     engine_cleanup: &CancellationToken,
     ctx: &dyn AsyncEngineContext,
 ) -> bool {
-    matches!(chunk.finish_reason, Some(FinishReason::Cancelled))
-        && engine_cleanup.is_cancelled()
-        && !ctx.is_stopped()
-        && !ctx.is_killed()
+    let is_cancelled = match item {
+        Ok(chunk) => matches!(chunk.finish_reason, Some(FinishReason::Cancelled)),
+        Err(error) => matches!(
+            error.error_type(),
+            ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled)
+        ),
+    };
+    is_cancelled && engine_cleanup.is_cancelled() && !ctx.is_stopped() && !ctx.is_killed()
 }
 
 /// JSON-shaped wrapper around [`EngineAdapter`] for the `local_endpoint_registry`.
@@ -463,7 +467,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             while let Some(item) = inner.next().await {
                 chunk_count += 1;
                 let item = match item {
-                    Ok(chunk) if ended_by_engine_cleanup(&chunk, &engine_cleanup, &*stream_ctx) => {
+                    item if ended_by_engine_cleanup(&item, &engine_cleanup, &*stream_ctx) => {
                         Err(DynamoError::builder()
                             .error_type(ErrorType::Backend(BackendError::EngineShutdown))
                             .message("worker shut down before the request finished")
@@ -1069,8 +1073,11 @@ mod tests {
     }
 
     /// Ends every request as cancelled after one token, as a sidecar engine
-    /// does when `cleanup()` tears down its native streams.
-    struct CancelledAfterTokenEngine;
+    /// does when `cleanup()` tears down its native streams: with a `Cancelled`
+    /// terminal, or with a cancellation error as SGLang's native HTTP path does.
+    struct CancelledAfterTokenEngine {
+        as_error: bool,
+    }
 
     #[async_trait]
     impl LLMEngine for CancelledAfterTokenEngine {
@@ -1083,9 +1090,17 @@ mod tests {
             _request: PreprocessedRequest,
             _context: GenerateContext,
         ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            let terminal = if self.as_error {
+                Err(DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Cancelled))
+                    .message("native request cancelled")
+                    .build())
+            } else {
+                Ok(LLMEngineOutput::cancelled())
+            };
             Ok(Box::pin(futures::stream::iter([
                 Ok(chunk::token(11)),
-                Ok(LLMEngineOutput::cancelled()),
+                terminal,
             ])))
         }
 
@@ -1099,14 +1114,16 @@ mod tests {
     /// migrates, unless the client has already gone.
     #[tokio::test]
     async fn adapter_reports_cleanup_cancellation_as_engine_shutdown() {
-        for (cleanup_started, client_stopped, is_engine_shutdown) in [
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
+        for (as_error, cleanup_started, client_stopped, is_engine_shutdown) in [
+            (false, true, false, true),
+            (true, true, false, true),
+            (false, true, true, false),
+            (true, true, true, false),
+            (false, false, false, false),
         ] {
             let cleanup = CancellationToken::new();
             let adapter = EngineAdapter::new(
-                Arc::new(CancelledAfterTokenEngine),
+                Arc::new(CancelledAfterTokenEngine { as_error }),
                 DisaggregationMode::Aggregated,
             )
             .with_engine_cleanup(cleanup.clone());
@@ -1128,6 +1145,12 @@ mod tests {
                 assert_eq!(
                     err.error_type(),
                     ErrorType::Backend(BackendError::EngineShutdown)
+                );
+            } else if as_error {
+                let err = terminal.error.expect("cancellation error");
+                assert_eq!(
+                    err.error_type(),
+                    ErrorType::Backend(BackendError::Cancelled)
                 );
             } else {
                 let chunk = terminal.data.expect("cancelled terminal");

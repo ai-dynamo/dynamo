@@ -131,11 +131,19 @@ pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError 
     status_to_dynamo(rpc, status)
 }
 
+/// Tonic 0.14 reports a stream that ended without trailers, the engine
+/// having closed it without a final status, only through this message.
+#[cfg(feature = "tonic-v14")]
+const MISSING_TRAILER: &str = "protocol error: missing grpc-status trailer";
+
 #[cfg(feature = "tonic-v14")]
 pub fn stream_status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError {
     let code = tonic::Code::from_i32(status.code() as i32);
     if is_broken_stream_v14(&status) {
         return disconnected(rpc, status.message(), code);
+    }
+    if status.code() == tonic_v14::Code::Unknown && status.message().starts_with(MISSING_TRAILER) {
+        return stream_incomplete(format!("{rpc}: {} ({code:?})", status.message()));
     }
     status_to_dynamo_parts(rpc, status.message(), code)
 }
@@ -233,6 +241,39 @@ mod tests {
         // Sent by the engine: no transport source, so the regular mapping.
         let sent = stream_status_to_dynamo("Test", tonic::Status::unknown("engine failure"));
         assert_eq!(sent.error_type(), ErrorType::Backend(BackendError::Unknown));
+    }
+
+    /// Produced by tonic's own decoder, so a tonic upgrade that changes the
+    /// status fails here rather than silently disabling migration.
+    #[cfg(feature = "tonic-v14")]
+    #[tokio::test]
+    async fn stream_closed_without_trailers_is_incomplete_on_tonic_v14() {
+        struct NoMessages;
+        impl tonic_v14::codec::Decoder for NoMessages {
+            type Item = ();
+            type Error = tonic_v14::Status;
+            fn decode(
+                &mut self,
+                _: &mut tonic_v14::codec::DecodeBuf<'_>,
+            ) -> Result<Option<()>, Self::Error> {
+                Ok(None)
+            }
+        }
+        let mut stream = tonic_v14::codec::Streaming::new_response(
+            NoMessages,
+            tonic_v14::body::Body::empty(),
+            tonic_v14::codegen::http::StatusCode::OK,
+            None,
+            None,
+        );
+        let status = stream
+            .message()
+            .await
+            .expect_err("a 200 stream without trailers fails");
+        assert_eq!(
+            crate::error::stream_status_to_dynamo_v14("Test", status).error_type(),
+            ErrorType::Backend(BackendError::StreamIncomplete)
+        );
     }
 
     #[cfg(feature = "tonic-v14")]
