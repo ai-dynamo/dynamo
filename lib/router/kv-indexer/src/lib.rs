@@ -7,9 +7,10 @@
 //! concurrent compressed tree), the thread-pool and branch-sharded wrappers, approximate
 //! LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash lifecycle
 //! delegate (`delegate`), the indexer counters (`metrics`), the residency projection
-//! (`residency`), overlap scores (`overlap`), and KV transfer candidates (`kv_hints`). The
-//! lower tiers, the request-plane DTOs, and the ingest backend follow. Until then
-//! `lib/kv-router` re-exports every item here at its old path.
+//! (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`), and the
+//! lower-tier continuation index with its per-tier registry. The request-plane DTOs, the
+//! local indexer, and the ingest backend follow. Until then `lib/kv-router` re-exports every
+//! item here at its old path.
 //!
 //! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, and `dynamo-kv-hashing`.
 //! The `export` feature (Prometheus counter vectors) is transitional: the design replaces it
@@ -54,6 +55,8 @@ pub mod cuckoo;
 pub mod delegate;
 pub mod kv_hints;
 mod kv_indexer;
+mod lower_tier;
+mod lower_tier_indexers;
 pub mod metrics;
 #[cfg(feature = "bench")]
 mod observation;
@@ -102,6 +105,8 @@ pub use branch_sharded::*;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use delegate::{HashLifecycle, KvIndexerDelegate};
 pub use kv_indexer::*;
+pub use lower_tier::*;
+pub use lower_tier_indexers::*;
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;

@@ -14,9 +14,12 @@ pub(crate) use dynamo_kv_hashing::routing::{
 };
 pub(crate) use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 pub(crate) use dynamo_router_protocol::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, WireResidencyDomain,
+    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
+    WireResidencyDomain,
 };
 pub(crate) use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 
 pub(crate) use crate::overlap::OverlapScores;
-pub(crate) use crate::residency::ResidencyOwnerKeyExt;
+pub(crate) use crate::residency::{
+    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot,
+};

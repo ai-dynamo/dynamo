@@ -14,7 +14,7 @@
 //! duplicate or conflicting store arrives, the existing mapping wins and the new
 //! event is ignored.
 
-use crate::protocols::ResidencyOwnerKeyExt;
+use crate::prelude::ResidencyOwnerKeyExt;
 use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,7 @@ use super::{
     WorkerLookupStats, WorkerTask,
 };
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-use crate::protocols::{
+use crate::prelude::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
     ResidencyOwner, ResidencyOwnerKey, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
@@ -979,7 +979,7 @@ impl LowerTierIndexer {
                         }),
                         dp_rank,
                     },
-                    crate::protocols::StorageTier::Device,
+                    crate::prelude::StorageTier::Device,
                     owner.domain(),
                 );
                 event.state_source = source;
@@ -1604,21 +1604,22 @@ fn finalize_workers(
 #[cfg(test)]
 mod tests {
     use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
-    use crate::protocols::ResidencyOwnerKeyExt;
+    use crate::prelude::ResidencyOwnerKeyExt;
     use rustc_hash::FxHashMap;
 
-    use crate::identity::{
+    use crate::kv_hints::KvTransferCandidateSource;
+    use crate::prelude::{
+        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
+        ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
+        RouterEvent, StorageTier, WireResidencyDomain, WorkerWithDpRank,
+    };
+    use crate::testing::{remove_event, router_event, stored_blocks_with_sequence_hashes};
+    use crate::{KvIndexerInterface, ThreadPoolIndexer};
+    use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
-    use crate::kv_hints::KvTransferCandidateSource;
-    use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
-        RouterEvent, RouterHintSourceMetadata, StorageTier, WireResidencyDomain, WorkerWithDpRank,
-    };
-    use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
+    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
@@ -1648,7 +1649,7 @@ mod tests {
         parent_hash: Option<u64>,
         local_values: &[u64],
         external_hashes: &[u64],
-    ) -> crate::protocols::RouterEvent {
+    ) -> crate::prelude::RouterEvent {
         router_event(
             worker_id,
             event_id,
@@ -1672,7 +1673,7 @@ mod tests {
         external_hashes: &[u64],
         domain: ResidencyDomain,
     ) -> RouterEvent {
-        let event = crate::protocols::KvCacheEvent {
+        let event = crate::prelude::KvCacheEvent {
             event_id,
             dp_rank: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -1715,8 +1716,8 @@ mod tests {
 
         fn apply_event(
             &mut self,
-            event: crate::protocols::RouterEvent,
-        ) -> Result<(), crate::protocols::KvCacheEventError> {
+            event: crate::prelude::RouterEvent,
+        ) -> Result<(), crate::prelude::KvCacheEventError> {
             self.index.apply_event(&mut self.worker_blocks, event)
         }
 
@@ -1763,7 +1764,7 @@ mod tests {
             )
         }
 
-        fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
+        fn dump_events(&self) -> Vec<crate::prelude::RouterEvent> {
             LowerTierIndexer::dump_events(&self.worker_blocks)
         }
     }
@@ -1838,7 +1839,7 @@ mod tests {
         index
             .apply_event(RouterEvent::with_residency_domain(
                 7,
-                crate::protocols::KvCacheEvent {
+                crate::prelude::KvCacheEvent {
                     event_id: 4,
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
@@ -1869,7 +1870,7 @@ mod tests {
         index
             .apply_event(RouterEvent::with_cache_owner(
                 7,
-                crate::protocols::KvCacheEvent {
+                crate::prelude::KvCacheEvent {
                     event_id: 6,
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
@@ -1893,7 +1894,7 @@ mod tests {
                 session_id: None,
                 storage_tier: StorageTier::Device,
                 residency_domain: WireResidencyDomain::default(),
-                event: crate::protocols::KvCacheEvent {
+                event: crate::prelude::KvCacheEvent {
                     event_id: 7,
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
@@ -3034,7 +3035,7 @@ mod tests {
     // --- dump_events tests ---
 
     /// Helper: replay dumped events into a fresh indexer and return it.
-    fn replay_dump(events: Vec<crate::protocols::RouterEvent>) -> TestLowerTierIndex {
+    fn replay_dump(events: Vec<crate::prelude::RouterEvent>) -> TestLowerTierIndex {
         let mut fresh = TestLowerTierIndex::new();
         for event in events {
             fresh.apply_event(event).unwrap();

@@ -17,14 +17,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::indexer::{
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use crate::prelude::{
+    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
+};
+use crate::{
     KvIndexerMetrics, KvRouterError, LowerTierContinuation, LowerTierIndexer,
     LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
     record_unsupported_residency_event,
-};
-use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-use crate::protocols::{
-    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -385,16 +385,16 @@ pub fn query_lower_tiers_with_options_and_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
-    use crate::indexer::KvIndexerInterface;
-    use crate::protocols::{
+    use crate::KvIndexerInterface;
+    use crate::prelude::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
-    use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+    use crate::testing::{router_event, stored_blocks_with_sequence_hashes};
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
 
     #[test]
     fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
@@ -449,7 +449,7 @@ mod tests {
         parent_hash: Option<u64>,
         local_values: &[u64],
         external_hashes: &[u64],
-    ) -> crate::protocols::RouterEvent {
+    ) -> crate::prelude::RouterEvent {
         router_event(
             worker_id,
             event_id,
