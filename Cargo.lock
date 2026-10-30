@@ -2493,9 +2493,12 @@ name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
  "blake3",
+ "prost 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
  "url",
 ]
 
@@ -2550,6 +2553,7 @@ dependencies = [
  "dynamo-global-common",
  "dynamo-kv-router",
  "parking_lot",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",

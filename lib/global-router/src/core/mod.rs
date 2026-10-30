@@ -19,10 +19,13 @@
 //! target. With [`ReplicaSync`] the core's bookings and session bindings
 //! replicate to the other Global Frontends over the core's own mesh, so
 //! every replica sees every replica's requests in flight and pins.
+//! [`replica_sync`] holds the gRPC contract those events will travel over
+//! between replicas, and its conversions to the core's event types.
 
 mod catalog;
 mod directory;
 mod policies;
+pub mod replica_sync;
 
 use std::collections::HashMap;
 use std::future::Future;

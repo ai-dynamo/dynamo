@@ -10,11 +10,23 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# The gRPC ReplicaSync contract (`replica_sync::proto`), generated from
+# proto/replica_sync.proto. Off by default so users of the plain types need
+# neither tonic nor protoc.
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-build"]
+
 [dependencies]
 blake3 = { workspace = true }
+prost = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true, optional = true }
 url = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
