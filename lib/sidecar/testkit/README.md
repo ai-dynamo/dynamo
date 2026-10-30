@@ -40,7 +40,7 @@ lib/sidecar/
     ├── src/
     │   ├── lib.rs              # Bounded waits and public testkit exports
     │   ├── control.rs          # Per-request controls, observations and controller test
-    │   ├── server.rs           # Local server lifetime, including abrupt shutdown
+    │   ├── server.rs           # Local server lifetime, including abrupt shutdown and restart
     │   ├── fixtures.rs         # Shared request construction and stream collection
     │   └── assert.rs           # Token, terminal, usage and error assertions
     ├── tests/
@@ -177,14 +177,15 @@ the sidecar output with the controller's observed token vector.
 
 The local test server owns a dedicated thread and runtime. Shutting it down
 also drops accepted connections and RPC handlers, even when a test retains live
-clients. That makes peer-loss tests deterministic.
+clients. That makes peer-loss tests deterministic. A server can start again on
+its old address, so reconnect tests reach the same endpoint.
 
 ### What runs where
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine availability from its health stream, and reconnection after engine loss | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; vLLM withdrawal on engine loss and re-registration, and startup without KV events; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 | `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, cancellation/recovery, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: basic aggregated/disaggregated chat | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.

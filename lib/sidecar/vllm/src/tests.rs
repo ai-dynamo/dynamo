@@ -12,9 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use dynamo_backend_common::{
-    BackendError, DisaggregationMode, EngineAvailability, ErrorType, FinishReason, GenerateContext,
-    LLMEngine, MultimodalData, PrefillResult, PreprocessedRequest, RlAdminBaseUrl,
-    RlWorkerMetadata,
+    BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine,
+    MultimodalData, PrefillResult, PreprocessedRequest, RlAdminBaseUrl, RlWorkerMetadata,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
@@ -30,9 +29,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
-use crate::client::{
-    CONTROL_SERVICE, INFERENCE_SERVICE, LIVENESS_SERVICE, READINESS_SERVICE, VllmClient,
-};
+use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::engine::VllmSidecarEngine;
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -2921,199 +2918,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
         assert!(result.is_err());
     }
     assert!(server.service.requests.lock().await.is_empty());
-}
-
-/// A fake vLLM on its own runtime, so dropping it closes every connection at
-/// once, as an engine crash does.
-struct CrashableServer {
-    endpoint: String,
-    health: tonic_health::server::HealthReporter,
-    stop: Option<oneshot::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CrashableServer {
-    async fn start(listener: std::net::TcpListener, health_services: &[&str]) -> Self {
-        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
-        let (health, health_service) = tonic_health::server::health_reporter();
-        for service in health_services {
-            health
-                .set_service_status(*service, HealthServingStatus::Serving)
-                .await;
-        }
-        listener
-            .set_nonblocking(true)
-            .expect("non-blocking listener");
-        let (stop, stopped) = oneshot::channel::<()>();
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("server runtime");
-            runtime.block_on(async move {
-                let service = FakeVllm::default();
-                let serve = tonic::transport::Server::builder()
-                    .add_service(pb::inference_server::InferenceServer::new(service.clone()))
-                    .add_service(pb::control_server::ControlServer::new(service))
-                    .add_service(health_service)
-                    .serve_with_incoming(TcpListenerStream::new(
-                        TcpListener::from_std(listener).expect("listener"),
-                    ));
-                tokio::select! {
-                    _ = stopped => {}
-                    result = serve => result.expect("serve fake vLLM"),
-                }
-            });
-        });
-        Self {
-            endpoint,
-            health,
-            stop: Some(stop),
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for CrashableServer {
-    fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("fake vLLM thread");
-        }
-    }
-}
-
-async fn wait_availability(
-    receiver: &mut tokio::sync::watch::Receiver<EngineAvailability>,
-    expected: EngineAvailability,
-) {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        receiver.wait_for(|state| *state == expected),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("availability never became {expected:?}"))
-    .expect("availability sender");
-}
-
-// Regression: the sidecar kept its worker registered after vLLM stopped serving
-// or went away. Covers both health shapes vLLM serves.
-#[tokio::test]
-async fn health_monitor_maps_vllm_health_to_availability() {
-    for has_liveness in [false, true] {
-        let (services, readiness): (&[&str], _) = if has_liveness {
-            (&[LIVENESS_SERVICE, READINESS_SERVICE], READINESS_SERVICE)
-        } else {
-            (&[INFERENCE_SERVICE], INFERENCE_SERVICE)
-        };
-        let mut server = CrashableServer::start(
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind"),
-            services,
-        )
-        .await;
-        let channel = tonic::transport::Endpoint::from_shared(server.endpoint.clone())
-            .expect("endpoint")
-            .connect()
-            .await
-            .expect("connect");
-        let availability = tokio::sync::watch::Sender::new(EngineAvailability::Ready);
-        let mut receiver = availability.subscribe();
-        let monitor = tokio::spawn(async move {
-            crate::client::monitor_health(
-                channel,
-                &availability,
-                std::time::Duration::from_secs(5),
-            )
-            .await;
-        });
-
-        server
-            .health
-            .set_service_status(readiness, HealthServingStatus::NotServing)
-            .await;
-        wait_availability(&mut receiver, EngineAvailability::NotReady).await;
-        server
-            .health
-            .set_service_status(readiness, HealthServingStatus::Serving)
-            .await;
-        wait_availability(&mut receiver, EngineAvailability::Ready).await;
-        if has_liveness {
-            server
-                .health
-                .set_service_status(LIVENESS_SERVICE, HealthServingStatus::NotServing)
-                .await;
-        } else {
-            // vLLM clears its statuses on shutdown, which ends the stream.
-            server.health.clear_service_status(INFERENCE_SERVICE).await;
-        }
-        wait_availability(&mut receiver, EngineAvailability::Lost).await;
-        monitor.await.expect("monitor task");
-    }
-}
-
-// Regression: after its vLLM connection broke, the sidecar kept accepting
-// requests and never reconnected.
-#[tokio::test]
-async fn lost_engine_rejects_requests_until_recovery_reconnects() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    let services = [CONTROL_SERVICE, INFERENCE_SERVICE];
-    let server = CrashableServer::start(listener, &services).await;
-    let engine = Arc::new(engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    ));
-    engine.start(0).await.expect("start");
-    let mut availability = engine.availability().expect("vLLM reports availability");
-
-    drop(server);
-    wait_availability(&mut availability, EngineAvailability::Lost).await;
-    let error = collect_result(&engine, request())
-        .await
-        .expect_err("a lost engine must reject new requests");
-    assert_eq!(
-        error.error_type(),
-        ErrorType::Backend(BackendError::EngineShutdown)
-    );
-
-    let recovery = tokio::spawn({
-        let engine = engine.clone();
-        async move { engine.recover().await }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    assert!(
-        !recovery.is_finished(),
-        "recovery must keep retrying while nothing listens"
-    );
-    // vLLM clears its health statuses just before its listener closes.
-    let server = CrashableServer::start(
-        std::net::TcpListener::bind(address).expect("rebind"),
-        &[CONTROL_SERVICE],
-    )
-    .await;
-    // Longer than the 1 s reconnect retry, so recovery reaches the health check.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    assert!(
-        !recovery.is_finished(),
-        "recovery must keep retrying while vLLM's inference health is unregistered"
-    );
-    server
-        .health
-        .set_service_status(INFERENCE_SERVICE, HealthServingStatus::Serving)
-        .await;
-    let config = tokio::time::timeout(std::time::Duration::from_secs(10), recovery)
-        .await
-        .expect("recovery finishes once vLLM serves")
-        .expect("recovery task")
-        .expect("recover");
-    assert_eq!(config.model, "model-source");
-    assert_eq!(*availability.borrow(), EngineAvailability::Ready);
-    let outputs = collect(&engine, request()).await;
-    assert!(outputs.last().unwrap().finish_reason.is_some());
 }
 
 // Regression: LoRA records are derived from the base model card, which the

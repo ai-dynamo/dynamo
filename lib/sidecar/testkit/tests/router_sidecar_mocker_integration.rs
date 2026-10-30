@@ -753,14 +753,16 @@ async fn engine_loss_withdraws_until_recovery() {
         .unwrap()
         .unwrap();
     bounded("held native checkpoint", held.wait(Event::Checkpoint)).await;
-    peer.set_inference_serving(false).await;
+    peer.set_service_health(vllm::INFERENCE_SERVICE, Some(false))
+        .await;
     env.withdrawn("backend", &router).await;
     held.release();
     let mut held_outputs = vec![Ok(first)];
     held_outputs.extend(outputs(stream).await);
     terminal(held_outputs, &held.tokens(), 4, FinishReason::Length);
 
-    peer.set_inference_serving(true).await;
+    peer.set_service_health(vllm::INFERENCE_SERVICE, Some(true))
+        .await;
     let router = env.ready("backend").await;
     healthy::<vllm::Fixture>(&env, &router, &control, "after-not-serving").await;
 

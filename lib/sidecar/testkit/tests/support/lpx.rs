@@ -77,7 +77,7 @@ impl SidecarFixture for Fixture {
             DisaggregationMode::Decode => pb::EngineRole::Decode,
             mode => panic!("the LPX sidecar serves aggregated and decode, not {mode}"),
         };
-        let mut args = fast_engine_args(EngineType::Trtllm);
+        let mut args = fast_engine_args(EngineType::Trtllm, config.has_kv_events);
         args.speedup_ratio = config.speedup_ratio;
         // Aggregated in every role: the wrapper carries the decode role on
         // the wire and removes the session before a request reaches here.

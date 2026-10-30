@@ -82,7 +82,7 @@ impl SidecarFixture for Fixture {
     const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
 
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
-        let mut args = fast_engine_args(EngineType::Sglang);
+        let mut args = fast_engine_args(EngineType::Sglang, config.has_kv_events);
         args.speedup_ratio = config.speedup_ratio;
         let service = SglangMockerService::new(
             MockerServerConfig {

@@ -22,7 +22,7 @@ pub struct FixtureConfig {
     pub connections: usize,
     pub speedup_ratio: f64,
     pub disaggregation_mode: DisaggregationMode,
-    /// Whether the vLLM fixture publishes KV events.
+    /// Whether the Mocker publishes KV events.
     pub has_kv_events: bool,
 }
 
@@ -80,8 +80,8 @@ pub trait WireFixture: SidecarFixture {
     async fn scheduler_active(&self);
 }
 
-fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({
+fn fast_engine_args(engine_type: EngineType, has_kv_events: bool) -> MockerConfig {
+    let mut args = MockerConfig::from_value(serde_json::json!({
         "dp_size": 1,
         "engine": {
             "backend": engine_type,
@@ -92,7 +92,10 @@ fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
             "speedup_ratio": 0.0
         }
     }))
-    .unwrap()
+    .unwrap();
+    // The Mocker publishes KV events only with prefix caching.
+    args.enable_prefix_caching &= has_kv_events;
+    args
 }
 
 pub trait ProcessFixture: WireFixture {
