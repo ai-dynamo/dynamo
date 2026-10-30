@@ -20,7 +20,7 @@ from .engine_monitor import VllmEngineMonitor
 
 _TRANSCRIPTION_IMPORT_ERROR: ImportError | None = None
 try:
-    from fastapi import UploadFile
+    from fastapi import UploadFile  # type: ignore[import-not-found]
     from vllm.entrypoints.openai.models.protocol import BaseModelPath
     from vllm.entrypoints.openai.models.serving import OpenAIServingModels
     from vllm.entrypoints.serve.engine.protocol import ErrorResponse
