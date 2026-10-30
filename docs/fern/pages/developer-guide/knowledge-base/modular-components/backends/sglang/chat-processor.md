@@ -37,6 +37,12 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
+## DeepSeek Prompt Encoding
+
+For DeepSeek V4 and V4.1 checkpoints without a chat template, the processor uses SGLang's recipe renderer when that module is available. This path requires the checkpoint's fast tokenizer and the `deepseek-recipe` package supplied by the SGLang installation. SGLang v0.5.22 keeps the existing V4 encoder path.
+
+Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
+
 ## Frontend Arguments
 
 These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:
