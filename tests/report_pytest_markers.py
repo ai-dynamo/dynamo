@@ -121,6 +121,8 @@ STUB_MODULES = [
     "aisimulate.generator.api",
     "aisimulate.generator.enumerate",
     "aisimulate.generator.module_bridge",
+    "aisimulate.generator.request",
+    "aisimulate.generator.request.schema",
     "aisimulate.output_adapter",
     "aisimulate.runner",
     "aisimulate.sdk.picking",
