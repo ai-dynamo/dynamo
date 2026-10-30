@@ -85,6 +85,13 @@ pub struct SystemHealth {
     /// Endpoints whose owner publishes readiness itself. Transport registration
     /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
     readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
+    /// Per-endpoint in-flight request counter, shared with the transport ingress
+    /// (`PushEndpoint`), so the canary can tell an idle endpoint from a busy one.
+    endpoint_inflight: Arc<std::sync::RwLock<HashMap<String, Arc<std::sync::atomic::AtomicU64>>>>,
+    /// Per-endpoint instant of the last observed engine progress: a streamed non-error
+    /// chunk, a completed request, or a forward pass reported over FPM. A BUSY endpoint is
+    /// judged by this instead of by a canary that would only queue behind its work.
+    endpoint_progress: Arc<std::sync::RwLock<HashMap<String, Instant>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -126,6 +133,8 @@ impl SystemHealth {
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            endpoint_inflight: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            endpoint_progress: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -187,6 +196,47 @@ impl SystemHealth {
     /// [`hold_endpoint_readiness`]: SystemHealth::hold_endpoint_readiness
     pub fn release_endpoint_readiness(&self, endpoint: &str) {
         self.readiness_holds.write().unwrap().remove(endpoint);
+    }
+
+    /// Share the ingress in-flight counter for `endpoint` with the health checker. Registration
+    /// is also the endpoint's first progress mark, so a request that arrives and stalls at once
+    /// is judged against the stall budget rather than against "never progressed".
+    pub fn register_endpoint_inflight(
+        &self,
+        endpoint: &str,
+        counter: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        self.endpoint_inflight
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string(), counter);
+        self.note_endpoint_progress(endpoint);
+    }
+
+    /// Requests currently in flight on `endpoint`; None when no ingress registered a counter.
+    pub fn endpoint_inflight(&self, endpoint: &str) -> Option<u64> {
+        self.endpoint_inflight
+            .read()
+            .unwrap()
+            .get(endpoint)
+            .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// Record that the engine behind `endpoint` made progress right now.
+    pub fn note_endpoint_progress(&self, endpoint: &str) {
+        self.endpoint_progress
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string(), Instant::now());
+    }
+
+    /// When `endpoint` last made progress; None if never recorded.
+    pub fn endpoint_last_progress(&self, endpoint: &str) -> Option<Instant> {
+        self.endpoint_progress
+            .read()
+            .unwrap()
+            .get(endpoint)
+            .cloned()
     }
 
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -400,6 +450,24 @@ mod tests {
     use crate::component::{Instance, TransportType};
 
     const ENDPOINT: &str = "generate";
+
+    #[test]
+    fn inflight_and_progress_bookkeeping() {
+        let health = system_health(true);
+        assert_eq!(health.endpoint_inflight(ENDPOINT), None);
+        assert!(health.endpoint_last_progress(ENDPOINT).is_none());
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        health.register_endpoint_inflight(ENDPOINT, counter.clone());
+        assert_eq!(health.endpoint_inflight(ENDPOINT), Some(0));
+        let registered = health
+            .endpoint_last_progress(ENDPOINT)
+            .expect("registration marks progress");
+        counter.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(health.endpoint_inflight(ENDPOINT), Some(2));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        health.note_endpoint_progress(ENDPOINT);
+        assert!(health.endpoint_last_progress(ENDPOINT).unwrap() > registered);
+    }
 
     fn system_health(health_check_enabled: bool) -> SystemHealth {
         SystemHealth::new(
