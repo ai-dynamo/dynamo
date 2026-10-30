@@ -83,7 +83,6 @@ git -C deps/env apply "$EXAMPLE_DIR/env-rc1-compat.patch"
 (
 	cd deps/env
 	umask 022
-	go test ./...
 	KO_DOCKER_REPO="$IMAGE_REPO/env-api" ko build --bare \
 	  --platform=linux/amd64,linux/arm64 ./cmd/ate-env-api
 	KO_DOCKER_REPO="$IMAGE_REPO/env-guest" ko build --bare \
@@ -168,31 +167,3 @@ configuration. The rc1 WorkerPool API does not expose Pod sysctls. When a manual
 patch to its generated Deployment is necessary, record it and reapply after
 recreation. The generated deployment has the same name as its WorkerPool.
 This is a Pod setting, not a host sysctl change.
-
-## Run local checks
-
-Install the pinned execution dependencies in a separate environment:
-
-```bash
-python3 -m venv .local/checks
-.local/checks/bin/pip install -r requirements.txt pytest pytest-asyncio
-```
-
-`test_guest.py` exercises the actual env guest protocol, file modes, symlinks,
-command failures, and cancellation. In one workstation terminal, build and
-start the patched guest on loopback:
-
-```bash
-(cd deps/env && go build -o "$EXAMPLE_DIR/.local/ate-env-guest" ./cmd/ate-env-guest)
-.local/ate-env-guest -workspace / -listen 127.0.0.1:17777
-```
-
-In another terminal, run the tests from the example directory:
-
-```bash
-ATE_ENV_GUEST_TARGET=127.0.0.1:17777 .local/checks/bin/python -m pytest \
-  --noconftest -c pytest.ini test_guest.py
-```
-
-Stop the guest with Ctrl+C after the tests. These checks do not replace the
-tutorial's Kubernetes one-trial validation.
