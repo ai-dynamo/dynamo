@@ -719,6 +719,11 @@ func (in *DynamoGraphDeploymentRequestNativeSpec) DeepCopyInto(out *DynamoGraphD
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Unauthenticated != nil {
+		in, out := &in.Unauthenticated, &out.Unauthenticated
+		*out = new(bool)
+		**out = **in
+	}
 	if in.DeploymentOverrides != nil {
 		in, out := &in.DeploymentOverrides, &out.DeploymentOverrides
 		*out = new(DeploymentOverridesSpec)
