@@ -60,6 +60,7 @@ from dynamo.vllm.omni.base_handler import BaseOmniHandler
 # builders can annotate it without importing this handler.
 from dynamo.vllm.omni.engine_inputs import EngineInputs
 from dynamo.vllm.omni.health_check import generation_error, has_completed_output
+from dynamo.vllm.omni.image_edit import ImageEditLimits, load_image_edit_references
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
@@ -219,6 +220,7 @@ class OmniHandler(BaseOmniHandler):
             media_output_fs: Filesystem for storing generated images/videos.
             media_output_http_url: Base URL for rewriting media paths in responses.
         """
+        self._image_edit_limits = ImageEditLimits.from_env()
         super().__init__(
             runtime=runtime,
             config=config,
@@ -228,6 +230,7 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self._image_edit_loader = ImageLoader(max_pixels=self._image_edit_limits.pixels)
         self.generate_endpoint = generate_endpoint
 
         # Keep parity with BaseWorkerHandler LoRA resolver contract.
@@ -645,24 +648,26 @@ class OmniHandler(BaseOmniHandler):
             inputs = self._engine_inputs_from_image(
                 parsed_request, dimensions=dimensions
             )
+            model_class_name = get_model_class_name(self.engine_client)
+            images = [image] if image is not None else []
             if parsed_request.input_reference is not None:
-                try:
-                    image = await self._image_loader.load_image(
-                        parsed_request.input_reference
-                    )
-                except (ValueError, PIL.Image.DecompressionBombError) as e:
-                    # Keep URLs and inline image data out of the client error.
-                    raise ValueError("Failed to load input_reference") from e
-            if image is not None:
-                inputs.input_images = 1
+                images = await load_image_edit_references(
+                    parsed_request.input_reference,
+                    image_loader=self._image_edit_loader,
+                    model_class_name=model_class_name,
+                    operator_limit=self._image_edit_limits.images,
+                    max_total_pixels=self._image_edit_limits.total_pixels,
+                )
+            if images:
+                inputs.input_images = len(images)
                 inputs.prompt.update(
                     build_image_to_image_prompt(
-                        model_class_name=get_model_class_name(self.engine_client),
+                        model_class_name=model_class_name,
                         prompt=parsed_request.prompt,
                         negative_prompt=(
                             parsed_request.nvext or ImageNvExt()
                         ).negative_prompt,
-                        input_image=[image],
+                        input_image=images,
                         height=dimensions[1],
                         width=dimensions[0],
                     )
@@ -790,14 +795,11 @@ class OmniHandler(BaseOmniHandler):
         req: NvCreateVideoRequest,
         nvext: VideoNvExt,
     ) -> None:
-        """Overlay only fields explicitly supplied by a video request."""
-        if nvext.num_frames is not None and nvext.num_frames <= 0:
-            raise ValueError("nvext.num_frames must be greater than zero")
-        if nvext.fps is not None and nvext.fps <= 0:
-            raise ValueError("nvext.fps must be greater than zero")
-        if req.seconds is not None and req.seconds <= 0:
-            raise ValueError("seconds must be greater than zero")
+        """Overlay only fields explicitly supplied by a video request.
 
+        `num_frames`, `fps`, and `seconds` arrive at least 1: the shared
+        request model bounds them as the frontend does.
+        """
         if req.size is not None:
             width, height = parse_size(req.size)
             sp.width = width

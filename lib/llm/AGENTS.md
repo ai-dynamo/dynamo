@@ -72,7 +72,7 @@ do not carry compatibility branches forward indefinitely.
 # Frontend Serving-Load Metrics
 
 The frontend's request metrics (`http/service/metrics.rs`) also feed the frame
-it publishes for the KV DC Relay's `SubscribeServingLoad` (`frontend_load.rs`),
+it publishes for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`),
 so `/metrics` and the Relay report the same numbers. Three are specific to that
 use and are experimental (see the Metrics Catalog):
 
@@ -91,7 +91,8 @@ request's shared `RequestMetrics` handle. Create a model's series when it
 registers, never from the publish path, which only reads. Before adding or
 changing a frontend metric, name its reader, check it is not a query over
 existing metrics or a sibling that should be a label, write its series count in
-the pull request, and add it to the
-[Metrics Inventory](../../docs/fern/pages/reference/observability/metrics-inventory.md).
-If one table row cannot describe its behavior, also describe it in the Metrics
-Catalog.
+the pull request, and add it to the Metrics Catalog.
+
+## Decision Cleanup Diagnostics
+
+Report decision cleanup overruns through the request-correlated warning, not a separate metric until a continuous consumer is identified. Preserve the current tracing span when spawning cleanup, and retain admission until local work finishes. Use the warning to investigate overdue cleanup; it does not prove physical GPU settlement. This diagnostic adds no Prometheus series.

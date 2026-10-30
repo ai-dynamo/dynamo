@@ -253,12 +253,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
 # becomes redundant, delete it and keep those assertions.
 #
-# CUDA only, and it has to be: the replacement ffmpeg is copied in under
-# `device == "cuda"` just below. Running the purge on XPU strips the base image's
-# media stack and puts nothing back, leaving that image with no ffmpeg at all and
-# an empty IMAGEIO_FFMPEG_EXE -- worse than either leaving it alone or replacing
-# it properly. The XPU image is not published, so there is nothing to remove from
-# it in the first place; the codec gate skips it for the same reason. Matches the
+# CUDA only. On XPU the codec-bearing wheels from the SGLang install are not
+# purged yet; both devices get the in-tree VP9 ffmpeg below. Matches the
 # equivalent purge in vllm_runtime.Dockerfile.
 {% if device == "cuda" %}
 RUN set -eux; \
@@ -330,13 +326,14 @@ RUN rm -rf \
         /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
     [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
 
-{% if device == "cuda" %}
+{% if device in ("cuda", "xpu") %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
-# via IMAGEIO_FFMPEG_EXE. The upstream ffmpeg was purged above, so this
-# VP9-only build is the only ffmpeg present; the video-generation
-# handler (CUDA DiffGenerator) encodes libvpx-vp9 with it. Same pattern as
-# vllm_runtime.Dockerfile.
+# via IMAGEIO_FFMPEG_EXE. On CUDA the upstream ffmpeg was purged above; the XPU
+# base ships none. Either way this is the only ffmpeg CLI in the image; the
+# video-generation handler (DiffGenerator) encodes libvpx-vp9 with it, and the
+# media-ffmpeg runtime wheel links its libav* for frontend video decoding. Same
+# pattern as vllm_runtime.Dockerfile.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -352,18 +349,10 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where SGLang shipping no encoder passed every PR gate.
-RUN set -eu; \
-    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 
-# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
-# image build if the runtime wheel was accidentally compiled without it.
+# Frontend video decoding is part of the shipped SGLang CUDA and XPU contract.
+# Fail the image build if the runtime wheel was accidentally compiled without it.
 {% if target not in ("dev", "local-dev") %}
 RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
 {% endif %}

@@ -17,6 +17,26 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v170"></a>
+
+## v1.7.0 - Upcoming
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **KV DC Relay is renamed Pool Relay** ([#17215](https://github.com/ai-dynamo/dynamo/pull/17215)). The old names are removed without aliases. The gRPC service name and pool ID hash domain stay unchanged until separate protocol work.
+
+| Old | New |
+| :---- | :---- |
+| `dynamo.kv_dc_relay` | `dynamo.pool_relay` |
+| Python `KvDcRelay`; Rust `KvDcRelay*` | `PoolRelay`; `PoolRelay*` |
+| `--dc-id`, `DYN_DC_ID`, `DcId` | `--cluster-id`, `DYN_CLUSTER_ID`, `ClusterId` |
+| `DcPoolCatalog`, `DcPoolDescriptor`, `DcRelayIdentity` | `PoolCatalogSnapshot`, `PoolDescriptor`, `PoolRelayIdentity` |
+| `ProducerIdentity::dc_id()`, `GlobalCkfBuildError::DuplicateDcLane` | `cluster_id()`, `DuplicateClusterLane` |
+| `{ns}.kv_dc_relay.control` | `{ns}.pool_relay.control` |
+| `kv_dc_relay_<hash>` diagnostic component; `service="kv_dc_relay"` metrics label | `pool_relay_<hash>`; `service="pool_relay"` |
+| `dc_id` in `PoolId`, in `health()`/`stats()`/`snapshot()` JSON, and in the `state_source` of KV state-agent events | `cluster_id` |
+| `kv-dc-relay.md`, `kv-dc-relay-configuration.md` | `pool-relay.md`, `pool-relay-configuration.md` (old URLs redirect) |
+
+  > **Migrate:** Update launch commands, imports, dashboards, alerts, and saved JSON together. Upgrade KV state agents and the routers that read their events together, because a router cannot decode state-agent events from the other version. Regenerate version-3 `dc_ckf_consumer_bench` corpora as version 4 before loading them.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
