@@ -45,6 +45,7 @@ def is_supported_kvcr_linker_topology(server_args) -> bool:
         getattr(server_args, name, 1) in (None, 1)
         for name in (
             "nnodes",
+            "tp_size",
             "dp_size",
             "attn_dp_size",
             "attn_cp_size",

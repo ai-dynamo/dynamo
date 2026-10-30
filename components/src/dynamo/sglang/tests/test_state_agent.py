@@ -17,7 +17,7 @@ from dynamo.llm import WorkerType
 
 pytest.importorskip("sglang")
 
-from dynamo.sglang import register, state_agent  # noqa: E402
+from dynamo.sglang import state_agent  # noqa: E402
 from dynamo.sglang.state_agent import (  # noqa: E402
     StateAgentLifecycle,
     state_agent_descriptors,
@@ -116,11 +116,9 @@ def linker_fixture():
     return engine, config, source, info
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("mode", LINKER_WORKER_MODES)
-def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size, mode):
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(mode):
     engine, config, source, _ = linker_fixture()
-    config.server_args.tp_size = tp_size
     config.serving_mode = mode
     (descriptor,) = state_agent_descriptors(engine, config)
     assert descriptor["cache_owner_id"] == source["cache_owner_id"]
@@ -139,13 +137,13 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source(tp_size
     }
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize(
     "worker_type", [WorkerType.Aggregated, WorkerType.Prefill, WorkerType.Decode]
 )
-def test_linker_registration_uses_state_agent(monkeypatch, tp_size, worker_type):
+def test_linker_registration_uses_state_agent(monkeypatch, worker_type):
+    from dynamo.sglang import register
+
     engine, config, source, _ = linker_fixture()
-    config.server_args.tp_size = tp_size
     config.server_args.model_path = config.server_args.served_model_name = "test-model"
     config.dynamo_args.use_sglang_tokenizer = False
     config.dynamo_args.model_source_uri = None
@@ -176,6 +174,7 @@ def test_linker_registration_uses_state_agent(monkeypatch, tp_size, worker_type)
 @pytest.mark.parametrize(
     "change,mode,match",
     [
+        ({"tp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "supported linker"),
         ({}, DisaggregationMode.ENCODE, "hint-forwarding LLM worker"),
@@ -191,7 +190,6 @@ def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
 
 def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
     engine, config, source, info = linker_fixture()
-    config.server_args.tp_size = 2
     config.serving_mode = DisaggregationMode.PREFILL
     engine.async_generate = lambda: None
     with pytest.raises(ValueError, match="hint-forwarding"):
@@ -214,7 +212,6 @@ def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
 )
 def test_linker_inventory_rejects_wrong_ownership_contract(target, field, value, match):
     engine, config, source, info = linker_fixture()
-    config.server_args.tp_size = 2
     config.serving_mode = DisaggregationMode.PREFILL
     {"source": source, "event": info["kv_event_sources"][0]}[target][field] = value
     with pytest.raises(ValueError, match=match):

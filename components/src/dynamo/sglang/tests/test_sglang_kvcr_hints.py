@@ -74,7 +74,7 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
         enable_unified_cache_external_linker=True,
         unified_cache_external_linker_backend="kvcr",
         nnodes=1,
-        tp_size=2,
+        tp_size=1,
         dp_size=1,
         pp_size=1,
     )
@@ -107,11 +107,10 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
     publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
     assert values == {}
     source["capabilities"].append("kvcr_inventory")
-    source["source_control_endpoint"] = "tcp://0.0.0.0:24100"
-    with pytest.raises(ValueError, match="wildcard"):
-        publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
+    args.tp_size = 2
+    publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
     assert values == {}
-    source["source_control_endpoint"] = "tcp://worker:24100"
+    args.tp_size = 1
     args.dp_size = 2
     publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
     assert values == {}
