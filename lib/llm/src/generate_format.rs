@@ -337,6 +337,14 @@ pub(crate) mod test_formats {
             Ok(())
         }
 
+        fn migrate(
+            &mut self,
+            _: usize,
+            _: &mut PreprocessedRequest,
+        ) -> Result<Option<LLMEngineOutput>, String> {
+            Ok(None)
+        }
+
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
             Ok(None)
         }
@@ -396,6 +404,7 @@ pub(crate) mod test_formats {
                         .map_err(|error| ClientError::new(error.to_string()))?;
                     Ok(Bound {
                         request,
+                        migration: Err("the test format does not migrate".to_string()),
                         exchange: Box::new(PassthroughExchange),
                     })
                 }),
