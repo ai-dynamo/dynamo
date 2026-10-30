@@ -149,6 +149,24 @@ impl<R: Read + Seek> NpzReader<R> {
         Ok(Self(ZipArchive::new(reader)?))
     }
 
+    /// Lists the entry names with one `.npy` suffix removed, as `numpy.load` lists them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#17086 checks for the optional prefill2d_* arrays with it"
+        )
+    )]
+    fn names(&self) -> Result<Vec<String>> {
+        self.0
+            .file_names()
+            .map(|name| -> Result<String> {
+                let name = name?;
+                Ok(name.strip_suffix(".npy").unwrap_or(&name).to_owned())
+            })
+            .collect()
+    }
+
     /// Reads entry `name`, else `{name}.npy`, the name that `numpy.savez` writes. It refuses an
     /// entry whose local header disagrees with the central directory.
     fn by_name<A: ReadNpyExt>(&mut self, name: &str) -> Result<A> {
@@ -481,6 +499,7 @@ mod tests {
         );
 
         let mut npz = NpzReader::new(bytes).unwrap();
+        assert_eq!(npz.names().unwrap(), ["a", "a", "b"]);
         assert_eq!(npz.by_name::<Array1<f64>>("a").unwrap(), array![1.0]);
         assert_eq!(npz.by_name::<Array1<f64>>("b").unwrap(), array![3.0]);
         let missing = npz.by_name::<Array1<f64>>("c").unwrap_err();
