@@ -7,9 +7,6 @@ import (
 )
 
 const (
-	DefaultUserId = "default"
-	DefaultOrgId  = "default"
-
 	DynamoServicePort       = 8000
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"

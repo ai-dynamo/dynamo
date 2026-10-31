@@ -162,13 +162,10 @@ async fn collect(
         .await
 }
 
-/// A model-name mismatch is not detectable over this contract: a real
-/// TensorRT-LLM server loads one model and answers `GetModelInfo` for whatever
-/// name it is asked about, so the sidecar registers under its own
-/// `--model-path` either way. Pinning that here stops a future change from
-/// inventing a check the engine cannot back.
+/// A real TensorRT-LLM server answers `GetModelInfo` for any nonempty model
+/// path; the sidecar must register the reported name while keeping its source.
 #[tokio::test]
-async fn sidecar_start_does_not_check_the_served_model_name() {
+async fn sidecar_registers_the_engine_reported_name() {
     let server = RunningServer::start_with(
         MockerServerConfig {
             model: "some-other-model".to_string(),
@@ -181,6 +178,11 @@ async fn sidecar_start_does_not_check_the_served_model_name() {
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
 
     let config = engine.start(0).await.expect("start is not a name check");
+    assert_eq!(config.model, MODEL);
+    assert_eq!(
+        config.served_model_name.as_deref(),
+        Some("some-other-model")
+    );
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(4_096),

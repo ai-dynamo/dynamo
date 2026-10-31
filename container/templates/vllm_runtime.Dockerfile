@@ -15,11 +15,14 @@ FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
+{% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
 ARG PYTHON_VERSION
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+{% if has_transformers_pin -%}
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
+{% endif -%}
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -78,6 +81,13 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
@@ -184,12 +194,14 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_plugins = "modelexpress,dynamo_nixl_telemetry" if context.vllm.enable_modelexpress == "true" else "dynamo_nixl_telemetry" %}
 {% endif %}
 
+{% if has_transformers_pin -%}
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
 
+{% endif -%}
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
@@ -376,15 +388,9 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where an image with no working encoder passed every PR gate.
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 RUN set -eu; \
     ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi; \
     # vllm-rs decodes video with `ffprobe` plus `ffmpeg -f image2pipe -vcodec ppm`.
     "$ff" -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
       || { echo "ERROR: shipped ffmpeg ($ff) has no image2pipe muxer" >&2; exit 1; }; \
@@ -480,6 +486,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # --no-deps it would arrive here without msgpack, which vLLM does not pull in.
 # lmcache is filtered too: its floor refreshes the CUDA base's bundled copy,
 # and installing it --no-deps on a base without it would ship it unresolved.
+# The pydantic pin corrects the CUDA base only; other bases keep their own copy.
 # The check asserts the distribution is absent rather than the `mooncake` module,
 # so it tests the filter without assuming what a future base may ship. It is
 # written as a positive test with no `!` and no stderr redirect: a broken
@@ -492,7 +499,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^lmcache' \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^lmcache' -e '^pydantic' \
         /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
@@ -595,6 +602,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
+{% if has_transformers_pin -%}
 # Check that later package layers preserve the Omni-compatible versions.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
@@ -606,6 +614,7 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
         raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
+{% endif -%}
 {% if device == "cuda" %}
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr

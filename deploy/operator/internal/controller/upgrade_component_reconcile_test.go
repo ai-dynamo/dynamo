@@ -151,7 +151,7 @@ func TestUpgradeComponentReconcileRecorder(t *testing.T) {
 				return result.result, result.err
 			})
 			readyBefore := recorder.graphReady(graph, 1) == nil
-			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "history", Name: "other"}}
+			req := ctrl.Request{Namespace: "history", Name: "other"}
 			for range 2 {
 				_, err := recorder.Reconcile(t.Context(), req)
 				require.ErrorIs(t, err, result.err)

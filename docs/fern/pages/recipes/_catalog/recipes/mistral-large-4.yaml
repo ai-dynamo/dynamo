@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: mistral-large-4
+title: Mistral Large 4
+page: pages/recipes/model-recipes/mistral-large-4.mdx
+provider: mistral
+model:
+  name: Mistral Large 4
+  precision: NVFP4 weights, FP8 or NVFP4 KV cache
+status: experimental  # pre-release
+targets:
+- id: vllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - nvfp4
+  - dspark-speculative-decoding
+  - cpu-kv-offload
+  - hybrid-kv-manager-off
+  workload:
+    type: agentic-trace-replay
+    traffic: AgentX agentic trace replay, 1M-token context
+    sla: 50 user output tok/s, TTFT P50 <= 2 s
+  deploy:
+    asset: recipes/mistral-large-4/vllm/agg-gb300-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - dspark-speculative-decoding
+  - cpu-kv-offload
+  - hybrid-kv-manager-off
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: AgentX agentic trace replay, 1M-token context
+    sla: 50 user output tok/s, TTFT P50 <= 2 s
+  deploy:
+    asset: recipes/mistral-large-4/vllm/disagg-gb300-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-vr200
+  recommended: false
+  hardware:
+    gpu: VR200
+    count: 4
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp4-kv-cache
+  - dspark-speculative-decoding
+  - cpu-kv-offload
+  - hybrid-kv-manager-off
+  workload:
+    type: agentic-trace-replay
+    traffic: AgentX agentic trace replay, 1M-token context
+    sla: 50 user output tok/s, TTFT P50 <= 2 s
+  deploy:
+    asset: recipes/mistral-large-4/vllm/agg-vr-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-vr200
+  recommended: false
+  hardware:
+    gpu: VR200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - fp4-kv-cache
+  - dspark-speculative-decoding
+  - cpu-kv-offload
+  - hybrid-kv-manager-off
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: AgentX agentic trace replay, 1M-token context
+    sla: 50 user output tok/s, TTFT P50 <= 2 s
+  deploy:
+    asset: recipes/mistral-large-4/vllm/disagg-vr-agentic/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null

@@ -22,7 +22,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -226,7 +225,7 @@ func TestAdoptBuildCheckpoints(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe a deployment at generation 2")
-			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			deployment := &v1alpha1.LPXGraphDeployment{Generation: 2}
 			deployment.Status.ObservedGeneration = test.observed
 			if test.recorded {
 				deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{}
@@ -243,7 +242,7 @@ func TestBuildCheckpointAdoptionSurvivesPendingBuildDownload(t *testing.T) {
 	const modelExpressURL = checkpointTestModelExpressURL
 
 	t.Log("Record adoption when a new deployment is first reconciled")
-	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	deployment := &v1alpha1.LPXGraphDeployment{Generation: 1}
 	markBuildCheckpointAdoption(modelExpressURL, deployment)
 
 	t.Log("A reconcile that waits for the build download still observes the generation")
@@ -261,7 +260,7 @@ func TestBuildCheckpointAdoptionSurvivesPendingBuildDownload(t *testing.T) {
 	require.True(t, adoptBuildCheckpoints(modelExpressURL, deployment))
 
 	t.Log("A deployment that never recorded adoption still has no record")
-	upgraded := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	upgraded := &v1alpha1.LPXGraphDeployment{Generation: 1}
 	upgraded.Status.ObservedGeneration = upgraded.Generation
 	_, err = r.reconcileCheckpointDownloads(t.Context(), upgraded, nil)
 	require.NoError(t, err)
@@ -334,10 +333,9 @@ func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
 
 			t.Log("Journal one Agent Pod for release")
 			agentClique := getResource[*grovev1alpha1.PodClique](t, objects, selected.plan.Agents[0].CliqueName)
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			pod := &corev1.Pod{
 				Namespace: child.Namespace, Name: "released", UID: "released-uid",
-				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
-			}}
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}}
 			sibling := pod.DeepCopy()
 			sibling.Name, sibling.UID = "sibling", "sibling-uid"
 			createLPXTestObjects(t, ctx, r.Client, pod, sibling)
@@ -364,7 +362,7 @@ func TestPendingCheckpointHoldsAnAddedWorkload(t *testing.T) {
 	t.Log("Publish one hybrid workload whose checkpoint is downloaded")
 	ctx := t.Context()
 	_, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
-	dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+	dgd.Spec.Components[0].Replicas = new(int32(1))
 	child := newLPXTestDeployment(t, dgd)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, ready: map[string]bool{checkpointTestKey: true}}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)

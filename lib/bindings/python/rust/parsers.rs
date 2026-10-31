@@ -41,14 +41,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn muse_glimmer_is_selectable_in_both_lists() {
-        assert!(
-            get_tool_parser_names().contains(&"muse_glimmer"),
-            "muse_glimmer must be a selectable tool-call parser name"
-        );
-        assert!(
-            get_reasoning_parser_names().contains(&"muse_glimmer"),
-            "muse_glimmer must be a selectable reasoning parser name"
-        );
+    fn unified_families_are_selectable_in_both_lists() {
+        for parser in ["muse_glimmer", "muse_spark", "muse_spark_open"] {
+            assert!(
+                get_tool_parser_names().contains(&parser),
+                "{parser} must be a selectable tool-call parser name"
+            );
+            assert!(
+                get_reasoning_parser_names().contains(&parser),
+                "{parser} must be a selectable reasoning parser name"
+            );
+        }
     }
 }

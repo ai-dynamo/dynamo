@@ -25,6 +25,14 @@ pub(crate) struct Args {
     )]
     pub default_thinking_mode: Option<String>,
 
+    /// Shared secret for signed parent-session routing hints sent to OpenEngine.
+    #[arg(
+        long,
+        env = "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY",
+        hide_env_values = true
+    )]
+    pub subagent_affinity_auth_key: Option<String>,
+
     /// Model maximum sequence length (input + output). Used to register the
     /// context length and to derive a default `max_tokens` when a request omits
     /// one. A value supplied here takes precedence over the context length
@@ -36,4 +44,45 @@ pub(crate) struct Args {
     /// `max_tokens` are rejected.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH", value_parser = clap::value_parser!(u32).range(1..))]
     pub context_length: Option<u32>,
+}
+
+/// Match the shared media policy's enabled default, rejecting invalid startup configuration.
+pub(crate) fn allow_remote_media_urls(
+    value: Option<&str>,
+) -> Result<bool, dynamo_backend_common::DynamoError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(true);
+    };
+    dynamo_runtime::config::parse_bool(value).map_err(|error| {
+        crate::client::invalid_argument(format!("DYN_MM_ALLOW_REMOTE_URLS: {error}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allow_remote_media_urls;
+
+    #[test]
+    fn remote_url_policy_defaults_and_boolean_vocabulary() {
+        for value in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("1"),
+            Some("TRUE"),
+            Some(" on "),
+            Some("yes"),
+        ] {
+            assert!(allow_remote_media_urls(value).unwrap(), "{value:?}");
+        }
+        for value in ["0", "FALSE", " off ", "no"] {
+            assert!(!allow_remote_media_urls(Some(value)).unwrap(), "{value}");
+        }
+        assert!(
+            allow_remote_media_urls(Some("invalid"))
+                .unwrap_err()
+                .to_string()
+                .contains("DYN_MM_ALLOW_REMOTE_URLS")
+        );
+    }
 }

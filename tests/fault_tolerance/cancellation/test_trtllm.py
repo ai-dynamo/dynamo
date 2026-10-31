@@ -91,7 +91,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         health_check_urls = [
             (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-            (f"http://localhost:{frontend_port}/health", check_health_generate),
+            (
+                f"http://localhost:{frontend_port}/health?instances=true",
+                check_health_generate,
+            ),
         ]
 
         # Set health check based on worker type

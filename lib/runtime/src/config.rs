@@ -820,6 +820,7 @@ mod tests {
 
         match std::env::var(MODE).as_deref() {
             Ok("warning") => {
+                let _interest_guard = crate::test_utils::tracing_interest_guard();
                 let subscriber = tracing_subscriber::fmt()
                     .with_ansi(false)
                     .with_writer(std::io::stderr)
@@ -830,6 +831,7 @@ mod tests {
                 });
             }
             Ok("conflict") => {
+                let _interest_guard = crate::test_utils::tracing_interest_guard();
                 let subscriber = tracing_subscriber::fmt()
                     .with_ansi(false)
                     .with_writer(std::io::stderr)

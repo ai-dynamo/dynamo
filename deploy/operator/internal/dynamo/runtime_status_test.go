@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestResolveComponentRuntimeStatus(t *testing.T) {
@@ -108,7 +107,7 @@ func TestResolveGroveComponentRuntimeStatusesUsesServingRole(t *testing.T) {
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "decode",
 				ComponentType: v1beta1.ComponentTypeDecode,
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 			}},
 		},
@@ -161,7 +160,7 @@ func TestNativeSidecarStatusDoesNotPredictIdentity(t *testing.T) {
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers:     []corev1.Container{{Name: "main", Image: "engine:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model", "--served-model-name", "engine-model", "--endpoint", "ns.engine.generate"}}},
-					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: tc.command, Args: tc.args, Env: []corev1.EnvVar{{Name: "WORKER_NAME", Value: "backend"}}}},
+					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: new(corev1.ContainerRestartPolicyAlways), Command: tc.command, Args: tc.args, Env: []corev1.EnvVar{{Name: "WORKER_NAME", Value: "backend"}}}},
 				}},
 			}
 			original := component.DeepCopy()

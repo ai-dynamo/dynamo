@@ -94,7 +94,7 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 			EnvFrom: []corev1.EnvFromSource{{
 				Prefix: "WORKER_",
 				ConfigMapRef: &corev1.ConfigMapEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
+					Name: "worker-config",
 				},
 			}},
 			Resources: corev1.ResourceRequirements{
@@ -113,8 +113,8 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 				{Name: "config", MountPath: "/etc/worker", ReadOnly: true},
 			},
 			SecurityContext: &corev1.SecurityContext{
-				RunAsNonRoot:             ptr.To(true),
-				AllowPrivilegeEscalation: ptr.To(false),
+				RunAsNonRoot:             new(true),
+				AllowPrivilegeEscalation: new(false),
 			},
 		}},
 		InitContainers: []corev1.Container{{
@@ -131,26 +131,26 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 		Volumes: []corev1.Volume{
 			{
 				Name: "models",
-				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: "model-cache",
 					ReadOnly:  true,
-				}},
+				},
 			},
 			{
 				Name: "config",
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
-				}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: "worker-config",
+				},
 			},
 		},
 		HostNetwork:           true,
 		HostPID:               true,
-		ShareProcessNamespace: ptr.To(true),
+		ShareProcessNamespace: new(true),
 		SecurityContext: &corev1.PodSecurityContext{
-			RunAsNonRoot: ptr.To(true),
+			RunAsNonRoot: new(true),
 			FSGroup:      ptr.To[int64](1000),
 		},
-		RuntimeClassName: ptr.To("nvidia"),
+		RuntimeClassName: new("nvidia"),
 		NodeName:         "gpu-node-07",
 		NodeSelector: map[string]string{
 			"kubernetes.io/arch":     "amd64",
@@ -288,9 +288,9 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 				)
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: "model-cache",
-					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 						ClaimName: "capture-dgd-model-cache",
-					}},
+					},
 				})
 			},
 			backend: "vllm",
