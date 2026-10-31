@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+  name: sglang-agg-kvcr
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: ${DYNAMO_SGLANG_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+    runtimeVersionOverride: ${DYNAMO_VERSION}
+  - name: worker
+    podTemplate:
+      spec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                  - worker
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - sglang-agg-kvcr
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            exec python3 -m dynamo.sglang \
+              --model-path Qwen/Qwen3-0.6B --tp-size 1 --page-size 64 --max-total-tokens 65536 \
+              --enable-hierarchical-cache --hicache-ratio 1.5 \
+              --hicache-mem-layout page_first --hicache-write-policy write_through \
+              --hicache-storage-backend kvcr --hicache-storage-prefetch-policy wait_complete \
+              --hicache-storage-backend-extra-config "{\"control_advertise_host\": \"$POD_IP\", \"control_port\": 24100, \"nixl_listen_port\": 24200, \"local_dram_bytes\": 8589934592}" \
+              --kv-events-config '{"publisher": "zmq", "topic": "", "endpoint": "tcp://*:24020"}'
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_SGLANG_IMAGE}
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 60
+          name: main
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 2
+    type: worker
+    runtimeVersionOverride: ${DYNAMO_VERSION}
