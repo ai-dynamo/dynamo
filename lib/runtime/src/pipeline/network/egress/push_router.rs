@@ -31,7 +31,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, Weak, atomic::AtomicU64},
     task::Poll,
     time::Instant,
 };
@@ -187,6 +187,13 @@ pub trait WorkerLoadMonitor: Send + Sync {
 pub trait MultimodalCacheIndex: Send + Sync {
     fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)>;
     fn remove_worker(&self, worker_id: u64);
+
+    /// Returns a token cancelled when this index is dropped, when available.
+    /// Implementations without an index lifecycle token use the runtime token
+    /// as their only shutdown path.
+    fn drop_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        None
+    }
 }
 
 pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
@@ -421,7 +428,7 @@ impl RuntimeEndpointId {
 
 /// At most one multimodal cache cleanup watcher per runtime endpoint.
 static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
-    dashmap::DashMap<RuntimeEndpointId, ()>,
+    dashmap::DashMap<RuntimeEndpointId, Weak<dyn MultimodalCacheIndex>>,
 > = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
@@ -541,35 +548,54 @@ fn spawn_multimodal_cache_cleanup_watcher(
     endpoint: Endpoint,
     indexer: Arc<dyn MultimodalCacheIndex>,
     cancel_token: tokio_util::sync::CancellationToken,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     use crate::discovery::{DiscoveryEvent, DiscoveryInstanceId, DiscoveryQuery};
+    use dashmap::mapref::entry::Entry;
     use tokio_stream::StreamExt as _;
 
-    let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
     let watcher_id = RuntimeEndpointId::for_endpoint(&endpoint);
-    if guard.insert(watcher_id.clone(), ()).is_some() {
-        tracing::debug!(
-            connection_id = watcher_id.connection_id,
-            ?watcher_id.endpoint_id,
-            "Multimodal cache cleanup watcher already running for this runtime endpoint, skipping"
-        );
-        return;
+    let drop_token = indexer.drop_token();
+    let indexer = Arc::downgrade(&indexer);
+    let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    match guard.entry(watcher_id.clone()) {
+        Entry::Occupied(mut entry) if entry.get().strong_count() == 0 => {
+            *entry.get_mut() = indexer.clone();
+        }
+        Entry::Occupied(_) => {
+            tracing::debug!(
+                connection_id = watcher_id.connection_id,
+                ?watcher_id.endpoint_id,
+                "Multimodal cache cleanup watcher already running for this runtime endpoint, skipping"
+            );
+            return None;
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(indexer.clone());
+        }
     }
 
     let endpoint_name = endpoint.name().to_string();
     let namespace = endpoint.component().namespace().name();
     let component = endpoint.component().name().to_string();
 
-    tokio::spawn(async move {
-        struct GuardRelease(RuntimeEndpointId);
+    Some(tokio::spawn(async move {
+        struct GuardRelease(RuntimeEndpointId, Weak<dyn MultimodalCacheIndex>);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
-                    map.remove(&self.0);
+                    map.remove_if(&self.0, |_, current| Weak::ptr_eq(current, &self.1));
                 }
             }
         }
-        let _release = GuardRelease(watcher_id);
+        let _release = GuardRelease(watcher_id, indexer.clone());
+        let indexer_dropped = async move {
+            if let Some(drop_token) = drop_token {
+                drop_token.cancelled().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(indexer_dropped);
 
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
@@ -579,25 +605,45 @@ fn spawn_multimodal_cache_cleanup_watcher(
                 endpoint: endpoint_name.clone(),
             };
 
-            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+            let discovery = endpoint.drt().discovery();
+            let discovery_request = discovery.list_and_watch(query, None);
+            tokio::pin!(discovery_request);
+            let discovery_result = tokio::select! {
+                result = &mut discovery_request => result,
+                _ = cancel_token.cancelled() => break 'reconnect,
+                _ = &mut indexer_dropped => break 'reconnect,
+            };
+
+            let mut stream = match discovery_result {
                 Ok(stream) => stream,
                 Err(error) => {
                     tracing::warn!(
                         endpoint = %endpoint_name,
                         "Failed to start multimodal cache cleanup watcher (will retry): {error}"
                     );
+                    let reconnect_delay = tokio::time::sleep(RECONNECT_BACKOFF);
+                    tokio::pin!(reconnect_delay);
                     tokio::select! {
-                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = &mut reconnect_delay => continue 'reconnect,
                         _ = cancel_token.cancelled() => break 'reconnect,
+                        _ = &mut indexer_dropped => break 'reconnect,
                     }
                 }
             };
 
             loop {
                 tokio::select! {
+                    _ = &mut indexer_dropped => break 'reconnect,
                     event = stream.next() => {
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
+                                let Some(indexer) = indexer.upgrade() else {
+                                    tracing::debug!(
+                                        endpoint = %endpoint_name,
+                                        "Multimodal cache index dropped; cleanup watcher exiting"
+                                    );
+                                    break 'reconnect;
+                                };
                                 indexer.remove_worker(eid.instance_id);
                             }
                             Some(Ok(DiscoveryEvent::Added(_)))
@@ -626,7 +672,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
         }
 
         tracing::debug!(endpoint = %endpoint_name, "Multimodal cache cleanup watcher exiting");
-    });
+    }))
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
@@ -761,11 +807,11 @@ where
 
         // Drop stale cache-index entries when workers leave discovery.
         if let Some(indexer) = multimodal_cache_indexer.clone() {
-            spawn_multimodal_cache_cleanup_watcher(
+            drop(spawn_multimodal_cache_cleanup_watcher(
                 client.endpoint.clone(),
                 indexer,
                 client.endpoint.drt().primary_token(),
-            );
+            ));
         }
         let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
@@ -2286,7 +2332,7 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::{
         DistributedRuntime, Runtime,
@@ -3752,6 +3798,135 @@ mod tests {
         assert_eq!(first.endpoint_id, second.endpoint_id);
         assert_ne!(first.connection_id, second.connection_id);
         assert_ne!(first, second);
+
+        runtime.shutdown();
+    }
+
+    /// Cache index whose teardown is externally observable.
+    struct ObservableCacheIndex {
+        drop_token: tokio_util::sync::CancellationToken,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl ObservableCacheIndex {
+        fn new() -> (Arc<Self>, Arc<AtomicBool>) {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let index = Arc::new(Self {
+                drop_token: tokio_util::sync::CancellationToken::new(),
+                dropped: dropped.clone(),
+            });
+            (index, dropped)
+        }
+    }
+
+    impl MultimodalCacheIndex for ObservableCacheIndex {
+        fn workers_with_cache_key_hits(&self, _cache_keys: &[String]) -> Vec<(u64, usize)> {
+            Vec::new()
+        }
+
+        fn remove_worker(&self, _worker_id: u64) {}
+
+        fn drop_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+            Some(self.drop_token.clone())
+        }
+    }
+
+    impl Drop for ObservableCacheIndex {
+        fn drop(&mut self) {
+            self.drop_token.cancel();
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn cache_watcher_guard()
+    -> &'static dashmap::DashMap<RuntimeEndpointId, Weak<dyn MultimodalCacheIndex>> {
+        ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new)
+    }
+
+    fn cache_watcher_is_for(
+        guard: &dashmap::DashMap<RuntimeEndpointId, Weak<dyn MultimodalCacheIndex>>,
+        watcher_id: &RuntimeEndpointId,
+        indexer: &Weak<dyn MultimodalCacheIndex>,
+    ) -> bool {
+        guard
+            .get(watcher_id)
+            .is_some_and(|current| Weak::ptr_eq(current.value(), indexer))
+    }
+
+    /// The cleanup watcher must not keep its index alive after the last
+    /// consumer drops it when the index exposes a lifecycle token.
+    #[tokio::test]
+    async fn cache_cleanup_watcher_stops_with_last_index_consumer() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("cache-watcher-last-consumer".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+
+        let (index, dropped) = ObservableCacheIndex::new();
+        let index: Arc<dyn MultimodalCacheIndex> = index;
+        let old_watcher = spawn_multimodal_cache_cleanup_watcher(
+            endpoint.clone(),
+            index.clone(),
+            drt.primary_token(),
+        )
+        .expect("first index must start a cleanup watcher");
+
+        let watcher_id = RuntimeEndpointId::for_endpoint(&endpoint);
+        let guard = cache_watcher_guard();
+        assert!(
+            guard.contains_key(&watcher_id),
+            "watcher must register its dedup entry"
+        );
+
+        drop(index);
+
+        // Re-arm before the old task has run its Drop guard. Its cleanup must
+        // not remove the replacement generation.
+        let (fresh, fresh_dropped) = ObservableCacheIndex::new();
+        let fresh: Arc<dyn MultimodalCacheIndex> = fresh;
+        let fresh_weak = Arc::downgrade(&fresh);
+        let fresh_watcher = spawn_multimodal_cache_cleanup_watcher(
+            endpoint.clone(),
+            fresh.clone(),
+            drt.primary_token(),
+        )
+        .expect("fresh index must start a cleanup watcher");
+        assert!(
+            guard.contains_key(&watcher_id),
+            "fresh index must re-arm the watcher for the same endpoint"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), old_watcher)
+            .await
+            .expect("old watcher must exit after its index drops")
+            .expect("old watcher must not panic");
+        assert!(
+            cache_watcher_is_for(guard, &watcher_id, &fresh_weak),
+            "old watcher must not remove a replacement generation"
+        );
+        assert!(
+            dropped.load(Ordering::Relaxed),
+            "watcher must not keep the old index alive with a strong reference"
+        );
+
+        drop(fresh);
+        tokio::time::timeout(std::time::Duration::from_secs(5), fresh_watcher)
+            .await
+            .expect("fresh watcher must exit after its index drops")
+            .expect("fresh watcher must not panic");
+        assert!(
+            !guard.contains_key(&watcher_id),
+            "re-armed watcher must also exit with its index"
+        );
+        assert!(
+            fresh_dropped.load(Ordering::Relaxed),
+            "re-armed watcher must not keep the fresh index alive"
+        );
 
         runtime.shutdown();
     }
