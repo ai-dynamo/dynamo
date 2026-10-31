@@ -1,13 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-
 use crate::indexer::KvRouterError;
 use crate::scheduling::KvSchedulerError;
 use crate::sequences::SequenceError;
+
+/// HTTP status numbers the kernel's errors map to. Plain integers: the kernel does
+/// not link an HTTP crate; `kv-router`'s server turns them into responses.
+mod status {
+    pub(super) const BAD_REQUEST: u16 = 400;
+    pub(super) const NOT_FOUND: u16 = 404;
+    pub(super) const CONFLICT: u16 = 409;
+    pub(super) const TOO_MANY_REQUESTS: u16 = 429;
+    pub(super) const INTERNAL_SERVER_ERROR: u16 = 500;
+    pub(super) const SERVICE_UNAVAILABLE: u16 = 503;
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
@@ -32,26 +39,24 @@ pub enum SelectionError {
 }
 
 impl SelectionError {
-    fn status(&self) -> StatusCode {
+    /// The HTTP status class this error maps to, as a bare number; the HTTP
+    /// adapter turns it into a response.
+    pub fn status_code(&self) -> u16 {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::NotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => status::BAD_REQUEST,
+            Self::NotReady(_) => status::SERVICE_UNAVAILABLE,
+            Self::NotFound(_) => status::NOT_FOUND,
+            Self::Conflict(_) => status::CONFLICT,
+            Self::Internal(_) => status::INTERNAL_SERVER_ERROR,
             Self::Scheduler(error) => scheduler_error_status(error),
             Self::Sequence(error) => sequence_error_status(error),
-            Self::Indexer(KvRouterError::IndexerOffline) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Indexer(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Indexer(KvRouterError::IndexerOffline) => status::SERVICE_UNAVAILABLE,
+            Self::Indexer(_) => status::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// HTTP-style status code for this error, for callers that consume the
     /// service in-process without an HTTP layer.
-    pub fn status_code(&self) -> u16 {
-        self.status().as_u16()
-    }
-
     /// Stable, machine-readable category for this error.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -68,78 +73,40 @@ impl SelectionError {
     }
 }
 
-fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
+fn scheduler_error_status(error: &KvSchedulerError) -> u16 {
     match error {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::AllEligibleWorkersFiltered
         | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        | KvSchedulerError::InitFailed(_) => status::SERVICE_UNAVAILABLE,
+        KvSchedulerError::WorkerSelectionPolicy(_) => status::INTERNAL_SERVER_ERROR,
         // Deadline expiry is deliberately 429, not 504: the deadline elapsed
         // while waiting for capacity, so it is backpressure the client should
         // respond to like the overloaded family, not a gateway timeout.
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. }
         | KvSchedulerError::QueueRejected(_)
-        | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
+        | KvSchedulerError::DeadlineExceeded => status::TOO_MANY_REQUESTS,
+        KvSchedulerError::PinnedWorkerNotAllowed { .. } => status::BAD_REQUEST,
         // A duplicate live request id, or a lifecycle the caller ended (or
         // re-registered) mid-classification, is caller-induced, like
         // `BookingFailed` and `SequenceError::DuplicateRequest`.
         KvSchedulerError::BookingFailed(_)
         | KvSchedulerError::DuplicateClassificationRequestId(_)
-        | KvSchedulerError::ClassificationLifecycleEnded(_) => StatusCode::CONFLICT,
+        | KvSchedulerError::ClassificationLifecycleEnded(_) => status::CONFLICT,
         KvSchedulerError::RequestClassifierPanicked(_)
         | KvSchedulerError::RequestClassifierFailed(_)
-        | KvSchedulerError::InvalidClassificationMetadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        | KvSchedulerError::InvalidClassificationMetadata(_) => status::INTERNAL_SERVER_ERROR,
     }
 }
 
-fn sequence_error_status(error: &SequenceError) -> StatusCode {
+fn sequence_error_status(error: &SequenceError) -> u16 {
     match error {
         SequenceError::WorkerNotFound { .. } | SequenceError::RequestNotFound { .. } => {
-            StatusCode::NOT_FOUND
+            status::NOT_FOUND
         }
-        SequenceError::DuplicateRequest { .. } => StatusCode::CONFLICT,
-        SequenceError::ReplicaSyncPublishFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-impl IntoResponse for SelectionError {
-    fn into_response(self) -> Response {
-        if matches!(
-            &self,
-            Self::Scheduler(
-                KvSchedulerError::RequestClassifierPanicked(_)
-                    | KvSchedulerError::RequestClassifierFailed(_)
-                    | KvSchedulerError::InvalidClassificationMetadata(_)
-            )
-        ) {
-            // Plugin-produced detail (its error text, or the metadata it
-            // returned) stays server-side: log it and return a fixed body.
-            tracing::warn!(error = %self, "request classifier failure sanitized from response");
-            return (
-                self.status(),
-                Json(serde_json::json!({"error": "request classifier failed"})),
-            )
-                .into_response();
-        }
-        if let Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &self {
-            return (
-                self.status(),
-                Json(serde_json::json!({
-                    "error": self.to_string(),
-                    "details": rejection,
-                })),
-            )
-                .into_response();
-        }
-
-        (
-            self.status(),
-            Json(serde_json::json!({"error": self.to_string()})),
-        )
-            .into_response()
+        SequenceError::DuplicateRequest { .. } => status::CONFLICT,
+        SequenceError::ReplicaSyncPublishFailed(_) => status::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -147,51 +114,19 @@ impl IntoResponse for SelectionError {
 mod tests {
     use super::*;
 
-    #[derive(Debug, thiserror::Error)]
-    #[error("private plugin detail")]
-    struct PrivateClassifierError;
-
     #[test]
     fn filtered_workers_are_unavailable_not_overloaded() {
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersFiltered).status_code(),
-            StatusCode::SERVICE_UNAVAILABLE.as_u16()
+            503
         );
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded).status_code(),
-            StatusCode::TOO_MANY_REQUESTS.as_u16()
+            429
         );
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::DeadlineExceeded).status_code(),
-            StatusCode::TOO_MANY_REQUESTS.as_u16()
+            429
         );
-    }
-
-    #[tokio::test]
-    async fn classifier_error_response_is_sanitized() {
-        let response = SelectionError::Scheduler(KvSchedulerError::RequestClassifierFailed(
-            std::sync::Arc::new(PrivateClassifierError),
-        ))
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
-    }
-
-    #[tokio::test]
-    async fn invalid_classification_metadata_response_is_sanitized() {
-        let response = SelectionError::Scheduler(KvSchedulerError::InvalidClassificationMetadata(
-            "unknown policy class \"plugin-private-class\"".to_string(),
-        ))
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
     }
 }

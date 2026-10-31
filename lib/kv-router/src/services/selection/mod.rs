@@ -17,6 +17,7 @@ mod pending;
 mod server;
 mod service;
 mod types;
+mod zmq_ingress;
 
 #[cfg(test)]
 mod tests;
@@ -29,9 +30,10 @@ pub use crate::plugins::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-pub use crate::services::common::replica_sync::{
+pub use crate::services::common::replica_sync::ReplicaPeerError;
+pub use crate::services::common::replication::{
     AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
-    ReplicaPeerError, SchedulerLoadSink,
+    SchedulerLoadSink,
 };
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
@@ -39,7 +41,7 @@ pub use core::{
     SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
 };
 pub use error::SelectionError;
-pub use ingress::KvEventIngress;
+pub use ingress::{KvEventIngress, LocalIndexIngress};
 pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
@@ -56,3 +58,4 @@ pub use types::{
     SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
     WorkerPatchRequest, WorkerRequest,
 };
+pub use zmq_ingress::ZmqDirectIngress;

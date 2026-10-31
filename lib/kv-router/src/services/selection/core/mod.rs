@@ -43,7 +43,7 @@ use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
-use crate::services::common::replica_sync::{
+use crate::services::common::replication::{
     AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityMeshSink, HostReplicaSyncFactory, ReplicaInbox,
     ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
@@ -75,7 +75,7 @@ use super::affinity::{
 };
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
-use super::ingress::{KvEventIngress, ZmqDirectIngress};
+use super::ingress::{KvEventIngress, LocalIndexIngress};
 use super::input::{PromptView, TrackingHashInput};
 use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
@@ -86,7 +86,7 @@ use super::types::{
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
-use crate::services::common::replica_sync::AffinityBindingEvent;
+use crate::services::common::replication::AffinityBindingEvent;
 
 pub type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -215,7 +215,7 @@ pub enum KvIndexSource {
 
 impl Default for KvIndexSource {
     fn default() -> Self {
-        Self::Owned(Arc::new(ZmqDirectIngress))
+        Self::Owned(Arc::new(LocalIndexIngress))
     }
 }
 
@@ -375,7 +375,8 @@ impl SelectionCore {
         )
     }
 
-    fn try_new_local_with_host(
+    /// `try_new_local` with an explicit host; tests install the ZMQ ingress this way.
+    pub(super) fn try_new_local_with_host(
         mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,

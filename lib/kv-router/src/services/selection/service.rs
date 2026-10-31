@@ -14,13 +14,14 @@ use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::RouterConfig;
 use crate::services::common::replica_sync::{
-    AffinityBindingEvent, PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
+    PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
+use crate::services::common::replication::AffinityBindingEvent;
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
-use super::core::{KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
+use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -28,6 +29,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+use super::zmq_ingress::ZmqDirectIngress;
 use crate::WorkerType;
 use crate::plugins::RouterPluginRegistry;
 
@@ -83,7 +85,15 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             plugin_registry,
-            host: SelectionHost::default(),
+            // The standalone service's partitions index worker KV events
+            // published over ZMQ; `kv_index` overrides this.
+            host: SelectionHost {
+                cache: HostCache {
+                    index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress)),
+                    ..HostCache::default()
+                },
+                ..SelectionHost::default()
+            },
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
             session_affinity_mode: SessionAffinityMode::default(),
@@ -416,7 +426,7 @@ impl SelectionService {
         Self {
             session_binding_rx: None,
             core: Arc::new(
-                SelectionCore::try_new_local(
+                SelectionCore::try_new_local_with_host(
                     kv_router_config,
                     indexer_threads,
                     cancel_token.clone(),
@@ -427,6 +437,13 @@ impl SelectionService {
                             role.default_selector_label(),
                         )
                     }),
+                    SelectionHost {
+                        cache: HostCache {
+                            index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress)),
+                            ..HostCache::default()
+                        },
+                        ..SelectionHost::default()
+                    },
                 )
                 .expect("valid test config"),
             ),

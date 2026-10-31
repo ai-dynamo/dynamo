@@ -11,7 +11,7 @@ use super::*;
 use crate::protocols::ResidencyOwnerKeyExt;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
-use crate::services::common::replica_sync::HostReplicaChannels;
+use crate::services::common::replication::HostReplicaChannels;
 use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,7 +36,7 @@ fn local_core_with(
     indexer_threads: usize,
     cancel_token: CancellationToken,
 ) -> SelectionCore {
-    SelectionCore::try_new_local(
+    SelectionCore::try_new_local_with_host(
         config,
         indexer_threads,
         cancel_token,
@@ -44,8 +44,20 @@ fn local_core_with(
         std::sync::Arc::new(|config, role, _| {
             crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         }),
+        zmq_host(),
     )
     .expect("valid test config")
+}
+
+/// The host the standalone service builds: partitions index worker KV events over ZMQ.
+fn zmq_host() -> SelectionHost {
+    SelectionHost {
+        cache: HostCache {
+            index: KvIndexSource::Owned(Arc::new(crate::services::selection::ZmqDirectIngress)),
+            ..HostCache::default()
+        },
+        ..SelectionHost::default()
+    }
 }
 
 /// `new_inner` with the test defaults.
