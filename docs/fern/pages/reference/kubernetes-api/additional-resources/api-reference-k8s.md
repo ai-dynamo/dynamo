@@ -3810,11 +3810,10 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-ObjectiveMode selects the optimization mode. Pareto is reserved for a future
-release and is not admitted until Candidate publication supports Pareto fronts.
+ObjectiveMode selects the optimization mode.
 
 _Validation:_
-- Enum: [Optimize]
+- Enum: [Optimize Pareto]
 
 _Appears in:_
 - [ObjectiveSpec](#objectivespec)
@@ -3822,7 +3821,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Optimize` |  |
-| `Pareto` | ObjectiveModePareto is reserved for the future Pareto API implementation.<br /> |
+| `Pareto` | ObjectiveModePareto searches for a Pareto front across multiple objectives.<br /> |
 
 
 #### ObjectiveSLASpec
@@ -3848,7 +3847,8 @@ _Appears in:_
 
 
 
-ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
+ObjectiveSpec defines the optimization objective. Use mode Optimize with a single metric
+for scalar optimization, or mode Pareto with two metrics for multi-objective search.
 
 
 
@@ -3860,9 +3860,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization. Only Optimize is currently supported. |  | Enum: [Optimize] <br />Optional: \{\} <br /> |
+| `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects the optimization mode: Optimize for a single scalar target,<br />Pareto for a multi-objective search across two metrics. |  | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
 | `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize.<br />When omitted in Optimize mode, admission defaults it to ThroughputPerGPU. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
-| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics is reserved for the future Pareto implementation. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MaxItems: 2 <br />MinItems: 2 <br />Optional: \{\} <br /> |
+| `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics selects the two objectives for a Pareto search.<br />Required when mode is Pareto; ignored otherwise.<br />When omitted in Pareto mode, AISimulate uses its default Pareto objectives. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MaxItems: 2 <br />MinItems: 2 <br />Optional: \{\} <br /> |
 | `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. Admission defaults an<br />omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those<br />defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names. |  | Optional: \{\} <br /> |
 
 

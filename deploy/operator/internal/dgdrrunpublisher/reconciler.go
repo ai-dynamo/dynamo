@@ -358,6 +358,7 @@ func observedStatus(run *v1beta2.DynamoGraphDeploymentRun) RunStatus {
 	var observed RunStatus
 	if progress := run.Status.Progress; progress != nil && progress.Candidates != nil {
 		observed.Published = progress.Candidates.Published
+		observed.ParetoFront = int32(progress.Candidates.ParetoFront)
 	}
 	if run.Status.LastProgressTime != nil {
 		observed.LastProgress = run.Status.LastProgressTime.UTC()

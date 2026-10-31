@@ -349,15 +349,29 @@ func TestUnderlayParetoObjective(t *testing.T) {
 	spec := defaultedSpec()
 	spec.Objective.Mode = v1beta2.ObjectiveModePareto
 	spec.Objective.Metric = nil
-	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerGPU", "ThroughputPerUser"}
-	input := underlay(t, spec)
-	if nested(t, input, "optimization", "target") != TargetPareto {
-		t.Fatalf("not a Pareto optimization: %v", input["optimization"])
+
+	t.Log("omitted metrics (nil) uses the default pair")
+	spec.Objective.Metrics = nil
+	if target := nested(t, underlay(t, spec), "optimization", "target"); target != TargetPareto {
+		t.Fatalf("nil metrics: not a Pareto optimization: %v", target)
 	}
 
+	t.Log("explicit default pair [ThroughputPerGPU, ThroughputPerUser] is accepted")
+	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerGPU", "ThroughputPerUser"}
+	if target := nested(t, underlay(t, spec), "optimization", "target"); target != TargetPareto {
+		t.Fatalf("explicit default pair: not a Pareto optimization: %v", target)
+	}
+
+	t.Log("reversed default pair [ThroughputPerUser, ThroughputPerGPU] is accepted")
+	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerUser", "ThroughputPerGPU"}
+	if target := nested(t, underlay(t, spec), "optimization", "target"); target != TargetPareto {
+		t.Fatalf("reversed default pair: not a Pareto optimization: %v", target)
+	}
+
+	t.Log("unsupported pair [Throughput, TTFT] is rejected")
 	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"Throughput", "TTFT"}
 	if _, err := Underlay(&spec.NativeSearchInput); err == nil {
-		t.Fatal("custom Pareto objectives must fail until the public AISimulate input exposes them")
+		t.Fatal("unsupported Pareto metrics pair must be rejected")
 	}
 }
 

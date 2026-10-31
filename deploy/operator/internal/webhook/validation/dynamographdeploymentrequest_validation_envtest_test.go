@@ -667,22 +667,21 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta2 pareto objective is reserved until Candidate publication supports it",
+			name: "v1beta2 pareto objective with two metrics is accepted",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
 			}),
-			gpuDiscovery:  true,
-			discovered:    discoveredH200,
-			wantSchemaErr: `spec.objective.mode: Unsupported value: "Pareto": supported values: "Optimize"`,
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
 		},
 		{
-			name: "v1beta2 optimize rejects the reserved Pareto metrics field",
+			name: "v1beta2 optimize rejects the Pareto metrics field",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Optimize", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
 			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
-			wantCELErr:   `spec.objective: Invalid value: metrics is reserved for the future Pareto implementation`,
+			wantCELErr:   `spec.objective: Invalid value: Optimize mode uses metric, not metrics`,
 		},
 		{
 			name: "v1beta2 duplicate backends are rejected on create",

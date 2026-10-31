@@ -650,6 +650,9 @@ func dgdrRunInput(
 		"runtime_version_override": dynamoVersion,
 		"derive_runtime_images":    true,
 	}
+	if run.Spec.Objective != nil && run.Spec.Objective.Mode == nvidiacomv1beta2.ObjectiveModePareto {
+		reserved["is_pareto"] = true
+	}
 	if run.Spec.Hardware != nil && run.Spec.Hardware.NumGPUsPerNode != nil {
 		reserved["num_gpus_per_node"] = int64(*run.Spec.Hardware.NumGPUsPerNode)
 	}

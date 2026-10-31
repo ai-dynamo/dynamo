@@ -171,8 +171,9 @@ type SnapshotRun struct {
 }
 
 type SnapshotProgress struct {
-	Round     int32 `json:"round"`
-	Evaluated int32 `json:"evaluated"`
+	Round       int32 `json:"round"`
+	Evaluated   int32 `json:"evaluated"`
+	ParetoFront int32 `json:"paretoFront,omitempty"`
 }
 
 // SnapshotCandidate is one evaluated point. Candidates are ordered best-first for

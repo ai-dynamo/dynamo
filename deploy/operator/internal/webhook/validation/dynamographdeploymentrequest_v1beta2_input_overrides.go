@@ -51,6 +51,7 @@ func validateAISimulateSpec(
 	// controller-owned Job and shared volume are reserved.
 	reserved := []string{
 		"derive_runtime_images",
+		"is_pareto",
 		"max_candidates",
 		"name",
 		"namespace",

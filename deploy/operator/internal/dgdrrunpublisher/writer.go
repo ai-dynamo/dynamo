@@ -237,9 +237,15 @@ func buildRunStatusApply(namespace, runName, resourceVersion string, status RunS
 	for _, name := range status.CandidateNames {
 		refs = append(refs, map[string]any{"name": name})
 	}
+	candidates := map[string]any{
+		"published": int64(status.Published),
+	}
+	if status.ParetoFront > 0 {
+		candidates["paretoFront"] = int64(status.ParetoFront)
+	}
 	fields := map[string]any{
 		"candidateRefs": refs,
-		"progress":      map[string]any{"candidates": map[string]any{"published": int64(status.Published)}},
+		"progress":      map[string]any{"candidates": candidates},
 	}
 	if !status.LastProgress.IsZero() {
 		fields["lastProgressTime"] = status.LastProgress.UTC().Format(time.RFC3339)
