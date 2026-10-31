@@ -93,7 +93,9 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
-_MM_ROUTING_MODEL_TYPES = frozenset({"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "kimi_k25"})
+_MM_ROUTING_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "kimi_k25"}
+)
 
 
 def _resolve_streaming_kv_events_config(
