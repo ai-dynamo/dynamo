@@ -1390,13 +1390,21 @@ class SglangStreamingPostProcessor:
     def _count_tokens_through(
         self, context_ids: list[int], token_ids: list[int], text: str
     ) -> int:
-        """Count leading ``token_ids`` whose incremental decode covers ``text``."""
+        """Count leading ``token_ids`` whose incremental decode covers ``text``.
+
+        Once a decoded prefix covers ``text``, every longer one does, so bisect
+        instead of decoding every prefix.
+        """
         context_text = self._decode_ids(context_ids)
-        for count in range(len(token_ids)):
+        low, high = 0, len(token_ids)
+        while low < high:
+            count = (low + high) // 2
             decoded = self._decode_ids(context_ids + token_ids[:count])
             if decoded[len(context_text) :].startswith(text):
-                return count
-        return len(token_ids)
+                high = count
+            else:
+                low = count + 1
+        return low
 
     def _build_openai_logprobs(
         self,
