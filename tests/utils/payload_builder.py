@@ -29,6 +29,7 @@ from tests.utils.payloads import (
     KvEventMetricsPayload,
     KvRoutingPayload,
     LMCacheMetricsPayload,
+    LoraLifecycleChatPayload,
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
@@ -168,6 +169,24 @@ def cached_tokens_chat_payload(
     )
 
 
+def _lora_chat_body(lora_name: str, max_tokens: int, temperature: float) -> dict:
+    return {
+        "model": lora_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": "What is deep learning? Answer in one sentence.",
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+
+
+_LORA_EXPECTED_RESPONSE = ["learning", "neural", "network", "AI", "model"]
+
+
 def lora_chat_payload(
     lora_name: str,
     s3_uri: str,
@@ -180,25 +199,34 @@ def lora_chat_payload(
 ) -> LoraTestChatPayload:
     """Create a LoRA-enabled chat payload for testing."""
     return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
+        body=_lora_chat_body(lora_name, max_tokens, temperature),
         lora_name=lora_name,
         s3_uri=s3_uri,
         system_port=system_port,
         repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
+        expected_response=expected_response or _LORA_EXPECTED_RESPONSE,
         expected_log=expected_log or [],
+    )
+
+
+def lora_lifecycle_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    base_model: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 1,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraLifecycleChatPayload:
+    """Create a chat payload that loads, unloads, and reloads a LoRA adapter."""
+    return LoraLifecycleChatPayload(
+        body=_lora_chat_body(lora_name, max_tokens, temperature),
+        base_model=base_model,
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=_LORA_EXPECTED_RESPONSE,
     )
 
 
