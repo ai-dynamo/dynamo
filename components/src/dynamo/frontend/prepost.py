@@ -590,9 +590,9 @@ def _normalize_reasoning_for_template(
         and isinstance(message.get("reasoning"), list)
         and all(isinstance(part, str) for part in message["reasoning"])
     ]
-    apply_template = getattr(tokenizer, "apply_chat_template", None)
-    if not segmented or not callable(apply_template):
+    if not segmented:
         return messages
+    apply_template = tokenizer.apply_chat_template
 
     adapted = list(messages)
     for index in segmented:
