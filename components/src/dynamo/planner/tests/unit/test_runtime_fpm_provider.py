@@ -85,11 +85,13 @@ async def test_refresh_rebinds_only_when_the_worker_endpoint_changes(role, monke
     await provider.refresh(state)
     assert _subscriber(provider, role) is first
 
+    provider._unjoined_workers[role] = ("worker-0",)
     getattr(state, role).info.endpoint = "infer"
     await provider.refresh(state)
 
     assert first.closed
     assert _subscriber(provider, role).endpoint == "ns.custom.infer"
+    assert role not in provider._unjoined_workers
 
 
 @pytest.mark.asyncio

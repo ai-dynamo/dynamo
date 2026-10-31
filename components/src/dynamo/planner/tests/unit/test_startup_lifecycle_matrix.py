@@ -62,7 +62,7 @@ class _FakeSubscriber:
     def __init__(self, endpoint):
         self.endpoint = endpoint
 
-    def start_tracking(self):
+    def start_tracking(self, **_kwargs):
         pass
 
     def shutdown(self):
@@ -115,21 +115,31 @@ def _cluster(backend, manifest, renames, runtime_component, path):
                 "servedModelName": "test-model",
                 "componentNames": [f"qwen-{name.lower()}"],
             }
-            cards[role] = (f"qwen-{name.lower()}-0", served)
+            cards[role] = (f"qwen-{name.lower()}-0", served, f"{name.lower()}-0")
             if component is workers[0] and pending:
                 desired = component["replicas"] = desired + 1
                 ready = 0 if readiness == "timeout" else ready
         status.update(replicas=desired, updatedReplicas=desired, readyReplicas=ready)
         statuses[name] = status
         for index in range(desired):
+            serving = index < ready
             pods.append(
                 client.V1Pod(
                     metadata=client.V1ObjectMeta(
                         name=f"{name.lower()}-{index}",
-                        labels={"nvidia.com/dynamo-component": name},
+                        uid=f"{name.lower()}-{index}-uid",
+                        labels={
+                            "nvidia.com/dynamo-component": name,
+                            "nvidia.com/dynamo-graph-deployment-name": "qwen",
+                        },
                     ),
                     status=client.V1PodStatus(
-                        phase="Running" if index < ready else "Pending"
+                        phase="Running" if serving else "Pending",
+                        conditions=(
+                            [client.V1PodCondition(type="Ready", status="True")]
+                            if serving
+                            else []
+                        ),
                     ),
                 )
             )
@@ -158,7 +168,17 @@ def _cluster(backend, manifest, renames, runtime_component, path):
     def publish_metadata():
         published[:] = [
             {
-                "metadata": {"name": cr_name},
+                "metadata": {
+                    "name": cr_name,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "v1",
+                            "kind": "Pod",
+                            "name": owner,
+                            "uid": f"{owner}-uid",
+                        }
+                    ],
+                },
                 "spec": {
                     "data": {
                         "model_cards": {
@@ -180,7 +200,7 @@ def _cluster(backend, manifest, renames, runtime_component, path):
                     }
                 },
             }
-            for role, (cr_name, served) in cards.items()
+            for role, (cr_name, served, owner) in cards.items()
         ]
 
     reads = []
@@ -270,9 +290,11 @@ async def test_startup_binds_metrics_to_registered_workers(
         "prefill": provider._prefill_fpm_sub,
         "decode": provider._decode_fpm_sub,
     }
-    for role, (_, served) in cards.items():
-        assert (
-            subscribers[role].endpoint
-            == f"{_RUNTIME_NAMESPACE}.{served}.{_endpoint_name(runtime_component)}"
-        )
-        assert getattr(state, role).info.max_num_batched_tokens == 8192
+    # Without pods/list, worker metadata cannot be tied to a serving pod, so the
+    # Planner keeps the status/default identity.
+    registered = not _PATHS[path][3]
+    for role, (_, served, _) in cards.items():
+        endpoint = _endpoint_name(runtime_component) if registered else "generate"
+        assert subscribers[role].endpoint == f"{_RUNTIME_NAMESPACE}.{served}.{endpoint}"
+        if registered:
+            assert getattr(state, role).info.max_num_batched_tokens == 8192
