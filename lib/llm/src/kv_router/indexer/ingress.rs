@@ -31,7 +31,8 @@ pub(crate) struct RuntimeIngressArgs<'a> {
     pub model_name: Option<&'a str>,
     pub worker_role: Option<WorkerType>,
     pub metric_worker_type: &'static str,
-    /// Combined policy inputs. Without CACHE, no routing indexer is created.
+    /// Execution policy inputs; a transfer-source consumer can independently
+    /// require the same index and subscription.
     pub worker_inputs: WorkerInputs,
     pub kv_event_source_requirement: KvEventSourceRequirement,
     pub kv_source_membership: Option<KvSourceMembershipWatch>,
@@ -61,7 +62,8 @@ impl RuntimeIngress {
             session_prefix_index,
         } = args;
         let component = endpoint.component();
-        let index_required = needs_kv_index(worker_inputs);
+        let index_required =
+            needs_kv_index(worker_inputs) || kv_event_source_requirement.requires_source();
         let indexer = if index_required {
             super::build(
                 component,

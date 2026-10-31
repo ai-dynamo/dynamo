@@ -1328,6 +1328,7 @@ fn test_convert_event_gates_on_locality_and_storage_tier() {
     let accepted = [
         (None, None, StorageTier::Device),
         (Some("GPU"), None, StorageTier::Device),
+        (Some("gpu_direct"), None, StorageTier::GpuDirect),
         (Some("CPU"), None, StorageTier::HostPinned),
         (Some("STORAGE"), None, StorageTier::Disk),
         (Some("STORAGE"), Some(Locality::Local), StorageTier::Disk),
@@ -1625,4 +1626,158 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn gpu_direct_medium_is_separate_from_execution_and_preserves_salted_root() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let raw = namespaced_block_stored(11, None, Some("gpu-tenant"), "gpu_direct");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let event = normalizer
+        .normalize(raw, 1, worker)
+        .expect("retained GPU event");
+    assert_eq!(event.placement.tier, StorageTier::GpuDirect);
+    let routed = event.into_router_event().unwrap();
+    assert!(!routed.targets_primary().unwrap());
+    assert_eq!(StorageTier::GpuDirect.to_kv_medium(), Some("gpu_direct"));
+    assert_eq!(
+        serde_json::to_value(StorageTier::GpuDirect).unwrap(),
+        "gpu_direct"
+    );
+}
+
+fn namespaced_removal(block_hash: u64, medium: &str) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
+        medium: Some(medium.to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    }
+}
+
+#[test]
+fn retained_gpu_namespace_survives_native_clear_until_explicit_gpu_removal() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let other_rank = WorkerWithDpRank::new(7, 1);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    normalizer
+        .preprocess(
+            namespaced_block_stored(1, None, Some("native"), "GPU"),
+            worker,
+        )
+        .unwrap();
+    normalizer
+        .preprocess(
+            namespaced_block_stored(1, None, Some("retained"), "gpu_direct"),
+            worker,
+        )
+        .unwrap();
+    normalizer
+        .preprocess(
+            namespaced_block_stored(1, None, Some("other-rank"), "gpu_direct"),
+            other_rank,
+        )
+        .unwrap();
+    normalizer
+        .preprocess(RawKvEvent::AllBlocksCleared { ownership: None }, worker)
+        .unwrap();
+    assert!(!normalizer.cache_namespaces.contains_key(&(worker, 1)));
+    assert!(
+        matches!(&normalizer.gpu_direct_cache_namespaces[&(worker, 1)], CacheNamespaceState::Namespaced(value) if value.as_ref() == "retained")
+    );
+    let child = normalizer
+        .preprocess(
+            namespaced_block_stored(2, Some(1), None, "gpu_direct"),
+            worker,
+        )
+        .unwrap();
+    assert!(
+        matches!(child, RawKvEvent::BlockStored { cache_namespace: Some(value), .. } if value == "retained")
+    );
+    normalizer
+        .preprocess(namespaced_removal(1, "gpu_direct"), worker)
+        .unwrap();
+    assert!(
+        !normalizer
+            .gpu_direct_cache_namespaces
+            .contains_key(&(worker, 1))
+    );
+    assert!(
+        normalizer
+            .gpu_direct_cache_namespaces
+            .contains_key(&(other_rank, 1))
+    );
+}
+
+#[test]
+fn gpu_removal_does_not_erase_native_namespace_and_native_remove_does_not_erase_gpu() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    for medium in ["GPU", "gpu_direct"] {
+        normalizer
+            .preprocess(
+                namespaced_block_stored(1, None, Some("shared-tenant"), medium),
+                worker,
+            )
+            .unwrap();
+    }
+    normalizer
+        .preprocess(namespaced_removal(1, "GPU"), worker)
+        .unwrap();
+    assert!(
+        normalizer
+            .gpu_direct_cache_namespaces
+            .contains_key(&(worker, 1))
+    );
+    normalizer
+        .preprocess(
+            namespaced_block_stored(1, None, Some("shared-tenant"), "GPU"),
+            worker,
+        )
+        .unwrap();
+    normalizer
+        .preprocess(namespaced_removal(1, "gpu_direct"), worker)
+        .unwrap();
+    assert!(normalizer.cache_namespaces.contains_key(&(worker, 1)));
+    assert!(
+        !normalizer
+            .gpu_direct_cache_namespaces
+            .contains_key(&(worker, 1))
+    );
+}
+
+#[test]
+fn gpu_namespace_can_learn_native_parent_then_continue_after_native_clear() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    normalizer
+        .preprocess(
+            namespaced_block_stored(1, None, Some("tenant"), "GPU"),
+            worker,
+        )
+        .unwrap();
+    let gpu_child = normalizer
+        .preprocess(
+            namespaced_block_stored(2, Some(1), None, "gpu_direct"),
+            worker,
+        )
+        .unwrap();
+    assert!(
+        matches!(gpu_child, RawKvEvent::BlockStored { cache_namespace: Some(value), .. } if value == "tenant")
+    );
+    normalizer
+        .preprocess(RawKvEvent::AllBlocksCleared { ownership: None }, worker)
+        .unwrap();
+    let gpu_next = normalizer
+        .preprocess(
+            namespaced_block_stored(3, Some(2), None, "gpu_direct"),
+            worker,
+        )
+        .unwrap();
+    assert!(
+        matches!(gpu_next, RawKvEvent::BlockStored { cache_namespace: Some(value), .. } if value == "tenant")
+    );
 }

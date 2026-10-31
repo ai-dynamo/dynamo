@@ -363,6 +363,7 @@ fn saturating_u32(value: usize) -> u32 {
 fn cache_hit_weight_for_tier(config: &KvRouterConfig, tier: StorageTier) -> f64 {
     match tier {
         StorageTier::Device => 1.0,
+        StorageTier::GpuDirect => 0.0,
         StorageTier::HostPinned => config.host_cache_hit_weight,
         StorageTier::Disk | StorageTier::External => config.disk_cache_hit_weight,
     }

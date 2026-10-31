@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import importlib
 import ipaddress
 import json
+import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -15,7 +18,10 @@ if TYPE_CHECKING:
     from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.common.constants import (
+    KV_HINT_GPU_DIRECT_CAPABILITY_KEY,
+    KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
@@ -54,28 +60,63 @@ def _apply_kv_hint(sampling_params: Any, kv_hint: Any) -> None:
 
 
 def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
-    """Return mapping-shaped secondary-tier configs from KVTransferConfig."""
+    """Find secondary tiers in supported connector wrappers, in child order.
+
+    Only known wrappers have a defined ``connectors`` contract. In particular,
+    wrapper-owned settings must not be mistaken for a child's KVCR settings.
+    Discovery does not certify a wrapper's load arbitration or event forwarding.
+    """
+
+    def visit(kv_config: Any) -> list[Mapping[str, Any]]:
+        if isinstance(kv_config, Mapping):
+            name = kv_config.get("kv_connector")
+            extra = kv_config.get("kv_connector_extra_config")
+        else:
+            name = getattr(kv_config, "kv_connector", None)
+            extra = getattr(kv_config, "kv_connector_extra_config", None)
+        if not isinstance(extra, Mapping):
+            return []
+        if name in MULTI_CONNECTOR_WRAPPERS:
+            children = extra.get("connectors", [])
+            if not isinstance(children, list) or any(
+                not isinstance(child, Mapping) for child in children
+            ):
+                raise ValueError(
+                    f"{name} requires connectors to be a list of connector configs"
+                )
+            return [tier for child in children for tier in visit(child)]
+        tiers = extra.get("secondary_tiers")
+        return (
+            [tier for tier in tiers if isinstance(tier, Mapping)]
+            if isinstance(tiers, list)
+            else []
+        )
+
+    return visit(getattr(engine_args, "kv_transfer_config", None))
+
+
+def _transfer_hint_domain(engine_args: AsyncEngineArgs) -> str | None:
+    """Read an operator-certified model, tokenizer, namespace and layout domain.
+
+    This is deliberately distinct from ``kv_transfer_domain``, which is a
+    topology label key. No domain is inferred from a model name or connector.
+    Keep it in the outer connector extra config, never inside a secondary tier:
+    vLLM forwards secondary-tier settings as constructor keyword arguments.
+    """
     kv_config = getattr(engine_args, "kv_transfer_config", None)
-    extra_config = getattr(kv_config, "kv_connector_extra_config", None)
-    if not isinstance(extra_config, Mapping):
-        return []
-
-    extra_configs = [extra_config]
-    if getattr(kv_config, "kv_connector", None) in MULTI_CONNECTOR_WRAPPERS:
-        extra_configs = [
-            child.get("kv_connector_extra_config") or {}
-            for child in extra_config.get("connectors") or []
-        ]
-
-    tiers: list[Mapping[str, Any]] = []
-    for config in extra_configs:
-        secondary_tiers = config.get("secondary_tiers")
-        if not isinstance(secondary_tiers, list):
-            continue
-        for tier in secondary_tiers:
-            if isinstance(tier, Mapping):
-                tiers.append(tier)
-    return tiers
+    extra = getattr(kv_config, "kv_connector_extra_config", None)
+    domain = (
+        extra.get(KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY)
+        if isinstance(extra, Mapping)
+        else None
+    )
+    if domain is None:
+        domain = os.environ.get("DYN_KV_HINT_TRANSFER_DOMAIN")
+    if domain is None:
+        return None
+    if not isinstance(domain, str) or not domain.strip() or domain != domain.strip():
+        raise ValueError("router_hint_transfer_domain must be a nonempty string")
+    return domain
 
 
 def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
@@ -102,8 +143,26 @@ def _transfer_hint_source_host(host: str | None) -> str | None:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
+        # Reject URI fragments, wildcard binds, malformed IP literals and
+        # whitespace without performing a blocking DNS lookup at registration.
+        if len(host) > 253 or not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.?", host
+        ):
+            return None
+        if all(character.isdigit() or character == "." for character in host):
+            return None
+        if any(
+            len(label) > 63
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in host.rstrip(".").split(".")
+        ):
+            return None
         return host
-    if address.is_unspecified:
+    if (
+        address.is_unspecified
+        or address.is_multicast
+        or str(address) == "255.255.255.255"
+    ):
         return None
     if address.version == 6:
         return f"[{address.compressed}]"
@@ -137,7 +196,7 @@ def _transfer_hint_source_control_endpoints(
         return None
     control_ports = tier.get("control_ports")
     if not isinstance(control_ports, list):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 - preserve the config-validation contract
             "P2P KV transfer hint support requires control_ports to be a list"
         )
     if len(control_ports) != dp_size:
@@ -158,6 +217,10 @@ def _transfer_hint_source_control_endpoints(
         if control_port is None:
             return None
         endpoints[str(global_dp_rank)] = f"tcp://{host}:{control_port}"
+    if len(set(endpoints.values())) != dp_size:
+        raise ValueError(
+            "P2P KV transfer hint support requires unique per-DP control ports"
+        )
     return endpoints
 
 
@@ -222,6 +285,7 @@ def _publish_kv_transfer_hint_capability(
     if sources is None:
         return
     transfer_hint_worker_type = next(iter(sources.values())).worker_type
+    domain = _transfer_hint_domain(engine_args)
 
     # set_engine_specific expects JSON text; the PyO3 binding parses each value
     # with serde_json::from_str, so Python strings must be json.dumps'ed first.
@@ -240,6 +304,10 @@ def _publish_kv_transfer_hint_capability(
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
         json.dumps(transfer_hint_worker_type),
     )
+    if domain is not None:
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, json.dumps(domain)
+        )
     runtime_config.set_engine_specific(
         KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
     )
@@ -254,6 +322,15 @@ def publish_kv_hint_capabilities(
     publish_source_endpoints: bool = True,
 ) -> None:
     """Publish each versioned KV hint capability that vLLM supports."""
+    # The runtime domain key is shared by legacy CPU and GPU hints. MNNVL
+    # deliberately uses its own effective domain, so never partially advertise
+    # an incompatible CPU provider under that same key.
+    if any(
+        tier.get("gpu_transport") == "mnnvl"
+        and KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+        for tier in _secondary_tiers(engine_args)
+    ) and _transfer_hint_tiers(engine_args):
+        raise ValueError("MNNVL GPU reuse cannot share the CPU-hint runtime domain")
     _publish_kv_transfer_hint_capability(
         runtime_config,
         engine_args,
@@ -261,3 +338,102 @@ def publish_kv_hint_capabilities(
         dp_range,
         publish_source_endpoints=publish_source_endpoints,
     )
+    _publish_gpu_transfer_hint_capability(
+        runtime_config,
+        engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=publish_source_endpoints,
+    )
+
+
+def _publish_gpu_transfer_hint_capability(
+    runtime_config: ModelRuntimeConfig,
+    engine_args: AsyncEngineArgs,
+    worker_type: WorkerType,
+    dp_range: tuple[int, int],
+    *,
+    publish_source_endpoints: bool,
+) -> None:
+    tiers = [
+        tier
+        for tier in _secondary_tiers(engine_args)
+        if KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+    ]
+    if not tiers:
+        return
+    if len(tiers) != 1 or dp_range[1] != 1:
+        raise ValueError(
+            "Direct GPU KV transfer requires one GPU tier per engine/DP rank"
+        )
+    tier = tiers[0]
+    if tier.get("type") != "GPUKVCRSecondaryTierManager":
+        raise ValueError("Direct GPU capability requires the GPU-only KVCR tier")
+    domain = _transfer_hint_domain(engine_args)
+    if domain is None or tier.get("compatibility_domain") != domain:
+        raise ValueError("Direct GPU capability requires one certified layout domain")
+    role = _transfer_hint_worker_type(worker_type)
+    endpoints = _transfer_hint_source_control_endpoints(tier, dp_range)
+    if role is None or endpoints is None or not publish_source_endpoints:
+        raise ValueError(
+            "Direct GPU transfer requires native worker-owned source endpoints"
+        )
+    # CacheOwner/state-agent sources use a different ownership contract; they
+    # must not advertise this worker-owned retained-GPU inventory as CPU RAM.
+    kv_config = getattr(engine_args, "kv_transfer_config", None)
+    extra = getattr(kv_config, "kv_connector_extra_config", None) or {}
+    if extra.get("dynamo_state_agent") is not None:
+        raise ValueError(
+            "Direct GPU KV transfer does not support CacheOwner attachments"
+        )
+    transport = tier.get("gpu_transport", "cuda_ipc")
+    if transport not in ("cuda_ipc", "mnnvl"):
+        raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+    tp_size = getattr(engine_args, "tensor_parallel_size", 1)
+    if type(tp_size) is not int or tp_size not in (1, 2):
+        raise ValueError("Direct GPU KV transfer supports raw-layout TP1 or TP2")
+    if tp_size > 1:
+        if (
+            getattr(engine_args, "data_parallel_size", 1) != 1
+            or getattr(engine_args, "distributed_executor_backend", None)
+            not in (None, "mp")
+            or any(
+                getattr(engine_args, name, 1) != 1
+                for name in (
+                    "pipeline_parallel_size",
+                    "prefill_context_parallel_size",
+                    "decode_context_parallel_size",
+                )
+            )
+        ):
+            raise ValueError(
+                "Retained GPU TP2 requires a single local MP engine without DP/PP/CP"
+            )
+        layout = importlib.import_module("kvbm.vllm_integration.gpu_layout")
+        domain = layout.parallel_layout_domain(domain, tp_size)
+    if transport == "mnnvl":
+        tls = tier.get("ucx_tls")
+        if not isinstance(tls, (list, tuple)) or tuple(tls) != (
+            "cuda_ipc",
+            "tcp",
+            "self",
+        ):
+            raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
+        # KVBM/NIXL are optional on ordinary backend paths. Load this stdlib-only
+        # helper only for the explicitly selected MNNVL profile after engine
+        # startup; its device/NVML observation is never a configured attestation.
+        fabric = importlib.import_module("kvbm.vllm_integration.gpu_mnnvl")
+        identity = fabric.observe_fabric()
+        expected_fabric = tier.get("fabric_domain")
+        if expected_fabric is not None and expected_fabric != identity.domain:
+            raise ValueError(
+                "Configured fabric constraint differs from actual assigned GPU"
+            )
+        domain = fabric.effective_domain(domain, identity.domain)
+    for key, value in (
+        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, role),
+        (KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, domain),
+        (KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints),
+        (KV_HINT_GPU_DIRECT_CAPABILITY_KEY, True),
+    ):
+        runtime_config.set_engine_specific(key, json.dumps(value))

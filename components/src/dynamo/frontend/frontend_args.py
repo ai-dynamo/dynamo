@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import math
 import os
 import pathlib
 from typing import Any, Dict, Optional
@@ -353,6 +354,59 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
         if self.conditional_disagg_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-disagg requires --router-mode=kv")
+        if self.enable_decode_to_prefill_reuse and self.router_mode != "kv":
+            raise ValueError(
+                "--router-decode-to-prefill-reuse requires --router-mode=kv"
+            )
+        if self.enable_decode_to_prefill_reuse and (
+            self.transfer_source_estimated_block_us is None
+            or self.transfer_source_prefill_token_us is None
+        ):
+            raise ValueError(
+                "--router-decode-to-prefill-reuse requires measured "
+                "--router-transfer-source-estimated-block-us and "
+                "--router-transfer-source-prefill-token-us"
+            )
+        if self.enable_decode_to_prefill_gpu_reuse:
+            if self.router_mode != "kv":
+                raise ValueError(
+                    "--router-decode-to-prefill-gpu-reuse requires --router-mode=kv"
+                )
+            if not self.use_kv_events or self.use_remote_indexer:
+                raise ValueError(
+                    "--router-decode-to-prefill-gpu-reuse requires local Device KV events"
+                )
+            if (
+                self.transfer_source_gpu_estimated_block_us is None
+                or self.transfer_source_prefill_token_us is None
+            ):
+                raise ValueError(
+                    "--router-decode-to-prefill-gpu-reuse requires measured "
+                    "--router-transfer-source-gpu-estimated-block-us and "
+                    "--router-transfer-source-prefill-token-us"
+                )
+        if not 0 < self.transfer_source_lookup_budget_ms <= 60_000:
+            raise ValueError(
+                "--router-transfer-source-lookup-budget-ms must be between 1 and 60000"
+            )
+        if self.minimum_transfer_prefix_blocks <= 0:
+            raise ValueError("--router-minimum-transfer-prefix-blocks must be > 0")
+        if (
+            not math.isfinite(self.minimum_estimated_ttft_saving_ms)
+            or self.minimum_estimated_ttft_saving_ms < 0
+        ):
+            raise ValueError(
+                "--router-minimum-estimated-ttft-saving-ms must be finite and >= 0"
+            )
+        for flag, value in (
+            ("estimated-block-us", self.transfer_source_estimated_block_us),
+            ("gpu-estimated-block-us", self.transfer_source_gpu_estimated_block_us),
+            ("prefill-token-us", self.transfer_source_prefill_token_us),
+        ):
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError(
+                    f"--router-transfer-source-{flag} must be finite and > 0"
+                )
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()

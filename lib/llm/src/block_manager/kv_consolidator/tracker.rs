@@ -101,6 +101,7 @@ impl EventSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageTier {
     Device,     // GPU / G1
+    GpuDirect,  // Retained GPU transfer cache; distinct from execution G1
     HostPinned, // CPU / G2
     Disk,       // Disk / G3
 }
@@ -115,6 +116,7 @@ impl StorageTier {
     pub fn to_vllm_medium(&self) -> &'static str {
         match self {
             StorageTier::Device => "GPU",
+            StorageTier::GpuDirect => "gpu_direct",
             StorageTier::HostPinned => "CPU_TIER1",
             StorageTier::Disk => "CPU_TIER2",
         }
@@ -124,6 +126,7 @@ impl StorageTier {
     pub fn to_str(&self) -> &'static str {
         match self {
             StorageTier::Device => "device",
+            StorageTier::GpuDirect => "gpu_direct",
             StorageTier::HostPinned => "host_pinned",
             StorageTier::Disk => "disk",
         }
@@ -134,6 +137,7 @@ impl From<RouterStorageTier> for StorageTier {
     fn from(value: RouterStorageTier) -> Self {
         match value {
             RouterStorageTier::Device => Self::Device,
+            RouterStorageTier::GpuDirect => Self::GpuDirect,
             RouterStorageTier::HostPinned => Self::HostPinned,
             RouterStorageTier::Disk | RouterStorageTier::External => Self::Disk,
         }

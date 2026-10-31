@@ -586,9 +586,11 @@ impl
                 stream: prefill_stream,
                 booking,
             } = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
-                })
+                .select_and_dispatch_prefill(
+                    prefill_context,
+                    self.decode_routing_host.get().map(Arc::as_ref),
+                    |request, target| self.prepare_prefill_dispatch(request, target, endpoint_id),
+                )
                 .await?;
             if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
                 state.store_prefill_release(booking);
