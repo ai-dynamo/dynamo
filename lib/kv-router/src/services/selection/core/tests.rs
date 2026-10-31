@@ -13,6 +13,8 @@ use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replication::HostReplicaChannels;
 use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};
+use crate::services::selection::service::local_selection_core_with_host;
+use crate::tracking_hash::tracking_hash_context;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -49,7 +51,7 @@ fn local_core_with_ingress(
     Arc<crate::services::selection::ZmqDirectIngress>,
 ) {
     let (host, ingress) = zmq_host_with_ingress();
-    let core = SelectionCore::try_new_local_with_host(
+    let core = local_selection_core_with_host(
         config,
         indexer_threads,
         cancel_token,
@@ -96,7 +98,7 @@ fn core_with(
     let config = crate::scheduling::RouterConfig::from(&config)
         .validate()
         .expect("valid router config");
-    SelectionCore::new_inner(
+    SelectionCore::new(
         config,
         1,
         CancellationToken::new(),

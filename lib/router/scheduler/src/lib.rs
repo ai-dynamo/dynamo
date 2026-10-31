@@ -15,6 +15,7 @@ pub mod kv_hints;
 pub mod local;
 pub mod overlap;
 pub mod overlap_refresh;
+pub mod overlap_summary;
 pub mod prefill_load;
 pub mod protocols;
 pub mod queue;
@@ -39,6 +40,7 @@ pub use overlap::{
 pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
+pub use overlap_summary::MooncakeOverlapSummary;
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,

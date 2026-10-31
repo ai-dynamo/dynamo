@@ -21,7 +21,8 @@ use dynamo_kv_router::scheduling::{BusyThresholds, RejectThresholdsProvider};
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{
     HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
-    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory,
+    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory, local_selection_core,
+    local_selection_core_with_host,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +70,7 @@ fn core_with_config(
     hints: bool,
     config: KvRouterConfig,
 ) -> SelectionCore {
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         config,
         1,
         CancellationToken::new(),
@@ -102,7 +103,7 @@ fn core_with_reject_thresholds(
             ..Default::default()
         }) as RejectThresholdsProvider
     });
-    let core = SelectionCore::bench_try_new_local_with_host(
+    let core = local_selection_core_with_host(
         config,
         1,
         CancellationToken::new(),

@@ -128,7 +128,7 @@ impl ScopedReplicaEvent {
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ReplicaSyncConfig {
+pub struct ReplicaSyncConfig {
     process_id: u64,
     outbound_tx: ReplicaEventSender,
     affinity_tx: Option<mpsc::Sender<AffinityBindingEvent>>,

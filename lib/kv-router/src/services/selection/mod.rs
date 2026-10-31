@@ -38,7 +38,7 @@ pub use crate::services::common::replication::{
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
     SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
+    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
 };
 pub use error::SelectionError;
 pub use ingress::{KvEventIngress, LocalIndexIngress};
@@ -47,7 +47,8 @@ pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use server::{AppState, run_server};
 pub use service::{
-    SelectionService, SelectionServiceBuilder, SessionBindingUpdates,
+    SelectionService, SelectionServiceBuilder, SelectionServiceConfig, SessionBindingUpdates,
+    local_selection_core, local_selection_core_with_host,
     warn_for_unserved_worker_selection_policies,
 };
 pub use types::{

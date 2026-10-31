@@ -176,14 +176,14 @@ mod tests {
     };
     use dynamo_custom_policy_builtin::default_factory;
     use dynamo_kv_router::services::selection::{
-        SelectionCacheConfig, SelectionCore, WorkerRequest,
+        SelectionCacheConfig, SelectionCore, WorkerRequest, local_selection_core,
     };
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
     use dynamo_runtime::protocols::EndpointId;
     use tower::ServiceExt;
 
     async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
-        let core = SelectionCore::try_new_local(
+        let core = local_selection_core(
             KvRouterConfig {
                 use_kv_events: false,
                 ..Default::default()

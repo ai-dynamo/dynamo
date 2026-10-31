@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_tokens::SequenceHash;
 use once_cell::sync::OnceCell;
@@ -51,7 +51,7 @@ use crate::services::common::replication::{
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
 use crate::services::indexer::registry::IndexRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
-use crate::tracking_hash::{TrackingHashContext, TrackingHashScope, tracking_hash_context};
+use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
 mod hint;
 mod operation;
@@ -256,19 +256,6 @@ impl Default for HostReplication {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SelectionServiceConfig {
-    pub port: u16,
-    pub threads: usize,
-    pub indexer_peers: Vec<String>,
-    pub replica_sync_port: Option<u16>,
-    pub replica_sync_peers: Vec<String>,
-    pub kv_router_config: crate::config::KvRouterConfig,
-    pub selection_cache: SelectionCacheConfig,
-    /// Session stickiness TTL; `None` disables session affinity.
-    pub session_affinity_ttl: Option<Duration>,
-}
-
 type SelectionEntries = RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>;
 
 pub struct SelectionCore {
@@ -334,88 +321,14 @@ impl SelectionCore {
             .collect()
     }
 
-    /// Create a local selector and report invalid tracking configuration.
-    pub fn try_new_local(
-        kv_router_config: crate::config::KvRouterConfig,
-        indexer_threads: usize,
-        cancel_token: CancellationToken,
-        cache_config: SelectionCacheConfig,
-        policy_factory: WorkerSelectionPolicyFactory,
-    ) -> anyhow::Result<Self> {
-        Self::try_new_local_with_host(
-            kv_router_config,
-            indexer_threads,
-            cancel_token,
-            cache_config,
-            policy_factory,
-            SelectionHost::default(),
-        )
-    }
-
-    /// A standalone core with host-supplied load signals, for benchmarks that measure a
-    /// host-only path such as the reject thresholds.
-    #[cfg(feature = "bench")]
-    #[doc(hidden)]
-    pub fn bench_try_new_local_with_host(
-        kv_router_config: crate::config::KvRouterConfig,
-        indexer_threads: usize,
-        cancel_token: CancellationToken,
-        cache_config: SelectionCacheConfig,
-        policy_factory: WorkerSelectionPolicyFactory,
-        host: SelectionHost,
-    ) -> anyhow::Result<Self> {
-        Self::try_new_local_with_host(
-            kv_router_config,
-            indexer_threads,
-            cancel_token,
-            cache_config,
-            policy_factory,
-            host,
-        )
-    }
-
-    /// `try_new_local` with an explicit host; tests install the ZMQ ingress this way.
-    pub(super) fn try_new_local_with_host(
-        mut kv_router_config: crate::config::KvRouterConfig,
-        indexer_threads: usize,
-        cancel_token: CancellationToken,
-        cache_config: SelectionCacheConfig,
-        policy_factory: WorkerSelectionPolicyFactory,
-        host: SelectionHost,
-    ) -> anyhow::Result<Self> {
-        kv_router_config
-            .apply_policy_config()
-            .map_err(anyhow::Error::msg)?;
-        kv_router_config
-            .validate_config()
-            .map_err(anyhow::Error::msg)?;
-        let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
-        let indexer_policy = IndexerPolicy::from_config(
-            &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
-        )?;
-        let config = RouterConfig::from(&kv_router_config).validate()?;
-        Ok(Self::new_inner(
-            config,
-            indexer_threads,
-            cancel_token,
-            None,
-            policy_factory,
-            host,
-            WorkerType::Aggregated,
-            true,
-            cache_config,
-            tracking_hash,
-            indexer_policy,
-            None,
-        ))
-    }
-
     pub fn partition(&self, key: &RoutingPartitionId) -> Option<SelectionPartition> {
         self.entry(key).map(SelectionPartition)
     }
 
+    /// The kernel constructor: every input is a resolved slice or a hook the host owns.
+    /// `SelectionServiceBuilder` and the local-core helpers in the composed router call it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_inner(
+    pub fn new(
         config: Validated<RouterConfig>,
         indexer_threads: usize,
         cancel_token: CancellationToken,

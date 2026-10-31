@@ -3,7 +3,8 @@
 use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
+    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+    local_selection_core,
 };
 use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId};
 
@@ -43,7 +44,7 @@ fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
 
 #[tokio::test]
 async fn shared_core_books_and_releases_with_the_builtin_default() {
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,
@@ -89,7 +90,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
     use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             ..Default::default()
@@ -169,7 +170,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
             Ok(0)
         }
     }
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,

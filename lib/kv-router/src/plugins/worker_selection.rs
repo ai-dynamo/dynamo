@@ -33,12 +33,5 @@ pub use crate::scheduling::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLo
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
-use crate::{RoutingPartitionRef, WorkerType};
-use std::sync::Arc;
-
 /// Factory that creates one worker-selection policy per routing partition.
-pub type WorkerSelectionPolicyFactory = Arc<
-    dyn for<'a> Fn(&SelectionConfig, WorkerType, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
-        + Send
-        + Sync,
->;
+pub use dynamo_scheduler::types::WorkerSelectionPolicyFactory;

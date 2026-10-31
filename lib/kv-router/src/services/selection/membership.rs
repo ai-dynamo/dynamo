@@ -206,10 +206,11 @@ mod tests {
     use super::*;
     use crate::config::KvRouterConfig;
     use crate::services::selection::SelectionCacheConfig;
+    use crate::services::selection::service::local_selection_core;
 
     fn core() -> Arc<SelectionCore> {
         Arc::new(
-            SelectionCore::try_new_local(
+            local_selection_core(
                 KvRouterConfig {
                     use_kv_events: false,
                     router_queue_threshold: None,

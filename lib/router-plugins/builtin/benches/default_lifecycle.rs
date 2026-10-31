@@ -5,7 +5,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
+    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+    local_selection_core,
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ fn bench(c: &mut Criterion) {
             WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         });
         for (label, factory) in [("reference", reference), ("plugin", default_factory())] {
-            let core = SelectionCore::try_new_local(
+            let core = local_selection_core(
                 KvRouterConfig {
                     use_kv_events: false,
                     router_queue_threshold: None,

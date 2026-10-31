@@ -21,7 +21,7 @@ use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::tracking_hash_context;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
-use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
+use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -231,7 +231,7 @@ impl SelectionServiceBuilder {
         let config = RouterConfig::from(&self.kv_router_config)
             .validate()
             .map_err(anyhow::Error::from)?;
-        let core = SelectionCore::new_inner(
+        let core = SelectionCore::new(
             config,
             self.indexer_threads,
             cancel_token.clone(),
@@ -308,6 +308,78 @@ impl SelectionServiceBuilder {
             cancel_token,
         })
     }
+}
+
+/// A local selection core from the flat configuration: applies the policy file, validates,
+/// resolves the tracking hash and indexer policy, and builds the kernel over the passive
+/// index ingress. Tests, benches, and in-process hosts use it; the standalone service goes
+/// through [`SelectionServiceBuilder`].
+pub fn local_selection_core(
+    kv_router_config: KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+    cache_config: SelectionCacheConfig,
+    policy_factory: WorkerSelectionPolicyFactory,
+) -> anyhow::Result<SelectionCore> {
+    local_selection_core_with_host(
+        kv_router_config,
+        indexer_threads,
+        cancel_token,
+        cache_config,
+        policy_factory,
+        SelectionHost::default(),
+    )
+}
+
+/// [`local_selection_core`] with an explicit host (ingress, load and cache signals).
+pub fn local_selection_core_with_host(
+    mut kv_router_config: KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+    cache_config: SelectionCacheConfig,
+    policy_factory: WorkerSelectionPolicyFactory,
+    host: SelectionHost,
+) -> anyhow::Result<SelectionCore> {
+    kv_router_config
+        .apply_policy_config()
+        .map_err(anyhow::Error::msg)?;
+    kv_router_config
+        .validate_config()
+        .map_err(anyhow::Error::msg)?;
+    let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
+    let indexer_policy = IndexerPolicy::from_config(
+        &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
+    )?;
+    let config = RouterConfig::from(&kv_router_config).validate()?;
+    Ok(SelectionCore::new(
+        config,
+        indexer_threads,
+        cancel_token,
+        None,
+        policy_factory,
+        host,
+        WorkerType::Aggregated,
+        true,
+        cache_config,
+        tracking_hash,
+        indexer_policy,
+        None,
+    ))
+}
+
+/// The standalone selection service's configuration, as the CLI and the Python bindings
+/// hand it over; `service_builder` turns it into a builder.
+#[derive(Debug, Clone)]
+pub struct SelectionServiceConfig {
+    pub port: u16,
+    pub threads: usize,
+    pub indexer_peers: Vec<String>,
+    pub replica_sync_port: Option<u16>,
+    pub replica_sync_peers: Vec<String>,
+    pub kv_router_config: crate::config::KvRouterConfig,
+    pub selection_cache: SelectionCacheConfig,
+    /// Session stickiness TTL; `None` disables session affinity.
+    pub session_affinity_ttl: Option<Duration>,
 }
 
 impl SelectionServiceConfig {
@@ -431,7 +503,7 @@ impl SelectionService {
         Self {
             session_binding_rx: None,
             core: Arc::new(
-                SelectionCore::try_new_local_with_host(
+                local_selection_core_with_host(
                     kv_router_config,
                     indexer_threads,
                     cancel_token.clone(),
