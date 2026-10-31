@@ -10,7 +10,6 @@ use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
 use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -20,8 +19,6 @@ pub use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::RawWorkerSelectionConfig;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
-
-const SYNTHETIC_POLICY_CLASS: &str = "default";
 
 #[derive(Debug, Error)]
 pub enum RouterPolicyConfigError {
@@ -41,38 +38,25 @@ pub enum RouterPolicyConfigError {
     Validation(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct PolicyClassConfig {
-    pub name: String,
-    pub queue_policy: RouterQueuePolicy,
-    pub quantum: usize,
-    /// The limits this class waits on.
-    pub busy_thresholds: BusyThresholds,
-    pub request_queue_limit_per_worker: Option<usize>,
-    pub raw_isl_token_queue_limit_per_worker: Option<usize>,
-    pub cached_token_queue_limit_per_worker: Option<usize>,
-}
-
-impl PolicyClassConfig {
-    pub fn queueing_enabled(&self) -> bool {
-        self.busy_thresholds.is_configured()
-    }
-
-    /// Any zero per-worker limit means `queue_rejection` rejects every queued
-    /// entry (`current >= limit` holds at zero usage), so the class can never
-    /// hold a queued request and must keep the direct admission path.
-    pub fn never_queues(&self) -> bool {
-        self.request_queue_limit_per_worker == Some(0)
-            || self.raw_isl_token_queue_limit_per_worker == Some(0)
-            || self.cached_token_queue_limit_per_worker == Some(0)
-    }
-}
-
 /// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
 /// past them, and rejects the request when no eligible worker remains.
 pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync + 'static>;
 
+pub use dynamo_slot_tracker::busy::BusyRanksExt;
 pub use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
+
+pub use super::admission_config::{
+    AdmissionConfigError, FamilyBucketTable, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
+    SYNTHETIC_POLICY_CLASS,
+};
+
+impl From<AdmissionConfigError> for RouterPolicyConfigError {
+    fn from(error: AdmissionConfigError) -> Self {
+        match error {
+            AdmissionConfigError::Validation(message) => Self::Validation(message),
+        }
+    }
+}
 
 /// Judges a whole worker against [`BusyThresholds`] from its runtime config. Lives beside
 /// [`WorkerConfigLike`] because the slot tracker does not know the config trait.
@@ -96,141 +80,6 @@ impl BusyThresholdsExt for BusyThresholds {
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
         self.worker_is_full_in_ranks(worker_id, start..end, WorkerCapacity::of(config), loads)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PolicyProfile {
-    classes: Vec<PolicyClassConfig>,
-    classifier: PolicyClassifier,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum PolicyClassifier {
-    SyntheticSingle { class_index: usize },
-    FamilyBucket(FamilyBucketClassifier),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct FamilyBucketClassifier {
-    default_family_index: usize,
-    family_indices: HashMap<String, usize>,
-    explicit_class_indices: HashMap<String, usize>,
-    buckets: Vec<UncachedIslBucket>,
-    class_by_family_bucket: Vec<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UncachedIslBucket {
-    min_tokens: usize,
-}
-
-impl FamilyBucketClassifier {
-    /// Returns only selections that do not require a cache snapshot.
-    fn direct_class_index(&self, requested: Option<&str>) -> Option<usize> {
-        requested.and_then(|name| self.explicit_class_indices.get(name).copied())
-    }
-
-    /// Combines a recognized family (or the default) with the observed bucket.
-    fn class_index(&self, requested: Option<&str>, uncached_tokens: usize) -> usize {
-        if let Some(class_index) = self.direct_class_index(requested) {
-            return class_index;
-        }
-
-        let family_index = requested
-            .and_then(|name| self.family_indices.get(name).copied())
-            .unwrap_or(self.default_family_index);
-        self.class_index_for_family(family_index, uncached_tokens)
-    }
-
-    fn strict_class_index(&self, requested: &str, uncached_tokens: usize) -> Option<usize> {
-        self.explicit_class_indices
-            .get(requested)
-            .copied()
-            .or_else(|| {
-                self.family_indices
-                    .get(requested)
-                    .map(|family_index| self.class_index_for_family(*family_index, uncached_tokens))
-            })
-    }
-
-    fn class_index_for_family(&self, family_index: usize, uncached_tokens: usize) -> usize {
-        let bucket_index = self
-            .buckets
-            .partition_point(|bucket| bucket.min_tokens <= uncached_tokens)
-            .saturating_sub(1);
-        self.class_by_family_bucket[family_index * self.buckets.len() + bucket_index]
-    }
-}
-
-impl PolicyProfile {
-    pub fn synthetic(
-        router_queue_threshold: Option<f64>,
-        router_queue_policy: RouterQueuePolicy,
-    ) -> Self {
-        let class = PolicyClassConfig {
-            name: SYNTHETIC_POLICY_CLASS.to_string(),
-            queue_policy: router_queue_policy,
-            quantum: 1,
-            busy_thresholds: BusyThresholds {
-                prefill_busy_threshold: None,
-                prefill_busy_threshold_frac: router_queue_threshold,
-                decode_busy_threshold_frac: None,
-            },
-            request_queue_limit_per_worker: None,
-            raw_isl_token_queue_limit_per_worker: None,
-            cached_token_queue_limit_per_worker: None,
-        };
-        Self {
-            classes: vec![class],
-            classifier: PolicyClassifier::SyntheticSingle { class_index: 0 },
-        }
-    }
-
-    pub fn classes(&self) -> &[PolicyClassConfig] {
-        &self.classes
-    }
-
-    pub fn default_class(&self) -> &PolicyClassConfig {
-        &self.classes[self.resolve_class_index(None, 0)]
-    }
-
-    /// Resolves synthetic and explicit requests without observing cache state.
-    pub fn direct_class_index(&self, requested: Option<&str>) -> Option<usize> {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => Some(*class_index),
-            PolicyClassifier::FamilyBucket(classifier) => classifier.direct_class_index(requested),
-        }
-    }
-
-    /// Resolves a requested family and exact uncached ISL to a physical queue.
-    pub fn resolve_class_index(&self, requested: Option<&str>, uncached_tokens: usize) -> usize {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => *class_index,
-            PolicyClassifier::FamilyBucket(classifier) => {
-                // TODO: Add bounded observability for unknown requested policy values.
-                classifier.class_index(requested, uncached_tokens)
-            }
-        }
-    }
-
-    pub fn class(&self, index: usize) -> &PolicyClassConfig {
-        &self.classes[index]
-    }
-
-    pub(crate) fn resolve_class_index_strict(
-        &self,
-        requested: &str,
-        uncached_tokens: usize,
-    ) -> Option<usize> {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => {
-                (self.classes[*class_index].name == requested).then_some(*class_index)
-            }
-            PolicyClassifier::FamilyBucket(classifier) => {
-                classifier.strict_class_index(requested, uncached_tokens)
-            }
-        }
     }
 }
 
@@ -565,19 +414,17 @@ fn resolve_profile(
         }
     }
 
-    Ok(PolicyProfile {
+    Ok(PolicyProfile::family_buckets(FamilyBucketTable {
         classes,
-        classifier: PolicyClassifier::FamilyBucket(FamilyBucketClassifier {
-            default_family_index,
-            family_indices,
-            explicit_class_indices,
-            buckets: resolved_buckets.buckets,
-            class_by_family_bucket: class_by_family_bucket
-                .into_iter()
-                .map(|class_index| class_index.expect("validated complete policy matrix"))
-                .collect(),
-        }),
-    })
+        default_family_index,
+        family_indices,
+        explicit_class_indices,
+        bucket_min_tokens: resolved_buckets.buckets,
+        class_by_family_bucket: class_by_family_bucket
+            .into_iter()
+            .map(|class_index| class_index.expect("validated complete policy matrix"))
+            .collect(),
+    })?)
 }
 
 struct ResolvedPolicyClass {
@@ -674,7 +521,8 @@ fn resolve_policy_class(
 }
 
 struct ResolvedBuckets {
-    buckets: Vec<UncachedIslBucket>,
+    /// Each bucket's lower bound in uncached tokens, in order.
+    buckets: Vec<usize>,
     names: Vec<String>,
     indices: HashMap<String, usize>,
 }
@@ -717,9 +565,7 @@ fn resolve_uncached_isl_buckets(
             )));
         }
         bucket_names.push(raw.bucket);
-        buckets.push(UncachedIslBucket {
-            min_tokens: raw.min_tokens,
-        });
+        buckets.push(raw.min_tokens);
     }
 
     Ok(ResolvedBuckets {

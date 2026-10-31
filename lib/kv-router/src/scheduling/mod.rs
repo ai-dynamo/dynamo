@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod admission_config;
 mod classifier_rows;
 pub mod config;
 mod filter;
@@ -32,8 +33,8 @@ pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
 pub use policy_config::{
-    BusyThresholds, BusyThresholdsExt, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider,
-    RouterPolicyConfig, RouterPolicyConfigError,
+    BusyRanksExt, BusyThresholds, BusyThresholdsExt, PolicyClassConfig, PolicyProfile,
+    RejectThresholdsProvider, RouterPolicyConfig, RouterPolicyConfigError,
 };
 pub use policy_queue::{
     PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,

@@ -14,8 +14,6 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use crate::WorkerLoadProjection;
 
-pub use dynamo_router_protocol::load::RankLoad;
-
 impl RankLoad for WorkerLoadProjection {
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
@@ -26,51 +24,30 @@ impl RankLoad for WorkerLoadProjection {
     }
 }
 
-/// Per-rank load limits. A rank is full once its booked load passes any configured limit.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct BusyThresholds {
-    /// Booked prefill tokens above which a rank is full.
-    // TODO(v1.7): Remove the absolute threshold; use `prefill_busy_threshold_frac`.
-    pub prefill_busy_threshold: Option<usize>,
-    /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
-    /// rank does not report it, the fraction is taken of
-    /// [`DEFAULT_MAX_BATCHED_TOKENS`](dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS).
-    pub prefill_busy_threshold_frac: Option<f64>,
-    /// Fraction of the rank's `total_kv_blocks` above which the KV blocks its active
-    /// requests hold make it full. A rank that does not report `total_kv_blocks` skips it.
-    pub decode_busy_threshold_frac: Option<f64>,
+pub use dynamo_router_protocol::load::{BusyThresholds, RankLoad};
+
+/// The per-rank and per-worker fullness checks over the slot tracker's load projection.
+pub trait BusyRanksExt {
+    /// Whether `worker`'s booked load passes a configured limit; an unobserved rank is idle.
+    fn rank_is_full(
+        &self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool;
+
+    /// Whether every one of `worker_id`'s `dp_ranks` is full.
+    fn worker_is_full_in_ranks(
+        &self,
+        worker_id: WorkerId,
+        dp_ranks: Range<u32>,
+        capacity: WorkerCapacity,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool;
 }
 
-impl BusyThresholds {
-    /// Whether any limit is set.
-    pub fn is_configured(&self) -> bool {
-        self.prefill_busy_threshold.is_some()
-            || self.prefill_busy_threshold_frac.is_some()
-            || self.decode_busy_threshold_frac.is_some()
-    }
-
-    /// Whether a rank with this `LOAD` row and capacity is within every configured limit.
-    pub fn has_room<L: RankLoad>(&self, load: &L, capacity: WorkerCapacity) -> bool {
-        let tokens = load.active_prefill_tokens();
-        let prefill_budget = capacity.prefill_budget();
-        let absolute_full = self
-            .prefill_busy_threshold
-            .is_some_and(|threshold| tokens > threshold);
-        let fractional_full = self
-            .prefill_busy_threshold_frac
-            .is_some_and(|threshold| (tokens as f64) > threshold * (prefill_budget as f64));
-        let decode_full = self
-            .decode_busy_threshold_frac
-            .zip(capacity.total_kv_blocks())
-            .is_some_and(|(threshold, total_kv_blocks)| {
-                (load.active_decode_blocks() as f64) > threshold * (total_kv_blocks as f64)
-            });
-        !(absolute_full || fractional_full || decode_full)
-    }
-
-    /// Whether this rank's `LOAD` row exceeds any configured limit. A rank without a
-    /// projection counts as idle.
-    pub fn rank_is_full(
+impl BusyRanksExt for BusyThresholds {
+    fn rank_is_full(
         &self,
         worker: WorkerWithDpRank,
         capacity: WorkerCapacity,
@@ -80,9 +57,7 @@ impl BusyThresholds {
         !self.has_room(&load, capacity)
     }
 
-    /// Whether no rank of `worker_id` in `dp_ranks` has room, judged on the `LOAD` rows in
-    /// `loads`. The router derives the range and capacity from the worker's config.
-    pub fn worker_is_full_in_ranks(
+    fn worker_is_full_in_ranks(
         &self,
         worker_id: WorkerId,
         dp_ranks: Range<u32>,

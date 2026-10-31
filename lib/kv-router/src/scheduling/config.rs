@@ -426,39 +426,7 @@ impl RouterPrefillLoadModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RouterQueuePolicy {
-    #[default]
-    Fcfs,
-    Lcfs,
-    Wspt,
-}
-
-impl fmt::Display for RouterQueuePolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Fcfs => f.write_str("fcfs"),
-            Self::Lcfs => f.write_str("lcfs"),
-            Self::Wspt => f.write_str("wspt"),
-        }
-    }
-}
-
-impl FromStr for RouterQueuePolicy {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "fcfs" => Ok(Self::Fcfs),
-            "lcfs" => Ok(Self::Lcfs),
-            "wspt" => Ok(Self::Wspt),
-            _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
-            )),
-        }
-    }
-}
+pub use super::admission_config::RouterQueuePolicy;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RouterConfigOverrideSerde {
