@@ -509,6 +509,10 @@ class OmniHandler(BaseOmniHandler):
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
+            except InvalidArgument:
+                # Client-input failure (e.g. unknown or unloaded LoRA adapter):
+                # surface it as a public 400, not an in-band error chunk.
+                raise
             except Exception as e:
                 logger.error(
                     "Error during generation for request %s: %s", request_id, e
@@ -583,7 +587,7 @@ class OmniHandler(BaseOmniHandler):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
 
