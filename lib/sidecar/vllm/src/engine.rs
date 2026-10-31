@@ -24,7 +24,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
+use crate::client::{self, CONTROL_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
     normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
@@ -297,13 +297,21 @@ impl VllmSidecarEngine {
     async fn connect_engine(
         &self,
         is_reconnect: bool,
-    ) -> Result<(VllmClient, DiscoveredModel, EngineConfig, Instant), DynamoError> {
+    ) -> Result<
+        (
+            VllmClient,
+            EngineAvailability,
+            DiscoveredModel,
+            EngineConfig,
+            Instant,
+        ),
+        DynamoError,
+    > {
         let startup_deadline = client::startup_deadline(self.transport.startup_deadline)?;
         let client =
             VllmClient::connect(&self.endpoint, self.transport, startup_deadline, false).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE, INFERENCE_SERVICE],
+        let availability = client
+            .wait_for_engine(
                 startup_deadline,
                 self.transport.retry_interval,
                 self.transport.connect_attempt_timeout,
@@ -322,14 +330,21 @@ impl VllmSidecarEngine {
                 Value::Bool(true),
             );
         }
-        Ok((client, observed, engine_config, startup_deadline))
+        Ok((
+            client,
+            availability,
+            observed,
+            engine_config,
+            startup_deadline,
+        ))
     }
 
-    /// Serve through `client` and report the engine's health until it is lost.
-    fn attach_client(&self, client: VllmClient) {
+    /// Serve through `client` and report the engine's health, starting from
+    /// `availability`, until it is lost.
+    fn attach_client(&self, client: VllmClient, availability: EngineAvailability) {
         let channel = client.health_channel();
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(client));
-        client::report(&self.availability, EngineAvailability::Ready);
+        client::report(&self.availability, availability);
         let availability = self.availability.clone();
         let cancel = self.cancel.child_token();
         let open_timeout = self.transport.connect_attempt_timeout;
@@ -851,7 +866,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "connecting to vLLM gRPC"
         );
-        let (client, observed, engine_config, startup_deadline) =
+        let (client, availability, observed, engine_config, startup_deadline) =
             self.connect_engine(false).await?;
         let routing_image_token_id =
             resolve_routing_image_token_id(&observed, startup_deadline).await;
@@ -859,7 +874,7 @@ impl LLMEngine for VllmSidecarEngine {
             .set(routing_image_token_id)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
-        self.attach_client(client);
+        self.attach_client(client, availability);
         tracing::info!(
             endpoint = %self.endpoint,
             connections = connection_count,
@@ -1269,8 +1284,8 @@ impl LLMEngine for VllmSidecarEngine {
         // A restarted engine may have lost its adapters; `on_recovered` republishes its inventory.
         self.unpublish_all_loras().await;
         tracing::info!(endpoint = %self.endpoint, "reconnecting to vLLM gRPC");
-        let (client, _, engine_config, _) = self.connect_engine(true).await?;
-        self.attach_client(client);
+        let (client, availability, _, engine_config, _) = self.connect_engine(true).await?;
+        self.attach_client(client, availability);
         tracing::info!(endpoint = %self.endpoint, "reconnected to vLLM gRPC");
         Ok(engine_config)
     }

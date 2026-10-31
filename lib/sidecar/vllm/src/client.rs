@@ -97,21 +97,64 @@ impl VllmClient {
                 startup_deadline,
                 retry_interval,
                 attempt_timeout,
-                is_reconnect,
+                Unregistered::on_connect(is_reconnect),
             )
             .await?;
         }
         Ok(())
     }
 
+    /// Wait until vLLM can serve and return whether it is ready now. A vLLM
+    /// with `liveness` keeps `vllm.Inference` NOT_SERVING while it is paused or
+    /// asleep, so the sidecar waits for `liveness` there and reads `readiness`.
+    pub(crate) async fn wait_for_engine(
+        &self,
+        startup_deadline: Instant,
+        retry_interval: Duration,
+        attempt_timeout: Duration,
+        is_reconnect: bool,
+    ) -> Result<EngineAvailability, DynamoError> {
+        let unregistered = Unregistered::on_connect(is_reconnect);
+        let wait = |service, unregistered| {
+            self.wait_for_service(
+                service,
+                startup_deadline,
+                retry_interval,
+                attempt_timeout,
+                unregistered,
+            )
+        };
+        wait(CONTROL_SERVICE, unregistered).await?;
+        if !wait(LIVENESS_SERVICE, Unregistered::Absent).await? {
+            wait(INFERENCE_SERVICE, unregistered).await?;
+            return Ok(EngineAvailability::Ready);
+        }
+        let mut client = HealthClient::new(self.pool.next_channel());
+        let readiness = client.check(HealthCheckRequest {
+            service: READINESS_SERVICE.to_string(),
+        });
+        let is_ready = matches!(
+            tokio::time::timeout(attempt_timeout, readiness).await,
+            Ok(Ok(response)) if response.get_ref().status == ServingStatus::Serving as i32
+        );
+        // The health monitor corrects a failed check.
+        Ok(if is_ready {
+            EngineAvailability::Ready
+        } else {
+            EngineAvailability::NotReady
+        })
+    }
+
+    /// Wait until `service` is SERVING; false if it is unregistered and
+    /// `unregistered` is `Absent`.
     async fn wait_for_service(
         &self,
         service: &str,
         deadline: Instant,
         retry_interval: Duration,
         attempt_timeout: Duration,
-        is_reconnect: bool,
-    ) -> Result<(), DynamoError> {
+        unregistered: Unregistered,
+    ) -> Result<bool, DynamoError> {
         let started = Instant::now();
         loop {
             let mut client = HealthClient::new(self.pool.next_channel());
@@ -130,17 +173,20 @@ impl VllmClient {
                     let status = ServingStatus::try_from(response.into_inner().status)
                         .unwrap_or(ServingStatus::Unknown);
                     if status == ServingStatus::Serving {
-                        return Ok(());
+                        return Ok(true);
                     }
                     format!("reported {}", status.as_str_name())
                 }
                 Ok(Err(status))
-                    if !is_reconnect
+                    if unregistered != Unregistered::Retry
                         && matches!(
                             status.code(),
                             tonic::Code::NotFound | tonic::Code::Unimplemented
                         ) =>
                 {
+                    if unregistered == Unregistered::Absent {
+                        return Ok(false);
+                    }
                     return Err(protocol_error(format!(
                         "{service} is unavailable through the standard gRPC health API: {status}"
                     )));
@@ -280,6 +326,27 @@ impl VllmClient {
         lora_rpc("ListLoras", client.list_loras(pb::ListLorasRequest {}))
             .await
             .map(|response| response.adapters)
+    }
+}
+
+/// What an unregistered health service means while waiting for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unregistered {
+    /// This vLLM lacks the service.
+    Fatal,
+    /// vLLM removes its health services just before its listener closes.
+    Retry,
+    /// The service is optional.
+    Absent,
+}
+
+impl Unregistered {
+    fn on_connect(is_reconnect: bool) -> Self {
+        if is_reconnect {
+            Self::Retry
+        } else {
+            Self::Fatal
+        }
     }
 }
 

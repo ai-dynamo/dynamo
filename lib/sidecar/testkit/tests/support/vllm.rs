@@ -533,10 +533,17 @@ impl Health for ControlledHealth {
         if request.get_ref().service != InferenceServer::<ControlledService>::NAME {
             return self.inner.check(request).await;
         }
-        // An unregistered service answers NotFound, as vLLM's does while it shuts down.
-        self.inner
+        // An unregistered service answers NotFound, as vLLM's does while it
+        // shuts down, and a NOT_SERVING one answers as set.
+        let registered = self
+            .inner
             .check(Request::new(request.get_ref().clone()))
             .await?;
+        if registered.get_ref().status
+            != tonic_health::pb::health_check_response::ServingStatus::Serving as i32
+        {
+            return Ok(registered);
+        }
         self.health_requested.send_replace(true);
         let mut readiness = self.is_healthy.clone();
         let is_healthy = readiness

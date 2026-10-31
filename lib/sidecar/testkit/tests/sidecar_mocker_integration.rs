@@ -600,18 +600,23 @@ async fn wait_availability(
 }
 
 /// Regression: the sidecar kept its worker registered after vLLM stopped
-/// serving or went away. Covers both health shapes vLLM serves.
+/// serving or went away, and could not connect to a vLLM with `liveness` while
+/// it slept. Covers both health shapes vLLM serves.
 #[tokio::test]
 async fn vllm_health_stream_sets_engine_availability() {
     for has_liveness in [false, true] {
         let mut fixture =
             vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
         let readiness = if has_liveness {
+            // Asleep: only `liveness` reports SERVING.
+            fixture
+                .set_service_health(vllm_fixture::LIVENESS_SERVICE, Some(true))
+                .await;
             for service in [
-                vllm_fixture::LIVENESS_SERVICE,
                 vllm_fixture::READINESS_SERVICE,
+                vllm_fixture::INFERENCE_SERVICE,
             ] {
-                fixture.set_service_health(service, Some(true)).await;
+                fixture.set_service_health(service, Some(false)).await;
             }
             vllm_fixture::READINESS_SERVICE
         } else {
@@ -621,7 +626,9 @@ async fn vllm_health_stream_sets_engine_availability() {
         engine.start(0).await.unwrap();
         let mut availability = engine.availability().expect("vLLM reports availability");
 
-        fixture.set_service_health(readiness, Some(false)).await;
+        if !has_liveness {
+            fixture.set_service_health(readiness, Some(false)).await;
+        }
         wait_availability(&mut availability, EngineAvailability::NotReady).await;
         fixture.set_service_health(readiness, Some(true)).await;
         wait_availability(&mut availability, EngineAvailability::Ready).await;
