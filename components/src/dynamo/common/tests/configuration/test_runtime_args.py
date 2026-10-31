@@ -431,7 +431,8 @@ def test_engine_request_limit_flag_outranks_both_environment_names(admission_env
     assert _CANONICAL_LIMIT_ENV in help_text
     assert _LEGACY_LIMIT_ENV in help_text
     assert "per DP rank" in help_text
-    assert "max_num_seqs" in help_text
+    assert "default: unlimited" in help_text
+    assert "max_num_seqs" not in help_text
 
 
 @pytest.mark.parametrize(

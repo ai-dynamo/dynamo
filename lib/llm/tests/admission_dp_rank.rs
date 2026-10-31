@@ -346,7 +346,9 @@ async fn admission_applies_only_at_the_typed_backend_boundary() {
     // wrapper admits through that gate.
     let reached = Arc::new(AtomicUsize::new(0));
     let backend_endpoint = endpoint(&drt, "generate");
-    let gate = WorkerAdmissionGate::default().get_or_create(backend_endpoint.component());
+    let gate = WorkerAdmissionGate::default()
+        .get_or_create(backend_endpoint.component())
+        .unwrap();
     // This worker serves global ranks 4 and 5: two engine requests, and two
     // waiting, worker-wide.
     gate.record_engine_capacity(None, 4, 2);
