@@ -57,6 +57,103 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
             .join("\n"),
     }
 }
+/// Count requests carry the same prompt controls as Messages, without an output budget.
+#[derive(serde::Deserialize)]
+pub(crate) struct AnthropicCountTokensInput {
+    pub model: String,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default, deserialize_with = "deserialize_count_system")]
+    pub system: Option<SystemContent>,
+    pub tools: Option<Vec<AnthropicTool>>,
+    pub tool_choice: Option<AnthropicToolChoice>,
+    pub thinking: Option<ThinkingConfig>,
+    pub output_config: Option<serde_json::Value>,
+}
+
+// The protocol crate's system deserializer is private. Keep this typed so duplicate
+// request fields are rejected and long conversations do not need a JSON Value tree.
+fn deserialize_count_system<'de, D>(deserializer: D) -> Result<Option<SystemContent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum System {
+        Text(String),
+        Blocks(Vec<Block>),
+    }
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Block {
+        Text {
+            text: String,
+            cache_control: Option<CacheControl>,
+        },
+    }
+    Ok(
+        Option::<System>::deserialize(deserializer)?.map(|system| match system {
+            System::Text(text) => SystemContent {
+                text,
+                cache_control: None,
+            },
+            System::Blocks(blocks) => {
+                let mut text = String::new();
+                let mut cache_control = None;
+                for (
+                    index,
+                    Block::Text {
+                        text: block,
+                        cache_control: cache,
+                    },
+                ) in blocks.into_iter().enumerate()
+                {
+                    if index > 0 {
+                        text.push('\n');
+                    }
+                    text.push_str(&block);
+                    if cache.is_some() {
+                        cache_control = cache;
+                    }
+                }
+                SystemContent {
+                    text,
+                    cache_control,
+                }
+            }
+        }),
+    )
+}
+
+impl TryFrom<AnthropicCountTokensInput> for NvCreateChatCompletionRequest {
+    type Error = anyhow::Error;
+
+    fn try_from(req: AnthropicCountTokensInput) -> Result<Self, Self::Error> {
+        AnthropicCreateMessageRequest {
+            model: req.model,
+            messages: req.messages,
+            system: req.system,
+            tools: req.tools,
+            // Only prompt processing runs; this is never a generation request.
+            max_tokens: 1,
+            stream: false,
+            nvext: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_choice: req.tool_choice,
+            cache_control: None,
+            thinking: req.thinking,
+            service_tier: None,
+            container: None,
+            output_config: req.output_config,
+        }
+        .try_into()
+    }
+}
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
