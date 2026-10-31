@@ -18,12 +18,3 @@ pub use dynamo_kv_indexer::identity::{
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
     MAX_EXPLICIT_IDENTITY_VALUE_BYTES,
 };
-
-#[cfg(any(
-    feature = "standalone-indexer",
-    feature = "standalone-selection",
-    feature = "standalone-slot-tracker"
-))]
-pub(crate) fn default_routing_group() -> String {
-    DEFAULT_ROUTING_GROUP.to_string()
-}

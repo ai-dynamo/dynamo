@@ -10,7 +10,7 @@
 //! `apply_event_routed`, so they exercise the HTTP layer end-to-end without
 //! requiring a running ZMQ publisher.
 
-#![cfg(feature = "standalone-indexer")]
+#![cfg(all(feature = "http", feature = "ingest-zmq"))]
 
 use std::sync::Arc;
 use std::time::Duration;

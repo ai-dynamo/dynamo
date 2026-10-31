@@ -510,15 +510,15 @@ jobs:
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      # Workspace feature unification hides these; check each on its own.
+      # Workspace feature unification hides these; check each feature on its own.
       run: |
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
+        cargo-hack --version || cargo install cargo-hack@0.6.45 --locked
+        bash scripts/router_features_check.sh
     - name: Run standalone slot-tracker feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
-      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
+      # No workspace member requests the slot-tracker service alone, so it needs an explicit run here.
+      run: cargo test --locked -p dynamo-kv-router --features http,replica-sync-zmq --lib 'services::'
     - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

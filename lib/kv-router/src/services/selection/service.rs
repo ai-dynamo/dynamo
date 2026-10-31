@@ -494,7 +494,7 @@ impl SelectionService {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "http"))]
     pub(super) fn new_local_for_test(
         kv_router_config: KvRouterConfig,
         indexer_threads: usize,
@@ -675,10 +675,13 @@ impl SelectionService {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "http")]
     pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
         self.peer_manager.clone()
     }
 
+    /// The registry in the HTTP dump format the peer-recovery endpoint serves.
+    #[cfg(feature = "http")]
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
         crate::services::indexer::server::dump_registry(self.core.index_registry()).await
     }
@@ -710,7 +713,7 @@ impl Drop for SelectionService {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "http"))]
 mod tests {
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;

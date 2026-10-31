@@ -14,13 +14,21 @@ readme = "README.md"
 
 [features]
 default = []
+# Adapters. The composition (flat config, plugin registry, SelectionServiceBuilder) never
+# needs a transport crate; each adapter brings its own.
+http = ["dep:axum", "dep:chrono", "dep:tracing-appender"]
+ingest-zmq = ["dep:zmq", "dep:dynamo-zmq"]
+replica-sync-zmq = ["dep:zmq", "dep:dynamo-zmq"]
+peer-recovery = ["dep:reqwest"]
+# Deprecated aliases for the pre-split service names, kept for one release: each enables the
+# adapters that service is made of.
+standalone-indexer = ["http", "ingest-zmq", "peer-recovery"]
+standalone-slot-tracker = ["http", "replica-sync-zmq"]
+standalone-selection = ["standalone-indexer", "replica-sync-zmq"]
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
 profile = ["dynamo-kv-indexer/profile"]
-standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:dynamo-zmq", "dep:chrono", "dep:tracing-appender"]
-standalone-slot-tracker = ["dep:axum", "dep:zmq", "dep:dynamo-zmq"]
-standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-scheduler/testing", "dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
 
@@ -46,7 +54,6 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }
-once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"
 futures-util = { workspace = true }
@@ -71,7 +78,7 @@ rmp-serde = { workspace = true }
 
 rustc-hash = "2.1.1"
 
-# standalone-indexer (optional)
+# adapters (optional)
 http = { workspace = true }
 axum = { version = "=0.8.4", default-features = false, features = [
   "http1",
@@ -100,6 +107,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bench]]
 name = "policy_queue"
@@ -117,4 +125,4 @@ required-features = ["bench"]
 [[bench]]
 name = "selection_core"
 harness = false
-required-features = ["standalone-selection", "bench"]
+required-features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"]

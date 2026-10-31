@@ -220,6 +220,29 @@ for row in "${TABLE[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Composition crate: its adapters live behind features, so with no features it
+# carries the kernel and the stages and none of the transport crates.
+# ---------------------------------------------------------------------------
+COMPOSITION="dynamo-kv-router"
+COMPOSITION_ROUTER_DEPS="dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-worker-selection"
+in_workspace "$COMPOSITION" || die "$COMPOSITION is not a workspace package"
+tree "$COMPOSITION" "$COMPOSITION" --no-default-features >"$tmp/comp_tree.txt"
+awk -v c="$COMPOSITION" '$1 != c { print $1 }' "$tmp/comp_tree.txt" | lines >"$tmp/comp_names.txt"
+comm -12 "$tmp/comp_names.txt" <(words "$ROUTER_FAMILY") >"$tmp/comp_found.txt"
+words "$COMPOSITION_ROUTER_DEPS" >"$tmp/comp_want.txt"
+if cmp -s "$tmp/comp_found.txt" "$tmp/comp_want.txt"; then
+  ok "$COMPOSITION: router deps == $(show <"$tmp/comp_want.txt") (no features)"
+else
+  bad "$COMPOSITION: router deps $(show <"$tmp/comp_found.txt") != allowed $(show <"$tmp/comp_want.txt") (no features)"
+fi
+comm -12 "$tmp/comp_names.txt" <(words "$HOST_FORBIDDEN") >"$tmp/comp_hits.txt"
+if [ ! -s "$tmp/comp_hits.txt" ]; then
+  ok "$COMPOSITION: none of $(words "$HOST_FORBIDDEN" | show) in its no-features tree ($(wc -l <"$tmp/comp_names.txt") crates)"
+else
+  bad "$COMPOSITION: transport crates in its no-features tree: $(show <"$tmp/comp_hits.txt")"
+fi
+
 words "$table_crates" >"$tmp/table_crates.txt"
 
 # ---------------------------------------------------------------------------

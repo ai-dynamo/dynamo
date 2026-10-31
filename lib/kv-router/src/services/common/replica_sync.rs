@@ -219,7 +219,7 @@ enum PeerCommand {
 }
 
 impl PeerManager {
-    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn start<F>(
         initial_peers: Vec<String>,
         cancel_token: CancellationToken,
@@ -428,13 +428,13 @@ fn handle_replica_message<F, A>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "standalone-slot-tracker")]
+    #[cfg(feature = "http")]
     use crate::identity::RoutingPartitionId;
     use crate::protocols::ActiveSequenceEvent;
 
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
 
-    #[cfg(feature = "standalone-slot-tracker")]
+    #[cfg(feature = "http")]
     use crate::services::slot_tracker::registry::SlotTrackerRegistry;
 
     fn event() -> ScopedReplicaEvent {
@@ -541,7 +541,7 @@ mod tests {
         publisher_task.await.unwrap();
     }
 
-    #[cfg(feature = "standalone-slot-tracker")]
+    #[cfg(feature = "http")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn zmq_replica_sync_propagates_request_lifecycle() {
         let endpoint_a = reserve_tcp_endpoint();
@@ -605,7 +605,7 @@ mod tests {
         publisher_b.await.unwrap();
     }
 
-    #[cfg(feature = "standalone-slot-tracker")]
+    #[cfg(feature = "http")]
     async fn wait_for_load(
         registry: &SlotTrackerRegistry,
         expected_blocks: usize,

@@ -27,13 +27,14 @@ mod pending {
 mod types {
     pub use dynamo_scheduler::selection::types::*;
 }
+#[cfg(feature = "http")]
 mod server;
 mod service;
 mod zmq_ingress;
 
 #[cfg(test)]
 mod core_host_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "http"))]
 mod tests;
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
@@ -61,6 +62,7 @@ pub use error::SelectionError;
 pub use ingress::{KvEventIngress, LocalIndexIngress};
 pub use input::{PromptRequest, PromptView};
 pub use pending::SelectionCacheConfig;
+#[cfg(feature = "http")]
 pub use server::{AppState, run_server};
 pub use service::{
     SelectionService, SelectionServiceBuilder, SelectionServiceConfig, SessionBindingUpdates,

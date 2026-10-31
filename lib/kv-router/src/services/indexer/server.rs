@@ -14,12 +14,13 @@ use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::identity::{RoutingPartitionId, default_routing_group};
+use crate::identity::RoutingPartitionId;
 #[cfg(feature = "metrics")]
 use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
+use dynamo_scheduler::identity::default_routing_group;
 
 use super::backend::Indexer;
 use super::registry::{IndexRegistry, ListenerControlError, WorkerRegistry};

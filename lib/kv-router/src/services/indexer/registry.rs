@@ -336,7 +336,7 @@ impl WorkerRegistry {
         Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(all(feature = "metrics", feature = "http"))]
     pub(super) fn new_with_indexer_metrics_and_cancel_token(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
@@ -396,7 +396,7 @@ impl WorkerRegistry {
         self.peers.iter().map(|entry| entry.key().clone()).collect()
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(all(feature = "metrics", feature = "http"))]
     pub fn refresh_metrics(&self) {
         let models = self.index.len();
         let workers = self.workers.len();
@@ -758,7 +758,7 @@ impl WorkerRegistry {
         self.index.all_indexers_with_block_size()
     }
 
-    #[cfg(all(test, feature = "standalone-selection"))]
+    #[cfg(all(test, feature = "replica-sync-zmq", feature = "peer-recovery"))]
     pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
         if let Some(mut entry) = self.workers.get_mut(&instance_id) {
             entry.listeners.remove(&dp_rank);

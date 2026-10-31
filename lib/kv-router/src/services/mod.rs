@@ -5,14 +5,21 @@
 
 pub(crate) mod common;
 
-#[cfg(feature = "standalone-indexer")]
+// The ZMQ listener registry; its HTTP server needs `http` and its peer recovery `peer-recovery`.
+#[cfg(feature = "ingest-zmq")]
 pub mod indexer;
 
-#[cfg(feature = "standalone-indexer")]
 pub mod overlap;
 
-#[cfg(feature = "standalone-selection")]
+// The selection service builder composes the ZMQ ingress, the peer mesh, and peer recovery;
+// its HTTP server needs `http` as well.
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 pub mod selection;
 
-#[cfg(feature = "standalone-slot-tracker")]
+// The slot-tracker service: an HTTP server over the registry, replicated through the mesh.
+#[cfg(all(feature = "http", feature = "replica-sync-zmq"))]
 pub mod slot_tracker;

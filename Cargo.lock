@@ -2714,7 +2714,6 @@ dependencies = [
  "flume",
  "futures-util",
  "http 1.4.1",
- "once_cell",
  "parking_lot",
  "prometheus",
  "reqwest 0.12.28",
