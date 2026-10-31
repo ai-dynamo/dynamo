@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::identity::{
-    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-    StableDpSlotId,
+    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+    RoutingScopeId, StableDpSlotId,
 };
 use crate::protocols::{
     ExternalSequenceBlockHash, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
