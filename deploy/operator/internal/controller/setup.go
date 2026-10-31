@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -30,15 +31,22 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {
 	SetupOptions
-	RBACManager             RBACManager
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
 	GPUDiscovery            *gpu.GPUDiscovery
+	OperatorImage           string
+	OperatorImagePullPolicy corev1.PullPolicy
+}
+
+type DynamoGraphDeploymentRunSetupOptions struct {
+	SetupOptions
+	DockerSecretRetriever   DockerSecretRetriever
+	PlannerImage            string
+	DynamoVersion           string
 	OperatorImage           string
 	OperatorImagePullPolicy corev1.PullPolicy
 }
@@ -83,6 +91,9 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
@@ -91,7 +102,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
 		SSHKeyManager:         opts.SSHKeyManager,
-		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
@@ -122,9 +132,43 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 		GPUDiscovery:            opts.gpuDiscovery(),
 		OperatorImage:           opts.OperatorImage,
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
-		RBACManager:             opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
+	}
+	return nil
+}
+
+// SetupDynamoGraphDeploymentRequestV1beta2 registers the controller that turns native v1beta2 Requests
+// into Runs. It fails at startup, with a clear message, when the cluster does not serve the v1beta2 APIs.
+func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := requireDGDRV1beta2API(mgr); err != nil {
+		return err
+	}
+	if err := (&DynamoGraphDeploymentRequestV1beta2Reconciler{
+		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest v1beta2 controller: %w", err)
+	}
+	return nil
+}
+
+// SetupDynamoGraphDeploymentRunV1beta2 registers the controller that executes immutable
+// v1beta2 Runs as AISimulate Jobs and observes their lifecycle.
+func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDeploymentRunSetupOptions) error {
+	if err := (&DynamoGraphDeploymentRunV1beta2Reconciler{
+		Client:                  mgr.GetClient(),
+		Config:                  opts.Config,
+		RuntimeConfig:           opts.RuntimeConfig,
+		DockerSecretRetriever:   opts.DockerSecretRetriever,
+		PlannerImage:            opts.PlannerImage,
+		DynamoVersion:           opts.DynamoVersion,
+		OperatorImage:           opts.OperatorImage,
+		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 controller: %w", err)
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ package controller
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -26,7 +27,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"k8s.io/utils/ptr"
 )
 
 type Reason string
@@ -57,6 +57,17 @@ func clearComponentGPUShapes(statuses map[string]nvidiacomv1beta1.ComponentRepli
 	}
 }
 
+// clearComponentRuntimeStatuses removes previously projected runtime facts
+// before a provider can fail while rendering a replacement.
+func clearComponentRuntimeStatuses(statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+	for componentName, status := range statuses {
+		status.ServedModelName = ""
+		status.RuntimeComponentName = ""
+		status.GPUPowerLimitWatts = nil
+		statuses[componentName] = status
+	}
+}
+
 // applyComponentGPUShapes projects provider-resolved shapes onto observed
 // component statuses. Explicit zero distinguishes a successful non-GPU
 // observation from a missing or cleared shape.
@@ -69,8 +80,38 @@ func applyComponentGPUShapes(
 		if !ok {
 			continue
 		}
-		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)
-		status.GPUsPerReplica = ptr.To(shape.GPUsPerReplica)
+		status.GPUsPerEngine = new(shape.GPUsPerEngine)
+		status.GPUsPerReplica = new(shape.GPUsPerReplica)
+		statuses[componentName] = status
+	}
+}
+
+// applyComponentRuntimeStatus projects one resolved serving-role identity onto
+// an observed component status.
+func applyComponentRuntimeStatus(
+	status *nvidiacomv1beta1.ComponentReplicaStatus,
+	runtimeStatus dynamo.ComponentRuntimeStatus,
+) {
+	if status == nil {
+		return
+	}
+	status.ServedModelName = runtimeStatus.ServedModelName
+	status.RuntimeComponentName = runtimeStatus.RuntimeComponentName
+	status.GPUPowerLimitWatts = runtimeStatus.GPUPowerLimitWatts
+}
+
+// applyComponentRuntimeStatuses projects provider-resolved serving-role
+// identities onto observed component statuses.
+func applyComponentRuntimeStatuses(
+	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+	runtimeStatuses map[string]dynamo.ComponentRuntimeStatus,
+) {
+	for componentName, runtimeStatus := range runtimeStatuses {
+		status, ok := statuses[componentName]
+		if !ok {
+			continue
+		}
+		applyComponentRuntimeStatus(&status, runtimeStatus)
 		statuses[componentName] = status
 	}
 }
@@ -87,9 +128,7 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 		ready, reason := resource.IsReady()
 
 		resourceComponentStatuses := resource.GetComponentStatuses()
-		for componentName, componentStatus := range resourceComponentStatuses {
-			componentStatuses[componentName] = componentStatus
-		}
+		maps.Copy(componentStatuses, resourceComponentStatuses)
 
 		if !ready {
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))

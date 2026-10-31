@@ -3,10 +3,13 @@
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
-use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
+use super::{
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
+};
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
@@ -37,21 +40,10 @@ fn contains_harmony_protocol(text: &str) -> bool {
 /// text `<tool_call>`). Looks up the real per-family marker tokens for `parser` from
 /// `dynamo_parsers`' own parser map (falling back to its "default" key exactly as
 /// `detect_tool_call_start` does for `None`/empty), then checks each with
-/// `unified_parser::contains_unquoted_marker` so a marker embedded inside a quoted string
+/// `unified_parser::first_unquoted_marker_position` so a marker embedded inside a quoted string
 /// is not misread as native tool-call markup.
 fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
-    let parser_key = if parser.is_empty() { "default" } else { parser };
-    let Some(config) = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser_key)
-    else {
-        return false;
-    };
-    config
-        .parser_config
-        .tool_call_start_tokens()
-        .iter()
-        .any(|marker| {
-            !marker.is_empty() && super::unified_parser::contains_unquoted_marker(content, marker)
-        })
+    super::unified_parser::first_unquoted_native_tool_call_marker(content, parser).is_some()
 }
 
 /// Drops any recovered native-fallback calls that don't match the forced
@@ -85,10 +77,24 @@ async fn parse_complete_tool_output(
     content: &str,
     parser: &str,
     constraint: &crate::protocols::openai::GuidedToolConstraint,
+    tools: &[dynamo_parsers::tool_calling::ToolDefinition],
 ) -> anyhow::Result<(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
+    let parser = match parser {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        parser => parser,
+    };
+    let version = super::tool_parser_v2::selected_version()?;
+    if version == super::tool_parser_v2::ParserVersion::V2
+        && !super::tool_parser_v2::supports_family(parser)
+    {
+        anyhow::bail!(
+            "{}=2 was requested, but parser {parser:?} has no compatible v2 implementation",
+            dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION
+        );
+    }
     if constraint.installs_guided_json() {
         match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
             Ok(calls) => return Ok((calls, Some(String::new()))),
@@ -106,13 +112,14 @@ async fn parse_complete_tool_output(
         }
     }
 
-    let result =
-        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
-            super::tool_parser_v2::parse_complete(content, None, parser)
-                .map(|(calls, normal)| (calls, Some(normal)))
-        } else {
-            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
-        };
+    let result = if version == super::tool_parser_v2::ParserVersion::V2
+        && super::tool_parser_v2::supports_family(parser)
+    {
+        super::tool_parser_v2::parse_complete(content, Some(tools), parser)
+            .map(|(calls, normal)| (calls, Some(normal)))
+    } else {
+        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+    };
 
     result.and_then(|(calls, normal)| {
         let filtered = filter_calls_to_forced_tool_name(calls, constraint);
@@ -138,6 +145,9 @@ async fn parse_complete_tool_output(
 /// from a streaming OpenAI API call into a complete final response.
 pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
+    response_events: Vec<ResponseOutputEvent>,
+    has_message_phases: bool,
+    recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
     model: String,
@@ -153,6 +163,8 @@ pub struct DeltaAggregator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
+    /// Prompt logprobs captured from the terminal chunk.
+    prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -176,6 +188,7 @@ struct DeltaChoice {
     // #8640: replaces the old `Option<Vec<ChatCompletionMessageToolCall>>`
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
+    parser_call_completion: HashMap<u32, bool>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
     // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
@@ -184,6 +197,7 @@ struct DeltaChoice {
 
     /// Optional reasoning content for the chat choice.
     reasoning_content: Option<String>,
+    refusal: Option<String>,
 
     /// Accumulated content parts for multimodal responses
     content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
@@ -196,6 +210,115 @@ fn suppress_tool_call_output(choice: &mut DeltaChoice) {
     choice.tool_calls = None;
     if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
         choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+    }
+}
+
+/// A token-limit finish can interrupt any call that the upstream emitted as provisional.
+/// Unified calls require complete JSON at every position. Legacy backend output
+/// retains its existing final-call-only truncation check.
+///
+/// An empty argument string is the MOST truncated shape, not a parameterless call: the
+/// limit landed after the name and before the first argument token. The wire schema does
+/// permit omitted arguments, but nothing here can tell that apart from a call cut short,
+/// so at the token limit it is dropped with every other unparseable tail.
+fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
+    if choice.finish_reason != Some(dynamo_protocols::types::FinishReason::Length) {
+        return;
+    }
+
+    let Some(tool_calls) = choice.tool_calls.as_mut() else {
+        return;
+    };
+    let terminal_index = tool_calls.len().saturating_sub(1);
+    let calls = std::mem::take(tool_calls);
+    *tool_calls = calls
+        .into_iter()
+        .enumerate()
+        .filter(|(index, tool_call)| {
+            (!unified && *index != terminal_index)
+                || serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).is_ok()
+        })
+        .map(|(_, tool_call)| tool_call)
+        .collect();
+    if tool_calls.is_empty() {
+        choice.tool_calls = None;
+    }
+}
+
+/// A stop or EOF can follow a streamed call whose last argument fragment is not
+/// valid JSON. The adapter can normalize that stop to `ToolCalls` before aggregation,
+/// so validate that terminal state too before exposing an executable final response.
+/// An empty argument string remains valid when the upstream explicitly completed a
+/// parameterless call with `ToolCalls`.
+fn drop_malformed_terminal_tool_calls(
+    choice: &mut DeltaChoice,
+    require_explicit_tool_terminal: bool,
+) {
+    // Provisional streamed calls were rejected by wire index before finalization.
+    // Shared batch parsing returns only completed calls, so no terminal is needed
+    // to reconfirm them here. Legacy backend arguments retain their existing contract.
+    if !require_explicit_tool_terminal {
+        return;
+    }
+
+    if !matches!(
+        choice.finish_reason,
+        None | Some(dynamo_protocols::types::FinishReason::Stop)
+            | Some(dynamo_protocols::types::FinishReason::ContentFilter)
+            | Some(dynamo_protocols::types::FinishReason::ToolCalls)
+    ) {
+        return;
+    }
+
+    let explicit_parameterless_call =
+        choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls);
+    let Some(tool_calls) = choice.tool_calls.as_mut() else {
+        return;
+    };
+    tool_calls.retain(|tool_call| {
+        let arguments = &tool_call.function.arguments;
+        (explicit_parameterless_call && arguments.is_empty())
+            || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
+    });
+    if tool_calls.is_empty() {
+        choice.tool_calls = None;
+        if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
+            choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+        }
+    }
+}
+
+/// A failed structured parse at the output limit is not ordinary assistant prose.
+/// Suppress the incomplete candidate rather than exposing parser markup or a partial
+/// guided-JSON document as `content`. Plain text remains untouched unless the parser
+/// actually identified a structured candidate.
+fn suppress_incomplete_structured_content(
+    choice: &mut DeltaChoice,
+    parser: &str,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) {
+    if choice.finish_reason != Some(dynamo_protocols::types::FinishReason::Length)
+        || choice.text.is_empty()
+    {
+        return;
+    }
+
+    if let Some(marker_start) =
+        super::unified_parser::first_unquoted_structural_tool_call_marker(&choice.text, parser)
+    {
+        tracing::warn!(
+            parser,
+            suppressed_bytes = choice.text.len() - marker_start,
+            "suppressing incomplete structured tool output on length finish"
+        );
+        choice.text.truncate(marker_start);
+    } else if constraint.installs_guided_json() {
+        tracing::warn!(
+            parser,
+            recovered_bytes = choice.text.len(),
+            "suppressing incomplete guided structured output on length finish"
+        );
+        choice.text.clear();
     }
 }
 
@@ -231,6 +354,19 @@ fn merge_tool_call_chunk(
         && let Some(ty) = incoming.r#type
     {
         existing.r#type = Some(ty);
+    }
+    // Custom deltas carry freeform input instead of function JSON fragments.
+    if let Some(incoming_custom) = incoming.custom {
+        let custom = existing.custom.get_or_insert_with(Default::default);
+        if custom.name.is_none() {
+            custom.name = incoming_custom.name;
+        }
+        if let Some(input) = incoming_custom.input {
+            custom
+                .input
+                .get_or_insert_with(String::new)
+                .push_str(&input);
+        }
     }
     let Some(incoming_fn) = incoming.function else {
         return;
@@ -272,6 +408,22 @@ fn finalize_merged_tool_chunk(
         );
         return None;
     };
+    if chunk.r#type == Some(dynamo_protocols::types::FunctionType::Custom) {
+        let custom = chunk.custom?;
+        let name = custom.name?;
+        let input = custom.input.unwrap_or_default();
+        return Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
+            id,
+            r#type: dynamo_protocols::types::FunctionType::Custom,
+            function: dynamo_protocols::types::FunctionCall {
+                name: name.clone(),
+                arguments:
+                    serde_json::json!({dynamo_protocols::types::CUSTOM_TOOL_INPUT_ARG:&input})
+                        .to_string(),
+            },
+            custom: Some(dynamo_protocols::types::CustomToolCall { name, input }),
+        });
+    }
     let Some(function) = chunk.function else {
         tracing::warn!(
             tool_call_index = index,
@@ -289,11 +441,9 @@ fn finalize_merged_tool_chunk(
         return None;
     };
     Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
+        custom: None,
         id,
-        // Use the merged r#type if the stream carried one. Falls back to
-        // `Function` — today the only variant in the OpenAI schema, but
-        // threading the merged value keeps us forward-compat if variants
-        // are added later and avoids dead state in `merge_tool_call_chunk`.
+        // Preserve the merged function type; custom calls were handled above.
         r#type: chunk
             .r#type
             .unwrap_or(dynamo_protocols::types::FunctionType::Function),
@@ -308,6 +458,9 @@ impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
         Self {
+            response_events: Vec::new(),
+            has_message_phases: false,
+            recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
             created: 0,
@@ -316,6 +469,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             service_tier: None,
             nvext: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -331,6 +485,36 @@ impl DeltaAggregator {
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
+        Self::apply_with_tool_terminal_policy(stream, parsing_options, false).await
+    }
+
+    pub(crate) async fn apply_for_selected_unified_parser(
+        stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
+        // V4.1 is default-on independently of this experiment. Its flag-off
+        // backend-supplied arguments keep the established aggregation contract.
+        let require_explicit_tool_terminal = super::unified_parser::selected_request_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            parsing_options.tool_choice.as_ref(),
+            &parsing_options.guided_tool_constraint,
+        )
+        .is_some()
+            && super::unified_parser::parsers_v2_selected();
+        Self::apply_with_tool_terminal_policy(
+            stream,
+            parsing_options,
+            require_explicit_tool_terminal,
+        )
+        .await
+    }
+
+    async fn apply_with_tool_terminal_policy(
+        stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
+        require_explicit_tool_terminal: bool,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let mut aggregator = stream
             .map(Annotated::into_data)
@@ -351,6 +535,35 @@ impl DeltaAggregator {
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
+                    if let Some(boundary) = delta.message_boundary {
+                        aggregator.has_message_phases = true;
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
+                    }
+                    for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
+                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                            if let Some(ResponseOutputEvent::Reasoning(previous)) = aggregator.response_events.last_mut() {
+                                previous.push_str(reasoning);
+                            } else {
+                                aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
+                            }
+                        }
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                            if let Some(ResponseOutputEvent::Text(previous)) = aggregator.response_events.last_mut() {
+                                previous.push_str(text);
+                            } else {
+                                aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
+                            }
+                        }
+                        for call in choice.delta.tool_calls.iter().flatten() {
+                            if let Some(id) = &call.id && aggregator.recorded_calls.insert(id.clone()) {
+                                aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
+                            }
+                        }
+                    }
+                    if let Some(prompt_logprobs) = delta.prompt_logprobs {
+                        aggregator.prompt_logprobs = Some(prompt_logprobs);
+                    }
+
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
                         let choice_role = choice.delta.role;
@@ -365,8 +578,10 @@ impl DeltaAggregator {
                                     finish_reason: None,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
+                                    parser_call_completion: HashMap::new(),
                                     tool_calls: None,
                                     reasoning_content: None,
+                                    refusal: None,
                                     content_parts: Vec::new(),
                                 });
 
@@ -384,6 +599,10 @@ impl DeltaAggregator {
                                     state_choice.content_parts.extend(parts.clone());
                                 }
                             }
+                        }
+
+                        if let Some(refusal) = &choice.delta.refusal {
+                            state_choice.refusal.get_or_insert_with(String::new).push_str(refusal);
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -405,6 +624,7 @@ impl DeltaAggregator {
                                     .entry(chunk.index)
                                     .or_insert_with(|| {
                                         dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                                            custom: None,
                                             index: chunk.index,
                                             id: None,
                                             r#type: None,
@@ -442,6 +662,15 @@ impl DeltaAggregator {
                             }
                         }
                     }
+                    // Completion can arrive without another argument or choice delta.
+                    // Apply it independently so the final call is not discarded.
+                    for evidence in delta.tool_call_completion {
+                        if let Some(choice) = aggregator.choices.get_mut(&evidence.choice_index) {
+                            choice.parser_call_completion.entry(evidence.tool_index)
+                                .and_modify(|complete| *complete |= evidence.complete)
+                                .or_insert(evidence.complete);
+                        }
+                    }
                 }
                 Ok(aggregator)
             })
@@ -457,8 +686,11 @@ impl DeltaAggregator {
                 continue;
             }
             let finalized: Vec<_> = std::mem::take(&mut choice.tool_call_chunks)
-                .into_values()
-                .filter_map(finalize_merged_tool_chunk)
+                .into_iter()
+                // Explicit parser evidence owns provisional calls. Backend chunks have
+                // no completion bit; the shared argument validation below handles them.
+                .filter(|(index, _)| choice.parser_call_completion.get(index) != Some(&false))
+                .filter_map(|(_, chunk)| finalize_merged_tool_chunk(chunk))
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
             // initializes it to None, try_tool_call_parse_aggregate_finalize
@@ -479,19 +711,36 @@ impl DeltaAggregator {
             }
         }
 
-        // Two independent families each own ONE unified parser (topology B: raw
-        // model text reaches the frontend un-split) that replaces the split
-        // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
-        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
-        // default-on). This is the safety net for output that reached the
-        // aggregator unparsed; a request the worker already streamed through the
-        // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
-        // populated and is skipped by each guard below.
-        let qwen3_unified_family = super::unified_parser::selected_batch_family(
+        // One configured unified family owns raw batch output before legacy parsing.
+        // Worker-parsed choices already carry tool calls and skip this safety net.
+        let selected_unified_family = super::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
         );
-        if let Some(family) = qwen3_unified_family {
+        if selected_unified_family.is_none() {
+            let version = super::tool_parser_v2::selected_version().map_err(|error| {
+                DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .diagnostic(error.to_string())
+                    .build()
+            })?;
+            super::tool_parser_v2::validate_tool_request_mode(
+                version,
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+                !matches!(
+                    parsing_options.guided_tool_constraint,
+                    crate::protocols::openai::GuidedToolConstraint::None
+                ),
+            )
+            .map_err(|error| {
+                DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .diagnostic(error.to_string())
+                    .build()
+            })?;
+        }
+        if let Some(family) = selected_unified_family {
             for choice in aggregator.choices.values_mut() {
                 if choice.text.is_empty()
                     || choice
@@ -501,15 +750,40 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
-                match super::unified_parser::parse_complete(
+                match super::unified_parser::parse_complete_with_policy(
                     family,
                     &choice.text,
                     &parsing_options.guided_tool_constraint,
                     &parsing_options.tools,
+                    super::unified_parser::UnifiedRequestPolicy {
+                        reasoning_disabled: parsing_options.reasoning_disabled,
+                        structured_response: parsing_options.structured_response,
+                    },
                 ) {
                     Ok(parsed) => {
+                        if choice.index == 0
+                            && parsed
+                                .events
+                                .iter()
+                                .any(|event| matches!(event, ResponseOutputEvent::Boundary(_)))
+                        {
+                            aggregator.has_message_phases = true;
+                            aggregator.response_events = parsed.events;
+                        }
+                        if parsed.incomplete_native_call
+                            && matches!(
+                                choice.finish_reason,
+                                Some(
+                                    dynamo_protocols::types::FinishReason::Stop
+                                        | dynamo_protocols::types::FinishReason::ToolCalls
+                                )
+                            )
+                        {
+                            choice.finish_reason =
+                                Some(dynamo_protocols::types::FinishReason::Length);
+                        }
                         choice.text = parsed.text;
-                        if !parsed.reasoning.is_empty() {
+                        if !parsed.reasoning.is_empty() && !parsing_options.reasoning_disabled {
                             choice
                                 .reasoning_content
                                 .get_or_insert_with(String::new)
@@ -530,6 +804,11 @@ impl DeltaAggregator {
                     Err(error) => {
                         // Best-effort: the aggregated text is served as-is rather than
                         // failing a request the model already answered.
+                        suppress_incomplete_structured_content(
+                            choice,
+                            family,
+                            &parsing_options.guided_tool_constraint,
+                        );
                         tracing::warn!(
                             error = %error,
                             family,
@@ -540,22 +819,7 @@ impl DeltaAggregator {
             }
         }
 
-        // Muse finalizes through the UNIFIED parser (topology B: raw model text
-        // reaches the frontend un-split). Keyed on EITHER parser name to match the
-        // streaming guard, so a reasoning-only card (`--dyn-reasoning-parser
-        // muse_glimmer`, no tool-call parser) splits its markup here too. Default-on,
-        // so muse never falls into the v1 aggregate-finalize below. The gate is wider
-        // than main's `tool_call_parser.is_some()` for that reason; `parser` is bound
-        // inside the loop, after the muse branch has taken its `continue`. Excluded
-        // when Qwen3 already claimed the request above, since Qwen3 also configures a
-        // `tool_call_parser` and would otherwise fall through into this block too.
-        let unified_family = super::tool_parser_v2::unified_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        );
-        if qwen3_unified_family.is_none()
-            && (unified_family.is_some() || parsing_options.tool_call_parser.is_some())
-        {
+        if selected_unified_family.is_none() && parsing_options.tool_call_parser.is_some() {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -566,151 +830,27 @@ impl DeltaAggregator {
                     continue;
                 }
 
-                if let Some(family) = unified_family.as_deref() {
-                    // Only the guided-JSON success arm below returns a synthetic
-                    // empty `content` placeholder (there is no separate message
-                    // text distinct from the tool-call JSON itself). Every other
-                    // arm — the native-fallback-after-guided-error reconstruction,
-                    // and the plain non-guided `else` branch — returns REAL
-                    // stripped content from `parse_complete_unified` that must
-                    // always replace `choice.text`, matching the sibling Qwen3
-                    // block's unconditional assignment, regardless of whether any
-                    // tool calls were found.
-                    let mut content_is_guided_placeholder = false;
-                    let parse_result = if parsing_options
-                        .guided_tool_constraint
-                        .installs_guided_json()
-                    {
-                        match super::tool_parser_v2::parse_complete_guided_json(
-                            &choice.text,
-                            &parsing_options.guided_tool_constraint,
-                        ) {
-                            Ok(calls) => {
-                                content_is_guided_placeholder = true;
-                                Ok((calls, String::new(), String::new()))
-                            }
-                            Err(guided_error) => {
-                                match super::tool_parser_v2::parse_complete_unified(
-                                    &choice.text,
-                                    None,
-                                    family,
-                                ) {
-                                    Ok((calls, reasoning, content)) => {
-                                        // A GuidedJsonNamed constraint pins one tool
-                                        // name; the native fallback must never hand
-                                        // back a call for a different tool just
-                                        // because it happened to find markup naming
-                                        // one in the malformed guided output.
-                                        let calls = filter_calls_to_forced_tool_name(
-                                            calls,
-                                            &parsing_options.guided_tool_constraint,
-                                        );
-                                        if !calls.is_empty()
-                                            || !reasoning.is_empty()
-                                            || content != choice.text
-                                        {
-                                            tracing::warn!(
-                                                family,
-                                                why = "guided_json_reconstructed_but_native_markup_observed",
-                                                recovered_bytes = choice.text.len(),
-                                                "falling back to the configured unified parser"
-                                            );
-                                            Ok((calls, reasoning, content))
-                                        } else {
-                                            Err(guided_error)
-                                        }
-                                    }
-                                    Err(native_error) => Err(native_error.context(format!(
-                                        "guided JSON parse also failed: {guided_error:#}"
-                                    ))),
-                                }
-                            }
-                        }
-                    } else {
-                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
-                    };
-                    match parse_result {
-                        Ok((calls, reasoning, content)) => {
-                            let calls_is_empty = calls.is_empty();
-                            // Same rule the streaming path applies: `none` still gets the
-                            // reasoning/content split and the marker stripping, but a
-                            // caller that disabled tools must not receive `tool_calls`.
-                            if !calls_is_empty && !parsing_options.suppress_tool_calls {
-                                choice.tool_calls = Some(
-                                    calls
-                                        .into_iter()
-                                        .map(super::tool_call_response_to_protocol)
-                                        .collect(),
-                                );
-                            }
-                            if !reasoning.is_empty() {
-                                choice
-                                    .reasoning_content
-                                    .get_or_insert_with(String::new)
-                                    .push_str(&reasoning);
-                            }
-                            if !calls_is_empty || !content_is_guided_placeholder {
-                                choice.text = content;
-                            } else {
-                                tracing::warn!(
-                                    family,
-                                    why = "guided_json_produced_zero_calls_under_tool_choice_required",
-                                    original_bytes = choice.text.len(),
-                                    "guided-JSON parse returned zero tool calls; preserving original text"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            tracing::debug!(error = %error, family, "muse unified batch parse failed");
-                        }
-                    }
-                    continue;
-                }
-
-                // Not muse: the loop gate guarantees a tool-call parser is set here.
                 let Some(parser) = parsing_options.tool_call_parser.as_deref() else {
                     continue;
                 };
 
-                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
-                // v2 parser for batch too (no jail / no aggregate-finalize):
-                // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families and the flag-off path keep the v1 finalize path.
+                // V2 finish drops truncated values instead of guessing.
                 // Guided JSON is handled above from the exact carried constraint.
-                // Extract the truncated tail BEFORE parsing so a second <tool_call>
-                // truncated after a complete first one is not silently dropped.
-                // Token strings come from the parser config so this stays in sync
-                // with any override, and matches the streaming path in preprocessor.rs.
-                let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
-                let glm47_truncated_tail = if parser == "glm47"
-                    && matches!(
-                        choice.finish_reason,
-                        Some(dynamo_protocols::types::FinishReason::Length)
-                    ) {
-                    choice
-                        .text
-                        .rfind(glm47_cfg.tool_call_start.as_str())
-                        .and_then(|start| {
-                            let tail = &choice.text[start..];
-                            if !tail.contains(glm47_cfg.tool_call_end.as_str()) {
-                                Some(tail.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                } else {
-                    None
-                };
-
                 let parse_result = parse_complete_tool_output(
                     &choice.text,
                     parser,
                     &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
                 )
                 .await;
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {
+                        suppress_incomplete_structured_content(
+                            choice,
+                            parser,
+                            &parsing_options.guided_tool_constraint,
+                        );
                         tracing::debug!(
                             error = %error,
                             parser,
@@ -732,36 +872,21 @@ impl DeltaAggregator {
                     || is_kimi_k3_parser(parser)
                 {
                     choice.text = content.unwrap_or_default();
-                } else if parser == "glm47"
-                    && matches!(
-                        choice.finish_reason,
-                        Some(dynamo_protocols::types::FinishReason::Length)
-                    )
-                    && choice.text.contains(glm47_cfg.tool_call_start.as_str())
+                } else if choice.finish_reason
+                    == Some(dynamo_protocols::types::FinishReason::Length)
                 {
-                    tracing::warn!(
+                    suppress_incomplete_structured_content(
+                        choice,
                         parser,
-                        "glm47: partial <tool_call> returned as content on length finish"
+                        &parsing_options.guided_tool_constraint,
                     );
-                }
-
-                // Recover any tail saved before parsing — the parser drops a truncated
-                // second block silently when an earlier complete block was already parsed.
-                if let Some(tail) = glm47_truncated_tail
-                    && !choice.text.contains(&tail)
-                {
-                    tracing::warn!(
-                        parser,
-                        tail_bytes = tail.len(),
-                        "glm47: truncated later <tool_call> appended as content"
-                    );
-                    if choice.text.is_empty() {
-                        choice.text = tail;
-                    } else {
-                        choice.text.push_str(&tail);
-                    }
                 }
             }
+        }
+
+        for choice in aggregator.choices.values_mut() {
+            drop_incomplete_length_tool_calls(choice, require_explicit_tool_terminal);
+            drop_malformed_terminal_tool_calls(choice, require_explicit_tool_terminal);
         }
 
         // A retained whole-response parser may discover a syntactically valid
@@ -829,6 +954,11 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            response_events: if aggregator.has_message_phases {
+                aggregator.response_events
+            } else {
+                Vec::new()
+            },
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,
@@ -839,6 +969,7 @@ impl DeltaAggregator {
                 choices,
                 service_tier: aggregator.service_tier,
             },
+            prompt_logprobs: aggregator.prompt_logprobs,
             nvext: aggregator.nvext,
         };
 
@@ -855,12 +986,10 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     fn from(delta: DeltaChoice) -> Self {
         // A terminal reason that already explains why generation ended
         // outranks the tool-call rewrite. Only `Stop` and a missing reason are
-        // rewritten. The streaming path applies the same rule in two parts:
-        // `unified_parser::ChoiceState::normalize_finish_reason` rewrites `Stop`, and
-        // `unified_parser::ChoiceState::unterminated_finish_reason` supplies `ToolCalls`
-        // when no reason arrives at all. The two paths used to disagree, so a call
-        // truncated at the token limit reached a non-streaming caller labelled
-        // `tool_calls` with no sign it had been cut off.
+        // rewritten, which is the same rule the streaming path applies in
+        // `unified_parser::ChoiceState::normalize_finish_reason`; the two paths used to
+        // disagree, so a call truncated at the token limit reached a non-streaming
+        // caller labelled `tool_calls` with no sign it had been cut off.
         //
         // Preserving `Length` is also what makes the Responses conversion reachable:
         // `responses::chat_completion_to_response` keys `status: "incomplete"` and
@@ -894,7 +1023,7 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
                     .unwrap_or(dynamo_protocols::types::Role::Assistant),
                 content,
                 tool_calls: delta.tool_calls,
-                refusal: None,
+                refusal: delta.refusal,
                 function_call: None,
                 audio: None,
                 reasoning_content: delta.reasoning_content,
@@ -942,7 +1071,7 @@ impl ChatCompletionAggregator for NvCreateChatCompletionResponse {
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
-        DeltaAggregator::apply(stream, parsing_options).await
+        DeltaAggregator::apply_for_selected_unified_parser(stream, parsing_options).await
     }
 
     async fn from_sse_stream(
@@ -961,6 +1090,50 @@ mod tests {
     use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
 
+    #[tokio::test]
+    async fn v2_batch_parser_uses_request_tool_schema() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::v2_batch_parser_uses_request_tool_schema"),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "set_state".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "enabled": {"type": "boolean"}
+                }
+            })),
+            strict: None,
+        }];
+        let content = concat!(
+            "<tool_call>\n<function=set_state>\n",
+            "<parameter=count>42</parameter>\n",
+            "<parameter=enabled>true</parameter>\n",
+            "</function>\n</tool_call>"
+        );
+        let (calls, _) = parse_complete_tool_output(
+            content,
+            "qwen3_coder",
+            &crate::protocols::openai::GuidedToolConstraint::None,
+            &tools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"count": 42, "enabled": true})
+        );
+    }
+
     #[allow(deprecated)]
     fn create_test_delta(
         index: u32,
@@ -978,6 +1151,7 @@ mod tests {
         let tool_call_chunks = tool_calls.map(|tool_calls| {
             vec![
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index: 0,
                     id: Some("test_id".to_string()),
                     r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1018,6 +1192,7 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1029,7 +1204,9 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -1066,6 +1243,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
@@ -1077,7 +1255,9 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1187,6 +1367,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "m".to_string(),
@@ -1198,7 +1379,9 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         let annotated = Annotated {
             data: Some(data),
@@ -1245,6 +1428,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1256,7 +1440,9 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1281,6 +1467,7 @@ mod tests {
     #[tokio::test]
     async fn test_issue_8640_split_tool_call_arguments_reconstructed() {
         let name_chunk = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("tc1".to_string()),
             r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1290,6 +1477,7 @@ mod tests {
             }),
         };
         let args_chunk_1 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1299,6 +1487,7 @@ mod tests {
             }),
         };
         let args_chunk_2 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1364,6 +1553,7 @@ mod tests {
     async fn test_parallel_tool_calls_interleaved_chunks_aggregate_independently() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1375,6 +1565,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -1439,6 +1630,7 @@ mod tests {
     async fn test_parallel_tool_calls_false_caps_to_first_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1450,6 +1642,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -1519,6 +1712,7 @@ mod tests {
     #[tokio::test]
     async fn test_fragment_only_chunks_without_opener_drop_cleanly() {
         let args_only = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1572,6 +1766,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refusal_fragments_survive_aggregation() {
+        let chunks = ["I cannot ", "help with that."].into_iter().map(|text| {
+            let mut chunk = create_test_delta(0, "", None, None, None, None);
+            chunk.data.as_mut().unwrap().inner.choices[0].delta.refusal = Some(text.to_string());
+            chunk
+        });
+        let response =
+            DeltaAggregator::apply(Box::pin(stream::iter(chunks)), ParsingOptions::default())
+                .await
+                .unwrap();
+        assert_eq!(
+            response.inner.choices[0].message.refusal.as_deref(),
+            Some("I cannot help with that.")
+        );
+        assert!(response.inner.choices[0].message.content.is_none());
+    }
+
+    #[tokio::test]
     async fn test_single_delta() {
         // Create a sample delta
         let annotated_delta = create_test_delta(
@@ -1606,6 +1818,7 @@ mod tests {
             choice.message.content.as_ref().unwrap(),
             &ChatCompletionMessageContent::Text("Hello,".to_string())
         );
+        assert!(choice.message.refusal.is_none());
         assert!(choice.finish_reason.is_none());
         assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
         assert!(response.inner.service_tier.is_none());
@@ -1843,6 +2056,7 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "test_model".to_string(),
@@ -1885,7 +2099,9 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         // Wrap it in Annotated and create a stream
@@ -2067,6 +2283,902 @@ mod tests {
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_protocols::types::FinishReason::ContentFilter)
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_completed_calls_survive_each_terminal_at_every_split() {
+        use super::super::unified_parser;
+        use dynamo_protocols::types::FinishReason;
+
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "write_file".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"count": {"type": "integer"}, "content": {"type": "string"}},
+                "required": ["count", "content"]
+            })),
+            strict: None,
+        }];
+        for (family, raw) in unified_parser::tests::eight_family_calls("café") {
+            let (tool, reasoning) = match family {
+                "qwen3" => ("qwen3_coder", "qwen3"),
+                "kimi_k2" => ("kimi_k2", "kimi_k25"),
+                "glm47" => ("glm47", "glm45"),
+                _ => (family, family),
+            };
+            if unified_parser::selected_family(Some(tool), Some(reasoning)).is_none() {
+                continue;
+            }
+            for finish in [
+                None,
+                Some(FinishReason::Stop),
+                Some(FinishReason::ToolCalls),
+                Some(FinishReason::Length),
+                Some(FinishReason::ContentFilter),
+            ] {
+                for split in (0..=raw.len()).filter(|split| raw.is_char_boundary(*split)) {
+                    let deltas = [
+                        create_test_delta(
+                            0,
+                            &raw[..split],
+                            Some(dynamo_protocols::types::Role::Assistant),
+                            None,
+                            None,
+                            None,
+                        ),
+                        create_test_delta(0, &raw[split..], None, finish, None, None),
+                    ];
+                    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter(deltas),
+                        ParsingOptions::new(Some(tool.into()), Some(reasoning.into()))
+                            .with_tools(tools.clone()),
+                    )
+                    .await
+                    .unwrap();
+                    let choice = &result.inner.choices[0];
+                    let calls = choice
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .expect("completed batch call");
+                    assert_eq!(calls.len(), 1, "{family}/{finish:?}/{split}");
+                    assert_eq!(calls[0].function.name, "write_file");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                            .unwrap(),
+                        serde_json::json!({"count": 2, "content": "café"})
+                    );
+                    assert!(choice.message.content.is_none(), "markup {family}/{split}");
+                    assert_eq!(
+                        choice.finish_reason,
+                        Some(match finish {
+                            Some(FinishReason::Length) => FinishReason::Length,
+                            Some(FinishReason::ContentFilter) => FinishReason::ContentFilter,
+                            _ => FinishReason::ToolCalls,
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nemotron_already_parsed_answer_survives_aggregation() {
+        // A non-streaming request still runs the unified stream parser first, so the
+        // aggregator receives the split `reasoning_content` + `content` deltas and then
+        // re-reads the choice text as a safety net. Nemotron's implicit-thought default
+        // must not relabel that already-parsed answer as reasoning.
+        const CHILD: &str = "DYNAMO_NEMOTRON_AGGREGATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "protocols::openai::chat_completions::aggregator::tests::nemotron_already_parsed_answer_survives_aggregation",
+            )
+            .env(CHILD, "1")
+            .env(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )
+            .output()
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        let options = ParsingOptions::new(
+            Some("qwen3_coder".to_string()),
+            Some("nemotron_v3".to_string()),
+        );
+        assert_eq!(
+            super::super::unified_parser::selected_batch_family(
+                options.tool_call_parser.as_deref(),
+                options.reasoning_parser.as_deref(),
+            ),
+            Some("nemotron_v3")
+        );
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "Hello!", "Let me greet them.")]),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text("Hello!".to_string()))
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Let me greet them.")
+        );
+        assert!(message.tool_calls.is_none());
+
+        // Reasoning-only, empty answer: the safety net has nothing to re-read, and
+        // force_nonempty_content still surfaces the thought as content.
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "", "Only thinking.")]),
+            options.with_move_reasoning_to_content_when_empty(true),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "Only thinking.".to_string()
+            ))
+        );
+        assert!(message.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_validation_preserves_legacy_structured_calls() {
+        use super::super::unified_parser;
+        use dynamo_protocols::types::FinishReason;
+
+        for (tool, reasoning) in [
+            (None, None),
+            (Some("hermes"), None),
+            (Some("qwen3_coder"), Some("qwen3")),
+            (Some("deepseek_v41"), Some("deepseek_v41")),
+        ] {
+            let unified = unified_parser::selected_family(tool, reasoning).is_some()
+                && unified_parser::parsers_v2_selected();
+            for finish in [
+                None,
+                Some(FinishReason::Stop),
+                Some(FinishReason::ToolCalls),
+                Some(FinishReason::Length),
+                Some(FinishReason::ContentFilter),
+            ] {
+                for args in [r#"{"city":"Paris"}"#, r#"{"city":"Paris""#, ""] {
+                    let mut delta = create_test_delta(
+                        0,
+                        "",
+                        Some(dynamo_protocols::types::Role::Assistant),
+                        finish,
+                        None,
+                        Some(r#"{"name":"search","arguments":{}}"#),
+                    );
+                    delta.data.as_mut().unwrap().inner.choices[0]
+                        .delta
+                        .tool_calls
+                        .as_mut()
+                        .unwrap()[0]
+                        .function
+                        .as_mut()
+                        .unwrap()
+                        .arguments = Some(args.into());
+                    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter([delta]),
+                        ParsingOptions::new(
+                            tool.map(str::to_string),
+                            reasoning.map(str::to_string),
+                        ),
+                    )
+                    .await;
+                    let unsupported = match super::super::tool_parser_v2::selected_version()
+                        .unwrap()
+                    {
+                        super::super::tool_parser_v2::ParserVersion::V2 => tool == Some("hermes"),
+                        super::super::tool_parser_v2::ParserVersion::V1 => {
+                            tool == Some("deepseek_v41")
+                        }
+                        super::super::tool_parser_v2::ParserVersion::Auto => false,
+                    };
+                    if unsupported {
+                        assert!(
+                            result.is_err(),
+                            "explicit parser generation rejects unsupported configured families"
+                        );
+                        continue;
+                    }
+                    let result = result.unwrap();
+                    let choice = &result.inner.choices[0];
+                    let valid = serde_json::from_str::<serde_json::Value>(args).is_ok();
+                    let retained = if unified {
+                        valid || (finish == Some(FinishReason::ToolCalls) && args.is_empty())
+                    } else {
+                        finish != Some(FinishReason::Length) || valid
+                    };
+                    assert_eq!(
+                        choice.message.tool_calls.is_some(),
+                        retained,
+                        "{tool:?}/{finish:?}/{args}"
+                    );
+                    if retained {
+                        assert_eq!(
+                            choice.message.tool_calls.as_ref().unwrap()[0]
+                                .function
+                                .arguments,
+                            args
+                        );
+                    }
+                    assert!(choice.message.content.is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_content_filter_drops_malformed_tool_call_arguments() {
+        let mut annotated_delta = create_test_delta(
+            0,
+            "",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ContentFilter),
+            None,
+            Some(r#"{"name":"search","arguments":{}}"#),
+        );
+        annotated_delta
+            .data
+            .as_mut()
+            .expect("test delta data")
+            .inner
+            .choices[0]
+            .delta
+            .tool_calls
+            .as_mut()
+            .expect("structured tool call")[0]
+            .function
+            .as_mut()
+            .expect("tool function")
+            .arguments = Some(r#"{"query":"Par"#.to_string());
+
+        let response = DeltaAggregator::apply_with_tool_terminal_policy(
+            Box::pin(stream::iter(vec![annotated_delta])),
+            ParsingOptions::new(Some("deepseek_v41".into()), Some("deepseek_v41".into())),
+            true,
+        )
+        .await
+        .expect("aggregation should succeed");
+        let choice = &response.inner.choices[0];
+
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ContentFilter)
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert!(!serde_json::to_string(choice).unwrap().contains("Par"));
+    }
+
+    #[tokio::test]
+    async fn explicit_terminal_policy_rejects_provisional_evidence_for_each_choice() {
+        let delta = |index, finish_reason| {
+            let mut input = create_test_delta(
+                index,
+                "",
+                Some(dynamo_protocols::types::Role::Assistant),
+                finish_reason,
+                None,
+                Some(r#"{"name":"search","arguments":{"query":"Paris"}}"#),
+            );
+            input.data.as_mut().unwrap().tool_call_completion.push(
+                super::super::ToolCallCompletion {
+                    choice_index: index,
+                    tool_index: 0,
+                    complete: false,
+                },
+            );
+            input
+        };
+        let incomplete_stop = delta(0, Some(dynamo_protocols::types::FinishReason::Stop));
+        let complete = create_test_delta(
+            1,
+            "",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+            Some(r#"{"name":"search","arguments":{"query":"Tokyo"}}"#),
+        );
+        let incomplete_length = delta(2, Some(dynamo_protocols::types::FinishReason::Length));
+        let incomplete_filtered = delta(
+            3,
+            Some(dynamo_protocols::types::FinishReason::ContentFilter),
+        );
+        let unterminated = delta(4, None);
+
+        let response = DeltaAggregator::apply_with_tool_terminal_policy(
+            Box::pin(stream::iter(vec![
+                incomplete_stop,
+                complete,
+                incomplete_length,
+                incomplete_filtered,
+                unterminated,
+            ])),
+            ParsingOptions::new(
+                Some("deepseek_v41".to_string()),
+                Some("deepseek_v41".to_string()),
+            ),
+            true,
+        )
+        .await
+        .expect("aggregation should succeed");
+        let incomplete_choices = [
+            &response.inner.choices[0],
+            &response.inner.choices[2],
+            &response.inner.choices[3],
+            &response.inner.choices[4],
+        ];
+        let complete_choice = &response.inner.choices[1];
+
+        for choice in incomplete_choices {
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "choice {}",
+                choice.index
+            );
+        }
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+        assert_eq!(
+            response.inner.choices[2].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+        assert_eq!(
+            response.inner.choices[3].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ContentFilter)
+        );
+        assert_eq!(response.inner.choices[4].finish_reason, None);
+        assert_eq!(
+            complete_choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            complete_choice.message.tool_calls.as_ref().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            complete_choice.message.tool_calls.as_ref().unwrap()[0]
+                .function
+                .arguments,
+            r#"{"query":"Tokyo"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen_incomplete_native_wrapper_is_not_dispatchable_after_aggregation() {
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: None,
+        }];
+        let raw = create_test_delta(
+            0,
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter>",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let adapted = super::super::unified_parser::apply_stream(
+            stream::iter(vec![raw]),
+            Some(tools),
+            None,
+            false,
+            dynamo_parsers_v2::UnifiedParserStartingState::Response,
+            "qwen3",
+        );
+
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            adapted,
+            ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string())),
+        )
+        .await
+        .expect("aggregation should succeed");
+
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+        assert!(response.inner.choices[0].message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_length_drops_incomplete_structured_tool_call_without_leaking_content() {
+        let mut annotated_delta = create_test_delta(
+            0,
+            "",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            Some(r#"{"name":"search","arguments":{}}"#),
+        );
+        annotated_delta
+            .data
+            .as_mut()
+            .expect("test delta data")
+            .inner
+            .choices[0]
+            .delta
+            .tool_calls
+            .as_mut()
+            .expect("structured tool call")[0]
+            .function
+            .as_mut()
+            .expect("tool function")
+            .arguments = Some(r#"{"query":"Par"#.to_string());
+        let response = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![annotated_delta])),
+            ParsingOptions::default(),
+        )
+        .await
+        .expect("aggregation should succeed");
+
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.message.content, None);
+        assert!(!serde_json::to_string(choice).unwrap().contains("Par"));
+    }
+
+    #[tokio::test]
+    async fn terminal_normalization_drops_incomplete_call_but_keeps_closed_json() {
+        let make_chunk = |id: Option<&str>, name: Option<&str>, arguments: Option<&str>| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index: 0,
+                id: id.map(str::to_string),
+                r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: name.map(str::to_string),
+                    arguments: arguments.map(str::to_string),
+                }),
+            }
+        };
+
+        for finish_reason in [
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+        ] {
+            let chunks = vec![
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(
+                        Some("call-1"),
+                        Some("get_weather"),
+                        Some(r#"{"city": "#),
+                    )],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                ),
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(None, None, Some(r#""Tokyo""#))],
+                    finish_reason,
+                    None,
+                ),
+            ];
+            let result = DeltaAggregator::apply_with_tool_terminal_policy(
+                Box::pin(stream::iter(chunks)),
+                ParsingOptions::new(Some("deepseek_v41".into()), Some("deepseek_v41".into())),
+                true,
+            )
+            .await
+            .unwrap();
+
+            let choice = &result.inner.choices[0];
+            assert_eq!(
+                choice.finish_reason,
+                match finish_reason {
+                    Some(dynamo_protocols::types::FinishReason::ToolCalls) => {
+                        Some(dynamo_protocols::types::FinishReason::Stop)
+                    }
+                    other => other,
+                }
+            );
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "incomplete JSON must not become a final tool call"
+            );
+        }
+
+        for arguments in [None, Some("")] {
+            let result = DeltaAggregator::apply_with_tool_terminal_policy(
+                Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(Some("call-1"), Some("get_weather"), arguments)],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                )])),
+                ParsingOptions::new(Some("deepseek_v41".into()), Some("deepseek_v41".into())),
+                true,
+            )
+            .await
+            .unwrap();
+
+            let choice = &result.inner.choices[0];
+            assert_eq!(choice.finish_reason, None);
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "a name-only EOF fragment must remain provisional"
+            );
+        }
+
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(Some("call-1"), Some("get_weather"), None)],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                ),
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(None, None, Some(r#"{"city":"Tokyo"}"#))],
+                    Some(dynamo_protocols::types::FinishReason::Stop),
+                    None,
+                ),
+            ])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        let tool_call = &choice.message.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        assert_eq!(tool_call.function.arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_normalization_keeps_valid_calls_when_sibling_is_malformed() {
+        let make_chunk = |index, id: Option<&str>, name: Option<&str>, arguments: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index,
+                id: id.map(str::to_string),
+                r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: name.map(str::to_string),
+                    arguments: Some(arguments.to_string()),
+                }),
+            }
+        };
+
+        let chunks = vec![
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![
+                    make_chunk(0, Some("call-invalid"), Some("get_weather"), r#"{"city":"#),
+                    make_chunk(1, Some("call-valid"), Some("get_time"), r#"{"tz":"#),
+                ],
+                None,
+                Some(dynamo_protocols::types::Role::Assistant),
+            ),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![
+                    make_chunk(0, None, None, "not-json"),
+                    make_chunk(1, None, None, r#""UTC"}"#),
+                ],
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                None,
+            ),
+        ];
+        let result = DeltaAggregator::apply_with_tool_terminal_policy(
+            Box::pin(stream::iter(chunks)),
+            ParsingOptions::new(Some("deepseek_v41".into()), Some("deepseek_v41".into())),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-valid");
+        assert_eq!(calls[0].function.name, "get_time");
+        assert_eq!(calls[0].function.arguments, r#"{"tz":"UTC"}"#);
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_length_keeps_prose_before_incomplete_native_marker() {
+        let text = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![delta])),
+            ParsingOptions::new(Some("glm47".to_string()), None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.inner.choices[0].message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "I can help. ".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_length_drops_a_nonfinal_invalid_structured_tool_call() {
+        let make_name = |idx: u32, id: &str, name: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index: idx,
+                id: Some(id.to_string()),
+                r#type: Some(dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some(name.to_string()),
+                    arguments: None,
+                }),
+            }
+        };
+        let make_args = |idx: u32, fragment: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index: idx,
+                id: None,
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: None,
+                    arguments: Some(fragment.to_string()),
+                }),
+            }
+        };
+        let first = create_test_delta_with_tool_chunks(
+            0,
+            vec![make_name(0, "first", "get_weather")],
+            None,
+            Some(dynamo_protocols::types::Role::Assistant),
+        );
+        let first_args =
+            create_test_delta_with_tool_chunks(0, vec![make_args(0, "{\"city\":")], None, None);
+        let mut second = create_test_delta_with_tool_chunks(
+            0,
+            vec![
+                make_name(1, "second", "get_time"),
+                make_args(1, "{\"tz\":\"UTC\"}"),
+            ],
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+        );
+        second.data.as_mut().unwrap().tool_call_completion = vec![
+            super::super::ToolCallCompletion {
+                choice_index: 0,
+                tool_index: 0,
+                complete: true,
+            },
+            super::super::ToolCallCompletion {
+                choice_index: 0,
+                tool_index: 1,
+                complete: true,
+            },
+        ];
+        for unified in [false, true] {
+            let options = if unified {
+                ParsingOptions::new(Some("deepseek_v41".into()), Some("deepseek_v41".into()))
+            } else {
+                ParsingOptions::default()
+            };
+            let result = DeltaAggregator::apply_with_tool_terminal_policy(
+                stream::iter(vec![first.clone(), first_args.clone(), second.clone()]),
+                options,
+                unified,
+            )
+            .await
+            .unwrap();
+            let tool_calls = result.inner.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .expect("the later complete call must remain visible");
+            assert_eq!(tool_calls.len(), if unified { 1 } else { 2 });
+            if !unified {
+                assert_eq!(tool_calls[0].function.arguments, "{\"city\":");
+            }
+            let complete = tool_calls.last().unwrap();
+            assert_eq!(complete.id, "second");
+            assert_eq!(complete.function.name, "get_time");
+            assert_eq!(complete.function.arguments, "{\"tz\":\"UTC\"}");
+            assert_eq!(
+                result.inner.choices[0].finish_reason,
+                Some(dynamo_protocols::types::FinishReason::Length)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_length_drops_the_final_invalid_structured_tool_call() {
+        let make_name = |idx: u32, id: &str, name: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index: idx,
+                id: Some(id.to_string()),
+                r#type: Some(dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some(name.to_string()),
+                    arguments: None,
+                }),
+            }
+        };
+        let make_args = |idx: u32, fragment: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
+                index: idx,
+                id: None,
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: None,
+                    arguments: Some(fragment.to_string()),
+                }),
+            }
+        };
+        let first = create_test_delta_with_tool_chunks(
+            0,
+            vec![
+                make_name(0, "first", "get_weather"),
+                make_args(0, "{\"city\":\"Paris\"}"),
+            ],
+            None,
+            Some(dynamo_protocols::types::Role::Assistant),
+        );
+        let final_invalid = create_test_delta_with_tool_chunks(
+            0,
+            vec![make_name(1, "second", "get_time"), make_args(1, "{\"tz\":")],
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+        );
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![first, final_invalid])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_calls = result.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the complete first call must remain visible");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
+    }
+
+    /// The limit can land after the function name and before the first argument
+    /// token. That leaves no argument bytes, which is the most truncated shape, not a
+    /// parameterless call, so it must not reach the client as executable.
+    #[tokio::test]
+    async fn test_length_drops_a_final_tool_call_with_no_argument_bytes() {
+        let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
+            index: 0,
+            id: Some("first".to_string()),
+            r#type: Some(dynamo_protocols::types::FunctionType::Function),
+            function: Some(dynamo_protocols::types::FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: None,
+            }),
+        };
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                0,
+                vec![call],
+                Some(dynamo_protocols::types::FinishReason::Length),
+                Some(dynamo_protocols::types::Role::Assistant),
+            )])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert!(
+            choice.message.tool_calls.is_none(),
+            "a call cut off before its arguments must not be executable"
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finished_tool_call_with_no_argument_bytes_remains_valid() {
+        let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
+            index: 0,
+            id: Some("first".to_string()),
+            r#type: Some(dynamo_protocols::types::FunctionType::Function),
+            function: Some(dynamo_protocols::types::FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: None,
+            }),
+        };
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                0,
+                vec![call],
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                Some(dynamo_protocols::types::Role::Assistant),
+            )])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_calls = result.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("a finished parameterless call must remain valid");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "");
+        assert_eq!(
+            result.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
+    /// `phi4` opens a call with the bare word `functools`, so cutting content at every
+    /// configured marker would truncate an ordinary answer about that Python module.
+    #[tokio::test]
+    async fn test_length_keeps_prose_containing_a_word_shaped_marker() {
+        let text = "Use functools.lru_cache to memoize the call, and it will";
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta(
+                0,
+                text,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Length),
+                None,
+                None,
+            )])),
+            ParsingOptions::new(Some("phi4".to_string()), None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.inner.choices[0].message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
         );
     }
 
@@ -2342,6 +3454,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_v41_batch_recovers_malformed_closed_arguments_as_text() {
+        let text = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"count\" string=\"false\">not-json</｜DSML｜ parameter>",
+            "</｜DSML｜ invoke></｜DSML｜ calls>"
+        );
+        let annotated_delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(
+                Some("deepseek_v41".to_string()),
+                Some("deepseek_v41".to_string()),
+            ),
+        )
+        .await;
+
+        let response = result.expect("malformed parser output should fall back to text");
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
     async fn test_disabled_tool_parsing_preserves_structured_content_with_name() {
         let json = r#"{"name":"Science Fair","date":"Friday","participants":["Alice","Bob"]}"#;
         let annotated_delta = create_test_delta(
@@ -2551,8 +3698,10 @@ mod tests {
             finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
+            parser_call_completion: HashMap::new(),
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
+            refusal: None,
             content_parts: vec![],
         };
 
@@ -2579,11 +3728,11 @@ mod tests {
     //   in:  <tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos   (finish_reason=length)
     //   out: finish=length  tool_calls=None  content=""
     // The parser sees an incomplete XML block and returns no tool call and no
-    // content, so the client gets an empty turn. The recovery path appends the
-    // raw partial markup as content so the caller can at least surface it.
+    // content. The non-streaming contract keeps the finish signal and suppresses
+    // the incomplete structured candidate rather than leaking parser markup.
 
     #[tokio::test]
-    async fn test_glm47_single_truncated_call_recovered_as_content() {
+    async fn test_glm47_single_truncated_call_is_suppressed() {
         let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos";
         let delta = create_test_delta(
             0,
@@ -2608,15 +3757,12 @@ mod tests {
             choice.message.tool_calls.is_none(),
             "incomplete call must not produce a structured tool_call"
         );
-        assert_eq!(
-            choice.message.content,
-            Some(ChatCompletionMessageContent::Text(text.to_string())),
-            "truncated markup must be returned as raw content"
-        );
+        assert_eq!(choice.message.content, None);
+        assert!(!serde_json::to_string(choice).unwrap().contains(text));
     }
 
     #[tokio::test]
-    async fn test_glm47_complete_call_then_truncated_second_recovered() {
+    async fn test_glm47_complete_call_then_truncated_second_is_suppressed() {
         // First call complete, second truncated mid-argument.
         let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>US/E";
         let delta = create_test_delta(
@@ -2634,7 +3780,7 @@ mod tests {
                 .unwrap();
 
         let choice = &result.inner.choices[0];
-        // First complete call is parsed into tool_calls.
+        // First complete call is parsed into tool_calls and remains available.
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(
             tool_calls.len(),
@@ -2642,20 +3788,39 @@ mod tests {
             "first complete call must be structured"
         );
         assert_eq!(tool_calls[0].function.name, "get_weather");
-        // Truncated second block is in content, not dropped.
-        let content = choice
-            .message
-            .content
-            .as_ref()
-            .expect("truncated second call must be in content");
-        let ChatCompletionMessageContent::Text(t) = content else {
-            panic!("content must be Text")
-        };
+        assert_eq!(choice.message.content, None);
         assert!(
-            t.contains("<tool_call>get_time"),
-            "truncated second call markup must be in content"
+            !serde_json::to_string(choice)
+                .unwrap()
+                .contains("<tool_call>get_time"),
+            "truncated second call markup must not leak into the response"
         );
-        assert!(!t.contains("</tool_call>"), "must not contain closing tag");
+    }
+
+    #[tokio::test]
+    async fn test_glm47_quoted_marker_prose_is_preserved_on_length_finish() {
+        let text = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![delta])),
+            ParsingOptions::new(Some("glm47".to_string()), None),
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
     }
 
     #[tokio::test]
@@ -2723,5 +3888,89 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert_eq!(error.message(), "invalid sampling parameter");
+    }
+    #[tokio::test]
+    async fn review_structured_complete_calls_survive_every_finish_without_evidence() {
+        for finish in [
+            None,
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+        ] {
+            let input = create_test_delta(
+                0,
+                "",
+                None,
+                finish,
+                None,
+                Some(r#"{"name":"write_file","arguments":{"count":1,"content":"data"}}"#),
+            );
+            let result = DeltaAggregator::apply_with_tool_terminal_policy(
+                stream::iter([input]),
+                ParsingOptions::default(),
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.inner.choices[0]
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .map(Vec::len),
+                Some(1),
+                "{finish:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review_backend_completion_evidence_remains_authoritative() {
+        for complete in [None, Some(false), Some(true)] {
+            for finish in [
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(dynamo_protocols::types::FinishReason::Length),
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            ] {
+                let mut input = create_test_delta(
+                    0,
+                    "",
+                    None,
+                    finish,
+                    None,
+                    Some(r#"{"name":"write_file","arguments":{"count":1,"content":"data"}}"#),
+                );
+                if let Some(complete) = complete {
+                    input.data.as_mut().unwrap().tool_call_completion.push(
+                        super::super::ToolCallCompletion {
+                            choice_index: 0,
+                            tool_index: 0,
+                            complete,
+                        },
+                    );
+                }
+                let response = DeltaAggregator::apply_with_tool_terminal_policy(
+                    stream::iter([input]),
+                    ParsingOptions::default(),
+                    true,
+                )
+                .await
+                .unwrap();
+                let calls = &response.inner.choices[0].message.tool_calls;
+                if complete == Some(false) {
+                    assert!(calls.is_none(), "{finish:?}");
+                } else {
+                    let calls = calls.as_ref().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].function.name, "write_file");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                            .unwrap(),
+                        serde_json::json!({"count":1,"content":"data"})
+                    );
+                }
+            }
+        }
     }
 }

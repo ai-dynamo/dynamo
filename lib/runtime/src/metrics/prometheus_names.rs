@@ -91,10 +91,6 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
-    /// Prefix for request admission/rejection control metrics (e.g.
-    /// `dynamo_rejection_request_total`).
-    pub const REJECTION: &str = "dynamo_rejection";
-
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -143,6 +139,11 @@ pub mod labels {
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
+    /// Label for where a booked request is in its lifecycle: "prefill" until it is
+    /// marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    /// the serving leg ("aggregated", "prefill", "decode").
+    pub const REQUEST_PHASE: &str = "request_phase";
+
     /// Label for router instance (discovery.instance_id() of the frontend)
     pub const ROUTER_ID: &str = "router_id";
 }
@@ -174,11 +175,45 @@ pub mod frontend_service {
     /// Whether the frontend can route at least one inference request for a model
     pub const MODEL_READY: &str = "model_ready";
 
+    /// Number of discovered physical workers by router admission state
+    pub const ROUTER_WORKERS: &str = "router_workers";
+
+    /// Current router admission state and reason for a discovered worker
+    pub const ROUTER_WORKER_STATE: &str = "router_worker_state";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
+
+    /// Admitted requests that have not produced an output token.
+    pub const AWAITING_FIRST_TOKEN_REQUESTS: &str = "awaiting_first_token_requests";
+    /// Known prompt tokens in inflight requests, labeled by state.
+    pub const INFLIGHT_INPUT_TOKENS: &str = "inflight_input_tokens";
+    /// Total known input tokens of admitted requests.
+    pub const INPUT_TOKENS_TOTAL: &str = "input_tokens_total";
+
+    /// Questions per admitted System One request.
+    pub const SYSTEMONE_QUESTIONS: &str = "systemone_questions";
+
+    /// Expanded prompt tokens per admitted System One request.
+    pub const SYSTEMONE_INPUT_TOKENS: &str = "systemone_input_tokens";
+
+    /// Requested candidate token IDs per admitted System One request.
+    pub const SYSTEMONE_CANDIDATE_IDS: &str = "systemone_candidate_ids";
+
+    /// Cached prompt tokens reported by a completed System One branch.
+    pub const SYSTEMONE_CACHED_TOKENS: &str = "systemone_cached_tokens";
+
+    /// Total question branches admitted for System One dispatch.
+    pub const SYSTEMONE_ADMITTED_BRANCHES_TOTAL: &str = "systemone_admitted_branches_total";
+
+    /// Duration of a System One execution phase in seconds.
+    pub const SYSTEMONE_PHASE_SECONDS: &str = "systemone_phase_seconds";
+
+    /// Total number of terminal semantic request failures.
+    pub const FAILURES_TOTAL: &str = "failures_total";
 
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
@@ -205,6 +240,17 @@ pub mod frontend_service {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "kv_worker_reused_tokens_total";
 
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
@@ -299,6 +345,10 @@ pub mod frontend_service {
     /// Active prefill tokens per worker
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Active requests booked per worker, labeled by request phase
+    /// Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    pub const WORKER_ACTIVE_REQUESTS: &str = "worker_active_requests";
 
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
@@ -466,10 +516,8 @@ pub mod work_handler {
     /// Configured capacity of the bounded work queue (gauge, static)
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
-    /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// A full queue is shed via try_reserve() and counted under
-    /// `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
-    /// toward `QUEUE_CAPACITY`.
+    /// Requests rejected before TCP worker dispatch because the bounded work queue
+    /// was full or the dispatcher channel was closed.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -663,6 +711,17 @@ pub mod router {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank (counter)
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens (counter)
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "router_kv_worker_reused_tokens_total";
 
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
@@ -968,9 +1027,15 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
 /// Builds a full component metric name by prepending the component prefix
 /// Sanitizes the metric name to ensure it's valid for Prometheus
 pub fn build_component_metric_name(metric_name: &str) -> String {
+    build_metric_name(name_prefix::COMPONENT, metric_name)
+}
+
+/// Builds a full metric name by prepending `prefix`
+/// Sanitizes the metric name to ensure it's valid for Prometheus
+pub(crate) fn build_metric_name(prefix: &str, metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
-    format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+    format!("{}_{}", prefix, sanitized_name)
 }
 
 /// Safely converts a u64 value to i64 for Prometheus metrics

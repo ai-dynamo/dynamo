@@ -79,6 +79,9 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         ],
         selected_prefill_endpoint: Some("[2001:db8::10]:8001".to_string()),
         token_ids: Some(vec![1, 2, 3, 4, 5]),
+        cache_namespace: None,
+        cache_salt_forwarding: Default::default(),
+        strip_nvext: false,
         reservation_id: None,
     };
 

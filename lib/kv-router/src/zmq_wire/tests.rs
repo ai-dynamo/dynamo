@@ -23,6 +23,50 @@ enum TestEventKind {
 }
 
 #[test]
+fn test_deserialize_sglang_cache_salt() {
+    for salt in [None, Some(""), Some("tenant-a")] {
+        let mut event = serde_json::json!(["BlockStored", [-123], null, [10, 11], 2, null, "GPU"]);
+        if let Some(salt) = salt {
+            event
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"cache_salt": salt}));
+        }
+        let raw: RawKvEvent = from_slice(&to_vec(&event).unwrap()).unwrap();
+        let RawKvEvent::BlockStored {
+            cache_namespace,
+            lora_name,
+            ..
+        } = raw
+        else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            cache_namespace.as_deref(),
+            salt.filter(|salt| !salt.is_empty())
+        );
+        assert_eq!(lora_name, None);
+    }
+
+    for metadata in [
+        serde_json::json!({}),
+        serde_json::json!({"cache_salt": 123}),
+    ] {
+        let event = serde_json::json!([
+            "BlockStored",
+            [-123],
+            null,
+            [10, 11],
+            2,
+            null,
+            "GPU",
+            metadata
+        ]);
+        assert!(from_slice::<RawKvEvent>(&to_vec(&event).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn test_deserialize_bigram_block_stored_sequence() {
     let raw_event = (
         "BlockStored",
@@ -96,6 +140,8 @@ struct MapBlockStoredFixture {
     locality: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ownership: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'static str>,
 }
 
 impl Default for MapBlockStoredFixture {
@@ -112,6 +158,7 @@ impl Default for MapBlockStoredFixture {
             extra_keys: None,
             locality: None,
             ownership: None,
+            session_id: None,
         }
     }
 }
@@ -150,6 +197,50 @@ fn decodes_ownership_on_named_map_events() {
     let event: RawKvEvent = from_slice(&encoded).unwrap();
     assert_eq!(event.ownership(), Ok(KvEventOwnership::Kvcr));
     assert_eq!(event.locality(), Some(Locality::Local));
+}
+
+#[test]
+fn block_stored_session_id_reaches_canonical_router_event() {
+    let encoded = to_vec_named(&MapBlockStoredFixture {
+        session_id: Some("session-1"),
+        ..Default::default()
+    })
+    .unwrap();
+    let raw: RawKvEvent = from_slice(&encoded).unwrap();
+    let placement = convert_event(
+        raw,
+        42,
+        2,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(placement.session_id.as_deref(), Some("session-1"));
+    let event = placement.into_router_event().unwrap();
+    assert_eq!(event.session_id.as_deref(), Some("session-1"));
+}
+
+#[test]
+fn missing_block_stored_session_id_remains_absent() {
+    let encoded = to_vec_named(&MapBlockStoredFixture::default()).unwrap();
+    let raw: RawKvEvent = from_slice(&encoded).unwrap();
+    let event = convert_event(
+        raw,
+        42,
+        2,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap()
+    .into_router_event()
+    .unwrap();
+
+    assert_eq!(event.session_id, None);
 }
 
 #[test]
@@ -736,6 +827,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -752,6 +844,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -797,6 +890,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(event, worker).is_some());
@@ -830,6 +924,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
 
     let parent_a = stored(Some("tenant-a"), vec![BlockHashValue::Unsigned(1)], None);
@@ -869,6 +964,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -885,6 +981,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -932,6 +1029,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement_event = convert_event(
@@ -976,7 +1074,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
             assert_eq!(store_data.blocks[0].tokens_hash, expected_first[0]);
             assert_eq!(store_data.blocks[1].tokens_hash, expected_second[0]);
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
 }
 
@@ -1008,6 +1106,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 
@@ -1037,7 +1136,7 @@ fn cpu_event_with_placeholder_payload_is_dropped_safely() {
             assert!(store_data.parent_hash.is_none());
             assert!(store_data.blocks.is_empty());
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert!(warning_count.load(Ordering::Relaxed) >= 1);
 }
@@ -1076,7 +1175,7 @@ fn cpu_event_with_full_payload_is_indexable() {
                 ExternalSequenceBlockHash(202)
             );
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert_eq!(warning_count.load(Ordering::Relaxed), 0);
 }
@@ -1193,6 +1292,7 @@ fn raw_placement_event(
             kv_cache_spec_sliding_window: None,
             locality,
             ownership: None,
+            session_id: None,
         },
         TestEventKind::BlockRemoved => RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(1)],
@@ -1385,6 +1485,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement = convert_event(
@@ -1405,7 +1506,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
     );
     match placement.event.data {
         KvCacheEventData::Stored(store_data) => assert!(store_data.blocks.is_empty()),
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert!(warning_count.load(Ordering::Relaxed) >= 1);
 }
@@ -1431,6 +1532,7 @@ fn namespaced_block_stored(
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 

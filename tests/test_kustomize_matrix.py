@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -12,8 +13,65 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
 MODULE_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
+USER_FACING_MANIFEST_ROOTS = (
+    REPO_ROOT / "benchmarks",
+    REPO_ROOT / "components/src/dynamo/profiler/templates",
+    REPO_ROOT / "examples",
+    REPO_ROOT / "recipes",
+)
+LEGACY_VLLM_COMPONENT_NAME = re.compile(
+    r"^\s*(?:"
+    r"-\s+name:\s*['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?"
+    r"|['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?\s*:"
+    r")\s*(?:#.*)?$"
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+def test_user_facing_manifests_use_short_vllm_component_names():
+    violations = []
+    for root in USER_FACING_MANIFEST_ROOTS:
+        for path in sorted(root.rglob("*.yaml")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if LEGACY_VLLM_COMPONENT_NAME.fullmatch(line):
+                    violations.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}"
+                    )
+
+    assert not violations, (
+        "user-facing manifests must use worker, prefill, or decode instead of "
+        "legacy vLLM component names:\n" + "\n".join(violations)
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "expected_worker_names"),
+    [
+        ("agg-gb200-agentic", {"worker"}),
+        ("agg-gb300-agentic", {"worker"}),
+        ("agg-h200-agentic", {"worker"}),
+        ("disagg-gb300-agentic", {"prefill", "decode"}),
+    ],
+)
+def test_kimi_k3_vllm_recipes_use_short_worker_names(deployment, expected_worker_names):
+    """Unprefixed names like PrefillWorker must not escape the vLLM rename."""
+    manifest = REPO_ROOT / "recipes/kimi-k3/vllm" / deployment / "deploy.yaml"
+    resources = list(yaml.safe_load_all(manifest.read_text(encoding="utf-8")))
+    dgd = next(
+        resource
+        for resource in resources
+        if resource and resource.get("kind") == "DynamoGraphDeployment"
+    )
+    worker_names = {
+        component["name"]
+        for component in dgd["spec"]["components"]
+        if component["type"] != "frontend"
+    }
+
+    assert worker_names == expected_worker_names
 
 
 def load_matrix_module():

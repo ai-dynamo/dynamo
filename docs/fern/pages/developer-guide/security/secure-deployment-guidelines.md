@@ -73,8 +73,8 @@ a microservice behind a dedicated gateway or proxy that provides:
 - **Load balancing** across frontend replicas.
 
 On Kubernetes, place a standard ingress or Gateway that you configure for
-authentication and TLS in front of the Dynamo Frontend service. The frontend
-implements no client authentication; that is the gateway's responsibility. If you
+authentication and TLS in front of the Dynamo Frontend service. End-user
+authentication and authorization remain the gateway's responsibility. If you
 adopt Dynamo's optional [Gateway API routing topology](../../kubernetes/installation/gateway-api-routing.mdx),
 note that its Endpoint Picker selects a backend for load and KV-cache reasons and
 does not authenticate clients, so it still sits behind your authenticating
@@ -83,10 +83,12 @@ gateway.
 TLS termination at the gateway secures only the client-to-gateway hop. If traffic
 from the gateway to the frontend crosses an untrusted segment, re-encrypt that hop
 by enabling the frontend's own server-side TLS (`DYN_TLS_CERT_PATH` /
-`DYN_TLS_KEY_PATH`); see the
-[frontend TLS configuration](../../reference/components/frontend-configuration.mdx).
-This is server-side TLS only — it does not authenticate end users, which remains
-the gateway's responsibility.
+`DYN_TLS_KEY_PATH`). To also require a client certificate from the gateway, set
+`DYN_TLS_CLIENT_CA_CERT_PATH` on the frontend and configure the gateway to present
+a certificate signed by a trusted CA. In this topology, mutual TLS (mTLS)
+authenticates the gateway on the gateway-to-frontend connection. End-user
+authentication and authorization remain the gateway's responsibility. See
+[HTTP TLS and mTLS](../../reference/components/tls-configuration.mdx#http-tls-and-mtls).
 
 ## Securing the Internal Communication Planes
 
@@ -196,10 +198,13 @@ reachable.
   target individual
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
-- **Admin API.** The frontend's HTTP admin API (for example,
-  `GET`/`POST /busy_threshold`) is enabled by default. If the deployer does not need to
-  change runtime tunables through it, set `DYN_DISABLE_FRONTEND_ADMIN_API=1`.
-  Inference, metrics, models, health, and liveness routes are unaffected.
+- **Admin API.** The frontend's HTTP admin API (`/router_policy` and `/busy_threshold`),
+  which changes routing for every client, is disabled by default.
+  `DYN_ENABLE_FRONTEND_ADMIN_API=1` starts it on its own listener, bound to `127.0.0.1:8002`
+  and never served on the inference port. It uses the frontend's TLS settings but has no
+  authentication. If you widen the bind with
+  `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port to trusted operators with a network
+  policy or firewall.
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by
   trusted monitoring systems; scope it to your observability stack rather than
   exposing it to untrusted networks.
@@ -266,6 +271,30 @@ privileges.
 Apply standard Docker hardening: restrict container network access to the trusted
 segment, set CPU/memory limits, avoid `--privileged`, drop unneeded capabilities,
 and run as a non-root user.
+
+## LPX Client Identity
+
+For every LPX DynamoGraphDeployment (DGD), the operator creates Secret
+`lpx-id-<DGD UID>` once. The DGD owns it, it is immutable, and the operator never
+rewrites it or adopts a Secret the DGD does not control. It holds:
+
+- `client.key` and `client.pem`: an Ed25519 key and a self-signed client certificate
+  (client authentication only, not a CA, valid for 10 years). Only the `main`
+  container of agent Pods mounts them, read-only at `/etc/lpx/identity`, together with
+  the optional platform CA from Secret `lpx-server-ca`. Agent Pods also publish the certificate in the annotation
+  `lpx.nvidia.com/client-cert`, so software on the LPU node can authenticate them.
+- `private.key` and `private.key.pub`: the DGD's own SSH key pair. It replaces the
+  cluster-wide MPI SSH Secret in the DGD's LPX Pods, so one DGD's key does not open
+  another DGD's Pods.
+
+Treat these Secrets as credentials: in workload namespaces, do not grant tenants
+Secret read, Pod exec or Pod update.
+
+The key is not rotated during the DGD's life. To rotate it, or after a suspected
+leak, delete and recreate the DGD; the new DGD gets a new UID and so a new Secret,
+key and certificate. Node-side software should accept the certificate only for the
+hardware the DGD currently holds, so a leaked key stops working when the DGD ends,
+whatever the certificate's validity period.
 
 ## Reporting a Vulnerability
 

@@ -5,6 +5,14 @@
 //!
 //! Watches the EPP's Kubernetes `Service` EndpointSlices and updates its
 //! in-process [`SelectionService`] as sibling EPP replicas join or leave.
+//!
+//! # Required k8s RBAC
+//!
+//! Standalone mode only (`DYN_EPP_MODE=standalone` + `DYN_EPP_PEER_SERVICE`).
+//! Needs the following permissions granted to SA `dynamo-epp` in
+//! `examples/onramp/agg.yaml`:
+//! - `services:get`
+//! - `endpointslices:list/watch`
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -260,9 +268,7 @@ mod tests {
         use axum::{Json, Router};
         use dynamo_kv_router::WorkerType;
         use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
-        use dynamo_kv_router::services::selection::{
-            SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
-        };
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
         use kube::Config;
         use tokio::net::TcpListener;
         use tokio::sync::Notify;
@@ -277,7 +283,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 kv_router_config_from_dynamo_env(),
                 WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                dynamo_custom_policy_builtin::default_registry(),
             )
             .indexer_threads(1)
             .replica_sync(listener_port, Vec::new())

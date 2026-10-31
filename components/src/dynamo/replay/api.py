@@ -3,17 +3,32 @@
 
 """Compatibility entry points spanning shared offline and Dynamo online replay."""
 
+import functools
 import json
+import math
 import os
-from typing import Any, Literal, TypedDict, overload
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
+from dynamo._core import KvRouterConfig
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
-from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from dynamo.replay.report import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+)
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import RetuneInputs, TrafficObservation
+
+_AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 
 
 def _planner_replay_adapter():
@@ -30,12 +45,25 @@ def _planner_replay_adapter():
     return planner_replay_adapter
 
 
+@dataclass(frozen=True)
+class TelemetryOptions:
+    """Optional policy-neutral telemetry for an offline replay.
+
+    In-memory capture is the default only when no callback or JSONL sink is set.
+    """
+
+    sample_interval_ms: float = 1_000.0
+    capture_in_memory: bool | None = None
+    callback: Callable[[dict[str, Any]], None] | None = None
+    jsonl_path: str | os.PathLike[str] | None = None
+
+
 class _CommonReplayOptions(TypedDict, total=False):
     extra_engine_args: Any
     prefill_engine_args: Any
     decode_engine_args: Any
     router_config: Any
-    aic_perf_config: Any
+    ais_perf_config: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -51,16 +79,27 @@ class _CommonReplayOptions(TypedDict, total=False):
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
+    telemetry_options: TelemetryOptions | None
+    kv_event_lag_ms: float | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
+    conversation_affinity: dict[str, Any] | None
     agentic_lanes: int | None
+    agentic_snapshot: dict[str, Any] | None
+    agentic_warmup: bool
+    agentic_profile: dict[str, Any] | None
+    execution_model: str | None
+    weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
     trace_block_size: int | None
     trace_format: str
     trace_shared_prefix_ratio: float
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
+    # Internal to retune sweeps; not part of the public API.
+    _planner_warmup_observations: "Sequence[TrafficObservation] | None"
+    _deterministic: bool
 
 
 class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
@@ -79,6 +118,143 @@ def _normalize_trace_files(trace_files):
     return list(trace_files)
 
 
+def _retune_inputs(
+    config: "PlannerConfig",
+    *,
+    trace_files: Sequence[str | os.PathLike[str]],
+    trace_format: str,
+    replay_concurrency: int | None,
+    agentic_lanes: int | None,
+    agentic_snapshot: dict[str, Any] | None,
+    agentic_warmup: bool,
+    agentic_profile: dict[str, Any] | None,
+    max_sim_time_ms: float | None,
+    extra_engine_args: Any,
+    prefill_engine_args: Any,
+    decode_engine_args: Any,
+    router_mode: Literal["round_robin", "kv_router"],
+    router_config: KvRouterConfig | None,
+    ais_perf_config: Any,
+    performance_model_metadata: dict[str, Any] | None,
+    model_name: str | None,
+    kv_event_lag_ms: float | None,
+    benchmark_granularity: int,
+    arrival_speedup_ratio: float,
+) -> "RetuneInputs":
+    """Derive planner retune inputs from this ``run_trace_replay`` call.
+
+    Every retune candidate replays one recorded window against the engine of
+    the outer replay, so the engine is pinned from the outer kwargs and the
+    trace time axis from the outer trace. Retune is open-loop and reads
+    ``dynamo.request.trace.v1`` files only, so it rejects the agentic replay
+    options and a trace whose requests carry ``agent_context`` (an agentic
+    Dynamo trace). ``execution_model`` is not an input: it only names the
+    target model of agentic rows, and ``DynamoReplayRunner`` sets it for every
+    performance-model engine, agentic or not. ``aisimulate predict --stack
+    dynamo`` replays through this function too, so each error also names the
+    AISimulate setting.
+    """
+
+    if trace_format != "dynamo":
+        raise ValueError(
+            "planner.retune replays a Dynamo request trace: it requires "
+            "trace_format='dynamo' (in aisimulate predict, traffic.source.format: "
+            f"dynamo); got {trace_format!r}"
+        )
+    if replay_concurrency is not None:
+        raise ValueError(
+            "planner.retune replays open-loop traffic at the trace timestamps; "
+            "replay_concurrency (in aisimulate predict, traffic.load.type: "
+            "concurrency) is not supported"
+        )
+    agentic_options = {
+        "agentic_lanes": agentic_lanes is not None,
+        "agentic_snapshot": agentic_snapshot is not None,
+        "agentic_warmup": bool(agentic_warmup),
+        "agentic_profile": agentic_profile is not None,
+    }
+    if rejected := sorted(name for name, used in agentic_options.items() if used):
+        raise ValueError(
+            "planner.retune replays open-loop traffic; agentic replay options "
+            "(in aisimulate predict, traffic.load.agentic_*) are not supported: "
+            f"{rejected}"
+        )
+    if max_sim_time_ms is not None:
+        raise ValueError(
+            "planner.retune replays complete windows; max_sim_time_ms (in "
+            "aisimulate predict, traffic.stop.max_virtual_time_seconds) is not "
+            "supported"
+        )
+
+    # Lazy imports: the planner and replay-config modules import
+    # ``dynamo.mocker``, whose package initializer imports this module (see
+    # ``_planner_replay_adapter``).
+    from dynamo.planner.config.planner_config import RetuneEngineSpec
+    from dynamo.planner.core.types import RetuneInputs
+    from dynamo.planner.offline.trace_data import detect_trace_format
+    from dynamo.planner.retune.window import read_trace_history, trace_origin_ms
+    from dynamo.replay.config import load_engine_args
+
+    # Pin the engine shape the outer replay runs (prefill and decode args make
+    # it disaggregated whatever the planner mode); the controller rejects a
+    # shape that does not match the planner mode.
+    engine = RetuneEngineSpec(
+        extra_engine_args=load_engine_args(extra_engine_args),
+        prefill_engine_args=load_engine_args(prefill_engine_args),
+        decode_engine_args=load_engine_args(decode_engine_args),
+        router_mode=router_mode,
+        router_config=json.loads((router_config or KvRouterConfig()).to_json()),
+        ais_perf_config=(
+            None if ais_perf_config is None else ais_perf_config.to_dict()
+        ),
+        performance_model_metadata=performance_model_metadata,
+        model_name=model_name,
+        kv_event_lag_ms=kv_event_lag_ms,
+        benchmark_granularity=benchmark_granularity,
+    )
+    trace_paths = tuple(os.fspath(path) for path in trace_files)
+    row_counts: dict[str, int] = {}
+    origin_ms = trace_origin_ms(trace_paths, row_counts=row_counts)
+    if agentic_requests := row_counts["agent_context_stripped"]:
+        # Retune windows drop agent_context, so candidates would replay
+        # open-loop traffic that the outer agentic replay never ran.
+        raise ValueError(
+            "planner.retune replays open-loop traffic; the trace has "
+            f"{agentic_requests} requests with agent_context (an agentic "
+            "Dynamo trace)"
+        )
+    history_paths: tuple[str, ...] = ()
+    # Only an inner planner that scales on throughput reads the history (to
+    # warm its predictors), so other configs leave the warmup trace alone.
+    warmup_trace = config.load_predictor_warmup_trace
+    if config.enable_throughput_scaling and warmup_trace is not None:
+        if detect_trace_format(warmup_trace) == "mooncake":
+            raise ValueError(
+                "planner.retune with throughput scaling reads "
+                "load_predictor_warmup_trace as recorded history, which needs "
+                "a dynamo.request.trace.v1 trace on the replayed trace's "
+                "absolute time axis; Mooncake timestamps are relative"
+            )
+        history_paths = (warmup_trace,)
+        # History and windows are read on one time axis; an overlapping
+        # history would count requests twice in predictor warmup.
+        overlap = read_trace_history(history_paths, origin_ms, math.inf, math.inf)
+        if overlap:
+            raise ValueError(
+                "planner.retune history (load_predictor_warmup_trace) must end "
+                "at or before the first replayed request on the same absolute "
+                f"time axis; {overlap} history requests arrive at "
+                f"or after {origin_ms:.0f} ms"
+            )
+    return RetuneInputs(
+        engine=engine,
+        trace_paths=trace_paths,
+        history_paths=history_paths,
+        trace_origin_ms=origin_ms,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+    )
+
+
 def _planner_config_arg(planner_config):
     """Normalize a planner config to the JSON form ``prepare_planner_replay``
     expects: a dict is json-encoded; a str (path or inline JSON) passes through."""
@@ -91,13 +267,85 @@ def _materialize_offline_report(
     native,
     *,
     planner: PlannerReplayDetails | None,
+    execution_model: str | None = None,
 ) -> ReplayReport:
+    summary = dict(native.summary)
+    _add_agentic_model_projection(summary, execution_model)
+    native_telemetry = native.telemetry
+    telemetry = (
+        None
+        if native_telemetry is None
+        else ReplayTelemetryDetails(
+            sample_interval_ms=float(native_telemetry["sample_interval_ms"]),
+            samples=list(native_telemetry["samples"]),
+        )
+    )
     return ReplayReport(
-        summary=native.summary,
+        summary=summary,
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
+        telemetry=telemetry,
     )
+
+
+def _normalize_execution_model(
+    trace_format: str, execution_model: str | None
+) -> str | None:
+    if execution_model is not None:
+        if not isinstance(execution_model, str):
+            raise TypeError("execution_model must be a string or None")
+        execution_model = execution_model.strip()
+        if not execution_model:
+            raise ValueError("execution_model must be non-empty")
+    if (
+        trace_format in {"weka", "agentic_mooncake", "agentic-mooncake"}
+        and execution_model is None
+    ):
+        raise ValueError("agentic execution requires a configured target model")
+    return execution_model
+
+
+def _add_agentic_model_projection(
+    summary: dict[str, Any], execution_model: str | None
+) -> None:
+    graph = summary.get("agentic_graph")
+    if not isinstance(graph, dict):
+        return
+    if execution_model is None:
+        raise ValueError(
+            "agentic execution did not declare its configured target model"
+        )
+    source_models = graph.get("source_models")
+    if not isinstance(source_models, list) or not all(
+        isinstance(model, str) and model for model in source_models
+    ):
+        raise ValueError("agentic graph did not report valid source_models")
+    summary["agentic_model_projection"] = {
+        "policy": _AGENTIC_MODEL_PROJECTION_POLICY,
+        "source_models": source_models,
+        "target_model": execution_model,
+    }
+
+
+def _telemetry_kwargs(options: TelemetryOptions | None) -> dict[str, Any]:
+    if options is None:
+        return {}
+    capture_in_memory = options.capture_in_memory
+    if capture_in_memory is None:
+        capture_in_memory = options.callback is None and options.jsonl_path is None
+    if (
+        not capture_in_memory
+        and options.callback is None
+        and options.jsonl_path is None
+    ):
+        raise ValueError("TelemetryOptions needs at least one sink")
+    return {
+        "capture_telemetry": capture_in_memory,
+        "telemetry_sample_interval_ms": options.sample_interval_ms,
+        "telemetry_callback": options.callback,
+        "telemetry_jsonl_path": options.jsonl_path,
+    }
 
 
 @overload
@@ -137,12 +385,16 @@ def run_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
     replay_concurrency=None,
     agentic_lanes=None,
+    agentic_snapshot=None,
+    agentic_warmup=False,
+    agentic_profile=None,
+    conversation_affinity=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -161,28 +413,77 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    execution_model=None,
+    weka_nested_timestamp_basis=None,
+    telemetry_options=None,
+    kv_event_lag_ms=None,
+    # Internal: a retune sweep's inner planner is warmed with the history it
+    # already bucketed instead of its load_predictor_warmup_trace.
+    _planner_warmup_observations=None,
+    # Internal: a retune sweep replays the baseline and every candidate with
+    # the canonical router seed and ordinal request ids (common random numbers).
+    _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
+    ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
+    omitting it retains AISimulate's automatic selection.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
+
+    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
+    workload controls on the existing offline trace path. Native validation owns
+    their schemas and lifecycle constraints.
+
+    ``conversation_affinity`` enables native hard binding for AgentX conversations:
+    ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
+    offline KV-router replay with fixed workers; omission preserves normal routing.
+
+    Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
+    leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
+    the replay loop, so their latency contributes to replay wall time. The
+    final buffered-file flush happens after the simulator finalizes
+    ``wall_time_ms``; time the outer API call when measuring end-to-end
+    persistence overhead. JSONL output is opened lazily on the first sample.
+    If a later write fails, replay fails; completed prior lines remain, and the
+    failing final line may be partial.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
     ):
         raise TypeError("agentic_lanes must be an integer or None")
+    if weka_nested_timestamp_basis is not None:
+        if not isinstance(weka_nested_timestamp_basis, str):
+            raise TypeError("weka_nested_timestamp_basis must be a string or None")
+        if weka_nested_timestamp_basis not in {"auto", "absolute", "relative"}:
+            raise ValueError(
+                "weka_nested_timestamp_basis must be 'auto', 'absolute', or 'relative'"
+            )
+        if trace_format != "weka":
+            raise ValueError("weka_nested_timestamp_basis requires trace_format='weka'")
+    execution_model = _normalize_execution_model(trace_format, execution_model)
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
         "replay_concurrency": replay_concurrency,
         "agentic_lanes": agentic_lanes,
+        "agentic_snapshot": agentic_snapshot,
+        "agentic_warmup": agentic_warmup,
+        "agentic_profile": agentic_profile,
+        "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,
@@ -193,33 +494,33 @@ def run_trace_replay(
         "report_jsonl_path": report_jsonl_path,
         "max_sim_time_ms": max_sim_time_ms,
         "model_name": model_name,
+        "execution_model": execution_model,
+        "weka_nested_timestamp_basis": weka_nested_timestamp_basis,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
+        "deterministic": _deterministic,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
         )
     if planner_config is not None:
+        if conversation_affinity is not None:
+            raise ValueError(
+                "conversation_affinity requires fixed workers, without a Planner"
+            )
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
         # offline planner run (matches the CLI's guardrails).
         if replay_mode != "offline":
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
-            )
-        if trace_format not in (
-            "mooncake",
-            "applied_compute_agentic",
-            "dynamo",
-        ):
-            raise ValueError(
-                "planner_config replay only supports trace_format='mooncake', "
-                "'applied_compute_agentic', or 'dynamo'"
             )
         if trace_format != "dynamo" and len(trace_files) != 1:
             raise ValueError(
@@ -231,6 +532,28 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
+        retune_inputs_factory = functools.partial(
+            _retune_inputs,
+            trace_files=trace_files,
+            trace_format=trace_format,
+            replay_concurrency=replay_concurrency,
+            agentic_lanes=agentic_lanes,
+            agentic_snapshot=agentic_snapshot,
+            agentic_warmup=agentic_warmup,
+            agentic_profile=agentic_profile,
+            max_sim_time_ms=max_sim_time_ms,
+            extra_engine_args=extra_engine_args,
+            prefill_engine_args=prefill_engine_args,
+            decode_engine_args=decode_engine_args,
+            router_mode=router_mode,
+            router_config=router_config,
+            ais_perf_config=ais_perf_config,
+            performance_model_metadata=performance_model_metadata,
+            model_name=model_name,
+            kv_event_lag_ms=kv_event_lag_ms,
+            benchmark_granularity=benchmark_granularity,
+            arrival_speedup_ratio=arrival_speedup_ratio,
+        )
         adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
@@ -239,6 +562,8 @@ def run_trace_replay(
             performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
+            retune_inputs_factory=retune_inputs_factory,
+            warmup_observations=_planner_warmup_observations,
         )
         with adapter_scope as adapter:
             native = _run_mocker_trace_replay(
@@ -249,6 +574,7 @@ def run_trace_replay(
             return _materialize_offline_report(
                 native,
                 planner=adapter.finalize(native.lifecycle_operations),
+                execution_model=execution_model,
             )
     result = _run_mocker_trace_replay(
         trace_files,
@@ -256,8 +582,14 @@ def run_trace_replay(
         scaling_policy=None,
     )
     if replay_mode == "online":
+        if isinstance(result, dict):
+            _add_agentic_model_projection(result, execution_model)
         return result
-    return _materialize_offline_report(result, planner=None)
+    return _materialize_offline_report(
+        result,
+        planner=None,
+        execution_model=execution_model,
+    )
 
 
 @overload
@@ -305,7 +637,7 @@ def run_synthetic_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -329,14 +661,24 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same timing boundary as trace replay."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` and
+    ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
+    selection. With ``router_mode="kv_router"``, equal-cost workers are selected
+    randomly even at router temperature zero. A fixed arrival seed therefore
+    does not guarantee identical routing, prefix reuse, or latency across runs,
+    including offline replay.
+    """
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
@@ -357,7 +699,9 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
     if planner_config is not None:

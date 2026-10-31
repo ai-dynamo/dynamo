@@ -6,7 +6,7 @@ metadata:
   name: inkling-vllm-gb300-disagg-agentic
 spec:
   components:
-    - name: VllmPrefillWorker
+    - name: prefill
       podTemplate:
         spec:
           resourceClaims: &roceClaims
@@ -29,7 +29,7 @@ spec:
                 claims: &roceResourceClaims
                   - name: compute-domain-channel
                   - name: roce
-    - name: VllmDecodeWorker
+    - name: decode
       podTemplate:
         spec:
           resourceClaims: *roceClaims

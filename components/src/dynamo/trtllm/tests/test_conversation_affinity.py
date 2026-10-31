@@ -8,11 +8,11 @@ TensorRT-LLM build (including rc19, which lacks the API)."""
 
 import pytest
 
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.trtllm.conversation_affinity import (
     CONVERSATION_PARAMS_AVAILABLE,
     conversation_params_for,
     engine_conversation_affinity_enabled,
-    session_id_from_request,
 )
 
 pytestmark = [

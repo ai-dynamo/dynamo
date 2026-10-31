@@ -63,6 +63,15 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			wantProvider: workloadProviderComponent,
 		},
 		{
+			name: "materialized DisaggregatedSet remains authoritative when Grove is enabled",
+			gate: features.Gates{Grove: true},
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderDisaggregatedSet,
+			},
+			workloads:    []providerTestWorkload{{provider: workloadProviderGrove, owned: true}},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
 			name:         "no owned workloads select Grove from current intent",
 			gate:         features.Gates{Grove: true},
 			wantProvider: workloadProviderGrove,
@@ -74,6 +83,22 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 				consts.KubeAnnotationEnableGrove: "FALSE",
 			},
 			wantProvider: workloadProviderComponent,
+		},
+		{
+			name: "explicit DisaggregatedSet intent selects DisaggregatedSet after Grove opt-out",
+			gate: features.Gates{Grove: true},
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove:            consts.KubeLabelValueFalse,
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
+			name: "explicit DisaggregatedSet intent is durable even when its gate is unavailable",
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			wantProvider: workloadProviderDisaggregatedSet,
 		},
 		{
 			name:         "owned DCD adopts component despite current Grove intent",
@@ -90,13 +115,42 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			wantProvider: workloadProviderGrove,
 		},
 		{
-			name: "mixed owned workload families fail closed",
+			name: "owned DisaggregatedSet adopts DS despite current component intent",
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse,
+			},
+			workloads:    []providerTestWorkload{{provider: workloadProviderDisaggregatedSet, owned: true}},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
+			name: "DisaggregatedSet adopts alongside auxiliary DCDs",
+			workloads: []providerTestWorkload{
+				{provider: workloadProviderComponent, owned: true},
+				{provider: workloadProviderDisaggregatedSet, owned: true},
+			},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
+			name: "Grove adopts alongside auxiliary DCDs",
 			workloads: []providerTestWorkload{
 				{provider: workloadProviderComponent, owned: true},
 				{provider: workloadProviderGrove, owned: true},
 			},
-			wantErr:   "owns DynamoComponentDeployments and PodCliqueSets",
+			wantProvider: workloadProviderGrove,
+		},
+		{
+			name: "DisaggregatedSet and Grove fail closed",
+			workloads: []providerTestWorkload{
+				{provider: workloadProviderGrove, owned: true},
+				{provider: workloadProviderDisaggregatedSet, owned: true},
+			},
+			wantErr:   "owns workloads from multiple providers",
 			wantErrIs: errConflictingWorkloadProviders,
+		},
+		{
+			name:         "unannotated DGD with only DCDs adopts component",
+			workloads:    []providerTestWorkload{{provider: workloadProviderComponent, owned: true}},
+			wantProvider: workloadProviderComponent,
 		},
 		{
 			name: "foreign workloads are ignored",
@@ -104,6 +158,7 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			workloads: []providerTestWorkload{
 				{provider: workloadProviderComponent},
 				{provider: workloadProviderGrove},
+				{provider: workloadProviderDisaggregatedSet},
 			},
 			wantProvider: workloadProviderGrove,
 		},
@@ -135,12 +190,10 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Store one DGD and the workload families visible during adoption")
 			seed := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "graph",
-					Namespace:   "default",
-					UID:         types.UID("graph-uid"),
-					Annotations: maps.Clone(tt.annotations),
-				},
+				Name:        "graph",
+				Namespace:   "default",
+				UID:         types.UID("graph-uid"),
+				Annotations: maps.Clone(tt.annotations),
 			}
 			objects := []client.Object{seed}
 			for i, workload := range tt.workloads {
@@ -228,6 +281,12 @@ func newProviderTestWorkload(
 		return &nvidiacomv1beta1.DynamoComponentDeployment{ObjectMeta: objectMeta}
 	case workloadProviderGrove:
 		return &grovev1alpha1.PodCliqueSet{ObjectMeta: objectMeta}
+	case workloadProviderDisaggregatedSet:
+		ds := newDisaggregatedSetObject()
+		ds.SetName(disaggregatedSetName(dgd))
+		ds.SetNamespace(dgd.Namespace)
+		ds.SetOwnerReferences(ownerReferences)
+		return ds
 	default:
 		t.Fatalf("unsupported test workload provider %q", workload.provider)
 		return nil
@@ -238,7 +297,7 @@ func TestEnsureWorkloadProviderRestoresObjectAfterPatchFailure(t *testing.T) {
 	t.Log("Inject a provider patch failure for an unannotated DGD")
 	patchErr := errors.New("patch failed")
 	seed := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 	}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -284,13 +343,11 @@ func TestDynamoGraphDeploymentReconcileReportsUnsupportedWorkloadProvider(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Store a DGD with an unsupported immutable workload provider")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "graph",
-					Namespace:  "default",
-					Generation: 4,
-					Annotations: map[string]string{
-						consts.KubeAnnotationWorkloadProvider: "unknown",
-					},
+				Name:       "graph",
+				Namespace:  "default",
+				Generation: 4,
+				Annotations: map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
 				},
 			}
 			builder := fake.NewClientBuilder().

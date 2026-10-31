@@ -19,12 +19,19 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -41,27 +48,58 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
 	ctx context.Context
+	// requestVersion is the API version the client used, resolved once from the admission
+	// request. Every object delivered to the webhook is a converted v1beta1 object;
+	// spec.v1beta2 says which represented spec it carries.
+	requestVersion string
+	warnings       admission.Warnings
 }
 
-// Validate performs stateless validation on request. ctx and request must not be nil.
+func (v *dynamoGraphDeploymentRequestValidation) warn(message string) {
+	v.warnings = append(v.warnings, message)
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warnf(format string, args ...any) {
+	v.warn(fmt.Sprintf(format, args...))
+}
+
+// Validate performs stateless validation on request. ctx must carry the admission request and
+// request must not be nil.
 func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get admission request: %w", err)
+	}
+	validation := &dynamoGraphDeploymentRequestValidation{
+		ctx:            ctx,
+		requestVersion: internalwebhook.RequestedVersion(req),
+	}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
-	return nil, invalidDynamoGraphDeploymentRequestError(request, allErrs)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
-// ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
+// ValidateUpdate validates newRequest against oldRequest. ctx must carry the admission request;
+// oldRequest and newRequest must not be nil.
 func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	ctx context.Context,
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get admission request: %w", err)
+	}
+	validation := &dynamoGraphDeploymentRequestValidation{
+		ctx:            ctx,
+		requestVersion: internalwebhook.RequestedVersion(req),
+	}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
-	return nil, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
+	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
+	validation.warnDeprecatedGPUSKU(&newRequest.Spec)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
 }
 
 // validateDynamoGraphDeploymentRequest validates request. request must not be nil.
@@ -76,6 +114,22 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	// The requested API version decides what spec.v1beta2 means. A spec that only conversion
+	// may produce is rejected on CREATE.
+	if v.requestVersion == internalwebhook.VersionV1Beta2 && spec.V1Beta2 == nil {
+		// A hub/v1beta1 representation was submitted through v1beta2.
+		return foreignCreateErrors(fldPath, false)
+	}
+	if v.requestVersion != internalwebhook.VersionV1Beta2 && spec.V1Beta2 != nil {
+		// A v1beta2 carrier was submitted through v1alpha1 or v1beta1.
+		return foreignCreateErrors(fldPath, true)
+	}
+	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
+	// the v1beta1 rules below do not apply to it.
+	if spec.V1Beta2 != nil {
+		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, fldPath.Child("v1beta2"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	if !features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery) && !hasManualDGDRHardware(spec.Hardware) {
@@ -101,7 +155,110 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	v.warnDeprecatedDGDOverrideTargets(spec)
+	v.warnDeprecatedGPUSKU(spec)
+
 	return allErrs
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedGPUSKU(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) {
+	//nolint:staticcheck // SA1019: Admission must warn when the deprecated value is used.
+	if spec.Hardware == nil || spec.Hardware.GPUSKU != nvidiacomv1beta1.GPUSKUTypeGB200SXM {
+		return
+	}
+
+	v.warn(`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`)
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTargets(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) {
+	if spec.Overrides == nil || spec.Overrides.DGD == nil {
+		return
+	}
+
+	override, ok := rawExtensionToUnstructured(spec.Overrides.DGD)
+	if !ok {
+		return
+	}
+
+	type deprecatedTarget struct {
+		name            string
+		path            string
+		replacementHint string
+	}
+	deprecated := make([]deprecatedTarget, 0)
+	switch override.GetAPIVersion() {
+	case nvidiacomv1alpha1.GroupVersion.String():
+		services, _, err := unstructured.NestedMap(override.Object, "spec", "services")
+		if err != nil {
+			return
+		}
+		for name := range services {
+			replacementHint, found := dgdoverride.DeprecatedDGDOverrideTargetReplacementHint(name)
+			if found {
+				deprecated = append(deprecated, deprecatedTarget{
+					name:            name,
+					path:            "spec.overrides.dgd.spec.services." + name,
+					replacementHint: replacementHint,
+				})
+			}
+		}
+	case nvidiacomv1beta1.GroupVersion.String():
+		components, _, err := unstructured.NestedSlice(override.Object, "spec", "components")
+		if err != nil {
+			return
+		}
+		for _, value := range components {
+			component, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := component["name"].(string)
+			replacementHint, found := dgdoverride.DeprecatedDGDOverrideTargetReplacementHint(name)
+			if found {
+				deprecated = append(deprecated, deprecatedTarget{
+					name:            name,
+					path:            fmt.Sprintf("spec.overrides.dgd.spec.components[name=%s]", name),
+					replacementHint: replacementHint,
+				})
+			}
+		}
+	default:
+		return
+	}
+
+	sort.Slice(deprecated, func(i, j int) bool {
+		return deprecated[i].path < deprecated[j].path
+	})
+	for _, item := range deprecated {
+		v.warn(fmt.Sprintf(
+			"%s: override target %q is deprecated; use %s. Legacy-name translation will be removed in a future release",
+			item.path,
+			item.name,
+			item.replacementHint,
+		))
+	}
+}
+
+func rawExtensionToUnstructured(extension *k8sruntime.RawExtension) (*unstructured.Unstructured, bool) {
+	if len(extension.Raw) > 0 {
+		object := map[string]any{}
+		if err := json.Unmarshal(extension.Raw, &object); err != nil {
+			return nil, false
+		}
+		return &unstructured.Unstructured{Object: object}, true
+	}
+	if extension.Object == nil {
+		return nil, false
+	}
+	object, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(extension.Object)
+	if err != nil {
+		return nil, false
+	}
+	return &unstructured.Unstructured{Object: object}, true
 }
 
 // validateDynamoGraphDeploymentRequestUpdate validates an update. newRequest and oldRequest must not be nil.
@@ -125,6 +282,21 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) field.ErrorList {
+	// A spec viewed through the API version that does not own it is read-only: an unchanged
+	// spec round-trips, any other write is rejected.
+	if v.requestVersion == internalwebhook.VersionV1Beta2 && newSpec.V1Beta2 == nil {
+		return foreignUpdateVerdict(fldPath, newSpec, oldSpec)
+	}
+	if v.requestVersion != internalwebhook.VersionV1Beta2 && newSpec.V1Beta2 != nil {
+		return foreignUpdateVerdict(fldPath, newSpec, oldSpec)
+	}
+	// A native v1beta2 spec is unconstrained by phase. Stateless validation of the new typed
+	// spec runs on every CREATE and UPDATE: an unchanged spec is no reason to skip it. Ratcheting
+	// belongs to the generated AISimulate schema validation, which will ratchet its own result.
+	if newSpec.V1Beta2 != nil {
+		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, fldPath.Child("v1beta2"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)

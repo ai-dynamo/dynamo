@@ -12,7 +12,7 @@ use crate::GrpcEndpoint;
 const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
-const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 300;
+const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 1800;
 
 fn parse_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
     GrpcEndpoint::parse(raw, "--grpc-endpoint").map_err(|error| error.to_string())
@@ -76,7 +76,8 @@ pub struct SidecarArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// Engine gRPC endpoint as `host:port` or a plaintext gRPC/HTTP URL.
+    /// Engine gRPC endpoint as `host:port`, a plaintext gRPC/HTTP URL, or
+    /// `unix:///ABSOLUTE/PATH` for a Unix socket.
     #[arg(
         long,
         env = "DYN_SIDECAR_GRPC_ENDPOINT",
@@ -129,7 +130,7 @@ mod tests {
         assert_eq!(config.connections.get(), 8);
         assert_eq!(config.connect_attempt_timeout, Duration::from_secs(30));
         assert_eq!(config.retry_interval, Duration::from_secs(1));
-        assert_eq!(config.startup_deadline, Duration::from_secs(300));
+        assert_eq!(config.startup_deadline, Duration::from_secs(1800));
 
         let overrides = TestArgs::try_parse_from([
             "test",

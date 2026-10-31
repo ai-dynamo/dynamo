@@ -12,7 +12,10 @@
 
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
-ARG PYTHON_VERSION
+# Planner-scoped interpreter; see container/context.yaml `planner_python_version`.
+# The planner build/runtime bases decouple this stage's CPython from the
+# global PYTHON_VERSION used by the frontend and framework stages.
+ARG PLANNER_PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
@@ -21,9 +24,9 @@ ARG TARGETARCH
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
 # entirely. Python headers come from the base image's
-# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
-# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
-# not available in this base's apt index anyway). libc6-dev is required
+# /usr/local/include/python${PLANNER_PYTHON_VERSION} (python:3.X-slim bundles
+# them directly — no apt python*-dev needed, and python${PLANNER_PYTHON_VERSION}-dev
+# is not available in this base's apt index anyway). libc6-dev is required
 # explicitly because on Debian it's a Recommends of gcc, not a Depends, so
 # --no-install-recommends would otherwise skip it and the build fails with
 # "fatal error: stdlib.h: No such file or directory". The toolchain stays
@@ -38,6 +41,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         $EXTRA_PKGS && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \
@@ -62,7 +67,7 @@ USER dynamo
 
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
+    uv venv ${VIRTUAL_ENV} --python ${PLANNER_PYTHON_VERSION}
 
 # Install the local wheels and planner/profiler runtime dependencies before the
 # repo copies so changes in tests/configs don't invalidate the dependency layer.
@@ -105,6 +110,15 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
+ARG PLANNER_PYTHON_VERSION
+USER 0
+
+# Remove this ensurepip copy once the NGC runtime provides Python 3.13.17+.
+# https://github.com/ai-dynamo/dynamo/issues/17188
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"]
+COPY --from=planner_builder /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/ /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil, subprocess, tempfile, venv; assert tuple(map(int, ensurepip.version().split('.'))) >= (26, 2, 2); assert len(list((pathlib.Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))) == 1; d = tempfile.mkdtemp(); venv.create(d, with_pip=True); subprocess.run([d + '/bin/python', '-m', 'pip', '--version'], check=True); shutil.rmtree(d)"]
+
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
@@ -118,6 +132,7 @@ COPY --from=licenses /legal /legal
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \
+    GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     LD_LIBRARY_PATH="/opt/dynamo/lib" \

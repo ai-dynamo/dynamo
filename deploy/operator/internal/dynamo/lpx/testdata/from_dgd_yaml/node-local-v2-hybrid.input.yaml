@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: node-local-v2-hybrid
+  namespace: test
+  uid: 22222222-2222-4222-8222-222222222222
+  generation: 1
+spec:
+  components:
+    - name: lpu
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v2-connected-lpx
+      roles:
+      - name: conductor
+        replicas: 1
+        podTemplate:
+          spec:
+            resourceClaims:
+            - name: gpu
+              resourceClaimTemplateName: decode-gpu
+            containers:
+            - name: main
+              image: example.invalid/gpu-runtime:test
+              command:
+              - /usr/local/bin/cyborg-entrypoint
+              - --expand-hosts
+              - --
+              - /opt/gpu-runtime
+              args:
+              - serve
+              env:
+              - name: RDMA_PORT
+                value: '19877'
+              - name: SERVER_HOSTS_FILE
+                value: /tmp/lpu_servers
+              - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['grove.io/podclique-pod-index']
+              startupProbe:
+                failureThreshold: 720
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 4
+              livenessProbe:
+                failureThreshold: 1
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 5
+                timeoutSeconds: 4
+              volumeMounts:
+              - name: config
+                mountPath: /configs
+              - name: infiniband
+                mountPath: /dev/infiniband
+              - name: model-storage
+                mountPath: /nfs
+              resources:
+                claims:
+                - name: gpu
+            volumes:
+            - name: infiniband
+              hostPath:
+                path: /dev/infiniband
+                type: Directory
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+      - name: agent
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /opt/dynamo-lpu
+              args:
+              - serve
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+                  hugepages-2Mi: 4Gi
+                requests:
+                  cpu: '62'
+                  hugepages-2Mi: 4Gi
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              readinessProbe:
+                failureThreshold: 6
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              env:
+              - name: GAS_DIR
+                value: $(LPX_MODEL_PATH)
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              - name: NIC_NAME
+                value: mlx5_0
+              - name: UCX_TLS
+                value: tcp
+              - name: RDMA_PORT
+                value: '19877'
+              - name: READINESS_PORT
+                value: '19878'
+              - name: LPU_MODEL_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+              - name: config
+                mountPath: /configs
+              - name: hugepages
+                mountPath: /dev/hugepages
+              - name: host-sys
+                mountPath: /sys
+              - name: host-dev
+                mountPath: /dev
+              - name: ssh-secret
+                mountPath: /ssh-pk
+                readOnly: true
+              securityContext:
+                privileged: true
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: hugepages
+              emptyDir:
+                medium: HugePages
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 420
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            tolerations:
+            - key: lpu.nvidia.com/node
+              operator: Exists

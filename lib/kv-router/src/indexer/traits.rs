@@ -10,6 +10,7 @@ use super::{
     TieredMatchDetails, WorkerTask,
 };
 use crate::protocols::*;
+use crate::session_prefix_index::SessionPrefixIndexer;
 
 /// Trait for querying an external shared KV cache pool.
 ///
@@ -28,6 +29,10 @@ pub trait SharedKvCache: Send + Sync {
         block_size: u32,
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
+
+    /// Hands the router's session prefix index to the cache so residency events that name
+    /// a session can update it. The default ignores the index.
+    fn attach_session_prefix_index(&self, _index: Arc<SessionPrefixIndexer>) {}
 }
 
 #[async_trait]
@@ -253,20 +258,19 @@ pub trait SyncIndexer: Send + Sync + 'static {
         ))
     }
 
-    /// Returns true when a maintenance task should be enqueued.
-    fn try_schedule_cleanup(&self) -> bool {
-        false
+    /// How often [`ThreadPoolIndexer`](super::ThreadPoolIndexer) should call
+    /// [`Self::run_background_maintenance`] on a dedicated thread off the event lanes, or
+    /// `None` for no maintenance thread.
+    fn background_maintenance_interval(&self) -> Option<std::time::Duration> {
+        None
     }
 
-    /// Rolls back a scheduled cleanup when enqueueing the task fails.
-    fn cancel_scheduled_cleanup(&self) {}
-
-    /// Executes a maintenance task on a worker thread.
-    fn run_cleanup_task(&self) {}
+    /// One tick of best-effort maintenance for shared-state backends.
+    fn run_background_maintenance(&self) {}
 
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
-    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// ConcurrentRadixTreeCompressed). Returns `None` for backends that keep per-thread
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None

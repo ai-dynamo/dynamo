@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import pytest
-from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
-from aiconfigurator.sdk.task_v2 import Task
+from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
+from aisimulate.sdk.task_v2 import Task
 
 pytestmark = [
     pytest.mark.aiconfigurator,
@@ -31,7 +31,7 @@ def test_rapid_task_v2_build_and_execute_contract() -> None:
         total_gpus=2,
         system="h200_sxm",
         backend="vllm",
-        backend_version="0.19.0",
+        backend_version="current",
         isl=128,
         osl=8,
         ttft=100_000.0,

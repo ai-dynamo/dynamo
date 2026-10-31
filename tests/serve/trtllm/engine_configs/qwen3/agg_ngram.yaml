@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Memory-optimized NGram speculative-decoding config for CI.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+max_batch_size: 4
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+disable_overlap_scheduler: true
+
+speculative_config:
+  decoding_type: NGram
+  max_draft_len: 4
+  max_matching_ngram_size: 2
+  is_keep_all: true
+  is_use_oldest: true
+  is_public_pool: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.24
+  enable_block_reuse: false

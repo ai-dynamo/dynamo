@@ -123,6 +123,94 @@ def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
     return isinstance(extra_fields, list) and field in extra_fields
 
 
+class PromptLogprobsAccumulator:
+    """Carry requested prompt logprobs through buffered chat postprocessing."""
+
+    def __init__(self, request: dict[str, Any]):
+        self._include_root = (
+            request.get("prompt_logprobs") is not None
+            and request.get("stream") is not True
+        )
+        self._include_nvext = nvext_extra_field_requested(request, "prompt_logprobs")
+        self._payload: list[Any] | None = None
+        self._emitted = False
+
+    @property
+    def needs_payload(self) -> bool:
+        return (
+            (self._include_root or self._include_nvext)
+            and self._payload is None
+            and not self._emitted
+        )
+
+    def update(self, engine_response: dict[str, Any]) -> None:
+        if not self.needs_payload:
+            return
+        engine_data = engine_response.get("engine_data")
+        if not isinstance(engine_data, dict) or "prompt_logprobs" not in engine_data:
+            return
+        payload = engine_data["prompt_logprobs"]
+        if not isinstance(payload, list):
+            raise ValueError("invalid prompt_logprobs payload: expected a list")
+        # The root field is validated by Rust; nvext otherwise stays untyped JSON.
+        if not self._include_root:
+            self._validate_nvext_payload(payload)
+        self._payload = payload
+
+    @staticmethod
+    def _validate_nvext_payload(payload: list[Any]) -> None:
+        for position in payload:
+            if position is None:
+                continue
+            if not isinstance(position, dict):
+                raise ValueError(
+                    "invalid prompt_logprobs payload: expected a token map"
+                )
+            for token_id, entry in position.items():
+                if (
+                    not isinstance(token_id, str)
+                    or not token_id.isascii()
+                    or not token_id.removeprefix("+").isdecimal()
+                    or int(token_id) > 2**32 - 1
+                ):
+                    raise ValueError(
+                        "invalid prompt_logprobs payload: invalid token ID"
+                    )
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        "invalid prompt_logprobs payload: expected an entry"
+                    )
+                logprob = entry.get("logprob")
+                if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
+                    raise ValueError("invalid prompt_logprobs payload: invalid logprob")
+                rank = entry.get("rank")
+                if rank is not None and (
+                    not isinstance(rank, int)
+                    or isinstance(rank, bool)
+                    or not 0 <= rank <= 2**32 - 1
+                ):
+                    raise ValueError("invalid prompt_logprobs payload: invalid rank")
+                decoded_token = entry.get("decoded_token")
+                if decoded_token is not None and not isinstance(decoded_token, str):
+                    raise ValueError(
+                        "invalid prompt_logprobs payload: invalid decoded token"
+                    )
+
+    def attach(self, chunk: dict[str, Any]) -> None:
+        if self._emitted or self._payload is None:
+            return
+        if not any(
+            choice.get("finish_reason") is not None for choice in chunk["choices"]
+        ):
+            return
+        if self._include_root:
+            chunk["prompt_logprobs"] = self._payload
+        if self._include_nvext:
+            chunk.setdefault("nvext", {})["prompt_logprobs"] = self._payload
+        self._emitted = True
+        self._payload = None
+
+
 def worker_warmup() -> bool:
     """Dummy task to ensure a ProcessPoolExecutor worker is fully initialized."""
     return True
@@ -148,12 +236,11 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 def extract_mm_urls(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
-    """Extract media and vLLM image processor-cache UUIDs from chat messages.
+    """Extract media and vLLM processor-cache UUIDs from chat messages.
 
     URL-backed parts become ``Url`` variants. Image parts with no URL and an
     opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
-    processor cache. Cache UUIDs on audio and video are rejected. Image UUID
-    lists preserve slot order::
+    processor cache. UUID lists preserve slot order for every media type::
 
         ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
          {"image_url": ["image-1", "image-1"]})
@@ -166,7 +253,7 @@ def extract_mm_urls(
     has_user_uuid = False
 
     for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
+        if not isinstance(msg, dict) or msg.get("role") not in ("user", "tool"):
             continue
         content = msg.get("content")
         if not isinstance(content, list):
@@ -184,25 +271,24 @@ def extract_mm_urls(
                 not isinstance(uuid_value, str) or not uuid_value
             ):
                 raise ValueError(f"{part_type} uuid must be a non-empty string")
-            if uuid_value is not None and part_type != "image_url":
-                raise ValueError(
-                    "multimodal cache UUIDs are supported only for "
-                    "image_url parts with vLLM"
-                )
-
             url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
             elif isinstance(uuid_value, str):
-                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+                if part_type == "image_url":
+                    mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+                else:
+                    raise ValueError(
+                        "UUID-only cache reuse is not supported for media modality "
+                        f"`{part_type}`; provide a media URL"
+                    )
             else:
                 raise ValueError(
                     f"{part_type} part must contain a non-empty URL or uuid"
                 )
 
-            if part_type == "image_url":
-                mm_uuids.setdefault(part_type, []).append(uuid_value)
-                has_user_uuid |= uuid_value is not None
+            mm_uuids.setdefault(part_type, []).append(uuid_value)
+            has_user_uuid |= uuid_value is not None
 
     return mm_data or None, mm_uuids if has_user_uuid else None
 

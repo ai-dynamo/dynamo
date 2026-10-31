@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.offline.trace_data import (
     extract_metrics_from_mooncake,
     extract_metrics_from_trace_paths,
@@ -19,8 +21,11 @@ from dynamo.planner.offline.trace_data import (
 
 from .presets import throughput_intervals
 
-if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig
+logger = logging.getLogger(__name__)
+
+# Exception classes a predictor is allowed to raise from predict_next(); mirrors
+# BuiltinLoadPredict._predict_load, which logs them and yields no forecast.
+_PREDICTOR_ERRORS = (ArithmeticError, IndexError, RuntimeError, TypeError, ValueError)
 
 LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
     "constant_last": {"family": "constant", "log1p": False},
@@ -81,11 +86,14 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULTS = {
-    "prophet_window_size": 50,
-    "q_level": 1.0,
-    "q_trend": 0.1,
-    "r": 10.0,
-    "min_points": 5,
+    name: PlannerConfig.model_fields[field].default
+    for name, field in {
+        "prophet_window_size": "prophet_window_size",
+        "q_level": "kalman_q_level",
+        "q_trend": "kalman_q_trend",
+        "r": "kalman_r",
+        "min_points": "kalman_min_points",
+    }.items()
 }
 _DEFAULT_PRESET = "constant_last"
 _VALID_FAMILIES = frozenset(
@@ -180,7 +188,9 @@ class LoadPredictorResult:
         }
 
 
-def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+def internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Expand one predictor preset into the internal form the scorers take."""
+
     complete = complete_predictor_preset(entry)
     return {
         "family": complete["load_predictor"],
@@ -196,7 +206,7 @@ def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
 def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
     """Expand a winner into concrete PlannerConfig predictor fields."""
 
-    preset = _internal_preset(entry)
+    preset = internal_preset(entry)
     family = preset["family"]
     fields: dict[str, Any] = {
         "load_predictor": family,
@@ -262,6 +272,11 @@ def window_loss(
 ) -> float:
     """Compute the existing weighted one-step-ahead forecast loss."""
 
+    # Clamp forecasts before forming the token products: two negative
+    # forecasts would otherwise multiply into a positive product that the
+    # clamp inside _error() never sees, scoring a doubly-wrong forecast
+    # better than a singly-wrong one.
+    n_hat, i_hat, o_hat = max(n_hat, 0.0), max(i_hat, 0.0), max(o_hat, 0.0)
     return (
         0.4 * _error(n_hat * i_hat, num_req * isl)
         + 0.4 * _error(n_hat * o_hat, num_req * osl)
@@ -299,26 +314,46 @@ def evaluate_preset(
     preset: dict[str, Any],
     interval_s: int,
     warmup: int,
+    *,
+    forecast_warmup: bool = True,
 ) -> float:
-    """Return mean one-step-ahead loss using the production predictor cadence."""
+    """Return mean one-step-ahead loss using the production predictor cadence.
+
+    The first ``warmup`` windows are observed but not scored. With
+    ``forecast_warmup=False`` they are not forecast either, as a predictor
+    swapped in on a warmup is prepared: a candidate then costs three
+    forecasts per scored window, and ARIMA selects its order once on all of
+    the warmup instead of at its fifth point.
+    """
 
     request_predictor, isl_predictor, osl_predictor = _new_predictors(
         preset, interval_s
     )
     losses: list[float] = []
     for index, window in enumerate(windows):
+        if index < warmup and not forecast_warmup:
+            request_predictor.add_data_point(window.num_req)
+            isl_predictor.add_data_point(window.isl)
+            osl_predictor.add_data_point(window.osl)
+            continue
         try:
             n_hat, i_hat, o_hat = (
                 request_predictor.predict_next(),
                 isl_predictor.predict_next(),
                 osl_predictor.predict_next(),
             )
-        except Exception:
-            n_hat, i_hat, o_hat = (
-                request_predictor.get_last_value(),
-                isl_predictor.get_last_value(),
-                osl_predictor.get_last_value(),
+        except _PREDICTOR_ERRORS as exc:
+            # In production this predictor would yield no forecast for the
+            # interval, so it must not be scored as if it had forecast the
+            # last value (ConstantPredictor's behaviour). Disqualify it;
+            # to_state() renders the inf loss as null.
+            logger.warning(
+                "load-predictor preset %s failed at window %d: %r; scoring as inf",
+                preset,
+                index,
+                exc,
             )
+            return math.inf
         if index >= warmup:
             losses.append(
                 window_loss(
@@ -338,7 +373,7 @@ def evaluate_preset(
 
 def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
     minimum_points = [
-        _new_predictors(_internal_preset(entry), interval_s)[0].minimum_data_points
+        _new_predictors(internal_preset(entry), interval_s)[0].minimum_data_points
         for entry in entries
     ]
     return max(minimum_points) if minimum_points else 0
@@ -346,6 +381,32 @@ def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
 
 def _entry_label(entry: str | dict[str, Any], index: int) -> str:
     return entry if isinstance(entry, str) else f"custom_{index}"
+
+
+def distinct_predictor_candidates(
+    entries: list[str | dict[str, Any]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Label and complete predictor candidates, dropping behavioural duplicates.
+
+    Returns ``(label, mapping)`` pairs: the label is the preset name, or
+    ``custom_<index>`` with the entry's position in ``entries`` (the
+    recommendation pre-sweep labels); the mapping holds every public predictor
+    knob. Two entries are duplicates when they give the same
+    ``predictor_fields``, that is the same planner predictor; the first one is
+    kept.
+    """
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+    for index, entry in enumerate(entries):
+        key = tuple(sorted(predictor_fields(entry).items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            (_entry_label(entry, index), complete_predictor_preset(entry))
+        )
+    return candidates
 
 
 def sweep_load_predictor(
@@ -403,7 +464,7 @@ def sweep_load_predictor(
             disable=not show_progress,
         )
         for label, entry in progress:
-            loss = evaluate_preset(windows, _internal_preset(entry), interval_s, warmup)
+            loss = evaluate_preset(windows, internal_preset(entry), interval_s, warmup)
             losses[label] = loss
             progress.set_postfix_str(f"{label}={loss:.3f}")
             if loss < best_loss:

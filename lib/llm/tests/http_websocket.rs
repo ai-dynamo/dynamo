@@ -141,6 +141,64 @@ async fn realtime_websocket_emits_session_created_on_connect() {
     let _ = handle.await;
 }
 
+/// An upgraded connection stays inflight while idle and while serving events.
+/// Draining rejects new upgrades without interrupting the admitted session.
+#[tokio::test]
+async fn realtime_websocket_holds_inflight_permit_until_disconnect() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Realtime, true)
+        .unwrap();
+    register_echo(&service);
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_health(port).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    expect_text_event(&mut ws, "session.created").await;
+    assert_eq!(state.inflight_count(), 1);
+    assert!(
+        !state
+            .wait_inflight_zero_or_timeout(Duration::from_millis(10))
+            .await
+    );
+
+    state.start_draining();
+    let rejected = tokio_tungstenite::connect_async(&url).await.unwrap_err();
+    assert!(matches!(rejected,
+        tokio_tungstenite::tungstenite::Error::Http(response)
+        if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    ));
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "session.update",
+            "session": {"type": "realtime", "model": ECHO_MODEL}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    expect_text_event(&mut ws, "session.updated").await;
+    assert_eq!(state.inflight_count(), 1);
+
+    ws.close(None).await.unwrap();
+    assert!(
+        state
+            .wait_inflight_zero_or_timeout(Duration::from_secs(2))
+            .await
+    );
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("service shutdown after websocket disconnect")
+        .unwrap()
+        .unwrap();
+}
+
 /// `session.update` round-trips through the engine: client sends the event,
 /// server replies with `session.updated` carrying the same `Session` payload.
 /// Demonstrates end-to-end realtime-event plumbing through the WebSocket.
@@ -427,6 +485,58 @@ async fn realtime_websocket_binary_frame_during_selection_emits_error() {
         event.pointer("/error/code").and_then(|s| s.as_str()),
         Some("invalid_request"),
         "error event should report invalid_request for binary frame: {event}"
+    );
+
+    let _ = ws.close(None).await;
+    token.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn realtime_websocket_forwards_text_buffer_extension() {
+    let (port, token, handle) = spawn_test_service(true, true).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "session.update",
+            "session": { "type": "realtime", "model": ECHO_MODEL }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send session.update");
+    expect_text_event(&mut ws, "session.updated").await;
+
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "input_text.append",
+            "text": "hello"
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send text append");
+
+    let event = expect_text_event(&mut ws, "error").await;
+    assert_eq!(
+        event
+            .pointer("/error/code")
+            .and_then(|value| value.as_str()),
+        Some("echo_engine_unsupported")
+    );
+    assert!(
+        event
+            .pointer("/error/message")
+            .and_then(|value| value.as_str())
+            .is_some_and(|message| message.contains("input_text.append"))
     );
 
     let _ = ws.close(None).await;

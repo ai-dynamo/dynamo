@@ -10,7 +10,6 @@ drained. There is no separate replay mode.
 Supported backends are:
 
 - `nested-map` (`PositionalIndexer`)
-- `concurrent-radix-tree`
 - `concurrent-radix-tree-compressed`
 
 The benchmark rejects single-threaded radix, branch-sharded CRTC, approximate
@@ -49,7 +48,9 @@ Inside timing:
   worker lookup and Flume queues.
 - Lookup service, event application, contention, required clock reads, and
   fixed-slot completion records.
-- Query drain and FIFO event-worker seal barriers.
+- Queue drain, ending at the last query or event completion. Closing lanes,
+  sealing and harvesting completion buffers, and aggregating issue records
+  happen after that timestamp.
 
 The logical denominator is Request + Stored + Removed + Cleared. The block
 denominator includes request hashes and hashes in both Stored and Removed
@@ -79,6 +80,11 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
   -name 'mooncake_bench-*' | head -n1)
 ```
+
+`--trace-block-size` (default 512) is the number of tokens each trace `hash_id`
+represents and must match the trace; the public Mooncake traces use 512.
+`--block-size` (default 128) is the separate mock-engine and indexer block size;
+the engine re-chunks synthesized prompt tokens at that size.
 
 Linux uses absolute `CLOCK_MONOTONIC` sleeps followed by the configured spin.
 macOS uses a portable sleep-plus-spin timer for correctness tests only.
@@ -179,10 +185,99 @@ The versioned Mooncake JSON reports:
 - Queue depth at producer stop, outstanding work, maximum reconstructed depth,
   drain time, timer kind, CPU masks, exact-ID validity, and compact failure
   reasons.
+- `provenance`: the command line, binary path and SHA-256, trace path and
+  SHA-256, and the trace, corpus, and issuer settings that shaped the replay.
+- `lower_tier`, in the lower-tier mode only (below).
 
 Do not interpret overloaded lookup latency as an iso-throughput latency result.
 At a comfortable common load, report scheduler lag, queue wait, and lookup
 service separately and require negligible queue depth and drain.
+
+### Lower-tier (KVCR host tier) mode
+
+`--num-host-blocks N` adds the host tiers a vLLM worker with KVCR publishes, and
+the router's lower tier (`LowerTierIndexers`) that indexes them. It needs
+`concurrent-radix-tree-compressed`.
+
+- **vLLM's CPU offload tier**, owned by the worker. The mocker writes each
+  computed prompt block through to a host cache of `N` blocks per worker, which
+  evicts LRU. Its copy time comes from `--kv-cache-bytes-per-token`.
+- **KVCR's DRAM tier**, owned by the worker's KVCR cache owner. Every completed
+  CPU-tier store is copied into a tier of `--kvcr-blocks` blocks per worker
+  (default `N`; `0` leaves it out), which evicts LRU, a chain's tail first. Each
+  owner projects to its worker and is a router-hint source.
+
+The run mirrors the router's `Indexer::Concurrent`:
+
+- Device events go to CRTC on the observed path. Host events go to the lower
+  tier with `enqueue_event`, as the router sends them, so a cache owner's events
+  land on the lane its digest picks. The lower tier has one lane per
+  `--num-event-workers`.
+- Every lookup is the router's: the CRTC device match first, then
+  `query_lower_tiers_with_options` seeded with it. The KV transfer chain is kept
+  when KVCR is on, as for workers that advertise router hints. Lookups run
+  concurrently with event application, with no flush.
+- Host events have no per-event completions. The run ends when the lower tier
+  has drained, so a lower tier that falls behind fails `kept_up`.
+- After the run, the lower tier's (block, owner) memberships in each domain must
+  equal the host tiers' live blocks, or the run is invalid. Its heap is the drop
+  in allocated bytes when it alone is dropped, from glibc or a preloaded
+  jemalloc.
+
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake -- \
+  "$TRACE" --num-host-blocks 65536 --kvcr-blocks 65536 \
+  --benchmark-duration-ms 12000 --result-json-output /tmp/lower-tier.json \
+  concurrent-radix-tree-compressed --num-event-workers 4
+```
+
+`lower_tier` in the result reports each host tier's events, blocks and live
+memberships against what the lower tier indexed, the lower-tier part of each
+lookup, the lookups that found blocks past the device prefix, the lower tier's
+drain, and its heap per membership. The `total_*` fields and throughputs stay
+device-only. Host offload changes the device stream too (blocks pinned during
+copies, prefixes restored from host), so compare device metrics only between
+runs with the same host settings.
+
+Not modelled: KVCR reads (onboarding from KVCR back to the GPU) and peer
+fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
+agent's coalescing of events into chains of up to 128 blocks; and KV-aware
+placement, since sessions are partitioned across workers at random.
+
+### Choosing a load for A/B comparisons
+
+An overloaded replay and a keep-up replay measure different things, so choose
+the load by the path a change touches:
+
+- **Write capacity: overloaded replay** (for example the 750 ms command above).
+  Queries finish during the issue window while events drain for several times
+  longer, so `achieved_block_ops_per_sec` mostly measures event application.
+  During that window queries also walk a tree that lags far behind the trace.
+- **Read cost and write latency: keep-up replay.** Use the shortest duration
+  whose runs report `kept_up=true` with negligible drain; the sweep finds it.
+  Compare `query_service` and `update_accepted_to_finished` percentiles.
+  Achieved throughput is pinned to the offered rate there and is not a metric.
+
+A sensitivity check with two deliberately regressed builds shows the difference.
+Both were throwaway patches to the CRTC at `2de120f6a3`. The read variant ran
+`walk_match_path` twice in `find_matches_impl` and kept the second result, and
+the write variant busy-waited 6 µs at the start of `apply_event`. Each variant
+ran the documented CRTC command at 750 ms and at 12 s, with 128 workers,
+duplication 20, length 4, and 4 event workers, as five interleaved
+fresh-process pairs against an unpatched build on 8 cores. Values are
+candidate/control median ratios:
+
+| Metric | Load | Read path ×2 | Write +6 µs/event |
+|---|---|---:|---:|
+| `achieved_block_ops_per_sec` | 750 ms (overloaded) | 0.997 (not detected) | 0.728 |
+| `query_service` p50 | 750 ms (overloaded) | 1.086 | 0.952 |
+| `query_service` p50 | 12 s (keep-up) | 1.325 | 1.007 |
+| `update_accepted_to_finished` p50 | 12 s (keep-up) | 1.004 | 5.09 |
+
+Median lookup service was 1.66 µs in the overloaded replay and 3.10 µs at keep-up:
+the overloaded replay understates read cost because its queries run against an
+early, small tree.
 
 ## Active Sequences replay
 
@@ -190,6 +285,13 @@ service separately and require negligible queue depth and drain.
 for `ActiveSequencesMultiWorker`, but it does not route operations through
 `ThreadPoolIndexer` or `RouterEvent`. Each lifecycle method is synchronous, so
 method return is the completion boundary.
+
+Each mocker-replayed request contributes an Add at its engine arrival time,
+which is when a router books it, a PrefillComplete at its first output, and a
+Free at completion. Requests are therefore in prefill for their simulated
+queueing and prefill time. `--modeled-prefill-tokens-per-sec RATE` attaches an
+expected prefill duration of `ISL / RATE` to every Add, which exercises the
+modeled (AIC-style) prefill-load path; without it, prefill load is unmodeled.
 
 Preparation creates a data-only corpus with normalized per-worker deadlines,
 stable operation IDs, lifecycle metadata, and one flattened sequence-hash slab.
@@ -204,7 +306,9 @@ At a shared deadline, operations retain per-worker source order. In particular,
 an Add is accepted and completed on its sticky lane before an associated
 PrefillComplete or Free. The timed path queues compact operation IDs, performs
 no per-operation task or timer creation, and drains every lane before throughput
-ends.
+ends. Projection reuses one map per runtime thread, matching the production
+scheduler queue's single reused map; its digest is computed after the
+projection timestamp so it does not count as projection service time.
 
 The result schema reports:
 
@@ -213,8 +317,12 @@ The result schema reports:
   and their total logical block visits.
 - Scheduled-to-accepted issue lag, accepted-to-started queue wait,
   scheduled-to-completed latency, queue depth, outstanding work, and drain.
-- Separate service distributions for projection, add, composite project+add,
-  prefill completion, and free.
+- Separate service distributions (mean and percentiles) for projection, add,
+  composite project+add, prefill completion, and free, plus
+  `tracker_service_ns_per_op`: the summed method service time per logical
+  operation.
+- Process and issuer-thread CPU over the timed window and
+  `backend_cpu_ns_per_op` (process CPU excluding the issuer).
 - Worker projections produced and inspected, exact IDs, per-worker FIFO,
   final-empty state, keep-up state, and compact failure reasons.
 
@@ -241,6 +349,15 @@ cargo bench --package dynamo-bench --bench active_sequences_bench \
   --benchmark-duration-ms 4000 \
   --result-json-output /path/to/active-sequences.json
 ```
+
+On Linux, keep the deadline issuer off the measured cores. `--backend-cpus`
+pins the Tokio lane runtime and sizes its worker pool to the mask, and
+`--issuer-cpu` pins the issuer to a disjoint CPU. On a hybrid CPU, give the
+backend one core type, for example `--backend-cpus 0-7 --issuer-cpu 16`.
+`--trials N` prepares the corpus once and replays it N times against fresh
+tracker state, writing one result per trial; use it to profile the timed phase
+without trace-generation setup in the samples, and use separate processes for
+A/B trials.
 
 Sweep cells rebuild the prepared corpus and Active Sequences state independently:
 
@@ -289,14 +406,14 @@ cargo bench --package dynamo-bench --bench approximate_lru_bench \
 cargo bench --package dynamo-bench --bench approximate_lru_bench \
   --no-default-features --features approximate-lru -- \
   testdata/mooncake_trace_approximate_pressure.jsonl \
-  --policy ttl --block-size 4 --benchmark-duration-ms 1000 \
+  --policy ttl --trace-block-size 8 --block-size 4 --benchmark-duration-ms 1000 \
   --num-unique-inference-workers 1 --pre-run-quiescence-ms 0 \
   --result-json-output /tmp/approx-ttl-smoke.json
 
 cargo bench --package dynamo-bench --bench approximate_lru_bench \
   --no-default-features --features approximate-lru -- \
   testdata/mooncake_trace_approximate_pressure.jsonl \
-  --policy lru --block-size 4 --capacity-blocks 2 --require-eviction \
+  --policy lru --trace-block-size 8 --block-size 4 --capacity-blocks 2 --require-eviction \
   --benchmark-duration-ms 1000 --num-unique-inference-workers 1 \
   --pre-run-quiescence-ms 0 \
   --result-json-output /tmp/approx-lru-smoke.json

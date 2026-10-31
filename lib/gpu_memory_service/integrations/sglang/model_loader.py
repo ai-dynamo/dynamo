@@ -22,15 +22,17 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
+    torch_device,
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
 )
 from gpu_memory_service.integrations.sglang.patches import (
-    patch_model_runner,
     patch_static_state_for_gms,
     patch_torch_memory_saver,
+    patch_xpu_kv_cache_sizing_for_gms,
 )
+from sglang.srt.model_loader.loader import BaseModelLoader
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +43,35 @@ logger = logging.getLogger(__name__)
 #   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
 patch_empty_cache()
 patch_torch_memory_saver()
-patch_model_runner()
+patch_xpu_kv_cache_sizing_for_gms()
 patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
 
-class GMSModelLoader:
-    """SGLang model loader that loads/imports weights via GPU Memory Service."""
+class GMSModelLoader(BaseModelLoader):
+    """SGLang model loader that loads/imports weights via GPU Memory Service.
+
+    Subclasses BaseModelLoader so SGLang's KV-cache sizing can read
+    ``preloaded_weights_bytes`` off this loader. ModelRunner exposes that
+    attribute as a property and Scheduler.init_target_memory_pool() feeds it
+    into ModelRunner.account_preloaded_weights() before allocating pools.
+    """
+
+    # SGLang adds this to its memory baseline. 0 unless _load_import_only()
+    # sets it (CUDA readers only).
+    preloaded_weights_bytes = 0
 
     def __init__(self, load_config):
-        self.load_config = load_config
+        super().__init__(load_config)
         self._default_loader = None
+
+    def download_model(self, model_config) -> None:
+        """Delegate downloads to the default loader.
+
+        Required by BaseModelLoader. In RO mode weights come from GMS and no
+        download happens, but SGLang may still call this before load_model().
+        """
+        self._get_default_loader().download_model(model_config)
 
     def _get_default_loader(self):
         if self._default_loader is None:
@@ -101,12 +121,44 @@ class GMSModelLoader:
         """Import model weights from GMS metadata (READ mode)."""
         allocator = impl.allocators["weights"]
 
-        device_index = torch.cuda.current_device()
+        device_index = torch_device().current_device()
         model = self._create_meta_model(model_config, device_config)
 
         materialize_module_from_gms(allocator, model, device_index=device_index)
+        # Two distinct values, used in different contexts:
+        #
+        #   impl.preloaded_weights_bytes (GMSMemorySaverImpl)
+        #       Bytes imported outside this engine's torch allocator (0 for a
+        #       writer). The XPU probe patch subtracts these from reported free
+        #       memory.
+        #   self.preloaded_weights_bytes (GMSModelLoader)
+        #       Bytes SGLang should add to its pre-load baseline
+        #       when calculating headroom. Platform dependent; see below.
         impl.imported_weights_bytes = allocator.total_bytes
         impl.preloaded_weights_bytes = allocator.total_bytes
+        # SGLang reads self.preloaded_weights_bytes off the loader to restore
+        # the KV baseline:
+        # ModelRunner.account_preloaded_weights() adds it to
+        # pre_model_load_memory. That add-back exists to undo a *pre-load*
+        # memory reading that was depressed by weights the GMS server already
+        # held. Whether the reading was actually depressed depends on how the
+        # platform probes free memory (srt/utils/common.py::get_available_gpu_memory):
+        #
+        #   CUDA - torch.cuda.mem_get_info() is device-wide, so it sees the
+        #          GMS-resident weights and the add-back is correct.
+        #   XPU  - total_memory - torch.xpu.memory_allocated() only sees this
+        #          process's torch allocations. GMS weights are VMM mappings
+        #          outside the torch allocator, so the pre-load reading was
+        #          never depressed and adding the bytes would inflate the
+        #          baseline instead of restoring it.
+        #
+        # On XPU report 0 here.
+        from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+        if get_vmm_device_type() == VMMDeviceType.XPU:
+            self.preloaded_weights_bytes = 0
+        else:
+            self.preloaded_weights_bytes = int(allocator.total_bytes)
 
         logger.info(
             "[GMS] READ mode: imported %.2f GiB from metadata",
@@ -120,7 +172,7 @@ class GMSModelLoader:
 
         setup_meta_tensor_workaround()
 
-        original_device = torch.cuda.current_device()
+        original_device = torch_device().current_device()
         meta_device = torch.device("meta")
 
         with meta_device:
@@ -133,7 +185,7 @@ class GMSModelLoader:
                 device_config=device_config,
             )
 
-        torch.cuda.set_device(original_device)
+        torch_device().set_device(original_device)
 
         try:
             from sglang.srt.model_loader.utils import (

@@ -1,0 +1,384 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Public request-classifier contract and startup configuration.
+
+mod config;
+mod inputs;
+mod progress;
+mod registry;
+pub use inputs::RequestClassifierContext;
+pub use progress::{RequestProgress, RequestProgressUpdater};
+
+pub(crate) use config::RawRequestClassifierConfig;
+pub use config::RequestClassifierConfig;
+pub(crate) use registry::RequestClassifierRegistry;
+pub use registry::{
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProvider,
+    RequestClassifierProviderError, RequestClassifierRegistryError,
+};
+
+use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use dynamo_tokens::SequenceHash;
+use tokio::time::Instant;
+
+use crate::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
+use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+use crate::scheduling::{
+    BusyThresholds, PolicyProfile, SessionContext, policy_queue::QueueSnapshot,
+};
+
+#[derive(Debug)]
+pub struct ClassifyRequest {
+    pub(crate) classification_id: u64,
+    request_id: Option<String>,
+    policy_class: Option<String>,
+    pub(crate) overrides: ClassificationOverrides,
+    ingress_at: Instant,
+    input_tokens: usize,
+    initial_cached_tokens: usize,
+    sequence_hashes: Option<Vec<SequenceHash>>,
+    pub(crate) progress: RequestProgress,
+    session_context: Option<SessionContext>,
+    pinned_worker: Option<WorkerWithDpRank>,
+    busy_thresholds: Option<ClassifyBusyThresholds>,
+}
+
+/// The router's policy classes and live router-wide thresholds, as seen by one
+/// classification.
+#[derive(Debug)]
+struct ClassifyBusyThresholds {
+    profile: Arc<PolicyProfile>,
+    reject: BusyThresholds,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClassificationOverrides {
+    pub(crate) policy_class: Option<String>,
+    pub(crate) due_at: Option<Instant>,
+    pub(crate) scheduling_cost_tokens: Option<usize>,
+    pub(crate) worker_selection_target: Option<Option<WorkerAffinityTarget>>,
+}
+
+impl ClassifyRequest {
+    #[cfg(test)]
+    pub(crate) fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
+        Self::with_timing(input_tokens, initial_cached_tokens, Instant::now())
+    }
+
+    pub(crate) fn with_timing(
+        input_tokens: usize,
+        initial_cached_tokens: usize,
+        ingress_at: Instant,
+    ) -> Self {
+        Self {
+            classification_id: 0,
+            request_id: None,
+            policy_class: None,
+            overrides: ClassificationOverrides::default(),
+            ingress_at,
+            input_tokens,
+            initial_cached_tokens,
+            sequence_hashes: None,
+            progress: RequestProgress::new(input_tokens).0,
+            session_context: None,
+            pinned_worker: None,
+            busy_thresholds: None,
+        }
+    }
+
+    pub(crate) fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    pub(crate) fn with_initial_policy_class(mut self, policy_class: impl Into<String>) -> Self {
+        self.policy_class = Some(policy_class.into());
+        self
+    }
+
+    pub(crate) fn with_session_context(mut self, session_context: SessionContext) -> Self {
+        self.session_context = Some(session_context);
+        self
+    }
+
+    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
+        self
+    }
+
+    /// Copy tracking hashes into storage owned by this classification attempt.
+    pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
+        self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
+        self
+    }
+
+    pub(crate) fn with_busy_thresholds(
+        mut self,
+        profile: Arc<PolicyProfile>,
+        reject: BusyThresholds,
+    ) -> Self {
+        self.busy_thresholds = Some(ClassifyBusyThresholds { profile, reject });
+        self
+    }
+
+    fn uncached_tokens(&self) -> usize {
+        QueueSnapshot::new(self.input_tokens, self.initial_cached_tokens).uncached_tokens
+    }
+
+    /// Busy thresholds of the policy class this request resolves to now, including a class
+    /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
+    /// while every eligible worker is past them.
+    pub fn queue_thresholds(&self) -> BusyThresholds {
+        self.busy_thresholds
+            .as_ref()
+            .map(|thresholds| {
+                let profile = &thresholds.profile;
+                profile
+                    .class(profile.resolve_class_index(self.policy_class(), self.uncached_tokens()))
+                    .busy_thresholds
+            })
+            .unwrap_or_default()
+    }
+
+    /// Busy thresholds `policy_class` would apply to this request, or `None` when the router
+    /// does not know the class. A policy family resolves to its class for this request's
+    /// uncached tokens, as [`set_policy_class`](Self::set_policy_class) would.
+    pub fn queue_thresholds_for(&self, policy_class: &str) -> Option<BusyThresholds> {
+        let profile = &self.busy_thresholds.as_ref()?.profile;
+        profile
+            .resolve_class_index_strict(policy_class, self.uncached_tokens())
+            .map(|index| profile.class(index).busy_thresholds)
+    }
+
+    /// Router-wide busy thresholds, read when classification started. Selection skips a
+    /// worker past them and rejects the request when none remains.
+    pub fn reject_thresholds(&self) -> BusyThresholds {
+        self.busy_thresholds
+            .as_ref()
+            .map(|thresholds| thresholds.reject)
+            .unwrap_or_default()
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    pub fn policy_class(&self) -> Option<&str> {
+        self.overrides
+            .policy_class
+            .as_deref()
+            .or(self.policy_class.as_deref())
+    }
+
+    pub fn set_policy_class(&mut self, policy_class: impl Into<String>) {
+        self.overrides.policy_class = Some(policy_class.into());
+    }
+
+    /// Input sequence length in tokens, the size the scheduler uses.
+    pub fn isl_tokens(&self) -> usize {
+        self.input_tokens
+    }
+
+    /// Return the request's ordered active-tracking sequence hashes.
+    ///
+    /// This is an owned snapshot of the host's existing scheduling input, taken
+    /// before classification. Each entry represents a complete tracking block;
+    /// use the factory's [`RequestClassifierContext::block_size`] for its token
+    /// unit. A partial trailing block is not covered. `None` preserves missing
+    /// tracking data; `Some(&[])` preserves a present, empty sequence.
+    ///
+    /// Values retain the host's public/keyed hashing and reuse configuration.
+    /// With KV reuse disabled they are randomized tracking identities, not
+    /// reusable content hashes. Compare only within the same tracking domain
+    /// and configuration. These are not physical block IDs, cache-hit evidence,
+    /// or a guarantee that requests share resident KV.
+    ///
+    /// The slice lives with this request, including while its classification
+    /// future is pending. It is not extended by generation progress. Reading it
+    /// neither computes hashes nor changes scheduling cost or worker selection.
+    /// Building the snapshot copies eight bytes per supplied hash; retaining
+    /// multiple classification inputs retains each copy independently.
+    pub fn sequence_hashes(&self) -> Option<&[SequenceHash]> {
+        self.sequence_hashes.as_deref()
+    }
+
+    /// Live context high-water mark, initialized from `input_tokens()` and raised
+    /// by host observations of prompt plus generated tokens. This is not physical
+    /// KV occupancy. The host alone updates this request's counter.
+    pub fn progress(&self) -> &RequestProgress {
+        &self.progress
+    }
+
+    /// Return the original router ingress time on the monotonic clock.
+    pub fn ingress_at(&self) -> Instant {
+        self.ingress_at
+    }
+
+    pub fn due_at(&self) -> Option<Instant> {
+        self.overrides.due_at
+    }
+
+    pub fn set_due_at(&mut self, due_at: Instant) {
+        self.overrides.due_at = Some(due_at);
+    }
+
+    pub fn scheduling_cost_tokens(&self) -> usize {
+        self.overrides.scheduling_cost_tokens.unwrap_or_else(|| {
+            QueueSnapshot::new(self.input_tokens, self.initial_cached_tokens).scheduling_cost_tokens
+        })
+    }
+
+    pub fn set_scheduling_cost_tokens(&mut self, scheduling_cost_tokens: usize) {
+        self.overrides.scheduling_cost_tokens = Some(scheduling_cost_tokens);
+    }
+
+    /// Prefer a worker/rank for this request, replacing its soft affinity target.
+    /// Hard pins and caller eligibility constraints remain authoritative. A custom
+    /// selector can fall back if the target is ineligible; `Sent` reports the result.
+    pub fn set_worker_selection_target(&mut self, worker: WorkerWithDpRank) {
+        self.overrides.worker_selection_target = Some(Some(worker.into()));
+    }
+
+    /// Clear this request's soft affinity preference without changing hard pins.
+    pub fn clear_worker_selection_target(&mut self) {
+        self.overrides.worker_selection_target = Some(None);
+    }
+
+    pub fn session_context(&self) -> Option<&SessionContext> {
+        self.session_context.as_ref()
+    }
+
+    /// Exact worker/rank required by the caller. A classifier's soft selection
+    /// target cannot override this pin.
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
+    }
+
+    /// Only the explicit overrides feed the queue: cache eligibility is
+    /// recomputed from the current workers at enqueue, because worker state
+    /// may have changed while the classification was pending.
+    pub(crate) fn into_queue_inputs(self) -> ClassificationOverrides {
+        self.overrides
+    }
+}
+
+/// Error returned by [`RequestClassifier::classify`].
+pub type ClassifierError = dyn Error + Send + Sync + 'static;
+
+/// Cause delivered to the classifier when a request aborts. Produced by the
+/// router or the worker path, not by the classifier.
+pub type AbortCause = dyn Error + Send + Sync + 'static;
+
+/// Request lifecycle events, delivered to [`RequestClassifier::on_event`] one
+/// at a time in lifecycle order. A terminal event can arrive without a prior
+/// `Sent`: an attempt that recorded a worker via selection but was never
+/// dispatched still ends with `Completed`.
+///
+/// Delivery is asynchronous, but a re-registered request id is not classified
+/// until the previous lifecycle's terminal event has been delivered, so a
+/// plugin keying state by request id observes each lifecycle's `classify` and
+/// events in order and never receives a stale terminal event after the id's
+/// next `classify`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ClassifyEvent {
+    Sent {
+        request_id: String,
+        worker: WorkerWithDpRank,
+    },
+    Responding {
+        request_id: String,
+        worker: WorkerWithDpRank,
+    },
+    Completed {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        context_tokens: Option<usize>,
+    },
+    Aborted {
+        request_id: String,
+        worker: Option<WorkerWithDpRank>,
+        error: Option<Arc<AbortCause>>,
+    },
+}
+
+/// An independently pollable classifier invocation. See [`RequestClassifier`]
+/// for why this is a `'static` future rather than `async fn`.
+pub type ClassifyFuture =
+    Pin<Box<dyn Future<Output = Result<ClassifyRequest, Box<ClassifierError>>> + Send + 'static>>;
+
+/// User-provided request classifier.
+///
+/// [`Self::classify`] deliberately avoids `async fn` and returns a `'static`
+/// future which the router polls on its own runtime, so a classifier may
+/// await, sleep, or park a request without blocking a thread and without
+/// standing up a runtime of its own. `async fn` cannot express this: its
+/// future borrows `&mut self` for the whole pending wait, which would hold the
+/// router-wide classifier lock and block every other request and every event.
+///
+/// Because the returned future is `'static`, state it touches must be owned or
+/// shared rather than borrowed from `self`:
+///
+/// ```ignore
+/// struct Pauser {
+///     state: Arc<Mutex<ProgramState>>,
+/// }
+///
+/// impl RequestClassifier for Pauser {
+///     fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+///         // Clone the handle into the future; `self` cannot be borrowed.
+///         let state = Arc::clone(&self.state);
+///         Box::pin(async move {
+///             state.lock().await.wait_for_slot().await;
+///             Ok(request)
+///         })
+///     }
+/// }
+/// ```
+///
+/// `classify`'s synchronous prologue runs under the router-wide classifier
+/// lock: build the future and return promptly, then wait inside it. Blocking
+/// before the future is returned stalls classification and event delivery.
+///
+/// [`Self::on_event`] is `async fn`. A dedicated router task delivers events
+/// one at a time in lifecycle order and awaits each callback, so `on_event`
+/// may await freely. A pending `classify` future never blocks delivery, but a
+/// slow `on_event` delays classification of new requests because both share
+/// the classifier lock. Terminal events arrive asynchronously, shortly after
+/// the request ends; events still queued at router shutdown are dropped.
+#[async_trait]
+pub trait RequestClassifier: Send + 'static {
+    /// Declare the worker-signal groups the `workers` view passed to [`Self::classify`]
+    /// carries. The host reads this once at install and builds rows only when it is not
+    /// [`WorkerInputs::NONE`].
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
+    /// `workers` covers every worker rank eligible for this request under its pin, allowed
+    /// workers, availability, and routing constraints, in unspecified order, with the groups
+    /// [`Self::required_worker_inputs`] declares; it is empty when that is
+    /// [`WorkerInputs::NONE`]. Overloaded workers are included. Values come from the row
+    /// builder worker selection uses, so each group means the same thing here as in a filter
+    /// or scorer.
+    ///
+    /// The view is a snapshot taken for this call and is lent only for its duration: the host
+    /// frees the rows when `classify` returns, so a deferred classification does not hold them.
+    /// Copy into the returned future anything it needs. Worker selection takes its own
+    /// snapshot when it later picks a worker, so it can pick a different worker.
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        Box::pin(async move { Ok(request) })
+    }
+
+    async fn on_event(&mut self, _event: ClassifyEvent) {}
+}

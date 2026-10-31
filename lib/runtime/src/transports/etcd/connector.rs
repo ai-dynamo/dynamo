@@ -7,6 +7,11 @@ use parking_lot::RwLock;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::sleep};
 
+/// Largest etcd response the KV and watch clients decode. tonic defaults to 4 MiB, which the
+/// model-card prefix passes near 2,000 workers (about 2 KB per card); every model registration
+/// reads that prefix, so all later workers then fail. Matches etcd's Go client (`math.MaxInt32`).
+const MAX_DECODING_MESSAGE_SIZE: usize = i32::MAX as usize;
+
 /// Manages ETCD client connections with reconnection support
 pub struct Connector {
     /// The actual ETCD client, protected by RwLock for safe updates during reconnection
@@ -55,6 +60,20 @@ impl Connector {
     /// Get a clone of the current ETCD client
     pub fn get_client(&self) -> etcd_client::Client {
         self.client.read().clone()
+    }
+
+    /// Get a KV client for the current connection that accepts large range responses
+    pub fn kv_client(&self) -> etcd_client::KvClient {
+        self.get_client()
+            .kv_client()
+            .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE)
+    }
+
+    /// Get a watch client for the current connection that accepts large watch responses
+    pub fn watch_client(&self) -> etcd_client::WatchClient {
+        self.get_client()
+            .watch_client()
+            .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE)
     }
 
     /// Reconnect to ETCD cluster with retry logic

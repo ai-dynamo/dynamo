@@ -55,24 +55,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
+	poolrelaycontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/poolrelay"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -115,16 +118,17 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
+	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
@@ -154,6 +158,7 @@ func main() {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
+	var dgdrV1beta2Enabled bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -165,8 +170,15 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
-	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
-		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
+	flag.StringVar(
+		&dgdrDefaultImage,
+		"dgdr-default-image",
+		"",
+		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; "+
+			"empty derives dynamo-planner:<operator-version>",
+	)
+	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
+		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -187,11 +199,18 @@ func main() {
 	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
 
 	// Validate and normalize operator version to semver
-	if _, err := semver.NewVersion(operatorVersion); err != nil {
+	parsedOperatorVersion, err := semver.NewVersion(operatorVersion)
+	if err != nil {
 		setupLog.Error(err, "operator-version is not valid semver",
 			"provided", operatorVersion, "error", err.Error())
 		os.Exit(1)
 	}
+	dynamoVersion := fmt.Sprintf(
+		"%d.%d.%d",
+		parsedOperatorVersion.Major(),
+		parsedOperatorVersion.Minor(),
+		parsedOperatorVersion.Patch(),
+	)
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
@@ -251,7 +270,6 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
-	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -415,7 +433,7 @@ func main() {
 	}
 	setupLog.Info("Secret informer cache synced and ready")
 	_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret creation...")
@@ -427,7 +445,7 @@ func main() {
 				}
 			}
 		},
-		UpdateFunc: func(old, new interface{}) {
+		UpdateFunc: func(old, new any) {
 			newSecret := new.(*corev1.Secret)
 			if newSecret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret update...")
@@ -439,7 +457,7 @@ func main() {
 				}
 			}
 		},
-		DeleteFunc: func(obj interface{}) {
+		DeleteFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret deletion...")
@@ -490,10 +508,12 @@ func main() {
 
 	// Register controllers synchronously before mgr.Start().
 	// Controllers don't depend on TLS certificates.
+	plannerImage := webhookdefaulting.PlannerImageFor(operatorVersion, dgdrDefaultImage)
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
-		operatorImage, pullPolicy,
+		operatorImage, pullPolicy, plannerImage, dynamoVersion,
+		dgdrV1beta2Enabled,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -506,31 +526,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
-		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-			os.Exit(1)
-		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
-		}
+	if err := caInjector.Inject(mainCtx); err != nil {
+		setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+		os.Exit(1)
 	}
 
 	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
@@ -560,6 +563,9 @@ func registerControllers(
 	sshKeyManager *secret.SSHKeyManager,
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
+	plannerImage string,
+	dynamoVersion string,
+	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
 		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
@@ -603,14 +609,14 @@ func registerControllers(
 		return err
 	}
 
-	rbacManager := rbac.NewManager(mgr.GetClient())
-
 	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
 		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-		RBACManager:           rbacManager,
 		SSHKeyManager:         sshKeyManager,
 	}); err != nil {
+		return err
+	}
+	if err := poolrelaycontroller.Setup(mgr, operatorCfg, runtimeConfig); err != nil {
 		return err
 	}
 	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
@@ -618,11 +624,25 @@ func registerControllers(
 	}
 	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
 		SetupOptions:            setupOptions,
-		RBACManager:             rbacManager,
 		OperatorImage:           operatorImage,
 		OperatorImagePullPolicy: operatorPullPolicy,
 	}); err != nil {
 		return err
+	}
+	if dgdrV1beta2Enabled {
+		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+			return err
+		}
+		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
+			SetupOptions:            setupOptions,
+			DockerSecretRetriever:   dockerSecretRetriever,
+			PlannerImage:            plannerImage,
+			DynamoVersion:           dynamoVersion,
+			OperatorImage:           operatorImage,
+			OperatorImagePullPolicy: operatorPullPolicy,
+		}); err != nil {
+			return err
+		}
 	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,
@@ -668,10 +688,22 @@ func registerWebhookHandlers(
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
-		Config:            operatorCfg,
-		RuntimeConfig:     runtimeConfig,
-		OperatorVersion:   operatorVersion,
-		DGDRDefaultImage:  dgdrDefaultImage,
+		Config:          operatorCfg,
+		RuntimeConfig:   runtimeConfig,
+		OperatorVersion: operatorVersion,
+		DGDRV1beta1: webhookdefaulting.DGDRV1beta1Options{
+			DefaultImage: dgdrDefaultImage,
+		},
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when
+			// the GPUDiscovery gate is on. The webhook keeps its own short-lived cache.
+			Hardware: &gpu.Discoverer{
+				Reader:     mgr.GetAPIReader(),
+				DCGM:       gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+				Cache:      gpu.NewGPUDiscoveryCache(),
+				NodeLabels: func() bool { return gate.Enabled(features.GPUDiscovery) },
+			},
+		},
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,
 	}); err != nil {

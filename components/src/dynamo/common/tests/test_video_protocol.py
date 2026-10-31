@@ -4,6 +4,7 @@
 """Unit tests for dynamo.common.protocols.video_protocol module."""
 
 import pytest
+from pydantic import ValidationError
 
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
@@ -56,3 +57,29 @@ def test_video_response_wire_shape():
         "created": 0,
         "data": [{"output_format": "mp4", "url": "http://example.com/v.mp4"}],
     }
+
+
+def test_video_response_reports_media_metadata():
+    response = VideoData(
+        output_format="mp4",
+        url="http://example.com/v.mp4",
+        fps=24,
+        audio_sample_rate=32000,
+    )
+
+    assert response.model_dump(exclude_none=True) == {
+        "output_format": "mp4",
+        "url": "http://example.com/v.mp4",
+        "fps": 24,
+        "audio_sample_rate": 32000,
+    }
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"seconds": 0}, {"nvext": {"fps": 0}}, {"nvext": {"num_frames": -1}}],
+)
+def test_video_request_rejects_non_positive_counts(fields):
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateVideoRequest(prompt="a cat", model="wan", **fields)

@@ -12,7 +12,7 @@ description: >
 #
 # KUBE_CONTEXT is read from the job environment rather than taken as an input, so
 # it stays declared once per job -- setup-dynamo-operator also reads it (to resolve
-# the shared dynamo-deploy-test namespace on aws-dev-01/02) and would otherwise
+# the shared dynamo-deploy-test namespace on aws-dev-02 and aws-gb300) and would otherwise
 # need to be kept in sync with a separate input.
 
 runs:

@@ -11,7 +11,7 @@ Mixin consumed by ``PlannerScalingState``.  All methods access state via
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import FpmObservations, ScalingDecision
@@ -44,6 +44,20 @@ class LoadScalingMixin:
     _diag_load_reason: Optional[str]
     _diag_load_reason_prefill: Optional[str]
     _diag_load_reason_decode: Optional[str]
+    _diag_load_metadata_available: dict[str, bool]
+
+    def _idle_sla_target(
+        self,
+        fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
+        num_workers: int,
+        component: Literal["prefill", "decode"],
+    ) -> Optional[int]:
+        if self._config.optimization_target != "sla" or not fpm_stats:
+            return None
+        if not all(fpm.is_idle() for fpm in fpm_stats.values()):
+            return None
+        # This FPM-driven path cannot wake a pool after its last publisher exits.
+        return max(1, resolve_min_endpoint(self._config, component), num_workers - 1)
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
@@ -57,9 +71,9 @@ class LoadScalingMixin:
         return self._advance_load_single(obs, mode)
 
     def _advance_load_single(
-        self, obs: FpmObservations, component: str
+        self, obs: FpmObservations, component: Literal["prefill", "decode"]
     ) -> Optional[ScalingDecision]:
-        if self._scaling_in_progress(component):
+        if self._load_scaling_blocked(component):
             logger.info(f"Scaling in progress for {component}, observing only")
             self._diag_load_reason = "scaling_in_progress"
             return None
@@ -89,9 +103,20 @@ class LoadScalingMixin:
                 if component == "prefill"
                 else self._decode_load_decision(fpm_stats, num_workers)
             )
+        if self._diag_load_reason == "missing_engine_metadata":
+            if component == "prefill":
+                self._diag_load_reason_prefill = self._diag_load_reason
+            else:
+                self._diag_load_reason_decode = self._diag_load_reason
+        # None means "no change" (or no usable signal). Hold at the current
+        # count so the floors below still apply, as in the agg and disagg paths.
+        load_unchanged = desired is None
         if desired is None:
-            return None
+            desired = num_workers
 
+        if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+            return None
+        desired = max(desired, resolve_min_endpoint(self._config, component))
         original_desired = desired
         if self._config.enable_throughput_scaling:
             bound = (
@@ -105,8 +130,14 @@ class LoadScalingMixin:
             desired,
             component,
         )
+        if load_unchanged and desired == num_workers:
+            # Keep the sub-decision's reason. A ready-equal target would also
+            # cancel replicas that are still starting.
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
+            return None
 
-        if desired < num_workers:
+        if desired < num_workers + self._pending_startup(component):
             if desired > original_desired:
                 self._diag_load_reason = "scale_down_capped_by_throughput"
             else:
@@ -133,7 +164,9 @@ class LoadScalingMixin:
             self._diag_load_reason_prefill = "no_fpm_data"
             self._diag_load_reason_decode = "no_fpm_data"
             return None
-        if self._scaling_in_progress("prefill") or self._scaling_in_progress("decode"):
+        if self._load_scaling_blocked("prefill") or self._load_scaling_blocked(
+            "decode"
+        ):
             logger.info("Scaling in progress for disagg deployment, observing only")
             self._diag_load_reason = "scaling_in_progress"
             self._diag_load_reason_prefill = "scaling_in_progress"
@@ -174,6 +207,7 @@ class LoadScalingMixin:
                 else self._prefill_load_decision(p_stats, self._num_p_workers)
             )
             p_reason = self._diag_load_reason
+            self._diag_load_reason_prefill = p_reason
 
         d_reason: Optional[str] = None
         d_desired: Optional[int] = None
@@ -185,6 +219,15 @@ class LoadScalingMixin:
                 else self._decode_load_decision(d_stats, self._num_d_workers)
             )
             d_reason = self._diag_load_reason
+            self._diag_load_reason_decode = d_reason
+
+        if self._pending_num_p or self._pending_num_d:
+            # Preserve raw intent before budget clamps can turn an up request
+            # into a ready-equal value that looks like startup cancellation.
+            if p_desired is not None and p_desired > self._num_p_workers:
+                p_desired = None
+            if d_desired is not None and d_desired > self._num_d_workers:
+                d_desired = None
 
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
@@ -206,6 +249,12 @@ class LoadScalingMixin:
 
         final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
         final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
+        if self._pending_num_p or self._pending_num_d:
+            return self._startup_disagg_decision(
+                final_p if p_desired is not None else None,
+                final_d if d_desired is not None else None,
+                source="load",
+            )
         throughput_lifted_proposal = self._config.enable_throughput_scaling and (
             post_floor_p > original_p or post_floor_d > original_d
         )
@@ -229,11 +278,25 @@ class LoadScalingMixin:
                 )
             return "scale_down_capped_by_throughput" if floor_capped else "no_change"
 
-        self._diag_load_reason_prefill = _reason(
-            final_p, original_p, post_floor_p, self._num_p_workers
+        self._diag_load_reason_prefill = (
+            p_reason
+            if p_reason == "missing_engine_metadata"
+            else _reason(
+                final_p,
+                original_p,
+                post_floor_p,
+                self._num_p_workers + self._pending_num_p,
+            )
         )
-        self._diag_load_reason_decode = _reason(
-            final_d, original_d, post_floor_d, self._num_d_workers
+        self._diag_load_reason_decode = (
+            d_reason
+            if d_reason == "missing_engine_metadata"
+            else _reason(
+                final_d,
+                original_d,
+                post_floor_d,
+                self._num_d_workers + self._pending_num_d,
+            )
         )
 
         # Aggregate reason: prioritise "most interesting" across components.
@@ -282,7 +345,7 @@ class LoadScalingMixin:
             return None
         num_workers = self._num_d_workers
 
-        if self._scaling_in_progress("decode"):
+        if self._load_scaling_blocked("decode"):
             logger.info(
                 f"Scaling in progress ({num_workers} -> {self._expected_num_d}), observing only"
             )
@@ -293,13 +356,20 @@ class LoadScalingMixin:
             return None
 
         easy = self._config.optimization_target != "sla"
-        if easy:
-            desired = self._agg_easy_decision(fpm_stats, num_workers)
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "decode")
+        if easy or idle_target is not None:
+            desired = (
+                idle_target
+                if idle_target is not None
+                else self._agg_easy_decision(fpm_stats, num_workers)
+            )
             # For agg easy mode, we directly get a single decision
             # _agg_easy_decision already sets _diag_load_reason before returning None
             if desired is None:
                 return None
 
+            if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+                return None
             original_desired = desired
             desired = max(desired, resolve_min_endpoint(self._config, "decode"))
             if self._config.enable_throughput_scaling:
@@ -309,7 +379,7 @@ class LoadScalingMixin:
                 "decode",
             )
 
-            if desired < num_workers:
+            if desired < num_workers + self._pending_num_d:
                 if desired > original_desired:
                     self._diag_load_reason = "scale_down_capped_by_throughput"
                 else:
@@ -321,23 +391,40 @@ class LoadScalingMixin:
             if budget_reason is not None:
                 self._diag_load_reason = budget_reason
 
-            logger.info(f"Agg easy-mode scaling: {num_workers} -> {desired}")
+            if (
+                idle_target is not None
+                and desired == num_workers
+                and not self._pending_num_d
+            ):
+                return None
+            logger.info("Agg load scaling: %s -> %s", num_workers, desired)
             return ScalingDecision(num_decode=desired)
 
+        d_caps = self._capabilities.decode
+        max_tokens = d_caps.max_num_batched_tokens if d_caps else None
+        self._diag_load_metadata_available["decode"] = (
+            bool(max_tokens and max_tokens > 0)
+            and self._agg_regression.has_valid_engine_limits()
+        )
         if not self._agg_regression.has_sufficient_data():
             logger.info(
                 f"Agg perf model: insufficient data "
                 f"({self._agg_regression.num_observations}/{self._agg_regression.min_observations})"
             )
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_reason = (
+                "insufficient_data"
+                if self._diag_load_metadata_available["decode"]
+                else "missing_engine_metadata"
+            )
             return None
 
-        d_caps = self._capabilities.decode
-        max_tokens = d_caps.max_num_batched_tokens if d_caps else None
         if not max_tokens or max_tokens <= 0:
             logger.warning(
                 "max_num_batched_tokens not available, skipping agg prefill scaling"
             )
+            self._diag_load_metadata_available["decode"] = False
+            self._diag_load_reason = "missing_engine_metadata"
+            self._diag_load_reason_decode = "missing_engine_metadata"
             p_desired = None
         else:
             p_desired = self._agg_prefill_scaling(fpm_stats, num_workers, max_tokens)
@@ -373,6 +460,8 @@ class LoadScalingMixin:
             # returning early.
             desired = num_workers
 
+        if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+            return None
         original_desired = desired
         desired = max(desired, resolve_min_endpoint(self._config, "decode"))
         if self._config.enable_throughput_scaling:
@@ -386,7 +475,15 @@ class LoadScalingMixin:
         # distinct diagnostic reason even when the net result is no change.
         floor_capped = desired > original_desired and original_desired < num_workers
 
-        if desired == num_workers:
+        cancel_startup = (
+            not any_refused
+            and self._pending_num_d > 0
+            and p_desired is not None
+            and d_desired is not None
+            and p_desired <= num_workers
+            and d_desired <= num_workers
+        )
+        if desired == num_workers and not cancel_startup:
             logger.info("Agg scaling: no scaling needed")
             if budget_reason is not None:
                 self._diag_load_reason = budget_reason
@@ -400,7 +497,7 @@ class LoadScalingMixin:
                 )
             return None
 
-        if desired < num_workers:
+        if desired < num_workers + self._pending_num_d:
             self._diag_load_reason = (
                 "scale_down_capped_by_throughput" if floor_capped else "scale_down"
             )
@@ -419,24 +516,36 @@ class LoadScalingMixin:
     def _prefill_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "prefill")
+        if idle_target is not None:
+            return idle_target
+        p_caps = self._capabilities.prefill
+        max_tokens = p_caps.max_num_batched_tokens if p_caps else None
+        self._diag_load_metadata_available["prefill"] = (
+            bool(max_tokens and max_tokens > 0)
+            and self._prefill_regression.has_valid_engine_limits()
+        )
         if not self._prefill_regression.has_sufficient_data():
             logger.info(
                 f"TTFT perf model: insufficient data "
                 f"({self._prefill_regression.num_observations}/{self._prefill_regression.min_observations})"
             )
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_reason = (
+                "insufficient_data"
+                if self._diag_load_metadata_available["prefill"]
+                else "missing_engine_metadata"
+            )
             return None
         if num_workers == 0:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        p_caps = self._capabilities.prefill
-        max_tokens = p_caps.max_num_batched_tokens if p_caps else None
         if not max_tokens or max_tokens <= 0:
             logger.warning(
                 "max_num_batched_tokens not available, skipping prefill load scaling"
             )
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_metadata_available["prefill"] = False
+            self._diag_load_reason = "missing_engine_metadata"
             return None
 
         kv_hit_rate = self._last_kv_hit_rate
@@ -449,7 +558,7 @@ class LoadScalingMixin:
         # ``(SLA - T_own) * sensitivity``. The new request's own forward-pass
         # time (``T_own``) does not shrink with more workers, so it is
         # excluded from the safety-margin budget.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("prefill") > 0
         consolidation_refused = False
         for label, group in self._prefill_regression.query_groups(fpm_stats):
             queued = max(fpm.queued_requests.sum_prefill_tokens for fpm in group)
@@ -516,12 +625,22 @@ class LoadScalingMixin:
     def _decode_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
+        idle_target = self._idle_sla_target(fpm_stats, num_workers, "decode")
+        if idle_target is not None:
+            return idle_target
+        self._diag_load_metadata_available[
+            "decode"
+        ] = self._decode_regression.has_valid_engine_limits()
         if not self._decode_regression.has_sufficient_data():
             logger.info(
                 f"ITL perf model: insufficient data "
                 f"({self._decode_regression.num_observations}/{self._decode_regression.min_observations})"
             )
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_reason = (
+                "insufficient_data"
+                if self._diag_load_metadata_available["decode"]
+                else "missing_engine_metadata"
+            )
             return None
         if num_workers == 0:
             self._diag_load_reason = "insufficient_data"
@@ -542,7 +661,7 @@ class LoadScalingMixin:
         #  2. SLA check: predicted ITL at the survivor's post-consolidation KV
         #     must stay within ``SLA * sensitivity``. Decouples from cache
         #     size -- engines often saturate latency well before cache.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for label, group in self._decode_regression.query_groups(fpm_stats):
             sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
@@ -612,7 +731,7 @@ class LoadScalingMixin:
         # applied only to the queue-induced portion of TTFT -- ``T_own`` (a
         # zero-queue prefill at the post-consolidation decode_kv) is treated
         # as the fixed cost the new request must pay regardless of N.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
             # Pre-consolidation prediction uses scheduled-only decode load.
@@ -695,7 +814,7 @@ class LoadScalingMixin:
         #     can't model block eviction past the cache).
         #  2. SLA check via ``estimate_scheduled_decode_itl`` at the
         #     post-consolidation combined kv.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
             sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
@@ -757,6 +876,19 @@ class LoadScalingMixin:
     # Easy-mode decision methods (optimization_target != "sla")
     # ------------------------------------------------------------------
 
+    def _consolidation_safe_easy_target(
+        self, desired: int, ready: int, values: list[float], up_threshold: float
+    ) -> int:
+        # Cancel startup without removing the last ready FPM publisher.
+        desired = max(desired, min(ready, 1))
+        # Do not drain a serving worker if redistributing its load would
+        # immediately trigger scale-up. Keep this guard after startup settles
+        # too; otherwise cancelling pending capacity only delays oscillation.
+        if 0 < desired < ready:
+            if max(values) * ready / desired >= up_threshold:
+                return ready
+        return desired
+
     def _prefill_easy_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
@@ -770,6 +902,7 @@ class LoadScalingMixin:
 
         values: list[float] = []
         if is_load:
+            self._diag_load_metadata_available["prefill"] = True
             up_thresh = self._config.prefill_scale_up_queue_tokens
             down_thresh = self._config.prefill_scale_down_queue_tokens
             if up_thresh is None or down_thresh is None:
@@ -792,9 +925,11 @@ class LoadScalingMixin:
                 logger.warning(
                     "context_length not available, skipping easy prefill scaling"
                 )
-                self._diag_load_reason = "insufficient_data"
+                self._diag_load_metadata_available["prefill"] = False
+                self._diag_load_reason = "missing_engine_metadata"
                 return None
 
+            self._diag_load_metadata_available["prefill"] = True
             up_thresh = (
                 _PREFILL_LATENCY_SCALE_UP
                 if is_latency
@@ -828,7 +963,7 @@ class LoadScalingMixin:
             return num_workers + 1
 
         # Scale down if ALL engines below threshold
-        if num_workers > 1:
+        if num_workers > 1 or self._pending_startup("prefill"):
             if is_load:
                 if all(v <= down_thresh for v in values):
                     desired = max(
@@ -839,7 +974,9 @@ class LoadScalingMixin:
                         f"Load prefill: all engines at or below scale-down "
                         f"threshold ({down_thresh}), -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
             elif is_latency:
                 # For latency mode, scale down when ALL queues are empty
                 if all(v <= down_thresh for v in values):
@@ -850,7 +987,9 @@ class LoadScalingMixin:
                     logger.info(
                         f"Easy prefill: all engines at zero queue, -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
             else:
                 if all(v < down_thresh for v in values):
                     desired = max(
@@ -861,7 +1000,9 @@ class LoadScalingMixin:
                         f"Easy prefill: all engines below scale-down threshold "
                         f"({down_thresh}), -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
 
         self._diag_load_reason = "no_change"
         return None
@@ -873,8 +1014,10 @@ class LoadScalingMixin:
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
             logger.warning("max_kv_tokens not available, skipping easy decode scaling")
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_metadata_available["decode"] = False
+            self._diag_load_reason = "missing_engine_metadata"
             return None
+        self._diag_load_metadata_available["decode"] = True
         if num_workers == 0:
             self._diag_load_reason = "insufficient_data"
             return None
@@ -931,13 +1074,15 @@ class LoadScalingMixin:
             if is_load
             else all(u < down_thresh for u in utils)
         )
-        if num_workers > 1 and scale_down:
+        if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy decode: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
             )
-            return desired
+            return self._consolidation_safe_easy_target(
+                desired, num_workers, utils, up_thresh
+            )
 
         self._diag_load_reason = "no_change"
         return None
@@ -950,8 +1095,10 @@ class LoadScalingMixin:
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
             logger.warning("max_kv_tokens not available, skipping easy agg scaling")
-            self._diag_load_reason = "insufficient_data"
+            self._diag_load_metadata_available["decode"] = False
+            self._diag_load_reason = "missing_engine_metadata"
             return None
+        self._diag_load_metadata_available["decode"] = True
         if num_workers == 0:
             self._diag_load_reason = "insufficient_data"
             return None
@@ -1009,13 +1156,15 @@ class LoadScalingMixin:
             if is_load
             else all(u < down_thresh for u in utils)
         )
-        if num_workers > 1 and scale_down:
+        if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy agg: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
             )
-            return desired
+            return self._consolidation_safe_easy_target(
+                desired, num_workers, utils, up_thresh
+            )
 
         self._diag_load_reason = "no_change"
         return None
@@ -1066,7 +1215,7 @@ class LoadScalingMixin:
             )
             return num_workers + 1
 
-        if num_workers > 1 and can_scale_down:
+        if can_scale_down:
             desired = max(num_workers - 1, min_endpoint)
             logger.info(
                 f"Load-based {label}: post-consolidation prediction within "

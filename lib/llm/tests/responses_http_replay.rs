@@ -9,7 +9,8 @@ use std::time::Duration;
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionToolChoiceOption, ImageDetail,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -25,10 +26,316 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_responses_sse,
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+async fn responses_sse_requires_terminal_event_without_trailers() {
+    for terminal in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_responses_sse(&body).await.is_ok());
+        for trailer in [
+            "data: [DONE]\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        ] {
+            assert!(
+                parse_responses_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_responses_sse("").await.is_err());
+    assert!(
+        parse_responses_sse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+            .await
+            .is_err()
+    );
+}
+
+/// Unsupported tool definitions return HTTP 400 before backend dispatch for both
+/// unary and streaming requests, including mixed function/hosted tool lists.
+#[tokio::test]
+#[serial]
+async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for stream in [false, true] {
+            for (tools, tool_type) in [
+                (json!([{"type": "web_search"}]), "web_search"),
+                (
+                    json!([tool("read_file"), {"type": "web_search"}]),
+                    "web_search",
+                ),
+            ] {
+                let body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "stream": stream,
+                    "tools": tools,
+                });
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let error: Value = response.json().await.unwrap();
+                assert!(error["message"].as_str().unwrap().contains(tool_type));
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Unsupported choices return HTTP 400 without dispatch for unary and streaming
+/// requests even when the supplied function tool definitions are valid.
+/// Custom tools now share the function-template adapter while retaining their
+/// namespace and custom identity in the public Responses surface.
+#[tokio::test]
+#[serial]
+async fn namespaced_custom_tools_are_accepted_and_echoed() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL, "input":"ping", "stream":stream,
+                    "tools":[{"type":"namespace","name":"custom","description":"Custom tools",
+                        "tools":[{"type":"custom","name":"run","format":{"type":"text"}}]}]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            if stream {
+                assert!(body.contains("response.completed"));
+            } else {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["tools"][0]["type"], "namespace");
+                assert_eq!(body["tools"][0]["tools"][0]["type"], "custom");
+            }
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for stream in [false, true] {
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": stream,
+                "tool_choice": {"type": "web_search_preview"},
+                "tools": [tool("read_file")],
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let error: Value = response.json().await.unwrap();
+            assert!(error["message"].as_str().unwrap().contains("tool_choice"));
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn allowed_function_tools_filter_before_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for (stream, mode) in [(false, "auto"), (true, "required")] {
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": stream,
+                "tools": [tool("read_file"), tool("write_file")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": mode,
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.bytes().await.unwrap();
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        for (request, expected_choice) in requests.iter().zip([
+            ChatCompletionToolChoiceOption::Auto,
+            ChatCompletionToolChoiceOption::Required,
+        ]) {
+            let tools = request.inner.tools.as_deref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "read_file");
+            assert_eq!(request.inner.tool_choice, Some(expected_choice));
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_allowed_tools_fail_before_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for allowed in [
+            json!([]),
+            json!([{"type": "function", "name": "unknown"}]),
+            json!([{"type": "web_search"}]),
+        ] {
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "tools": [tool("read_file")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": allowed
+                }
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn disallowed_streamed_function_call_kills_backend_context() {
+    temp_env::async_with_vars(ENV, async {
+        let svc =
+            HarnessService::start([load_agent_fixture("fragmented-tool.sse").await.unwrap()]).await;
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "List /tmp",
+                "stream": true,
+                "tools": [tool("read_file"), tool("list_directory")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let events = parse_responses_sse(&response.text().await.unwrap())
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| event.event == "response.failed"));
+
+        let contexts = svc.engine.take_contexts().await;
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].is_killed());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Exercise the production handler's shared name map, including historical
+/// identities that are absent from the current tool definitions.
+#[tokio::test]
+#[serial]
+async fn colliding_namespace_tools_round_trip_through_http() {
+    use dynamo_llm::protocols::openai::{
+        chat_completions::NvCreateChatCompletionRequest, responses::NvCreateResponse,
+    };
+
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for namespace in ["crm", "billing"] {
+                let body = json!({
+                    "model": MODEL,
+                    "input": [
+                        {"type": "function_call", "namespace": "archived", "name": "lookup",
+                         "call_id": "previous", "arguments": "{}"},
+                        {"type": "function_call_output", "call_id": "previous", "output": "ok"},
+                        {"role": "user", "content": "Look up /tmp"}
+                    ],
+                    "stream": stream,
+                    "tools": [
+                        {"type": "namespace", "name": "crm", "description": "CRM", "tools": [tool("lookup")]},
+                        {"type": "namespace", "name": "billing", "description": "Billing", "tools": [tool("lookup")]}
+                    ],
+                    "tool_choice": {"type": "allowed_tools", "mode": "required", "tools": [
+                        {"type": "function", "namespace": namespace, "name": "lookup"}
+                    ]}
+                });
+                let request: NvCreateResponse = serde_json::from_value(body.clone()).unwrap();
+                let converted = NvCreateChatCompletionRequest::try_from(request).unwrap();
+                let backend_name = &converted.inner.tools.as_ref().unwrap()[0].function.name;
+                assert_ne!(backend_name, "lookup");
+                let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+                for chunk in &mut script {
+                    if let Some(data) = &mut chunk.data {
+                        for choice in &mut data.inner.choices {
+                            for call in choice.delta.tool_calls.iter_mut().flatten() {
+                                if let Some(function) = &mut call.function
+                                    && function.name.is_some()
+                                {
+                                    function.name = Some(backend_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                let svc = HarnessService::start([script]).await;
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let response_body = if stream {
+                    let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
+                    for kind in ["response.output_item.added", "response.output_item.done"] {
+                        let call = events.iter().find(|event| event.event == kind
+                            && event.data["item"]["type"] == "function_call").unwrap();
+                        assert_eq!(call.data["item"]["name"], "lookup");
+                        assert_eq!(call.data["item"]["namespace"], namespace);
+                    }
+                    events.iter().find(|event| event.event == "response.completed")
+                        .unwrap().data["response"].clone()
+                } else {
+                    response.json::<Value>().await.unwrap()
+                };
+                let call = response_body["output"].as_array().unwrap().iter()
+                    .find(|item| item["type"] == "function_call").unwrap();
+                assert_eq!(call["name"], "lookup");
+                assert_eq!(call["namespace"], namespace);
+                assert!(!call["call_id"].as_str().unwrap().is_empty());
+                let observed = svc.engine.take_requests().await;
+                assert_eq!(observed.len(), 1);
+                assert_eq!(&observed[0].inner.tools.as_ref().unwrap()[0].function.name, backend_name);
+                let ChatCompletionRequestMessage::Assistant(history) = &observed[0].inner.messages[0] else {
+                    panic!("expected historical function call");
+                };
+                assert_ne!(&history.tool_calls.as_ref().unwrap()[0].function.name, backend_name);
+                svc.shutdown().await;
+            }
+        }
+    }).await;
+}
 
 async fn post_responses(svc: &HarnessService, body: &Value) -> reqwest::Response {
     svc.client
@@ -57,6 +364,195 @@ fn event_position(events: &[http_harness::JsonSseEvent], event_type: &str) -> us
         .iter()
         .position(|event| event.event == event_type)
         .unwrap_or_else(|| panic!("missing {event_type} event"))
+}
+
+fn assert_streamed_response_metadata(events: &[http_harness::JsonSseEvent], expected: &Value) {
+    let response_events: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .data
+                .get("response")
+                .map(|response| (event.event.as_str(), response))
+        })
+        .collect();
+    assert!(
+        !response_events.is_empty(),
+        "stream did not contain any response objects"
+    );
+    for (event_type, response) in response_events {
+        assert_eq!(
+            &response["metadata"], expected,
+            "unexpected metadata in {event_type}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 6]).await;
+        let metadata_cases = [
+            (
+                "populated",
+                Some(json!({
+                    "trace_id": "synthetic-123",
+                    "tenant": "test"
+                })),
+            ),
+            ("explicitly empty", Some(json!({}))),
+            ("absent", None),
+        ];
+
+        for (case, request_metadata) in &metadata_cases {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "Say hi.",
+                    "stream": stream,
+                    "max_output_tokens": 20,
+                });
+                if let Some(metadata) = request_metadata {
+                    body["metadata"] = metadata.clone();
+                }
+
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::OK,
+                    "unexpected status for {case} metadata with stream={stream}"
+                );
+                let expected_response_metadata =
+                    request_metadata.clone().unwrap_or_else(|| json!({}));
+                if stream {
+                    let events = parse_responses_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    assert_streamed_response_metadata(&events, &expected_response_metadata);
+                } else {
+                    let response_body: Value = response.json().await.unwrap();
+                    assert_eq!(
+                        response_body["metadata"], expected_response_metadata,
+                        "unexpected metadata for {case} unary response"
+                    );
+                }
+            }
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 6);
+        for (request, (_, expected_metadata)) in requests.iter().zip(
+            metadata_cases
+                .iter()
+                .flat_map(|metadata_case| [metadata_case, metadata_case]),
+        ) {
+            assert_eq!(
+                request.inner.metadata.as_ref(),
+                expected_metadata.as_ref(),
+                "translated request did not preserve metadata presence"
+            );
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn refusal_fragments_reach_responses_content_and_events() {
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for include_text in [false, true] {
+                let mut script = load_agent_fixture("text.sse").await.unwrap();
+                let chunk = script[1].data.as_mut().unwrap();
+                if !include_text {
+                    chunk.inner.choices[0].delta.content = None;
+                }
+                chunk.inner.choices[0].delta.refusal = Some("I cannot ".into());
+                let mut tail = script[1].clone();
+                let delta = &mut tail.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.refusal = Some("help with that.".into());
+                script.insert(2, tail);
+                let svc = HarnessService::start([script]).await;
+                let response = post_responses(
+                    &svc,
+                    &json!({
+                        "model": MODEL, "input": "ping", "stream": stream
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body: Value = if stream {
+                    let events = parse_responses_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let refusal_events: Vec<_> = events
+                        .iter()
+                        .filter(|event| event.event == "response.refusal.delta")
+                        .collect();
+                    assert_eq!(refusal_events.len(), 2);
+                    assert_eq!(
+                        refusal_events
+                            .iter()
+                            .map(|event| event.data["delta"].as_str().unwrap())
+                            .collect::<String>(),
+                        "I cannot help with that."
+                    );
+                    for event in &refusal_events {
+                        assert_eq!(event.data["content_index"], usize::from(include_text));
+                    }
+                    let done = events
+                        .iter()
+                        .find(|event| event.event == "response.refusal.done")
+                        .unwrap();
+                    assert_eq!(done.data["refusal"], "I cannot help with that.");
+                    assert_eq!(done.data["content_index"], usize::from(include_text));
+                    for event in &refusal_events {
+                        assert_eq!(event.data["item_id"], done.data["item_id"]);
+                        assert_eq!(event.data["output_index"], done.data["output_index"]);
+                    }
+                    let part = events
+                        .iter()
+                        .find(|event| {
+                            event.event == "response.content_part.done"
+                                && event.data["part"]["type"] == "refusal"
+                        })
+                        .unwrap();
+                    assert_eq!(part.data["content_index"], done.data["content_index"]);
+                    assert_eq!(
+                        part.data["part"],
+                        json!({"type":"refusal", "refusal":"I cannot help with that."})
+                    );
+                    events
+                        .iter()
+                        .find(|event| event.event == "response.completed")
+                        .unwrap()
+                        .data["response"]
+                        .clone()
+                } else {
+                    response.json().await.unwrap()
+                };
+                let content = body["output"][0]["content"].as_array().unwrap();
+                assert_eq!(content.len(), if include_text { 2 } else { 1 });
+                if include_text {
+                    assert_eq!(content[0]["type"], "output_text");
+                    assert_eq!(content[0]["text"], "Pong.");
+                }
+                assert_eq!(
+                    content.last().unwrap(),
+                    &json!({"type":"refusal", "refusal":"I cannot help with that."})
+                );
+                assert_eq!(body["status"], "completed");
+                assert_eq!(body["usage"]["total_tokens"], 7);
+                svc.shutdown().await;
+            }
+        }
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -112,8 +608,7 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -125,21 +620,30 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+#[rstest::rstest]
+#[case::text(false)]
+#[case::refusal(true)]
 #[tokio::test]
 #[serial]
-async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
+async fn streaming_backend_error_closes_partial_output_and_counts_failure(#[case] refusal: bool) {
     temp_env::async_with_vars(ENV, async {
         const ERROR_MESSAGE: &str =
             "ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing.";
         let mut script = load_agent_fixture("text.sse").await.unwrap();
+        if refusal {
+            let delta = &mut script[1].data.as_mut().unwrap().inner.choices[0].delta;
+            delta.content = None;
+            delta.refusal = Some("I cannot help.".into());
+        }
         let finish_position = script
             .iter()
             .position(|chunk| {
-                chunk
-                    .inner
-                    .choices
-                    .iter()
-                    .any(|choice| choice.finish_reason.is_some())
+                chunk.data.as_ref().is_some_and(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason.is_some())
+                })
             })
             .expect("text fixture has no finish-reason chunk");
         script.truncate(finish_position);
@@ -176,10 +680,10 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
-        let text_done_position = event_position(&events, "response.output_text.done");
+        let text_done_position = event_position(&events, if refusal { "response.refusal.done" } else { "response.output_text.done" });
         let part_done_position = event_position(&events, "response.content_part.done");
         let item_done_position = event_position(&events, "response.output_item.done");
         let failed_position = event_position(&events, "response.failed");
@@ -190,6 +694,9 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         let completed_item = &events[item_done_position].data["item"];
         let failed = &events[failed_position];
         assert_eq!(completed_item["status"], "incomplete");
+        if refusal {
+            assert_eq!(completed_item["content"], json!([{"type":"refusal", "refusal":"I cannot help."}]));
+        }
         assert_eq!(failed.data["response"]["status"], "failed");
         assert_eq!(failed.data["response"]["output"], json!([completed_item]));
         assert_eq!(
@@ -198,7 +705,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         );
         assert_eq!(
             failed.data["response"]["error"]["message"],
-            ERROR_MESSAGE
+            "Invalid request"
         );
         assert!(
             events
@@ -211,7 +718,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
                 &Endpoint::Responses,
                 &RequestType::Stream,
                 &Status::Error,
-                &ErrorType::Internal,
+                &ErrorType::Validation,
             ),
             1
         );
@@ -249,7 +756,7 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -304,7 +811,12 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
         let split_at = script
             .iter()
-            .position(|chunk| chunk.inner.usage.is_some())
+            .position(|chunk| {
+                chunk
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.usage.is_some())
+            })
             .expect("fragmented-tool fixture has no usage chunk");
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_responses(
@@ -351,8 +863,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -397,7 +908,7 @@ async fn parallel_function_calls_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -580,6 +1091,97 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
             other => panic!("unexpected translated round-trip messages: {other:#?}"),
         }
 
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn function_call_output_image_without_detail_reaches_the_chat_engine() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_output_tokens": 64,
+                "input": [
+                    {"role": "user", "content": "What is the dominant color?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": image_url}
+                    ]}
+                ],
+                "tools": [tool("screenshot")]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+
+        let requests = svc.engine.take_requests().await;
+        let [request] = &requests[..] else {
+            panic!("expected one chat-engine request, got {}", requests.len());
+        };
+        let [
+            ChatCompletionRequestMessage::User(_),
+            ChatCompletionRequestMessage::Assistant(_),
+            ChatCompletionRequestMessage::Tool(tool_result),
+        ] = &request.inner.messages[..]
+        else {
+            panic!("unexpected translated messages: {:#?}", request.inner.messages);
+        };
+        assert_eq!(tool_result.tool_call_id, "call_1");
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool_result.content else {
+            panic!("expected multimodal tool content");
+        };
+        assert_eq!(parts.len(), 1);
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[0] else {
+            panic!("expected image part");
+        };
+        let image = image.image_url.as_ref().unwrap();
+        assert_eq!(image.url.as_str(), image_url);
+        assert_eq!(image.detail, Some(ImageDetail::Auto));
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_image_url_returns_bad_request() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": [
+                    {"role": "user", "content": "What is in the screenshot?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": "not-a-url"}
+                    ]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400);
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(
+            body["message"],
+            "Failed to convert responses request: Invalid image URL: relative URL without a base"
+        );
+        assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
     .await;

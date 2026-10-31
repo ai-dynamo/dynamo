@@ -124,6 +124,7 @@ where
                     }
                 }
                 Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
+                Ok(DiscoveryEvent::Resync(_)) => {}
                 Ok(DiscoveryEvent::Removed(id)) => {
                     let had_entry = state.contains_key(&id);
 

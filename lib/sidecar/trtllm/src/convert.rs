@@ -1,115 +1,403 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and
-//! the TensorRT-LLM `TrtllmService` protobuf messages.
+//! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
+//! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Scope: aggregated generation. Disaggregation, multimodal, LoRA, beam search,
-//! and `n > 1` are rejected before dispatch — the `Generate` response contract
-//! carries no disaggregation handoff, and the sidecar streams a single sequence.
+//! Supports aggregated and disaggregated image generation. Video, audio, LoRA,
+//! beam search, and `n > 1` are rejected before dispatch.
+//!
+//! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
+//! its request `context_only` and returns the `PrefillReady` handoff as its
+//! terminal chunk, and a decode worker replays that handoff in `kv.session`.
+//! See [`crate::disagg`] for the codec.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use dynamo_backend_common::{
-    DynamoError, FinishReason, LLMEngineOutput, PreprocessedRequest, StopReason, TopLogprob, usage,
+    CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
+    MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use crate::client;
+use crate::client::{self, ModelLimits};
+use crate::disagg;
 use crate::proto as pb;
 
-/// Per-chunk logprobs: the selected-token logprob sequence plus the per-token
-/// top-k alternatives, both aligned with the chunk's delta tokens.
-type MappedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
+/// A chunk's delta token IDs, the selected-token logprob sequence, and the
+/// per-token top-k alternatives, all aligned with each other.
+type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
+#[cfg(test)]
 pub(crate) fn build_generate_request(
-    request: &PreprocessedRequest,
+    request: PreprocessedRequest,
     request_id: &str,
-    context_length: Option<u32>,
+    model: &str,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request)?;
+    build_generate_request_with_routing(request, request_id, model, limits, mode, false)
+}
+
+pub(crate) fn build_generate_request_with_routing(
+    mut request: PreprocessedRequest,
+    request_id: &str,
+    model: &str,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+    allow_dp_rank: bool,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    validate_request(&request, mode, allow_dp_rank)?;
+    let request_has_media = has_media(&request);
+    let media = image_media(&mut request, limits)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
     let output = &request.output_options;
 
+    // A prefill worker only needs the context phase; TensorRT-LLM still requires
+    // a positive budget, and one token is what the context phase produces.
+    // No minimum check here: the minimum applies to the decode worker's budget,
+    // and discovery pairs the two roles without requiring equal context lengths
+    // (`discovery/model_manager.rs`). This worker's own window can neither
+    // prove the request impossible nor prove it servable, so checking it would
+    // reject requests a wider decode window would serve. Releasing the handoff
+    // when decode does reject is the sound fix and belongs on that side.
+    let max_tokens = if mode.is_prefill() {
+        Some(1)
+    } else {
+        max_tokens(&request, limits, request_has_media)?
+    };
+    // The decode worker replays the prefill worker's session; the prefill worker
+    // marks its request `context_only` through `extra`.
+    let kv = match mode {
+        DisaggregationMode::Prefill => None,
+        // A handoff is the normal case, but conditional disaggregation
+        // dispatches straight to a decode worker with none, expecting it to run
+        // the context phase itself. Requiring one would fail every bypassed
+        // request.
+        DisaggregationMode::Decode => match request.prefill_result.as_ref() {
+            Some(handoff) => Some(pb::KvOptions {
+                session: Some(disagg::session_from_json(&handoff.disaggregated_params)?),
+                ..Default::default()
+            }),
+            None => None,
+        },
+        DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
+    };
+    let conditions = stop_conditions(&request);
+    let guided = guided_decoding(&request)?;
+    let session_id = request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.trim())
+        .filter(|session_id| !session_id.is_empty())
+        // Rank hints require a conversation ID in OpenEngine.
+        .or_else(|| {
+            let rank = request.routing.as_ref().and_then(|routing| {
+                if mode.is_prefill() {
+                    routing.prefill_dp_rank.or(routing.dp_rank)
+                } else {
+                    routing.dp_rank
+                }
+            });
+            (allow_dp_rank && rank.is_some()).then_some(request_id)
+        })
+        .map(str::to_string);
+    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let token_ids = Arc::unwrap_or_clone(request.token_ids);
+
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
-        tokenized: Some(pb::TokenizedInput {
-            original_text: String::new(),
-            input_token_ids: request.token_ids.clone(),
-            query_token_ids: Vec::new(),
-        }),
-        sampling_config: Some(pb::SamplingConfig {
-            beam_width: 1,
-            num_return_sequences: 1,
+        // The OpenEngine server rejects an empty model; any non-empty name is
+        // served by the loaded model (single-model server).
+        model: model.to_string(),
+        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+            ids: token_ids,
+        })),
+        sampling: Some(pb::SamplingParams {
+            temperature: sampling.temperature.map(f64::from),
+            top_p: sampling.top_p.map(f64::from),
             top_k: normalize_top_k(sampling.top_k)?,
-            top_p: sampling.top_p,
-            temperature: sampling.temperature,
-            min_p: sampling.min_p,
+            min_p: sampling.min_p.map(f64::from),
+            frequency_penalty: sampling.frequency_penalty.map(f64::from),
+            presence_penalty: sampling.presence_penalty.map(f64::from),
+            repetition_penalty: sampling.repetition_penalty.map(f64::from),
             seed: normalize_seed(sampling.seed)?,
+            num_sequences: Some(1),
+        }),
+        stopping: Some(pb::StoppingOptions {
+            max_tokens,
+            // Forwarded on a context-only request too. The minimum only masks
+            // EOS until the sequence reaches it, so it cannot extend a context
+            // phase that `max_tokens` already caps at one token. Dropping it
+            // would let the prefill worker sample EOS on that token, finish with
+            // `Stop` instead of `PrefillReady`, and leave the frontend treating
+            // a request that never met its minimum as complete.
             min_tokens: stop.min_tokens,
-            repetition_penalty: sampling.repetition_penalty,
-            presence_penalty: sampling.presence_penalty,
-            frequency_penalty: sampling.frequency_penalty,
-            ..Default::default()
+            conditions,
+            ignore_eos: stop.ignore_eos,
+            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+            // the output. A visible token equal to `end_id` finishes as END_ID
+            // and may still be dropped.
+            include_stop_in_output,
         }),
-        output_config: Some(pb::OutputConfig {
-            logprobs: output.logprobs.map(request_logprob_count).transpose()?,
-            // prompt_logprobs is intentionally not requested: it is rejected in
-            // `validate_request` (no `LLMEngineOutput` field to surface it).
-            // TRT-LLM streams delta tokens; input tokens must not be echoed.
-            exclude_input_from_output: true,
-            ..Default::default()
+        response: Some(pb::ResponseOptions {
+            // A prefill worker streams no tokens to the client, but it must
+            // still be asked for logprobs: the context phase produces the first
+            // generated token, and its logprob only reaches the decode worker
+            // if the context request computed it (the server carries it as
+            // `first_gen_log_probs` in the handoff). Suppressing it here makes
+            // the decode worker report that first token as missing its logprob.
+            return_output_logprobs: Some(output.logprobs.is_some()),
+            output_candidates: output.logprobs.map(output_candidates),
+            // Prompt logprobs are rejected in `validate_request` (no
+            // `LLMEngineOutput` field to surface them).
+            return_prompt_logprobs: None,
+            prompt_candidates: None,
+            prompt_logprob_start: None,
         }),
-        max_tokens: max_tokens(request, context_length)?,
-        streaming: true,
-        guided_decoding: guided_decoding(request)?,
-        stop: stop.stop.clone().unwrap_or_default(),
-        stop_token_ids: stop_token_ids(request),
-        ignore_eos: stop.ignore_eos.unwrap_or(false),
-        // `include_stop_token_in_output` retains matched stop *token IDs*, a
-        // different axis from Dynamo's `include_stop_str_in_output` (stop
-        // *strings*). Mapping one to the other would leak hidden stop/EOS tokens,
-        // so leave it at the default (strip) and reject the request-level flag in
-        // `validate_request` instead.
-        ..Default::default()
+        guided,
+        media,
+        lora_name: String::new(),
+        kv,
+        extra: Some(disagg::request_extra(
+            mode.is_prefill(),
+            session_id.as_deref(),
+        )),
     })
 }
 
-// Temporary workaround: TensorRT-LLM's gRPC `GenerateRequest.max_tokens` is
-// REQUIRED (see proto/trtllm_service.proto), so an omitted `max_tokens` — which
-// the Dynamo frontend forwards as `None` for the backend to default — has no
-// natural value. We mirror the in-process backend's text-only default,
-// `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
-// `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
-// `token_ids.len()` is the true prompt length. `context_length` comes from
-// `--context-length` (GetModelInfo returns zero on current releases).
-//
-// Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
-// `max_tokens` made optional): drop this fallback, the `--context-length` arg,
-// and the context-length plumbing in `engine.rs`, and forward an omitted
-// `max_tokens` as unset.
+// Derive omitted text max_tokens from the context window. For media, only
+// TensorRT-LLM knows the prompt length after expansion, so leave it unset.
+// Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands; context_length
+// remains necessary for LlmRegistration.
 fn max_tokens(
     request: &PreprocessedRequest,
-    context_length: Option<u32>,
-) -> Result<u32, DynamoError> {
+    limits: Option<ModelLimits>,
+    has_media: bool,
+) -> Result<Option<u32>, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
-        return Ok(max_tokens);
+        return Ok(Some(max_tokens));
     }
-    let context_length = context_length.ok_or_else(|| {
-        client::invalid_argument(
-            "TensorRT-LLM requires max_tokens, and no model context length is available to \
-             derive a default; specify max_tokens explicitly",
-        )
-    })?;
+    if has_media {
+        return Ok(None);
+    }
+    let context_length = limits
+        .and_then(|limits| limits.context_length)
+        .ok_or_else(|| {
+            client::invalid_argument(
+                "TensorRT-LLM requires max_tokens, and no model context length is known to \
+             derive a default from; specify max_tokens explicitly or start the sidecar \
+             with --context-length",
+            )
+        })?;
+    let limits = limits.unwrap_or_default();
     let prompt_len = request.token_ids.len() as u32;
-    Ok(context_length.saturating_sub(prompt_len).max(1))
+    let remaining = context_length.saturating_sub(prompt_len).max(1);
+    // The window is input + output, so on a short prompt the remainder can
+    // exceed what the engine will actually generate and it would reject the
+    // request we derived.
+    let derived = match limits.max_output_tokens {
+        Some(cap) => remaining.min(cap),
+        None => remaining,
+    };
+    reject_impossible_minimum(request, derived, context_length, prompt_len)?;
+    Ok(Some(derived))
+}
+
+const IMAGE_KEY: &str = "image_url";
+
+/// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
+pub(crate) fn validate_remote_media_urls(
+    request: &PreprocessedRequest,
+    allow_remote: bool,
+) -> Result<(), DynamoError> {
+    if allow_remote {
+        return Ok(());
+    }
+    for item in request
+        .multi_modal_data
+        .iter()
+        .flat_map(|media| media.values())
+        .flatten()
+    {
+        let url = match item {
+            MultimodalData::Url(url) => url.as_str(),
+            MultimodalData::RawUrl(url) => url.as_str(),
+            _ => continue,
+        };
+        if url.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }) {
+            return Err(client::invalid_argument(
+                "Remote media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); \
+                 send the media inline as a data: URL instead",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Per-modality vectors do not preserve cross-modality order.
+fn image_media(
+    request: &mut PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
+    reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
+
+    // mm_routing_info stays router-side; multi_modal_data is engine input.
+    let mut media_map = request.multi_modal_data.take();
+    if let Some(media_map) = media_map.as_ref() {
+        for (modality, items) in media_map {
+            if modality != IMAGE_KEY && !items.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal modality `{modality}` is not supported by the TensorRT-LLM sidecar; this image-only implementation accepts `{IMAGE_KEY}`"
+                )));
+            }
+        }
+    }
+
+    let images = media_map
+        .as_mut()
+        .and_then(|media| media.remove(IMAGE_KEY))
+        .unwrap_or_default();
+
+    let mut uuid_map = request.multi_modal_uuids.take();
+    let user_image_uuids = if let Some(uuid_map) = uuid_map.as_mut() {
+        for (modality, uuids) in uuid_map.iter() {
+            if modality != IMAGE_KEY && !uuids.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal UUIDs for `{modality}` cannot be forwarded by the image-only TensorRT-LLM sidecar"
+                )));
+            }
+        }
+        uuid_map.remove(IMAGE_KEY)
+    } else {
+        None
+    };
+
+    if let Some(uuids) = user_image_uuids.as_ref()
+        && uuids.len() != images.len()
+    {
+        return Err(client::invalid_argument(format!(
+            "`{IMAGE_KEY}` UUID count ({}) must match its media item count ({})",
+            uuids.len(),
+            images.len()
+        )));
+    }
+
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    if limits.is_none_or(|limits| limits.supports_image != Some(true)) {
+        return Err(client::invalid_argument(
+            "the loaded TensorRT-LLM model does not advertise image support through Control.GetModelInfo",
+        ));
+    }
+    if let Some(limits) = limits
+        && (limits.engine_context_length.is_none()
+            || limits.context_length != limits.engine_context_length)
+    {
+        return Err(client::invalid_argument(
+            "image requests require --context-length to match the window reported by \
+             TensorRT-LLM; the sidecar cannot enforce a different window after media expansion",
+        ));
+    }
+
+    let uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
+    images
+        .into_iter()
+        .zip(uuids)
+        .enumerate()
+        .map(|(index, (image, uuid))| {
+            let source = match image {
+                MultimodalData::Url(url) => media_source(url.to_string(), index)?,
+                MultimodalData::RawUrl(url) => media_source(url, index)?,
+                MultimodalData::Decoded(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{IMAGE_KEY}` item {index} is pre-decoded; OpenEngine requires a URL or data URI so TensorRT-LLM can own image decoding"
+                    )));
+                }
+                MultimodalData::UuidOnly(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{IMAGE_KEY}` item {index} contains only a cache UUID; OpenEngine requires an image source"
+                    )));
+                }
+            };
+            Ok(pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(source),
+                // MIME metadata belongs to raw_bytes, which this client does not send.
+                mime_type: String::new(),
+                // Do not substitute router-owned mm_hashes for caller cache identities.
+                uuid: uuid.unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn media_source(value: String, index: usize) -> Result<pb::media_item::Source, DynamoError> {
+    let scheme = value
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value)),
+        Some("data") => Ok(pb::media_item::Source::DataUri(value)),
+        _ => Err(client::invalid_argument(format!(
+            "`{IMAGE_KEY}` item {index} must use an http, https, or data URI"
+        ))),
+    }
+}
+
+fn reject_media_override(name: &str, value: Option<&serde_json::Value>) -> Result<(), DynamoError> {
+    let is_empty = match value {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(fields)) => fields.is_empty(),
+        Some(_) => false,
+    };
+    if is_empty {
+        Ok(())
+    } else {
+        Err(client::invalid_argument(format!(
+            "{name} is not supported by the TensorRT-LLM OpenEngine sidecar"
+        )))
+    }
+}
+
+fn has_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+}
+
+/// Both the output cap and the `.max(1)` floor can land under an explicit
+/// minimum. Sending `min_tokens` above `max_tokens` is a request no engine can
+/// honour, and TensorRT-LLM does not cross-validate the pair, so say which two
+/// values conflict instead of letting it resolve them silently.
+fn reject_impossible_minimum(
+    request: &PreprocessedRequest,
+    derived: u32,
+    context_length: u32,
+    prompt_len: u32,
+) -> Result<(), DynamoError> {
+    if let Some(min_tokens) = request.stop_conditions.min_tokens
+        && min_tokens > derived
+    {
+        return Err(client::invalid_argument(format!(
+            "min_tokens ({min_tokens}) exceeds the {derived} tokens left for this request; \
+             the {context_length}-token window already holds a {prompt_len}-token prompt"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
-    // Dynamo uses -1/0 (or absence) for "consider all tokens"; TRT-LLM treats an
-    // unset top_k the same way. Forward only a positive cap; reject other
-    // negatives rather than silently widening them to "all tokens".
+    // Dynamo uses -1/0 (or absence) for "consider all tokens"; the OpenEngine
+    // server treats an unset top_k the same way. Forward only a positive cap;
+    // reject other negatives rather than silently widening them to "all tokens".
     match top_k {
         None | Some(-1) | Some(0) => Ok(None),
         Some(value) if value > 0 => Ok(Some(value)),
@@ -120,7 +408,7 @@ fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
 }
 
 fn normalize_seed(seed: Option<i64>) -> Result<Option<u64>, DynamoError> {
-    // TRT-LLM's seed is `uint64`; reject a negative seed rather than silently
+    // OpenEngine's seed is `uint64`; reject a negative seed rather than silently
     // dropping it and losing reproducibility.
     seed.map(|seed| {
         u64::try_from(seed)
@@ -129,22 +417,44 @@ fn normalize_seed(seed: Option<i64>) -> Result<Option<u64>, DynamoError> {
     .transpose()
 }
 
-fn request_logprob_count(count: u32) -> Result<i32, DynamoError> {
-    // TRT-LLM computes the selected-token logprob only when at least one logprob
-    // is requested, so floor the wire value at 1: `logprobs=0` (selected token,
-    // no alternatives) still yields the chosen-token logprob. The original count
-    // is preserved in `ResponseState` to decide whether to surface alternatives.
-    i32::try_from(count.max(1)).map_err(|_| {
-        client::invalid_argument(format!("logprobs request must fit in i32; got {count}"))
-    })
+fn output_candidates(count: u32) -> pb::CandidateTokenSelection {
+    // TRT-LLM computes the selected-token logprob only when at least one
+    // candidate is requested, so floor the wire value at 1: `logprobs=0`
+    // (selected token, no alternatives) still yields the chosen-token logprob.
+    // The original count is preserved in `ResponseState` to decide whether to
+    // surface alternatives.
+    pb::CandidateTokenSelection {
+        selection: Some(pb::candidate_token_selection::Selection::TopN(count.max(1))),
+    }
 }
 
+fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
+    let stop = &request.stop_conditions;
+    let mut conditions = Vec::new();
+    if let Some(stop_strings) = stop.stop.as_ref() {
+        for text in stop_strings {
+            conditions.push(pb::StopCondition {
+                condition: Some(pb::stop_condition::Condition::StopText(text.clone())),
+            });
+        }
+    }
+    for id in stop_token_ids(request) {
+        conditions.push(pb::StopCondition {
+            condition: Some(pb::stop_condition::Condition::StopTokenId(id)),
+        });
+    }
+    conditions
+}
+
+/// TensorRT-LLM 1.3.0rc29's `min_tokens` holds back only `end_id`, so any of
+/// these can end generation early (NVIDIA/TensorRT-LLM#20188).
 fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     let stop = &request.stop_conditions;
     let mut ids = BTreeSet::new();
     for values in [
         stop.stop_token_ids.as_ref(),
         stop.stop_token_ids_hidden.as_ref(),
+        stop.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -154,48 +464,73 @@ fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     ids.into_iter().collect()
 }
 
+fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
+    request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+}
+
+/// Stop IDs the engine trims by default but returns once
+/// `include_stop_in_output` is set for visible stops.
+fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    let visible = request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_deref()
+        .unwrap_or_default();
+    if visible.is_empty() {
+        return BTreeSet::new();
+    }
+    stop_token_ids(request)
+        .into_iter()
+        .filter(|id| !visible.contains(id))
+        .collect()
+}
+
 fn guided_decoding(
     request: &PreprocessedRequest,
-) -> Result<Option<pb::GuidedDecodingParams>, DynamoError> {
+) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
     let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
         return Ok(None);
     };
     if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
         return Err(client::invalid_argument(
-            "guided decoding backend and whitespace_pattern are not supported by TensorRT-LLM gRPC",
+            "guided decoding backend and whitespace_pattern are not supported by the TensorRT-LLM OpenEngine server",
         ));
     }
 
-    use pb::guided_decoding_params::GuideType;
-    let mut constraints = Vec::new();
+    use pb::guided_decoding::Guide;
+    let mut guides = Vec::new();
     if let Some(json) = &guided.json {
-        constraints.push((GuideType::JsonSchema, json_guide(json)));
+        guides.push(Guide::JsonSchema(json_guide(json)));
     }
     if let Some(regex) = &guided.regex {
-        constraints.push((GuideType::Regex, regex.clone()));
+        guides.push(Guide::Regex(regex.clone()));
     }
     if let Some(grammar) = &guided.grammar {
-        constraints.push((GuideType::EbnfGrammar, grammar.clone()));
+        guides.push(Guide::EbnfGrammar(grammar.clone()));
     }
     if let Some(tag) = &guided.structural_tag {
-        constraints.push((GuideType::StructuralTag, json_guide(tag)));
+        guides.push(Guide::StructuralTag(json_guide(tag)));
     }
     if guided.choice.is_some() {
+        // `choice` is in the OpenEngine contract but the TensorRT-LLM server
+        // rejects it; fail fast with a clear message.
         return Err(client::invalid_argument(
-            "guided decoding `choice` is not supported by TensorRT-LLM gRPC",
+            "guided decoding `choice` is not supported by the TensorRT-LLM OpenEngine server",
         ));
     }
-    if constraints.len() > 1 {
+    if guides.len() > 1 {
         return Err(client::invalid_argument(
             "only one guided decoding constraint may be set",
         ));
     }
-    Ok(constraints
-        .pop()
-        .map(|(guide_type, guide)| pb::GuidedDecodingParams {
-            guide_type: guide_type as i32,
-            guide,
-        }))
+    Ok(guides.pop().map(|guide| pb::GuidedDecoding {
+        guide: Some(guide),
+        backend: String::new(),
+    }))
 }
 
 /// A guide is either a JSON string carried verbatim or a JSON value rendered to
@@ -207,7 +542,11 @@ fn json_guide(value: &serde_json::Value) -> String {
     }
 }
 
-fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+fn validate_request(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+    allow_dp_rank: bool,
+) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_argument("token_ids must not be empty"));
     }
@@ -216,38 +555,25 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.multi_modal_data.is_some()
-        || request.mm_routing_info.is_some()
-        || request.encoder_result.is_some()
-    {
+    if request.encoder_result.is_some() {
         return Err(client::invalid_argument(
-            "multimodal requests are not supported by the TensorRT-LLM sidecar",
+            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.prefill_result.is_some() {
-        return Err(client::invalid_argument(
-            "disaggregated (prefill/decode) requests are not supported by the TensorRT-LLM sidecar",
-        ));
+    // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
+    // means the frontend routed a decode request to the wrong worker role.
+    if request.prefill_result.is_some() && !mode.is_decode() {
+        return Err(client::invalid_argument(format!(
+            "received a prefill_result on a worker running in '{mode}' mode; \
+             disaggregated decode requests must be routed to a decode worker"
+        )));
     }
     if request.output_options.prompt_logprobs.is_some() {
-        // TRT-LLM would compute these, but the terminal `complete` carries them
-        // with no `LLMEngineOutput` field to surface — reject rather than pay for
-        // and drop them.
+        // TRT-LLM would compute these, but the terminal carries them with no
+        // `LLMEngineOutput` field to surface — reject rather than pay for and
+        // drop them.
         return Err(client::invalid_argument(
             "prompt logprobs are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        // A visible stop token must halt generation *and* stay in the output.
-        // TRT-LLM's single `include_stop_token_in_output` flag cannot honor that
-        // per token, so reject rather than silently drop or mis-retain them.
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     if request
@@ -263,22 +589,14 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request
         .routing
         .as_ref()
-        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
-    {
-        return Err(client::invalid_argument(
-            "KV-aware data-parallel routing is not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
         .and_then(|routing| routing.cache_namespace.as_deref())
         .is_some_and(|namespace| !namespace.is_empty())
     {
-        // `cache_namespace` is the request-scoped KV-cache isolation contract. The
-        // proto carries `cache_salt_id`, but TRT-LLM 1.3.0rc21 does not plumb it
-        // through the gRPC servicer, so honoring it would let requests from
-        // different namespaces share prefix-cache entries. Reject until supported.
+        // `cache_namespace` is the request-scoped KV-cache isolation contract.
+        // The OpenEngine request carries `kv.cache_salt`, but the sidecar does
+        // not yet map the namespace onto it, so honoring the request would let
+        // requests from different namespaces share prefix-cache entries. Reject
+        // until the mapping is implemented.
         return Err(client::invalid_argument(
             "cache namespace isolation is not supported by the TensorRT-LLM sidecar",
         ));
@@ -289,12 +607,23 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .and_then(|routing| routing.priority)
         .is_some_and(|priority| priority != 0)
     {
-        // The shared contract forwards a nonzero priority to the engine, but the
-        // TRT-LLM gRPC request has no priority field, so it would be silently
-        // dropped and change queue ordering. Reject until the wire protocol
-        // carries it.
+        // OpenEngine carries priority as request metadata, which the TensorRT-LLM
+        // server rejects; a nonzero priority would otherwise be silently dropped
+        // and change queue ordering. Reject until the server honors it.
         return Err(client::invalid_argument(
             "request priority is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
+    let own_rank = request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
+    });
+    if !allow_dp_rank && own_rank.is_some_and(|rank| rank != 0) {
+        return Err(client::invalid_argument(
+            "data-parallel rank targeting was not advertised by the OpenEngine server",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
@@ -305,10 +634,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Retaining stop *strings* has no faithful mapping in the TRT-LLM gRPC
-        // request (its only control, `include_stop_token_in_output`, governs stop
-        // *token IDs* and would leak hidden stop/EOS tokens). Reject rather than
-        // mis-map — consistent with rejecting visible stop token IDs above.
+        // Would map to `include_stop_in_output`; not yet tested end to end.
         return Err(client::invalid_argument(
             "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
         ));
@@ -322,25 +648,88 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
     }
+    if sampling
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_argument(
+            "logit_bias is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     Ok(())
 }
 
-/// Streaming response reducer. TRT-LLM streams delta `chunk`s followed by a
-/// single terminal `complete`; this maps each onto an `LLMEngineOutput`.
+/// Streaming response reducer. The OpenEngine server streams `token` events
+/// followed by a terminal `finished` event carrying authoritative usage; this
+/// maps each onto an `LLMEngineOutput`.
 pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
-    streamed_tokens: u32,
     output_logprobs: Option<u32>,
+    /// Every stop ID when visible stops are set, empty otherwise. The engine
+    /// stops on these, so one at the end of a delta is held for the terminal.
+    /// OpenEngine sends the matched stop before the `finished` event carrying
+    /// usage, and the frontend decoder drops everything after a visible stop.
+    held_stop_ids: BTreeSet<u32>,
+    /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
+    hidden_stop_ids: BTreeSet<u32>,
+    pending_stop: Option<pb::TokenInfo>,
+    phase: Phase,
+}
+
+/// What this worker does with the tokens the engine streams back. Each arm owns
+/// the state that only exists in that mode, so a prefill worker cannot reach a
+/// decode worker's cache accounting and vice versa.
+enum Phase {
+    /// Aggregated, or a decode leg: tokens stream straight to the client.
+    Stream {
+        /// The handoff this leg replays, if any. Cache hits are measured during
+        /// the context phase, so on a decode leg the count arrives here rather
+        /// than from the local engine -- which counts the blocks transferred
+        /// into it and reports a different quantity under the same name.
+        handoff: Option<Handoff>,
+    },
+    /// A prefill leg: `PrefillReady` is the terminal event, and context tokens
+    /// are held back because the decode leg replays them. They only reach the
+    /// client through a context request that ends without a handoff, which has
+    /// no decode leg to do the replaying.
+    Prefill { held: Vec<pb::TokenInfo> },
+}
+
+/// What a decode leg knows about the context phase that preceded it.
+struct Handoff {
+    /// The context phase's prefix-cache hit count, when it reported one. Absent
+    /// means the context phase reported none -- not that the decode engine's
+    /// own count should stand in for it.
+    cached_tokens: Option<u32>,
 }
 
 impl ResponseState {
-    pub(crate) fn new(request: &PreprocessedRequest) -> Self {
+    pub(crate) fn new(request: &PreprocessedRequest, mode: DisaggregationMode) -> Self {
         Self {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
-            streamed_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            held_stop_ids: if has_visible_stop_tokens(request) {
+                stop_token_ids(request).into_iter().collect()
+            } else {
+                BTreeSet::new()
+            },
+            hidden_stop_ids: retained_hidden_stop_ids(request),
+            pending_stop: None,
+            phase: if mode.is_prefill() {
+                Phase::Prefill { held: Vec::new() }
+            } else {
+                Phase::Stream {
+                    handoff: request.prefill_result.as_ref().map(|prefill| Handoff {
+                        cached_tokens: prefill
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|details| details.cached_tokens),
+                    }),
+                }
+            },
         }
     }
 
@@ -356,60 +745,102 @@ impl ResponseState {
         &mut self,
         response: pb::GenerateResponse,
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
-        match response.response {
-            Some(pb::generate_response::Response::Chunk(chunk)) => self.convert_chunk(chunk),
-            Some(pb::generate_response::Response::Complete(complete)) => {
-                self.convert_complete(complete).map(Some)
+        let pb::GenerateResponse { event, usage, .. } = response;
+        // A response with no event is protocol drift, not an empty delta.
+        let Some(event) = event else {
+            return Err(client::protocol_error("response carried no event"));
+        };
+        match event {
+            pb::generate_response::Event::Token(token) => self.convert_token(token),
+            pb::generate_response::Event::Finished(finished) => {
+                self.convert_finished(finished, usage).map(Some)
             }
-            // A response with neither payload is protocol drift, not an
-            // empty delta — fail rather than silently discard it.
-            None => Err(client::protocol_error(
-                "response carried neither a chunk nor a complete payload",
+            pb::generate_response::Event::PrefillReady(prefill) => {
+                self.convert_prefill_ready(prefill, usage).map(Some)
+            }
+            pb::generate_response::Event::Error(error) => Err(engine_error(error)),
+            // Prompt logprobs are never requested, so a prompt event is drift.
+            pb::generate_response::Event::Prompt(_) => Err(client::protocol_error(
+                "received an unexpected prompt event; prompt logprobs are not requested",
             )),
         }
     }
 
-    /// Validates the single-sequence invariant and folds the response's usage
-    /// counts into the running totals. Shared by chunk and terminal handling.
-    fn accumulate(
+    /// Terminal chunk for a prefill worker.
+    ///
+    /// `PrefillReady` *is* the terminal event for a `context_only` request — the
+    /// server suppresses `finished` because the engine reports the sequence as
+    /// unfinished — so this synthesizes the terminal chunk, carrying the handoff
+    /// the decode worker will replay.
+    fn convert_prefill_ready(
         &mut self,
-        sequence_index: u32,
-        prompt_tokens: u32,
-        completion_tokens: u32,
-    ) -> Result<(), DynamoError> {
-        if sequence_index != 0 {
-            return Err(client::protocol_error(format!(
-                "received unsupported sequence index {sequence_index}"
-            )));
-        }
-        if prompt_tokens != 0 {
-            self.prompt_tokens = prompt_tokens;
-        }
-        // TRT-LLM reports cumulative (not per-chunk-delta) usage counts, verified
-        // against 1.3.0rc21 over multi-chunk streams; `max` tolerates chunks that
-        // omit the count (report 0) without regressing the running total.
-        self.completion_tokens = self.completion_tokens.max(completion_tokens);
-        Ok(())
+        prefill: pb::PrefillReady,
+        reported: Option<pb::Usage>,
+    ) -> Result<LLMEngineOutput, DynamoError> {
+        let Phase::Prefill { .. } = self.phase else {
+            return Err(client::protocol_error(
+                "received a prefill_ready event on a worker that is not running in prefill mode",
+            ));
+        };
+        let session = prefill
+            .kv_session
+            .ok_or_else(|| client::protocol_error("prefill_ready event carried no kv_session"))?;
+        Ok(LLMEngineOutput {
+            // The client sees no tokens from prefill; the decode worker emits
+            // the full completion.
+            token_ids: Vec::new(),
+            index: Some(0),
+            // `Length` is what the frontend's prefill router requires to chain
+            // into decode: it returns any other terminal reason straight to the
+            // caller as an already-complete request (see
+            // `kv_router::prefill_router::admission`). It is also accurate —
+            // the context request is capped at one token.
+            finish_reason: Some(FinishReason::Length),
+            // PrefillReady is the final response for a context request, so it
+            // carries the engine's usage -- including cached_prompt_tokens,
+            // which the frontend forwards to the decode leg and which cannot be
+            // reconstructed client-side.
+            completion_usage: Some(prefill_usage(reported, self.prompt_tokens)),
+            disaggregated_params: Some(disagg::session_to_json(session)?),
+            ..Default::default()
+        })
     }
 
-    fn convert_chunk(
+    fn convert_token(
         &mut self,
-        chunk: pb::GenerateStreamChunk,
+        token: pb::TokenOutput,
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
-        self.accumulate(
-            chunk.sequence_index,
-            chunk.prompt_tokens,
-            chunk.completion_tokens,
-        )?;
-        self.streamed_tokens = self
-            .streamed_tokens
-            .saturating_add(chunk.token_ids.len() as u32);
-        if chunk.token_ids.is_empty() {
+        check_output_index(token.output_index)?;
+        if let Phase::Prefill { held } = &mut self.phase {
+            // Whole `TokenInfo`s, not just the IDs: a context request that ends
+            // without a handoff returns these to the client, and by then the
+            // logprobs it asked for are gone if only the IDs were kept.
+            held.extend(token.tokens);
+            self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
-        let (log_probs, top_logprobs) = self.map_logprobs(&chunk.token_ids, &chunk.logprobs)?;
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(token.tokens.len() as u32);
+        let mut tokens = token.tokens;
+        if let Some(pending) = self.pending_stop.take() {
+            tokens.insert(0, pending);
+        }
+        if tokens
+            .last()
+            .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
+        {
+            self.pending_stop = tokens.pop();
+        }
+        let (token_ids, log_probs, top_logprobs) = self.map_tokens(tokens)?;
+        if token_ids.is_empty() {
+            // A text-only delta (e.g. stop-string holdback): the sidecar streams
+            // token IDs and lets the frontend detokenize, so there is nothing to
+            // surface yet.
+            return Ok(None);
+        }
         Ok(Some(LLMEngineOutput {
-            token_ids: chunk.token_ids,
+            token_ids,
             log_probs,
             top_logprobs,
             index: Some(0),
@@ -417,114 +848,256 @@ impl ResponseState {
         }))
     }
 
-    fn convert_complete(
+    fn convert_finished(
         &mut self,
-        complete: pb::GenerateComplete,
+        finished: pb::GenerationFinished,
+        reported: Option<pb::Usage>,
     ) -> Result<LLMEngineOutput, DynamoError> {
-        self.accumulate(
-            complete.sequence_index,
-            complete.prompt_tokens,
-            complete.completion_tokens,
-        )?;
-
-        // The terminal echoes the cumulative output token IDs (proto: "cumulative,
-        // not delta"). When present they must match what we streamed; a mismatch
-        // is protocol drift. Tolerate an omitted echo (empty) rather than
-        // false-erroring a server that only carries finish state in the terminal.
-        if !complete.output_token_ids.is_empty()
-            && complete.output_token_ids.len() as u32 != self.streamed_tokens
-        {
-            return Err(client::protocol_error(format!(
-                "terminal output_token_ids ({}) do not match {} streamed delta tokens",
-                complete.output_token_ids.len(),
-                self.streamed_tokens
-            )));
+        check_output_index(finished.output_index)?;
+        // A decode engine counts the blocks transferred into it as cache hits,
+        // a different quantity from the context phase's prefix-cache hit that
+        // would read as a ~100% hit rate on every disaggregated request. Once
+        // this leg took a handoff the context phase is the only source, even
+        // when it reported no hits. A leg without one ran its own context
+        // phase, so its engine is the source.
+        let (mut cached_tokens, engine_measured_the_cache) = match &self.phase {
+            Phase::Stream {
+                handoff: Some(handoff),
+            } => (handoff.cached_tokens, false),
+            Phase::Stream { handoff: None } | Phase::Prefill { .. } => (None, true),
+        };
+        // The final response carries authoritative usage; prefer it over the
+        // counts accumulated while streaming.
+        if let Some(reported) = reported {
+            if reported.prompt_tokens != 0 {
+                self.prompt_tokens = reported.prompt_tokens;
+            }
+            if reported.completion_tokens != 0 {
+                self.completion_tokens = reported.completion_tokens;
+            }
+            if engine_measured_the_cache {
+                cached_tokens = reported.cached_prompt_tokens;
+            }
         }
 
-        // The delta tokens were already streamed via chunks; the terminal
-        // response only carries finish state and usage.
+        let finish_reason = match pb::FinishReason::try_from(finished.reason).map_err(|_| {
+            client::protocol_error(format!("unknown finish reason {}", finished.reason))
+        })? {
+            pb::FinishReason::Stop => FinishReason::Stop,
+            pb::FinishReason::Length => FinishReason::Length,
+            pb::FinishReason::Cancelled => FinishReason::Cancelled,
+            // Fail closed on an unspecified reason rather than reporting a clean
+            // stop for a version-skewed or malformed terminal.
+            pb::FinishReason::Unspecified => {
+                return Err(client::protocol_error(
+                    "terminal response has an unspecified finish reason",
+                ));
+            }
+        };
+
+        // A context request only reaches a `finished` event when it produced no
+        // handoff: the server suppresses the terminal once it has sent
+        // `PrefillReady`. `Length` there means the context phase burned its
+        // one-token budget without ever transmitting KV -- disaggregation is
+        // not working on this engine -- so returning that single token would
+        // silently truncate the completion. Any other reason is a genuine stop
+        // during the context phase, and with no decode leg to run, it is the
+        // whole answer.
+        let mut held = match &mut self.phase {
+            Phase::Prefill { held } if finish_reason == FinishReason::Length => {
+                return Err(client::protocol_error(format!(
+                    "context request ended at its token budget without a kv_session handoff \
+                     after {} token(s); the engine ran the context phase but never transmitted \
+                     its KV, which usually means disaggregation is not configured on it (check \
+                     cache_transceiver_config)",
+                    held.len()
+                )));
+            }
+            Phase::Prefill { held } => std::mem::take(held),
+            Phase::Stream { .. } => self.pending_stop.take().into_iter().collect(),
+        };
+        let stop_match = finished
+            .stop_match
+            .and_then(|stop_match| stop_match.r#match);
+        if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
+            stop_match
+            && self.hidden_stop_ids.contains(&id)
+            && held.last().is_some_and(|info| info.token_id == id)
+        {
+            held.pop();
+        }
+
+        let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
+            (Vec::new(), None, None)
+        } else {
+            self.map_tokens(held)?
+        };
+
         let mut terminal = LLMEngineOutput {
+            token_ids,
+            log_probs,
+            top_logprobs,
             index: Some(0),
-            finish_reason: Some(finish_reason(&complete.finish_reason)?),
-            completion_usage: Some(usage(self.prompt_tokens, self.completion_tokens)),
+            finish_reason: Some(finish_reason),
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens_details: cached_prompt_tokens(cached_tokens, self.prompt_tokens),
+                ..usage(self.prompt_tokens, self.completion_tokens)
+            }),
             ..Default::default()
         };
-        terminal.stop_reason = complete.matched_stop.map(|matched| match matched {
-            pb::generate_complete::MatchedStop::MatchedStopStr(value) => StopReason::String(value),
-            pb::generate_complete::MatchedStop::MatchedTokenId(id) => {
+        terminal.stop_reason = stop_match.map(|matched| match matched {
+            pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
                 StopReason::Int(i64::from(id))
             }
+            pb::stop_match::Match::StopText(text) => StopReason::String(text),
         });
         Ok(terminal)
     }
 
-    fn map_logprobs(
-        &self,
-        token_ids: &[u32],
-        logprobs: &[pb::TokenLogprob],
-    ) -> Result<MappedLogprobs, DynamoError> {
+    /// One pass over the owned deltas. Token IDs, selected-token logprobs, and
+    /// the candidate lists all come from the same `TokenInfo`s, and this runs on
+    /// every token of every request.
+    fn map_tokens(&self, tokens: Vec<pb::TokenInfo>) -> Result<MappedTokens, DynamoError> {
+        let mut token_ids = Vec::with_capacity(tokens.len());
         let Some(count) = self.output_logprobs else {
-            return Ok((None, None));
+            token_ids.extend(tokens.into_iter().map(|info| info.token_id));
+            return Ok((token_ids, None, None));
         };
-        // Logprobs were requested, so every delta token must carry one; an empty
-        // or short slice is a protocol violation, not a silent no-op.
-        if logprobs.len() != token_ids.len() {
-            return Err(client::protocol_error(format!(
-                "logprob count {} does not match {} delta tokens",
-                logprobs.len(),
-                token_ids.len()
-            )));
-        }
-        let log_probs = logprobs.iter().map(|lp| f64::from(lp.logprob)).collect();
-        if count == 0 {
-            // `logprobs=0` keeps the selected-token logprob but omits the top
-            // alternatives, matching the vLLM sidecar contract.
-            return Ok((Some(log_probs), None));
-        }
-        let top_logprobs = logprobs
-            .iter()
-            .map(|lp| {
-                if lp.top_logprobs.is_empty() {
+        let mut log_probs = Vec::with_capacity(tokens.len());
+        // `logprobs=0` keeps the selected-token logprob but omits the top
+        // alternatives.
+        let wants_candidates = count != 0;
+        let mut top_logprobs = Vec::with_capacity(if wants_candidates { tokens.len() } else { 0 });
+        for info in tokens {
+            let token_id = info.token_id;
+            let rank = info.rank.unwrap_or(0);
+            // Logprobs were requested, so every delta token must carry its
+            // selected-token logprob; a missing value is protocol drift.
+            let logprob = info.logprob.ok_or_else(|| {
+                client::protocol_error(format!("token {token_id} is missing its logprob"))
+            })?;
+            if wants_candidates {
+                top_logprobs.push(if info.candidates.is_empty() {
                     vec![TopLogprob {
-                        rank: 0,
-                        token_id: lp.token_id,
+                        rank,
+                        token_id,
                         token: None,
-                        logprob: f64::from(lp.logprob),
+                        logprob,
                         bytes: None,
                     }]
                 } else {
-                    lp.top_logprobs
-                        .iter()
-                        .enumerate()
-                        .map(|(rank, candidate)| TopLogprob {
-                            rank: rank as u32,
+                    info.candidates
+                        .into_iter()
+                        .map(|candidate| TopLogprob {
+                            rank: candidate.rank.unwrap_or(0),
                             token_id: candidate.token_id,
                             token: None,
-                            logprob: f64::from(candidate.logprob),
+                            logprob: candidate.logprob,
                             bytes: None,
                         })
                         .collect()
-                }
-            })
-            .collect();
-        Ok((Some(log_probs), Some(top_logprobs)))
+                });
+            }
+            token_ids.push(token_id);
+            log_probs.push(logprob);
+        }
+        Ok((
+            token_ids,
+            Some(log_probs),
+            wants_candidates.then_some(top_logprobs),
+        ))
     }
 }
 
-fn finish_reason(reason: &str) -> Result<FinishReason, DynamoError> {
-    Ok(match reason.trim().to_ascii_lowercase().as_str() {
-        "length" => FinishReason::Length,
-        "cancelled" | "canceled" | "aborted" | "timeout" => FinishReason::Cancelled,
-        "error" => FinishReason::Error("TensorRT-LLM reported an error finish".to_string()),
-        // Proto-documented stop reasons ("stop", "stop_word"); an empty string is
-        // a bare terminal (finished implies stop).
-        "stop" | "stop_word" | "eos" | "" => FinishReason::Stop,
-        // Fail closed on an unrecognized reason rather than reporting a clean stop
-        // for a version-skewed or malformed terminal.
-        other => {
-            return Err(client::protocol_error(format!(
-                "unknown finish reason {other:?}"
-            )));
-        }
+/// The OpenEngine contract requires an explicit index even for output zero, and
+/// the sidecar streams a single sequence: anything else is drift.
+fn check_output_index(index: Option<u32>) -> Result<(), DynamoError> {
+    match index {
+        Some(0) => Ok(()),
+        Some(index) => Err(client::protocol_error(format!(
+            "received unsupported output index {index}"
+        ))),
+        None => Err(client::protocol_error(
+            "response carried no output index; the OpenEngine contract requires one",
+        )),
+    }
+}
+
+/// Usage for the prefill terminal. `PrefillReady` *is* the final response for a
+/// context request, so it carries the engine's authoritative counts; the
+/// client-side prompt length is only a fallback for a server that omits them.
+fn prefill_usage(reported: Option<pb::Usage>, prompt_tokens: u32) -> CompletionUsage {
+    let Some(reported) = reported else {
+        return usage(prompt_tokens, 0);
+    };
+    let prompt_tokens = if reported.prompt_tokens != 0 {
+        reported.prompt_tokens
+    } else {
+        prompt_tokens
+    };
+    CompletionUsage {
+        prompt_tokens_details: cached_prompt_tokens(reported.cached_prompt_tokens, prompt_tokens),
+        ..usage(prompt_tokens, 0)
+    }
+}
+
+/// A server that counts cache hits against an expanded prompt would otherwise
+/// report more cached tokens than the prompt the client actually sent.
+fn cached_prompt_tokens(cached: Option<u32>, prompt_tokens: u32) -> Option<PromptTokensDetails> {
+    cached.map(|cached_tokens| PromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+        ..Default::default()
     })
 }
+
+pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
+    let code = pb::ErrorCode::try_from(error.code).unwrap_or(pb::ErrorCode::Unspecified);
+    let message = if error.message.trim().is_empty() {
+        format!("TensorRT-LLM reported engine error {code:?}")
+    } else {
+        format!("TensorRT-LLM engine error: {}", error.message)
+    };
+    match code {
+        pb::ErrorCode::InvalidArgument | pb::ErrorCode::UnsupportedFeature => {
+            client::invalid_argument(message)
+        }
+        // Not `worker_overloaded`, despite the name. The only site in the
+        // TensorRT-LLM servicer that emits this code is the 30-second
+        // consumer-stall watchdog (`grpc/openengine/servicer.py`, "response
+        // consumer stalled"), which fires when *this* sidecar stopped draining
+        // the stream -- the engine has capacity. Marking it migratable would
+        // re-dispatch to a second worker and stall there too, spending two
+        // workers' GPU time and recording local backpressure as worker
+        // capacity. Revisit if a server starts emitting it for real admission
+        // pressure.
+        pb::ErrorCode::Overloaded => client::engine_error(message),
+        pb::ErrorCode::Cancelled => client::cancelled(message),
+        // A decode request reached a worker whose engine is not in that role,
+        // so every request to it fails the same way. That is a deployment
+        // mistake, and an opaque 500 gives the operator nothing to search for.
+        pb::ErrorCode::RoleMismatch => client::invalid_argument(format!(
+            "{message} (the engine rejected this request's disaggregation role: check that the \
+             sidecar's --disaggregation-mode matches how its engine was started)"
+        )),
+        // The handoff named a context worker this engine could not reach or
+        // whose session is gone. Migration is linked above the prefill router
+        // (`entrypoint/input/common.rs:501-505`), so a retry would re-run
+        // prefill and get a fresh handoff rather than replay this one -- this
+        // is recoverable in principle. Kept non-migratable for now because the
+        // common cause is a transceiver both engines lack, where retrying
+        // across every worker buries the one error that names the fix.
+        pb::ErrorCode::KvSessionNotFound | pb::ErrorCode::KvTransferFailed => {
+            client::engine_error(format!(
+                "{message} (the prefill handoff could not be resolved: check that both engines \
+                 were started with a cache transceiver and can reach each other)"
+            ))
+        }
+        _ => client::engine_error(message),
+    }
+}
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;

@@ -23,7 +23,7 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
     ```yaml
     spec:
       services:
-        VllmDecodeWorker:
+        decode:
           extraPodSpec:
             mainContainer:
               command:
@@ -80,16 +80,27 @@ If workers do not publish KV events, configure the frontend with `--no-router-kv
 A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. All non-prefill modes — `agg`, `pd`, `decode`, and `encode` — do not enforce this check.
 </Warning>
 
-The value is a JSON object. For NIXL-based prefill/decode disaggregation:
+The value is a JSON object. For NIXL-based prefill/decode disaggregation, configure each worker with its role.
+
+Prefill worker:
 
 ```bash
 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 ```
 
-Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
+Decode worker:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+```
+
+Only prefill workers must set `--kv-transfer-config` to pass Dynamo's startup check. Decode workers also need `NixlConnector` with `kv_consumer` to receive transferred KV, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) shows.
 
 The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
 
@@ -117,10 +128,16 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_HEADLESS`
 </ParamField>
 
+<ParamField path="--freeze-gc-after-init" type="boolean" default="false">
+  Collect and freeze tracked objects in the Dynamo worker process once the engine is initialized, before the model is registered. Later full (gen2) collections then skip the static heap (engine client, tokenizer, config), which otherwise causes multi-hundred-millisecond request stalls under load. vLLM already freezes its EngineCore, GPU-worker and API-server heaps; this covers the Dynamo process that replaces the API server. Reference counting still reclaims objects, but unreachable cycles among frozen objects remain until they are unfrozen or the process exits. Validate memory usage before enabling it. Not supported with `--headless` or `--disaggregation-mode=encode`.
+
+  Environment variable: `DYN_VLLM_FREEZE_GC_AFTER_INIT`
+</ParamField>
+
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
-  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`.
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`. Discovery rejects text-input workers using KV-aware routing; enable frontend tokenization or select a non-KV router mode.
 
   Environment variable: `DYN_VLLM_USE_TOKENIZER`
 </ParamField>

@@ -21,7 +21,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
-    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
 use uuid::Uuid;
 
@@ -38,6 +39,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
         ChatCompletionRequestSystemMessage {
             content: ChatCompletionRequestSystemMessageContent::Text(content),
             name: None,
+            tools: None,
         },
     ));
 }
@@ -58,7 +60,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+    fn try_from(mut req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -100,6 +102,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             audio: None,
                             tool_calls: None,
                             function_call: None,
+                            partial: None,
                         },
                     ));
                 }
@@ -110,15 +113,29 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             }
         }
 
-        // Convert tools
+        // Convert tools. Chat validation rejects an empty `tools` array, so map it
+        // to `None` to keep `/v1/messages` accepting `tools: []`.
         let tools = req
             .tools
             .as_deref()
+            .filter(|tools| !tools.is_empty())
             .map(convert_anthropic_tools)
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?;
+        let parallel_tool_calls = req
+            .tool_choice
+            .as_ref()
+            .and_then(|choice| match choice {
+                AnthropicToolChoice::Simple(simple) => simple.disable_parallel_tool_use,
+                AnthropicToolChoice::Named(named) => named.disable_parallel_tool_use,
+            })
+            .map(|disabled| !disabled);
 
         // Convert stop_sequences -> stop
         let stop = req
@@ -126,7 +143,36 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
+        let response_format = req
+            .output_config
+            .as_mut()
+            .and_then(|config| config.get_mut("format"))
+            .filter(|format| !format.is_null())
+            .map(|format| {
+                anyhow::ensure!(
+                    format.get("type").and_then(|value| value.as_str()) == Some("json_schema"),
+                    "output_config.format.type must be json_schema"
+                );
+                let schema = format
+                    .get_mut("schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("output_config.format.schema must be an object")
+                    })?;
+                Ok::<_, anyhow::Error>(ResponseFormat::JsonSchema {
+                    json_schema: ResponseFormatJsonSchema {
+                        name: "response".into(),
+                        description: None,
+                        schema: schema.take(),
+                        strict: Some(true),
+                    },
+                })
+            })
+            .transpose()?;
+
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
@@ -136,6 +182,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 stop,
                 tools,
                 tool_choice,
+                parallel_tool_calls,
+                response_format,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -159,18 +207,21 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             // when a reasoning parser is configured. The conversion layer only
             // forwards the client's explicit thinking preference here; the handler
             // has access to parsing_options and makes the final decision.
-            chat_template_args: if req
-                .thinking
-                .as_ref()
-                .is_some_and(|t| t.thinking_type == "enabled")
-            {
+            chat_template_args: req.thinking.as_ref().and_then(|thinking| {
+                let enabled = match thinking.thinking_type.as_str() {
+                    "enabled" => true,
+                    "disabled" => false,
+                    _ => return None,
+                };
                 let mut args = std::collections::HashMap::new();
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
                 Some(args)
-            } else {
-                None
-            },
+            }),
             thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -194,7 +245,10 @@ fn convert_user_blocks(
         match block {
             AnthropicContentBlock::Text { text, .. } => {
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        ..Default::default()
+                    },
                 ));
             }
             AnthropicContentBlock::Image { source } => {
@@ -294,7 +348,10 @@ fn convert_tool_result_content(
         match block {
             ToolResultContentBlock::Text { text } => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        ..Default::default()
+                    },
                 ));
             }
             ToolResultContentBlock::Image { source } => {
@@ -403,6 +460,7 @@ fn convert_assistant_blocks(
                 // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
+                    custom: None,
                     id: id.clone(),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -465,6 +523,7 @@ fn convert_assistant_blocks(
             tool_calls: tc,
             #[allow(deprecated)]
             function_call: None,
+            partial: None,
         },
     ));
 }
@@ -481,12 +540,15 @@ fn convert_anthropic_tools(
                 anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
             Ok(ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
-                    strict: None,
+                    strict: tool.strict,
+                    defer_loading: None,
                 },
             })
         })
@@ -494,21 +556,16 @@ fn convert_anthropic_tools(
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
@@ -519,7 +576,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -570,24 +627,28 @@ pub(super) fn new_tool_use_id() -> String {
 /// This replaces `unwrap_or(json!({}))`, which turned any unparseable arguments
 /// into a well-formed EMPTY object. That produced a `tool_use` block a client would
 /// happily execute with no arguments and no error anywhere in the response.
-///
-/// `truncated` gates that recovery, and it is what keeps this honest. Partial members
-/// are only safe to emit when something ELSE in the response already tells the client
-/// the call is incomplete, which is exactly `stop_reason: "max_tokens"`. When the
-/// upstream reason instead claims the call finished, malformed arguments mean the
-/// generation is wrong rather than cut short: emitting the members that happen to parse
-/// would hand back a call that looks complete, carries only some of its arguments, and
-/// reports no error anywhere. That is worse than the empty object, because a partial
-/// call can pass schema validation and then run.
 pub(super) fn tool_use_input(
     tool_name: &str,
     arguments: &str,
     truncated: bool,
-) -> serde_json::Value {
-    // One warning per call, logged where the outcome is known. Logging before the
-    // `truncated` check would announce a recovery that the branch below may refuse.
+) -> Option<serde_json::Value> {
+    // No argument bytes at all is the MOST truncated shape when the limit ended
+    // generation: it landed after the name and before the first argument token.
+    // Only a call the model finished may report an empty object.
+    if arguments.is_empty() {
+        return (!truncated).then(|| serde_json::json!({}));
+    }
+
     let error = match serde_json::from_str::<serde_json::Value>(arguments) {
-        Ok(value) => return value,
+        Ok(value) if value.is_object() => return Some(value),
+        Ok(_) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                "suppressing tool_use block with non-object arguments"
+            );
+            return None;
+        }
         Err(error) => error,
     };
 
@@ -596,11 +657,9 @@ pub(super) fn tool_use_input(
             tool_name = %tool_name,
             argument_bytes = arguments.len(),
             error = %error,
-            "tool call arguments are not valid JSON and generation was not cut off; emitting \
-             an empty tool_use input rather than a partial one, because the response claims \
-             this call completed"
+            "suppressing tool_use block with invalid arguments because generation was not cut off"
         );
-        return serde_json::json!({});
+        return None;
     }
 
     match recover_completed_members(arguments) {
@@ -613,17 +672,16 @@ pub(super) fn tool_use_input(
                 "tool call arguments were cut off at the token limit; keeping the members \
                  that completed. `stop_reason` is `max_tokens`"
             );
-            serde_json::Value::Object(map)
+            Some(serde_json::Value::Object(map))
         }
         None => {
             tracing::warn!(
                 tool_name = %tool_name,
                 argument_bytes = arguments.len(),
                 error = %error,
-                "tool call arguments were cut off at the token limit and no complete member \
-                 survived; emitting an empty tool_use input"
+                "suppressing truncated tool_use block because no complete member survived"
             );
-            serde_json::json!({})
+            None
         }
     }
 }
@@ -666,9 +724,8 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
     }
 
     // Truncation can land after a member's value but before the outer `}`, in which
-    // case there is no trailing comma and the comma scan finds nothing — yet every
-    // member present did finish. Close the object and take it, but only when the last
-    // value is provably complete (see `ends_on_a_finished_value`).
+    // case there is no trailing comma. Close the object only when the final value is
+    // provably complete; otherwise a partial number such as `2` could be fabricated.
     if ends_on_a_finished_value(trimmed)
         && let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
             &format!("{}}}", trimmed.trim_end()),
@@ -682,31 +739,12 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
     serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&candidate).ok()
 }
 
-/// Whether the payload's last value is one that cannot have been cut short.
-///
-/// Appending `}` to a truncated object can turn an unfinished value into a plausible
-/// finished one. `{"n": 25` cut to `{"n": 2` closes into `{"n": 2}`, reporting an
-/// argument the model never emitted — the exact fabrication this module refuses to do.
-///
-/// Four tails prove the value is over:
-/// - trailing whitespace. JSON allows it only between tokens, so the value before it
-///   ended. This also covers a complete number.
-/// - an unescaped closing quote. It appears only once the string is over.
-/// - `}` or `]`. They appear only once the object or array is over.
-/// - `true`, `false` or `null`. No longer JSON token starts with one of them.
-///
-/// Only a bare number with nothing after it stays ambiguous, because its own digits may
-/// be cut short. It falls through to the comma scan.
+/// Whether the raw suffix proves that the final JSON value ended before truncation.
 fn ends_on_a_finished_value(trimmed: &str) -> bool {
     let tail = trimmed.trim_end();
-    // Whitespace cannot occur inside a JSON number or literal. Let the normal
-    // parser decide whether the value before it is valid; this also covers
-    // complete `true`, `false`, and `null` values.
     if tail.len() != trimmed.len() {
         return true;
     }
-
-    // A closing quote must not itself be escaped, or the string is still open.
     if let Some(before_quote) = tail.strip_suffix('"') {
         let backslashes = before_quote
             .chars()
@@ -722,50 +760,75 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
         || tail.ends_with("null")
 }
 
+/// Preserve a matched string stop without confusing token stops with delimiters.
+pub(super) fn anthropic_stop_fields(
+    finish_reason: &dynamo_protocols::types::FinishReason,
+    stop_reason: Option<&serde_json::Value>,
+) -> (AnthropicStopReason, Option<String>) {
+    use dynamo_protocols::types::FinishReason;
+
+    match finish_reason {
+        FinishReason::Stop => match stop_reason.and_then(serde_json::Value::as_str) {
+            Some(sequence) => (
+                AnthropicStopReason::StopSequence,
+                Some(sequence.to_string()),
+            ),
+            None => (AnthropicStopReason::EndTurn, None),
+        },
+        FinishReason::Length => (AnthropicStopReason::MaxTokens, None),
+        FinishReason::ToolCalls | FinishReason::FunctionCall => {
+            (AnthropicStopReason::ToolUse, None)
+        }
+        FinishReason::ContentFilter => (AnthropicStopReason::Refusal, None),
+    }
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
     api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
-    let _ = api_context; // Available for future enrichment (service_tier, etc.)
+    let single_tool = api_context.is_some_and(|ctx| ctx.disable_parallel_tool_use);
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
     let mut content = Vec::new();
     let mut stop_reason = None;
+    let mut stop_sequence = None;
 
     if let Some(choice) = choice {
-        // Only the token limit means "cut off mid-call". Every other terminal reason
-        // claims the call finished, so partial arguments must not be recovered under it.
-        // This describes the choice; the call loop below narrows it to the last call,
-        // which is the only one the limit can have interrupted.
+        // Only the token limit means that a call may have been cut off. The loop
+        // below narrows this choice-level fact to the final call, which is the only
+        // call that can have been interrupted by the limit.
         let truncated = matches!(
             choice.finish_reason,
             Some(dynamo_protocols::types::FinishReason::Length)
         );
 
-        // Map finish_reason
-        stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
-            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
-        });
+        if let Some(finish_reason) = &choice.finish_reason {
+            let fields = anthropic_stop_fields(
+                finish_reason,
+                chat_resp
+                    .nvext
+                    .as_ref()
+                    .and_then(|ext| ext.get("stop_reason")),
+            );
+            stop_reason = Some(fields.0);
+            stop_sequence = fields.1;
+        }
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            // The token limit stops generation once, inside the call the model was
-            // writing. Every earlier call finished, so only the last one can carry a
-            // truncated tail.
             let last_call = tool_calls.len().saturating_sub(1);
             for (call_index, tc) in tool_calls.into_iter().enumerate() {
-                let input = tool_use_input(
+                let Some(input) = tool_use_input(
                     &tc.function.name,
                     &tc.function.arguments,
                     truncated && call_index == last_call,
-                );
+                ) else {
+                    continue;
+                };
                 let emitted_id = new_tool_use_id();
                 tracing::debug!(
                     backend_id = %tc.id,
@@ -777,7 +840,26 @@ pub fn chat_completion_to_anthropic_response(
                     name: tc.function.name,
                     input,
                 });
+                if single_tool {
+                    break;
+                }
             }
+        }
+
+        // `stop_reason: tool_use` is an instruction to run a tool. Suppressing every
+        // call above leaves nothing to run, and Anthropic rejects that turn when the
+        // client sends it back, so the conversation cannot continue. Report the turn
+        // as ended instead. `max_tokens` and `refusal` already explain themselves and
+        // stay as they are.
+        if stop_reason == Some(AnthropicStopReason::ToolUse)
+            && !content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. }))
+        {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
         // Extract reasoning content (from --dyn-reasoning-parser, e.g. qwen3).
@@ -840,7 +922,7 @@ pub fn chat_completion_to_anthropic_response(
         content,
         model: model.to_string(),
         stop_reason,
-        stop_sequence: None,
+        stop_sequence,
         usage,
     }
 }
@@ -848,6 +930,142 @@ pub fn chat_completion_to_anthropic_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unary_stop_sequence_metadata() {
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                "stop",
+                serde_json::json!("</answer>"),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                "stop",
+                serde_json::json!("\n\nHuman:"),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            ("stop", serde_json::json!(42), "end_turn", None),
+            ("length", serde_json::json!("</answer>"), "max_tokens", None),
+            (
+                "content_filter",
+                serde_json::json!("</answer>"),
+                "refusal",
+                None,
+            ),
+            (
+                "tool_calls",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+            (
+                "function_call",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut chat = serde_json::json!({
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                "model": "test-model", "choices": [{
+                    "index": 0, "finish_reason": finish,
+                    "message": {"role": "assistant", "content": "<answer>2 plus 3 is 5"}
+                }], "nvext": {"stop_reason": matched}
+            });
+            if expected_reason == "tool_use" {
+                chat["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "calculate", "arguments": "{}"}
+                }]);
+            }
+            let response = chat_completion_to_anthropic_response(
+                serde_json::from_value(chat).unwrap(),
+                "test-model",
+                None,
+            );
+            let response = serde_json::to_value(response).unwrap();
+            assert_eq!(
+                response["stop_reason"], expected_reason,
+                "{finish}: {matched}"
+            );
+            assert_eq!(
+                response["stop_sequence"],
+                serde_json::json!(expected_sequence),
+                "{finish}: {matched}"
+            );
+            assert!(response.get("nvext").is_none());
+        }
+    }
+
+    #[test]
+    fn test_output_config_format_conversion() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {"value": {"type": "string", "enum": ["OK"]}},
+            "properties": {"value": {"$ref": "#/$defs/value"}},
+            "required": ["value"],
+            "additionalProperties": false
+        });
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Return a value."}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}}
+        }))
+        .unwrap();
+        let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        assert_eq!(
+            serde_json::to_value(chat.inner.response_format).unwrap(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": schema, "strict": true}
+            })
+        );
+    }
+
+    #[test]
+    fn test_output_config_format_absent_or_invalid() {
+        for (config, valid) in [
+            (serde_json::json!(null), true),
+            (serde_json::json!({}), true),
+            (serde_json::json!({"effort": "high"}), true),
+            (serde_json::json!({"format": null}), true),
+            (serde_json::json!({"format": "json_schema"}), false),
+            (serde_json::json!({"format": {"type": "text"}}), false),
+            (serde_json::json!({"format": {"schema": {}}}), false),
+            (
+                serde_json::json!({"format": {"type": "json_schema"}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": null}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": []}}),
+                false,
+            ),
+        ] {
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "output_config": config
+            }))
+            .unwrap();
+            let result = NvCreateChatCompletionRequest::try_from(req);
+            if valid {
+                assert!(result.unwrap().inner.response_format.is_none());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .starts_with("output_config.format")
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_simple_user_message_conversion() {
@@ -1145,6 +1363,37 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_strict_conversion() {
+        for strict in [Some(true), Some(false), None] {
+            let mut input = serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "Set the status to gamma."}],
+                "tools": [{
+                    "name": "set_status",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string", "enum": ["ALPHA", "BETA"]}},
+                        "required": ["status"],
+                        "additionalProperties": false
+                    }
+                }]
+            });
+            if let Some(strict) = strict {
+                input["tools"][0]["strict"] = strict.into();
+            }
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(input.clone()).unwrap();
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            let tools = chat_req.inner.tools.unwrap();
+            assert_eq!(tools[0].function.strict, strict);
+            assert_eq!(
+                tools[0].function.parameters.as_ref().unwrap(),
+                &input["tools"][0]["input_schema"]
+            );
+        }
+    }
+
+    #[test]
     fn test_tools_conversion() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1172,6 +1421,7 @@ mod tests {
                     "properties": {"location": {"type": "string"}},
                     "required": ["location"]
                 })),
+                strict: None,
                 cache_control: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Simple(AnthropicToolChoiceSimple {
@@ -1184,6 +1434,12 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.tools = Some(vec![]);
+        empty_req.tool_choice = None;
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.tools.is_none());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.tools.is_some());
@@ -1249,6 +1505,7 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1280,6 +1537,7 @@ mod tests {
                     completion_tokens_details: None,
                 }),
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1307,6 +1565,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1337,10 +1596,12 @@ mod tests {
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                         audio_tokens: None,
                         cached_tokens: Some(11),
+                        ..Default::default()
                     }),
                     completion_tokens_details: None,
                 }),
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1366,6 +1627,7 @@ mod tests {
             prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                 audio_tokens: None,
                 cached_tokens: Some(20),
+                ..Default::default()
             }),
             completion_tokens_details: None,
         };
@@ -1380,6 +1642,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1405,6 +1668,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1419,6 +1683,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1444,6 +1709,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: Some(serde_json::json!({
                 "worker_id": {"decode_worker_id": 1}
             })),
@@ -2506,52 +2772,9 @@ mod tests {
 }
 
 #[cfg(test)]
-mod truncated_tool_call_tests {
+mod anthropic_types_tests {
     use super::*;
 
-    /// Build a one-choice response carrying a single tool call with the given
-    /// finish reason and raw argument text, and return the Anthropic `input` it
-    /// converts to.
-    #[allow(deprecated)]
-    fn converted_tool_use_input(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &str,
-    ) -> serde_json::Value {
-        converted_tool_use_response(finish_reason, arguments)
-            .content
-            .into_iter()
-            .find_map(|block| match block {
-                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
-                _ => None,
-            })
-            .expect("expected a tool_use block")
-    }
-
-    #[allow(deprecated)]
-    fn converted_tool_use_response(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &str,
-    ) -> AnthropicMessageResponse {
-        converted_tool_use_response_for(finish_reason, &[arguments])
-    }
-
-    /// Every `tool_use` input in the converted response, in call order.
-    fn converted_tool_use_inputs(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &[&str],
-    ) -> Vec<serde_json::Value> {
-        converted_tool_use_response_for(finish_reason, arguments)
-            .content
-            .into_iter()
-            .filter_map(|block| match block {
-                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// One tool call per entry in `arguments`, so a test can build a choice that
-    /// carries parallel calls.
     #[allow(deprecated)]
     fn converted_tool_use_response_for(
         finish_reason: dynamo_protocols::types::FinishReason,
@@ -2561,17 +2784,19 @@ mod truncated_tool_call_tests {
             .iter()
             .enumerate()
             .map(
-                |(index, args)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    custom: None,
                     id: format!("call_{}", index + 1),
                     r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: "record_literal".into(),
-                        arguments: args.to_string(),
+                        arguments: (*arguments).into(),
                     },
                 },
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2592,99 +2817,27 @@ mod truncated_tool_call_tests {
                 model: "test-model".into(),
                 service_tier: None,
                 system_fingerprint: None,
-                object: "chat.completion".to_string(),
+                object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
-
         chat_completion_to_anthropic_response(chat_resp, "test-model", None)
     }
 
-    /// Pins the WIRING, not the helper. The eight helper tests below all call
-    /// `tool_use_input` directly, so reverting the conversion site to the old
-    /// `unwrap_or(json!({}))` left every one of them green. This one goes red,
-    /// because it reaches the recovery only through `chat_completion_to_anthropic_response`.
-    #[test]
-    fn the_conversion_recovers_members_when_the_reason_is_the_token_limit() {
-        assert_eq!(
-            converted_tool_use_input(dynamo_protocols::types::FinishReason::Length, TRUNCATED),
-            serde_json::json!({"label": "customer-eof"}),
-            "a call cut off at the token limit must keep the members that finished"
-        );
-    }
-
-    /// The guard on the rule above. When the upstream reason says the call FINISHED,
-    /// malformed arguments are a generation defect, not a truncation. Recovering members
-    /// there would emit a call that looks complete while silently carrying only some of
-    /// its arguments -- one a client can validate and then run. The empty object is the
-    /// honest answer, because it fails the tool's schema instead of half-succeeding.
-    #[test]
-    fn the_conversion_refuses_partial_arguments_when_the_call_claims_it_finished() {
-        for reason in [
-            dynamo_protocols::types::FinishReason::ToolCalls,
-            dynamo_protocols::types::FinishReason::Stop,
-            dynamo_protocols::types::FinishReason::ContentFilter,
-            dynamo_protocols::types::FinishReason::FunctionCall,
-        ] {
-            assert_eq!(
-                converted_tool_use_input(reason, TRUNCATED),
-                serde_json::json!({}),
-                "{reason:?} claims the call completed, so partial arguments must not be emitted"
-            );
-        }
-    }
-
-    #[test]
-    fn the_conversion_maps_content_filter_to_refusal() {
-        let response = converted_tool_use_response(
-            dynamo_protocols::types::FinishReason::ContentFilter,
-            r#"{"label": "blocked"}"#,
-        );
-        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
-    }
-
-    /// Malformed, but NOT cut short: the model closed the object and still emitted
-    /// arguments that do not parse. Recovery must refuse this shape.
-    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
-
-    /// `truncated` describes the CHOICE, but only the last call can be the one the
-    /// model was writing when the budget ran out. It finished every earlier call, so
-    /// malformed arguments there are a generation defect and must still yield `{}`.
-    #[test]
-    fn only_the_final_tool_call_recovers_partial_arguments() {
-        let inputs = converted_tool_use_inputs(
-            dynamo_protocols::types::FinishReason::Length,
-            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
-        );
-
-        assert_eq!(inputs.len(), 2, "both calls must reach the response");
-        assert_eq!(
-            inputs[0],
-            serde_json::json!({}),
-            "a call the model finished must not be repaired, even at the token limit"
-        );
-        assert_eq!(
-            inputs[1],
-            serde_json::json!({"label": "customer-eof"}),
-            "the final call is the only one that can have been cut off"
-        );
-    }
-
-    /// Valid arguments are untouched no matter which reason ended generation.
-    #[test]
-    fn the_conversion_passes_valid_arguments_through_for_every_reason() {
-        for reason in [
-            dynamo_protocols::types::FinishReason::Length,
-            dynamo_protocols::types::FinishReason::ToolCalls,
-            dynamo_protocols::types::FinishReason::Stop,
-        ] {
-            assert_eq!(
-                converted_tool_use_input(reason, r#"{"label": "done"}"#),
-                serde_json::json!({"label": "done"}),
-                "valid arguments must survive {reason:?} unchanged"
-            );
-        }
+    fn converted_tool_use_inputs(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> Vec<serde_json::Value> {
+        converted_tool_use_response_for(finish_reason, arguments)
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The measured payload: `record_literal` cut off inside the second
@@ -2692,9 +2845,95 @@ mod truncated_tool_call_tests {
     const TRUNCATED: &str =
         r#"{"label": "customer-eof", "literal_text": "customer-eof-xxxxxxxxxxxxxxxxxxxx"#;
 
+    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
+
+    #[test]
+    fn conversion_recovers_members_only_for_the_final_length_call() {
+        let inputs = converted_tool_use_inputs(
+            dynamo_protocols::types::FinishReason::Length,
+            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
+        );
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], serde_json::json!({"label": "customer-eof"}));
+    }
+
+    /// A call cut off before its first argument token has no argument bytes. Reporting
+    /// it as an empty object hands the client a runnable zero-argument call.
+    #[test]
+    fn conversion_drops_a_length_call_with_no_argument_bytes() {
+        let inputs =
+            converted_tool_use_inputs(dynamo_protocols::types::FinishReason::Length, &[""]);
+        assert!(inputs.is_empty(), "unexpected tool block: {inputs:?}");
+        assert_eq!(tool_use_input("get_weather", "", true), None);
+        // A call the model finished still reports the empty object.
+        assert_eq!(
+            tool_use_input("get_weather", "", false),
+            Some(serde_json::json!({}))
+        );
+    }
+
+    /// `tool_use` tells the client to run a tool. With every call suppressed there is
+    /// nothing to run, and Anthropic rejects the turn when the client sends it back.
+    #[test]
+    fn conversion_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &[r#"{"label": "cut""#],
+        );
+        assert!(
+            !response
+                .content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. })),
+            "the malformed call must not be emitted"
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::EndTurn));
+    }
+
+    #[test]
+    fn conversion_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [
+                dynamo_protocols::types::FinishReason::ToolCalls,
+                dynamo_protocols::types::FinishReason::Length,
+            ] {
+                let response = converted_tool_use_response_for(reason, &[arguments]);
+                assert!(
+                    response.content.iter().all(|block| !matches!(
+                        block,
+                        AnthropicResponseContentBlock::ToolUse { .. }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                assert_eq!(
+                    response.stop_reason,
+                    Some(if reason == dynamo_protocols::types::FinishReason::Length {
+                        AnthropicStopReason::MaxTokens
+                    } else {
+                        AnthropicStopReason::EndTurn
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conversion_does_not_recover_malformed_non_length_arguments() {
+        for reason in [
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            dynamo_protocols::types::FinishReason::Stop,
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            dynamo_protocols::types::FinishReason::FunctionCall,
+        ] {
+            let inputs = converted_tool_use_inputs(reason, &[TRUNCATED]);
+            assert!(inputs.is_empty(), "unexpected tool block for {reason:?}");
+        }
+    }
+
     #[test]
     fn truncated_arguments_keep_the_members_that_completed() {
-        let input = tool_use_input("record_literal", TRUNCATED, true);
+        let input = tool_use_input("record_literal", TRUNCATED, true)
+            .expect("completed members should be recovered");
         let obj = input.as_object().expect("input must stay an object");
 
         // The finished member survives verbatim.
@@ -2714,84 +2953,58 @@ mod truncated_tool_call_tests {
     /// received a well-formed tool_use block and executed it with no arguments.
     #[test]
     fn truncated_arguments_are_not_silently_emptied() {
-        assert_ne!(
+        assert_eq!(
             tool_use_input("record_literal", TRUNCATED, true),
-            serde_json::json!({}),
-            "unparseable arguments must not collapse to an empty object"
+            Some(serde_json::json!({"label": "customer-eof"}))
         );
     }
 
     #[test]
     fn valid_arguments_are_passed_through_unchanged() {
         let input = tool_use_input("get_weather", r#"{"location": "SF", "unit": "c"}"#, true);
-        assert_eq!(input, serde_json::json!({"location": "SF", "unit": "c"}));
-    }
-
-    /// Truncation after a member value but before the closing brace. There is no
-    /// trailing comma, so the comma scan alone finds nothing, yet `label` did finish.
-    /// Returning `{}` here would be the empty-object failure this module exists to stop.
-    #[test]
-    fn a_final_member_without_a_trailing_comma_is_recovered() {
-        let recovered =
-            recover_completed_members(r#"{"label": "customer-eof""#).expect("`label` completed");
         assert_eq!(
-            recovered.get("label").and_then(|v| v.as_str()),
-            Some("customer-eof")
+            input,
+            Some(serde_json::json!({"location": "SF", "unit": "c"}))
         );
-        assert_eq!(recovered.len(), 1);
+    }
 
-        // Same shape reached through the public entry point.
+    #[test]
+    fn conversion_maps_content_filter_to_refusal() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            &[r#"{"label":"blocked"}"#],
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
+    }
+
+    #[test]
+    fn final_member_without_closing_brace_is_recovered_when_provably_complete() {
         assert_eq!(
-            tool_use_input("record_literal", r#"{"label": "customer-eof""#, true),
-            serde_json::json!({"label": "customer-eof"})
+            tool_use_input("record_literal", r#"{"label":"done""#, true),
+            Some(serde_json::json!({"label": "done"}))
         );
-
-        // A closed nested value is equally provably finished.
-        let recovered =
-            recover_completed_members(r#"{"a": 1, "b": {"p": 2}"#).expect("`a` and `b` completed");
-        assert_eq!(recovered.get("b"), Some(&serde_json::json!({"p": 2})));
-        assert_eq!(recovered.len(), 2);
-    }
-
-    /// The guard on the case above: closing the brace after a BARE NUMBER would invent a
-    /// value, because the digits may themselves be truncated. `{"n": 25` cut to `{"n": 2`
-    /// must not be reported as `n = 2`.
-    #[test]
-    fn a_truncated_number_is_never_closed_into_a_value() {
-        assert_eq!(recover_completed_members(r#"{"n": 2"#), None);
-
-        // With an earlier complete member, fall back to the comma boundary and drop the
-        // ambiguous tail rather than reporting it.
-        let recovered = recover_completed_members(r#"{"a": "x", "n": 2"#).expect("`a` completed");
-        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x"));
-        assert!(
-            !recovered.contains_key("n"),
-            "a possibly-truncated number must not be reported, got: {recovered:?}"
+        assert_eq!(
+            recover_completed_members(r#"{"count": 2 "#).unwrap()["count"],
+            2
         );
-
-        // An escaped quote at the very end leaves the string open; it is not a finished
-        // value and must not be closed either.
-        assert_eq!(recover_completed_members(r#"{"a": "he said \""#), None);
+        assert_eq!(
+            recover_completed_members(r#"{"ok": true "#).unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"ok": false "#).unwrap()["ok"],
+            false
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"value": null "#).unwrap()["value"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
-    fn scalar_values_followed_by_whitespace_are_recovered() {
-        for (key, value, expected) in [
-            ("count", r#"2 "#, serde_json::json!(2)),
-            ("enabled", "true ", serde_json::json!(true)),
-            ("enabled", "false ", serde_json::json!(false)),
-            ("value", "null ", serde_json::Value::Null),
-        ] {
-            let input = format!(r#"{{"{key}": {value}"#);
-            let recovered = recover_completed_members(&input).expect("scalar value completed");
-            assert_eq!(recovered.get(key), Some(&expected));
-        }
-    }
-
-    #[test]
-    fn an_undelimited_scalar_is_not_recovered() {
+    fn undelimited_scalar_prefix_is_not_recovered() {
         assert_eq!(recover_completed_members(r#"{"count": 2"#), None);
-        assert_eq!(recover_completed_members(r#"{"enabled": tru"#), None);
+        assert_eq!(recover_completed_members(r#"{"ok": tru"#), None);
         assert_eq!(recover_completed_members(r#"{"value": nul"#), None);
     }
 
@@ -2837,5 +3050,109 @@ mod truncated_tool_call_tests {
             Some(r#"he said "hi", ok"#)
         );
         assert_eq!(recovered.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod thinking_control_tests {
+    use super::*;
+
+    fn request_with_thinking(thinking: Option<serde_json::Value>) -> AnthropicCreateMessageRequest {
+        let mut request = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        if let Some(thinking) = thinking {
+            request["thinking"] = thinking;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn enabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "enabled", "budget_tokens": 1024}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            true
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "disabled"}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            false
+        );
+    }
+
+    #[test]
+    fn omitted_thinking_keeps_template_default() {
+        let converted =
+            NvCreateChatCompletionRequest::try_from(request_with_thinking(None)).unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn null_thinking_keeps_template_default() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::Value::Null,
+        )))
+        .unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn other_thinking_modes_keep_existing_behavior() {
+        for mode in ["adaptive", "unknown"] {
+            let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+                serde_json::json!({"type": mode}),
+            )))
+            .unwrap();
+            assert!(converted.chat_template_args.is_none(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn disabling_thinking_preserves_history_and_tools() {
+        let mut value = serde_json::json!({
+            "model": "test-model", "max_tokens": 2048,
+            "messages": [
+                {"role": "user", "content": "Read x"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Inspect the file", "signature": "sig"},
+                    {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "x"}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "hello"}]}
+            ],
+            "tools": [{"name": "read", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}],
+            "tool_choice": {"type": "tool", "name": "read"},
+            "nvext": {"cache_salt": "test-salt"}
+        });
+        let unspecified = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value.clone()).unwrap(),
+        )
+        .unwrap();
+        value["thinking"] = serde_json::json!({"type": "disabled"});
+        let mut disabled = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
+            false
+        );
+        disabled.chat_template_args = None;
+        assert_eq!(
+            serde_json::to_value(unspecified).unwrap(),
+            serde_json::to_value(disabled).unwrap()
+        );
     }
 }

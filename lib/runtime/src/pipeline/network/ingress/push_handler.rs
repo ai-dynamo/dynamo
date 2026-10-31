@@ -4,11 +4,15 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
+use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::network::{StreamPrologueError, velo_response};
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
+use crate::{dynamo_nvtx_mark, dynamo_nvtx_range};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -140,6 +144,131 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+trait ResponsePublisher {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
+
+    /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
+    /// where the transport can carry it.
+    ///
+    /// The default drops the type and sends the text alone. TCP and QUIC
+    /// override this so a typed refusal survives the response plane.
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        self.send_prologue(error.map(|error| error.message)).await
+    }
+    async fn finish(&mut self) -> anyhow::Result<()>;
+    async fn abort(&mut self) -> anyhow::Result<()>;
+
+    fn reset_on_stop(&self) -> bool {
+        false
+    }
+
+    fn strict_prologue(&self) -> bool {
+        false
+    }
+}
+
+impl ResponsePublisher for velo_response::VeloResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send(self, payload).await
+    }
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send_prologue(
+            self,
+            error.map(StreamPrologueError::from_message),
+        )
+        .await
+    }
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send_prologue(self, error).await
+    }
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::finish(self).await
+    }
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::abort(self).await
+    }
+    // `reset_on_stop` stays false on purpose. `stop_generating` does not
+    // invalidate results already in the stream, so after a graceful Stop the
+    // frontend still gets what the engine yields, final chunk included. TCP
+    // and QUIC instead end the stream at the worker.
+    fn strict_prologue(&self) -> bool {
+        true
+    }
+}
+
+impl ResponsePublisher for quic_response::QuicResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue_typed(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::finish(self).await
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::abort(self).await
+    }
+
+    fn reset_on_stop(&self) -> bool {
+        true
+    }
+
+    fn strict_prologue(&self) -> bool {
+        true
+    }
+}
+
+impl ResponsePublisher for StreamSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        StreamSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        StreamSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        StreamSender::send_prologue_typed(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
 where
     Req: PipelineIO + Sync,
@@ -147,7 +276,7 @@ where
     Adapter: Send + Sync + 'static,
 {
     /// Pump every chunk from the engine's response stream out to the
-    /// upstream-side `StreamSender`, plus the terminal complete-final
+    /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
     /// health-check notifier policy (notify only on non-error chunks and
@@ -155,7 +284,7 @@ where
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
-        publisher: &StreamSender,
+        publisher: &impl ResponsePublisher,
         payload_codec: RequestPlanePayloadCodec,
     ) where
         U: Data + std::fmt::Debug,
@@ -167,7 +296,14 @@ where
         let mut send_complete_final = true;
         let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
+            // Everything inside this range is Dynamo-side egress work for one
+            // chunk. The gaps *between* consecutive `worker.egress.chunk` ranges
+            // are the engine producing the next token — that split is the whole
+            // point of the worker annotations. (Frontend-side receive/decode is
+            // a separate, currently unannotated cost; do not attribute it here.)
+            let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
             tracing::trace!("Sending response: {:?}", resp);
+            let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
             let encoded = match self
                 .payload_adapter
                 .encode_response(payload_codec, Some(resp), false)
@@ -186,13 +322,22 @@ where
                     break;
                 }
             };
+            drop(nvtx_encode);
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
+            // Notify before the publish: engine progress counts even if the send fails.
+            // Error chunks do not prove health, so they never reset the canary.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
+            let publish_result = publisher.send(resp_bytes).await;
+            drop(nvtx_publish);
+            if let Err(send_err) = publish_result {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -203,10 +348,18 @@ where
                     // Case 1 can happen when client closed the connection after receiving the
                     // complete response from frontend. Hence, send failure can be expected in this
                     // case.
-                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                    tracing::warn!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                 } else {
                     // Otherwise, this is an error.
-                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    tracing::error!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                     context.stop_generating();
                 }
                 // Account errors in all cases, including cancellation. Therefore this metric can be
@@ -217,12 +370,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -231,6 +378,12 @@ where
                 // before the queued error and clean terminal frames are read.
                 break;
             }
+        }
+        // The TCP response writer exits without its clean sentinel when the
+        // worker context is stopped. Preserve that behavior on QUIC: the
+        // caller sends a logical reset instead of a clean terminal frame.
+        if publisher.reset_on_stop() && context.is_stopped() && !context.is_killed() {
+            send_complete_final = false;
         }
         if send_complete_final {
             let encoded = match self
@@ -358,6 +511,12 @@ struct ParsedRequest<Req> {
     payload_codec: RequestPlanePayloadCodec,
 }
 
+#[derive(Clone, Copy)]
+struct ResponsePlaneModes {
+    configured: ResponsePlaneMode,
+    advertised: ResponsePlaneMode,
+}
+
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -370,7 +529,8 @@ trait IngressDispatch: Send + Sync {
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
 }
 
@@ -385,10 +545,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
         let data = data.ok_or_else(|| {
@@ -444,10 +603,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // Bidirectional envelopes are header-only — all request frames
         // (including the first) flow on the request-stream socket once it's
         // dialed in. A data payload means the sender used the unary wire
@@ -569,6 +727,145 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
+    async fn generate_and_publish<P>(
+        &self,
+        request: Req,
+        payload_codec: RequestPlanePayloadCodec,
+        start_time: Instant,
+        response_modes: ResponsePlaneModes,
+        lifecycle: &LifecycleTrace,
+        mut publisher: P,
+    ) -> Result<(), PipelineError>
+    where
+        Self: IngressDispatch<Request = Req>,
+        P: ResponsePublisher,
+    {
+        let ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        } = response_modes;
+
+        if configured_mode != advertised_mode {
+            let message = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised_mode.name(),
+                configured_mode.name()
+            );
+            let _ = publisher.send_prologue(Some(message.clone())).await;
+            let _ = publisher.finish().await;
+            return Err(PipelineError::Generic(message));
+        }
+
+        let request_context = request.context();
+        tracing::trace!("calling generate");
+        let worker_operation = lifecycle.start_worker_operation();
+        // Dispatch into the engine. For a Python worker this covers the pyo3
+        // bridge crossing that builds the response generator, not token
+        // generation itself.
+        let nvtx_generate = dynamo_nvtx_range!("worker.ingress.generate");
+        let stream = async {
+            self.segment
+                .get()
+                .expect("segment not set")
+                .generate(request)
+                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
+                .await
+        }
+        .instrument(worker_operation.clone())
+        .await
+        .map_err(|error| {
+            if let Some(metrics) = self.metrics() {
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::GENERATE])
+                    .inc();
+            }
+            PipelineError::GenerateError(error)
+        });
+        drop(nvtx_generate);
+
+        let stream = match stream {
+            Ok(stream) => {
+                tracing::trace!("Successfully generated response stream; sending prologue");
+                let result = publisher.send_prologue(None).await;
+                // Marked only on a successful send: the prologue is what tells the
+                // frontend the stream is live, so a marker on the failure path would
+                // put an acknowledgement on the timeline that the frontend never got.
+                let prologue_sent = result.is_ok();
+                if publisher.strict_prologue() {
+                    result.map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to open {} response stream: {error}",
+                            configured_mode.name()
+                        ))
+                    })?;
+                }
+                if prologue_sent {
+                    dynamo_nvtx_mark!("worker.ingress.prologue_sent");
+                }
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
+                stream
+            }
+            Err(error) => {
+                let error_string = error.to_string();
+
+                #[cfg(debug_assertions)]
+                tracing::debug!(
+                    "Failed to generate response stream (with debug backtrace): {:?}",
+                    error
+                );
+                #[cfg(not(debug_assertions))]
+                tracing::error!("Failed to generate response stream: {error_string}");
+
+                if publisher.reset_on_stop()
+                    && request_context.is_stopped()
+                    && !request_context.is_killed()
+                {
+                    let _ = publisher.abort().await;
+                } else {
+                    // Send the worker's error type with the display text, so a
+                    // frontend can tell a request the backend cannot serve from
+                    // a transport failure.
+                    let prologue_error = StreamPrologueError::new(
+                        error_string,
+                        typed_error_from_pipeline_error(&error),
+                    );
+                    let _ = publisher.send_prologue_typed(Some(prologue_error)).await;
+                }
+                return Err(error);
+            }
+        };
+
+        async {
+            self.pump_response_stream(stream, &publisher, payload_codec)
+                .instrument(lifecycle.start_worker_response_streaming())
+                .await
+        }
+        .instrument(worker_operation)
+        .await;
+        let finish = if publisher.reset_on_stop()
+            && request_context.is_stopped()
+            && !request_context.is_killed()
+        {
+            publisher.abort().await
+        } else {
+            publisher.finish().await
+        };
+        finish.map_err(|error| {
+            PipelineError::Generic(format!(
+                "Failed to finish {} response stream: {error}",
+                configured_mode.name()
+            ))
+        })
+    }
+
     /// Shared body of `PushWorkHandler::handle_payload` for every
     /// `Ingress<Req, ManyOut<U>>` shape that has an [`IngressDispatch`]
     /// impl. Sets up the inflight metrics guard, calls
@@ -584,12 +881,15 @@ where
     where
         Self: IngressDispatch<Request = Req>,
     {
+        // Outer band for one request's entire time inside the worker, from wire
+        // arrival to terminal frame. Held across awaits, hence a start/end range.
+        let _nvtx_request = dynamo_nvtx_range!("worker.ingress.request");
+
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
-
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
@@ -606,12 +906,32 @@ where
             }
         });
 
+        let (control_msg, data) = self.decode_control_message(payload)?;
+        let lifecycle = match self.registered_lifecycle_role() {
+            Some(role)
+                if control_msg
+                    .metadata
+                    .get(crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+                    .is_some_and(|version| version == "v1") =>
+            {
+                LifecycleTrace::from_request_id_with_role(control_msg.id.clone(), role)
+            }
+            _ => LifecycleTrace::new(false),
+        };
+
+        // Admission begins after the envelope selects capture, before payload
+        // decoding and response setup. Hold without entering it: response
+        // readers capture the current span and live until the request ends.
+        // They must inherit handle_payload, not prolong worker.admission.
+        let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
+        let nvtx_parse = dynamo_nvtx_range!("worker.ingress.parse_request");
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(payload).await?;
+        } = self.parse_and_build_request(control_msg, data).await?;
+        drop(nvtx_parse);
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -619,72 +939,119 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            response_connection_info,
-            self.metrics().map(|m| m.cancellation_total.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
-            }
-            PipelineError::Generic(format!("Failed to create response stream: {e}"))
-        })?;
-
-        tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
-            .await
-            .map_err(|e| {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(e)
-            });
-
-        // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if the generate call failed, the error is sent to the client
-        let stream = match stream {
-            Ok(stream) => {
-                tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
-                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
-                    .observe(start_time.elapsed().as_secs_f64());
-                stream
-            }
-            Err(e) => {
-                let error_string = e.to_string();
-
-                #[cfg(debug_assertions)]
-                {
-                    tracing::debug!(
-                        "Failed to generate response stream (with debug backtrace): {:?}",
-                        e
-                    );
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    tracing::error!("Failed to generate response stream: {error_string}");
-                }
-
-                let _result = publisher.send_prologue(Some(error_string)).await;
-                Err(e)?
-            }
+        let advertised_mode =
+            ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = match self.response_plane.get() {
+            Some(mode) => *mode,
+            None => ResponsePlaneMode::configured()
+                .map_err(|error| PipelineError::Generic(error.to_string()))?,
         };
+        let response_modes = ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        };
+        let cancellation_counter = self
+            .metrics()
+            .map(|metrics| metrics.cancellation_total.clone());
 
-        self.pump_response_stream(stream, &publisher, payload_codec)
-            .await;
+        match advertised_mode {
+            ResponsePlaneMode::Tcp => {
+                tracing::trace!("creating tcp response stream");
+                let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
+                let publisher = tcp::client::TcpClient::create_response_stream(
+                    request.context(),
+                    response_connection_info,
+                    cancellation_counter,
+                )
+                .await
+                .map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!("Failed to create response stream: {error}"))
+                })?;
+                drop(nvtx_open);
+                drop(worker_admission);
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    response_modes,
+                    &lifecycle,
+                    publisher,
+                )
+                .await?;
+            }
+            ResponsePlaneMode::Velo => {
+                let context = request.context();
+                let publisher = async {
+                    let service = self.velo_response_service().await?;
+                    service
+                        .sender(
+                            context.clone(),
+                            response_connection_info,
+                            cancellation_counter,
+                        )
+                        .await
+                }
+                .await
+                .map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!(
+                        "Failed to create Velo response stream: {error}"
+                    ))
+                })?;
+                drop(worker_admission);
+                tokio::select! {
+                    biased;
+                    _ = context.killed() => return Ok(()),
+                    result = self.generate_and_publish(request, payload_codec, start_time, response_modes, &lifecycle, publisher) => result?,
+                }
+            }
+            ResponsePlaneMode::Quic => {
+                tracing::trace!("creating QUIC response sender");
+                let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
+                let response_pool = self.quic_response_client_pool()?;
+                let publisher = response_pool
+                    .sender_with_cancellation_metric(
+                        request.context(),
+                        response_connection_info,
+                        cancellation_counter,
+                    )
+                    .await
+                    .map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to create QUIC response stream: {error}"
+                        ))
+                    })?;
+                drop(nvtx_open);
+                drop(worker_admission);
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    response_modes,
+                    &lifecycle,
+                    publisher,
+                )
+                .await?;
+            }
+        }
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
@@ -701,6 +1068,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_endpoint_config(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -733,6 +1104,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_endpoint_config(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -758,18 +1133,307 @@ where
     }
 }
 
+/// Recover the worker's typed error from a pipeline failure, for the prologue.
+///
+/// `GenerateError` must unwrap its `anyhow::Error` payload first. `anyhow::Error`
+/// does not implement `std::error::Error`, so that variant exposes no `source()`
+/// and converting the enclosing `PipelineError` yields a bare
+/// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
+/// no worker error and converts to `ErrorType::Unknown`.
+///
+/// A [`PipelineError::DuplicateRequestId`] refusal is typed
+/// [`crate::error::ErrorType::Conflict`]: the worker is healthy and still serving
+/// the earlier request with that id, so fault detection must not quarantine it.
+pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
+    let source: &(dyn std::error::Error + 'static) = match e {
+        PipelineError::GenerateError(inner) => inner.as_ref(),
+        other => other,
+    };
+    let is_duplicate_id = std::iter::successors(Some(source), |e| e.source()).any(|e| {
+        matches!(
+            e.downcast_ref::<PipelineError>(),
+            Some(PipelineError::DuplicateRequestId(_))
+        )
+    });
+    if is_duplicate_id {
+        return DynamoError::builder()
+            .error_type(crate::error::ErrorType::Conflict)
+            .message(source.to_string())
+            .build();
+    }
+    DynamoError::from(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
-    use futures::stream;
+    use futures::{FutureExt, Stream, stream};
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::error::{BackendError, ErrorType};
 
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// The positive half of the recovery hop: a worker's typed refusal, boxed
+    /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
+    /// comes back out with its type intact.
+    #[test]
+    fn generate_error_payload_keeps_the_workers_error_type() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the worker's type must survive the anyhow payload"
+        );
+    }
+
+    /// The negative half: a failure that is not a worker's `generate()` error
+    /// has no worker classification and uses the canonical internal fallback.
+    #[test]
+    fn non_generate_pipeline_error_is_internal_unclassified() {
+        let e = PipelineError::DeserializationError("bad request payload".to_string());
+        let error = typed_error_from_pipeline_error(&e);
+
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.unclassified");
+    }
+
+    #[test]
+    fn duplicate_request_id_is_a_conflict() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            PipelineError::DuplicateRequestId("same-id".to_string()),
+        ));
+        let error = typed_error_from_pipeline_error(&e);
+
+        assert_eq!(error.class(), ErrorType::Conflict);
+        assert_eq!(error.reason().as_str(), "request.conflict");
+    }
+
+    #[derive(Clone, Default)]
+    struct AdmissionCapture {
+        started: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() == "worker.admission" {
+                self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if ctx.span(&id).unwrap().metadata().name() == "worker.admission" {
+                self.closed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct AdmissionProbe(AdmissionCapture, bool);
+
+    #[async_trait]
+    impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for AdmissionProbe
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            assert_eq!(self.0.started.load(Ordering::SeqCst), self.1);
+            assert_eq!(
+                self.0.closed.load(Ordering::SeqCst),
+                self.1,
+                "admission must close before generation, while the TCP reader is still alive"
+            );
+            anyhow::bail!("admission probe finished")
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_closes_before_generation_and_skips_control_calls() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        // Configuration is process-scoped. Isolate this enabled-mode test from
+        // other tests which may have initialized the disabled default already.
+        const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated admission regression failed");
+            return;
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
+                ("DYN_RESPONSE_PLANE", Some("tcp")),
+            ],
+            async {
+                for (inference, rooted) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
+                    let capture = AdmissionCapture::default();
+                    let _interest_guard = crate::test_utils::tracing_interest_guard();
+                    let subscriber = tracing_subscriber::registry().with(capture.clone());
+                    async {
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap().to_string();
+                        let peer = tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                        });
+                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let ingress = if inference {
+                            TestIngress::for_engine_with_lifecycle_role(
+                                engine,
+                                crate::telemetry::LifecycleOperationRole::Worker,
+                            )
+                        } else {
+                            TestIngress::for_engine(engine)
+                        }
+                        .unwrap();
+                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                            address,
+                            subject: "admission-probe".to_string(),
+                            context: "admission-probe".to_string(),
+                            stream_type: crate::pipeline::network::StreamType::Response,
+                        }
+                        .into();
+                        let metadata = if rooted {
+                            std::collections::BTreeMap::from([(
+                                crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
+                                "v1",
+                            )])
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
+                        let header = serde_json::to_vec(&serde_json::json!({
+                            "id": "admission-probe",
+                            "request_type": "single_in",
+                            "response_type": "many_out",
+                            "connection_info": connection,
+                            "metadata": metadata,
+                        }))
+                        .unwrap();
+                        let payload = TwoPartCodec::default()
+                            .encode_message(TwoPartMessage::from_parts(
+                                header.into(),
+                                Bytes::from_static(b"{}"),
+                            ))
+                            .unwrap();
+                        let error = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            ingress
+                                .handle_payload_shared(payload, Some("admission-probe".to_string()))
+                                .instrument(tracing::info_span!("handle_payload")),
+                        )
+                        .await
+                        .expect("local admission probe timed out")
+                        .unwrap_err();
+                        assert!(error.to_string().contains("admission probe finished"));
+                        peer.abort();
+                        let _ = peer.await;
+                    }
+                    .with_subscriber(subscriber)
+                    .await;
+                }
+            },
+        )
+        .await;
+    }
+
+    #[derive(Default)]
+    struct MismatchPublisher {
+        prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
+        finished: Arc<AtomicBool>,
+    }
+
+    impl ResponsePublisher for MismatchPublisher {
+        async fn send(&self, _payload: Bytes) -> anyhow::Result<()> {
+            panic!("mismatch must not send response data")
+        }
+
+        async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+            *self.prologue.lock().unwrap() = Some(error);
+            Ok(())
+        }
+
+        async fn finish(&mut self) -> anyhow::Result<()> {
+            self.finished.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> anyhow::Result<()> {
+            panic!("mismatch must finish with a frontend-visible error")
+        }
+    }
+
+    #[tokio::test]
+    async fn response_plane_mismatch_reports_error_before_generate() {
+        for (configured, advertised) in [
+            (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
+            (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
+        ] {
+            let ingress = TestIngress::new();
+            let publisher = MismatchPublisher::default();
+            let prologue = publisher.prologue.clone();
+            let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::new(false);
+
+            let error = ingress
+                .generate_and_publish(
+                    Context::new(serde_json::json!({})),
+                    RequestPlanePayloadCodec::Json,
+                    Instant::now(),
+                    ResponsePlaneModes {
+                        configured,
+                        advertised,
+                    },
+                    &lifecycle,
+                    publisher,
+                )
+                .await
+                .expect_err("mismatched response planes must fail");
+
+            let expected = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised.name(),
+                configured.name()
+            );
+            assert!(error.to_string().contains(&expected));
+            assert_eq!(*prologue.lock().unwrap(), Some(Some(expected)));
+            assert!(finished.load(Ordering::Acquire));
+        }
+    }
 
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {
@@ -786,6 +1450,59 @@ mod tests {
             .unwrap(),
             IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn velo_setup_failures_count_response_stream_errors() {
+        // An ingress not bound to a runtime endpoint has no Velo service.
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
+        let control = RequestControlMessage {
+            id: "test".into(),
+            request_type: RequestType::SingleIn,
+            response_type: ResponseType::ManyOut,
+            payload_codec: RequestPlanePayloadCodec::Json,
+            connection_info: ConnectionInfo {
+                transport: velo_response::TRANSPORT_NAME.into(),
+                info: "{}".into(),
+            },
+            metadata: Default::default(),
+            frontend_send_ts_ns: None,
+            request_stream_connection_info: None,
+        };
+        let payload = TwoPartCodec::default()
+            .encode_message(TwoPartMessage::from_parts(
+                serde_json::to_vec(&control).unwrap().into(),
+                Bytes::from_static(b"{}"),
+            ))
+            .unwrap();
+        let error = ingress
+            .handle_payload_shared(payload, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("live runtime endpoint"),
+            "{error}"
+        );
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                .get(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_quic_client_pool_initializes_without_add_metrics() {
+        let ingress = TestIngress::new();
+        assert!(ingress.metrics().is_none());
+
+        let first = ingress.quic_response_client_pool().unwrap();
+        let second = ingress.quic_response_client_pool().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     /// Which half of the teardown race a given run exercises.
@@ -1001,6 +1718,57 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// Run the pump with a health-check notifier set and a publisher whose
+    /// receiver is already gone, so every `send` fails. This models a client
+    /// that left before the engine produced its first chunk.
+    /// Returns whether the pump left a notification permit for the canary.
+    async fn pump_with_dead_publisher(
+        engine: impl Stream<Item = TestResponse> + Send + 'static,
+    ) -> bool {
+        let ingress = TestIngress::new();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(engine), ctx.context());
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        // `notify_one` stores a permit when no task is waiting, so a pending
+        // notification resolves immediately here.
+        notifier.notified().now_or_never().is_some()
+    }
+
+    /// Issue #15707: under overload the client often leaves before the engine
+    /// sends its first chunk, so every publish fails. The engine is still
+    /// making progress, so the canary timer must be reset.
+    #[tokio::test]
+    async fn publish_failure_with_engine_progress_still_resets_canary() {
+        let chunk = TestResponse::from_data(serde_json::json!({ "token": 0 }));
+        assert!(
+            pump_with_dead_publisher(stream::iter([chunk])).await,
+            "a produced non-error chunk must reset the canary even when the publish fails"
+        );
+    }
+
+    /// Error chunks do not prove the engine is healthy, so they must not reset
+    /// the canary timer even though they are engine output.
+    #[tokio::test]
+    async fn error_only_output_does_not_reset_canary() {
+        assert!(
+            !pump_with_dead_publisher(stream::iter(vec![TestResponse::from_error("boom")])).await,
+            "an error-only chunk must not reset the canary"
         );
     }
 }

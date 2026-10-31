@@ -19,7 +19,9 @@ pytestmark = [
 ]
 
 
-def test_audio_request_wire_shape_and_defaults():
+def test_audio_request_wire_shape():
+    # `speed` is the one request field with a protocol default; the frontend
+    # fills it in. The handlers own the default for `response_format`.
     request = NvCreateAudioSpeechRequest(
         input="hello",
         model="qwen-tts",
@@ -34,7 +36,6 @@ def test_audio_request_wire_shape_and_defaults():
         "model": "qwen-tts",
         "voice": "vivian",
         "data_source": "b64_json",
-        "response_format": "wav",
         "speed": 1.0,
         "task_type": "CustomVoice",
         "language": "English",
@@ -45,6 +46,19 @@ def test_audio_request_wire_shape_and_defaults():
 def test_audio_request_rejects_speed_outside_supported_range(speed):
     with pytest.raises(ValidationError):
         NvCreateAudioSpeechRequest(input="hi", speed=speed)
+
+
+def test_audio_request_speed_omitted_is_the_default_and_explicit_is_kept():
+    assert NvCreateAudioSpeechRequest(input="hi").speed == 1.0
+    assert NvCreateAudioSpeechRequest(input="hi", speed=2.5).speed == 2.5
+
+
+def test_audio_request_null_speed_is_not_part_of_the_worker_contract():
+    # A client may send `"speed": null`; the frontend reads it as 1.0 and
+    # forwards the number. The generated model describes what a worker
+    # receives, so `null` is rejected here, not normalized.
+    with pytest.raises(ValidationError):
+        NvCreateAudioSpeechRequest.model_validate({"input": "hi", "speed": None})
 
 
 def test_audio_response_wire_shape():

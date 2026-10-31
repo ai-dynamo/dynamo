@@ -63,7 +63,7 @@ pub fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<
     keys
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct EmbeddingCacheIndexer {
     key_workers: Arc<DashMap<String, HashSet<WorkerId>>>,
     worker_cache_keys: Arc<DashMap<WorkerId, HashSet<String>>>,

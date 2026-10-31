@@ -29,6 +29,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "You MUST use two tools in parallel to resolve the user request: call get_current_weather for each city AND call is_holiday_today to check if today is a holiday. Do not answer without using both tools.".to_string()
                 ),
                 name: None,
+                tools: None,
             }
         ),
         dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -43,7 +44,9 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
 
     let tools = vec![
         dynamo_protocols::types::ChatCompletionTool {
+            custom: None,
             r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            defer_loading: None,
             function: dynamo_protocols::types::FunctionObject {
                 name: "get_current_weather".to_string(),
                 description: Some("Get weather for a city/state in specified units".to_string()),
@@ -58,10 +61,13 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "additionalProperties": false
                 })),
                 strict: None,
+                defer_loading: None,
             },
         },
         dynamo_protocols::types::ChatCompletionTool {
+            custom: None,
             r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            defer_loading: None,
             function: dynamo_protocols::types::FunctionObject {
                 name: "is_holiday_today".to_string(),
                 description: Some("Return whether today is a public holiday".to_string()),
@@ -71,6 +77,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "additionalProperties": false
                 })),
                 strict: None,
+                defer_loading: None,
             },
         },
     ];
@@ -87,6 +94,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         .expect("Failed to build chat completion request");
 
     NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner,
         common: CommonExt::default(),
         nvext: None,
@@ -94,6 +102,8 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     }
 }

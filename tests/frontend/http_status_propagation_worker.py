@@ -26,8 +26,8 @@ from dynamo.frontend.utils import extract_mm_urls
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_http_status_propagation import (
+    BACKEND_MESSAGE,
     ENDPOINT_PATH,
-    EXPECTED_MESSAGE,
     EXPECTED_STATUS,
     MODEL_NAME,
     PASSTHROUGH_ENDPOINT_PATH,
@@ -47,7 +47,7 @@ class _StatusLikeError(Exception):
 
 
 async def generate(request, context):
-    raise _StatusLikeError(status=EXPECTED_STATUS, message=EXPECTED_MESSAGE)
+    raise _StatusLikeError(status=EXPECTED_STATUS, message=BACKEND_MESSAGE)
     yield  # unreachable; needed to make this an async generator
 
 
@@ -60,7 +60,7 @@ async def generate_passthrough(request, context):
         # URL must raise before this generator can produce or delegate work.
         await ImageLoader().load_image_batch(image_items)
         raise AssertionError("blocked media URL unexpectedly passed validation")
-    raise _StatusLikeError(status=EXPECTED_STATUS, message=EXPECTED_MESSAGE)
+    raise _StatusLikeError(status=EXPECTED_STATUS, message=BACKEND_MESSAGE)
     yield  # unreachable; needed to make this an async generator
 
 

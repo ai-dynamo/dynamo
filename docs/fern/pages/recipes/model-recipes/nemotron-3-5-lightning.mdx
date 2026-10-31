@@ -15,23 +15,23 @@ This recipe deploys the NVFP4 or BF16 variant of `NVIDIA-Nemotron-3.5-Lightning-
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
-<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
-<label htmlFor="recipe-sku-b200">B200</label>
 <input type="radio" id="recipe-sku-h100" name="recipe-sku" value="h100" />
 <label htmlFor="recipe-sku-h100">H100</label>
 <input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
 <label htmlFor="recipe-sku-h200">H200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200</label>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
 <label htmlFor="recipe-sku-gb200">GB200</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-trtllm-agg" name="recipe-variant" value="trtllm-agg" />
+<label htmlFor="recipe-variant-trtllm-agg">TensorRT-LLM aggregated</label>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
 <label htmlFor="recipe-variant-agg">vLLM aggregated</label>
 <input type="radio" id="recipe-variant-vllm-disagg" name="recipe-variant" value="vllm-disagg" />
 <label htmlFor="recipe-variant-vllm-disagg">vLLM disaggregated</label>
-<input type="radio" id="recipe-variant-trtllm-agg" name="recipe-variant" value="trtllm-agg" />
-<label htmlFor="recipe-variant-trtllm-agg">TensorRT-LLM aggregated</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16</span>

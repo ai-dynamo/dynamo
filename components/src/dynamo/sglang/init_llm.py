@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 import os
 import time
@@ -15,30 +16,58 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.gateway import (
+    attached_engine_load_time,
+    gateway_worker_count,
+    serve_via_gateway_children,
+)
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.state_agent import StateAgentLifecycle
 
 
-async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
-    """Perform warmup request for prefill engine to reduce initial TTFT.
+async def _warmup_prefill_engine(
+    engine: sgl.Engine, server_args, metrics_task: asyncio.Task
+) -> None:
+    """Warm the prefill engine and stop metrics if warmup fails.
 
-    Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops). Delegates to
-    `_disagg.warmup_prefill_engine`.
+    Raises on failure so the worker never registers with a broken engine.
     """
     from dynamo.sglang._disagg import warmup_prefill_engine
 
-    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    try:
+        await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    except asyncio.CancelledError:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        raise
+    except asyncio.TimeoutError as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
+        raise RuntimeError(
+            "Prefill warmup timed out; worker cannot serve requests"
+        ) from exc
+    except Exception as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup failed: %s — aborting worker startup", exc)
+        raise RuntimeError(f"Prefill warmup failed: {exc}") from exc
+
+
+def _freeze_gc_after_init(enabled: bool) -> None:
+    if enabled:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
 async def init_decode(
@@ -48,6 +77,7 @@ async def init_decode(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    attached_engine: Optional[object] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -62,6 +92,7 @@ async def init_decode(
     )
 
     # Use pre-created engine if provided (snapshot mode)
+    load_time: Optional[float]
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
@@ -70,6 +101,11 @@ async def init_decode(
                 "Snapshot ServerArgs must disable forward-pass metrics before "
                 "engine creation"
             )
+    elif attached_engine is not None:
+        # Gateway child: the parent owns the engine, this process only holds a
+        # TokenizerWorker registered with its router.
+        engine = attached_engine
+        load_time = attached_engine_load_time()
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -77,6 +113,20 @@ async def init_decode(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    gateway_count = gateway_worker_count(server_args, dynamo_args)
+    if gateway_count > 1:
+        # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
+        # serve requests; gateway children do, this process keeps the engine alive.
+        try:
+            _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
+            await serve_via_gateway_children(
+                engine, gateway_count, shutdown_event, load_time=load_time
+            )
+        finally:
+            engine.shutdown()
+            if run_deferred_handlers is not None:
+                await run_deferred_handlers()
+        return
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
@@ -100,8 +150,9 @@ async def init_decode(
     # which take a different init path entirely. Narrow for mypy.
     assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
-    publisher.component_gauges.set_model_load_time(load_time)
-    logging.debug(f"SGLang model load time: {load_time:.2f}s")
+    if load_time is not None:
+        publisher.component_gauges.set_model_load_time(load_time)
+        logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
@@ -129,6 +180,8 @@ async def init_decode(
         first_token_source=first_token_source,
     )
     handler.register_engine_routes(runtime)
+    if attached_engine is not None:
+        handler.follow_shared_pause_state()
 
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
@@ -139,6 +192,8 @@ async def init_decode(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
 
+    _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
+
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
@@ -146,7 +201,10 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -181,23 +239,25 @@ async def init_decode(
                 needs=decode_needs,
                 # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
         try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+            await state_agent.close()
+        finally:
+            await finish_worker_teardown(
+                metrics_task,
+                handler.cleanup,
+                run_deferred_handlers,
+                body_failed=body_failed,
+            )
 
 
 async def init_prefill(
@@ -207,6 +267,7 @@ async def init_prefill(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    attached_engine: Optional[object] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -221,6 +282,7 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (snapshot mode)
+    load_time: Optional[float]
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
@@ -229,6 +291,11 @@ async def init_prefill(
                 "Snapshot ServerArgs must disable forward-pass metrics before "
                 "engine creation"
             )
+    elif attached_engine is not None:
+        # Gateway child: the parent owns the engine, this process only holds a
+        # TokenizerWorker registered with its router.
+        engine = attached_engine
+        load_time = attached_engine_load_time()
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -236,6 +303,19 @@ async def init_prefill(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    gateway_count = gateway_worker_count(server_args, dynamo_args)
+    if gateway_count > 1:
+        # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
+        # serve requests; gateway children do, this process keeps the engine alive.
+        try:
+            await serve_via_gateway_children(
+                engine, gateway_count, shutdown_event, load_time=load_time
+            )
+        finally:
+            engine.shutdown()
+            if run_deferred_handlers is not None:
+                await run_deferred_handlers()
+        return
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
@@ -259,33 +339,30 @@ async def init_prefill(
     # which take a different init path entirely. Narrow for mypy.
     assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
-    publisher.component_gauges.set_model_load_time(load_time)
+    if load_time is not None:
+        publisher.component_gauges.set_model_load_time(load_time)
 
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
-    try:
-        await _warmup_prefill_engine(engine, server_args)
-    except asyncio.TimeoutError as e:
-        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
-        raise RuntimeError(
-            "Prefill warmup timed out; worker cannot serve requests"
-        ) from e
-    except Exception as e:
-        logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
-        raise RuntimeError(f"Prefill warmup failed: {e}") from e
+    await _warmup_prefill_engine(engine, server_args, metrics_task)
 
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
+    if attached_engine is not None:
+        handler.follow_shared_pause_state()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
     ready_event = asyncio.Event()
 
+    body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -328,19 +405,21 @@ async def init_prefill(
                 # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
                 # advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
         try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+            await state_agent.close()
+        finally:
+            await finish_worker_teardown(
+                metrics_task,
+                handler.cleanup,
+                run_deferred_handlers,
+                body_failed=body_failed,
+            )

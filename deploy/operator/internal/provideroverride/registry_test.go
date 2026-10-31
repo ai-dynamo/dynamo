@@ -42,7 +42,7 @@ func TestExpectedTarget(t *testing.T) {
 	}
 	forcedScalingGroup := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		Experimental: &nvidiacomv1beta1.ExperimentalSpec{
-			Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+			Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 		},
 	}
 	interPodGMS := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
@@ -68,12 +68,12 @@ func TestExpectedTarget(t *testing.T) {
 		{name: "single-node component PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: singleNode, want: TargetPodCliqueTemplateSpec},
 		{name: "multinode component scaling group", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: multinode, want: TargetPodCliqueScalingGroupConfig},
 		{name: "forced component scaling group", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: forcedScalingGroup, want: TargetPodCliqueScalingGroupConfig},
-		{name: "multinode leader PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeLeader, component: multinode, want: TargetPodCliqueTemplateSpec},
-		{name: "multinode worker PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeWorker, component: multinode, want: TargetPodCliqueTemplateSpec},
+		{name: "multinode leader PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleLeader, component: multinode, want: TargetPodCliqueTemplateSpec},
+		{name: "multinode worker PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleWorker, component: multinode, want: TargetPodCliqueTemplateSpec},
 		{name: "component provider unsupported", provider: consts.WorkloadProviderComponent, version: GroveAPIVersion, scope: ScopeRoot, wantErr: "does not support provider overrides"},
 		{name: "version unsupported", provider: consts.WorkloadProviderGrove, version: "grove.io/v2", scope: ScopeRoot, wantErr: "unsupported Grove apiVersion"},
-		{name: "role requires multinode", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeLeader, component: singleNode, wantErr: "requires a multinode component"},
-		{name: "GMS roles unsupported", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeWorker, component: interPodGMS, wantErr: "not supported for inter-pod GMS"},
+		{name: "role requires multinode", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleLeader, component: singleNode, wantErr: "requires a multinode component"},
+		{name: "GMS roles unsupported", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleWorker, component: interPodGMS, wantErr: "not supported for inter-pod GMS"},
 	}
 
 	for _, tt := range tests {
@@ -138,6 +138,13 @@ func TestValidateValue(t *testing.T) {
 			target: TargetPodCliqueScalingGroupConfig,
 			value:  `{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
 		},
+		{name: "standalone budget only", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":2}}`},
+		{name: "scaling group topology and budget", target: TargetPodCliqueScalingGroupConfig, value: `{"topologyConstraint":{},"rollingUpdate":{"maxUnavailable":2}}`},
+		{name: "zero budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":0}}`, wantErr: []string{"must be a positive 32-bit integer"}},
+		{name: "null budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":null}}`, wantErr: []string{"is required"}},
+		{name: "missing budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{}}`, wantErr: []string{"is required"}},
+		{name: "null rolling update", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":null}`, wantErr: []string{"must be a JSON object"}},
+		{name: "other rolling knob rejected", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":2,"maxSurge":1}}`, wantErr: []string{"maxSurge"}, ownershipViolation: true},
 		{
 			name:               "root structural field is rejected",
 			target:             TargetPodCliqueSet,
@@ -170,6 +177,12 @@ func TestValidateValue(t *testing.T) {
 			value:   `{"topologyConstraint":{"pack":"rack"}}`,
 			wantErr: []string{"does not match the registered PodCliqueTemplateSpec schema"},
 		},
+		{name: "standalone native minimum", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":2}}`},
+		{name: "scaling-group native minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":2}`},
+		{name: "standalone minimum cannot rewrite podSpec", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":1,"podSpec":{}}}`, wantErr: []string{"spec.podSpec"}, ownershipViolation: true},
+		{name: "null minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":null}`, wantErr: []string{"minAvailable"}},
+		{name: "zero minimum", target: TargetPodCliqueTemplateSpec, value: `{"spec":{"minAvailable":0}}`, wantErr: []string{"spec.minAvailable"}},
+		{name: "fractional minimum", target: TargetPodCliqueScalingGroupConfig, value: `{"minAvailable":1.5}`, wantErr: []string{"does not match the registered"}},
 	}
 
 	for _, tt := range tests {

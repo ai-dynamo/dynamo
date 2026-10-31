@@ -6,15 +6,10 @@ use std::collections::HashSet;
 use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{
-        AdmissionAttempt,
-        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-    },
-    selector::WorkerSelector,
+    scheduling::queue::BookingHandle,
 };
 
-use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
 
 /// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
@@ -26,15 +21,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 pub struct PrefillReservation {
     worker: WorkerWithDpRank,
     dp_rank: Option<u32>,
-    release: ReservationRelease,
-}
-
-enum ReservationRelease {
-    Kv {
-        cleanup: SchedulerBookingCleanup,
-        booking: Option<SchedulerBookingDescriptor>,
-    },
-    None,
+    booking: Option<BookingHandle>,
 }
 
 impl PrefillReservation {
@@ -48,29 +35,14 @@ impl PrefillReservation {
 
     /// Release this booking and wait for the scheduler to acknowledge it.
     pub async fn release(mut self) -> Result<()> {
-        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
-            && let Some(booking) = booking.take()
-        {
-            cleanup.enqueue_acknowledged(booking).wait().await?;
+        if let Some(booking) = self.booking.take() {
+            booking.release().await?;
         }
         Ok(())
     }
 }
 
-impl Drop for PrefillReservation {
-    fn drop(&mut self) {
-        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
-            && let Some(booking) = booking.take()
-        {
-            cleanup.enqueue(booking);
-        }
-    }
-}
-
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouter {
     /// Select a prefill worker and reserve it when KV routing is enabled.
     ///
     /// If this future is dropped while queued, the scheduler retracts its
@@ -89,6 +61,7 @@ where
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
@@ -110,11 +83,11 @@ where
             return Ok(PrefillReservation {
                 worker: WorkerWithDpRank::new(worker_id, 0),
                 dp_rank: None,
-                release: ReservationRelease::None,
+                booking: None,
             });
         };
         let admitted = chooser
-            .find_best_match_details_with_lifecycle(
+            .find_best_match_details_with_policy_class_admitted(
                 Some(reservation_id),
                 token_ids,
                 block_mm_infos,
@@ -125,29 +98,24 @@ where
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
+                None,
                 None,
                 None,
                 allowed_worker_ids,
                 routing_constraints,
             )
             .await?;
-        let (outcome, attempt) = admitted.into_parts();
+        let (outcome, booking) = admitted.into_parts();
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
-                    anyhow::bail!("prefill reservation admission did not return a tracked attempt");
+                let Some(booking) = booking else {
+                    anyhow::bail!("prefill reservation admission did not return a booking");
                 };
                 Ok(PrefillReservation {
                     worker,
                     dp_rank: Some(worker.dp_rank),
-                    release: ReservationRelease::Kv {
-                        cleanup: chooser.booking_cleanup(),
-                        booking: Some(SchedulerBookingDescriptor {
-                            request_id: reservation_id.to_string(),
-                            worker,
-                            attempt_id,
-                        }),
-                    },
+                    booking: Some(booking),
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
@@ -161,79 +129,6 @@ where
             }
         }
     }
-
-    /// Query the best prefill worker without executing a request.
-    ///
-    /// This query is advisory and does not book scheduler or occupancy state;
-    /// concurrent callers may observe the same worker.
-    #[expect(clippy::too_many_arguments)]
-    pub async fn query_prefill_worker(
-        &self,
-        token_ids: &[u32],
-        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        lora_name: Option<String>,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-    ) -> Result<PrefillQueryOutcome> {
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
-            return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        }
-        let binding = self
-            .binding
-            .load_full()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
-
-        let router = &binding.router;
-        let Some(kv_router) = router.kv_router_if_enabled() else {
-            let worker_id = router
-                .peek_next_worker()
-                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-            return Ok(PrefillQueryOutcome::Routed {
-                worker_id,
-                dp_rank: None,
-            });
-        };
-        let outcome = kv_router
-            .find_best_match_details(
-                None,
-                token_ids,
-                block_mm_infos,
-                None,
-                false,
-                false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                None,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await?;
-        match outcome {
-            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                Ok(PrefillQueryOutcome::Routed {
-                    worker_id: worker.worker_id,
-                    dp_rank: Some(worker.dp_rank),
-                })
-            }
-            crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                Ok(PrefillQueryOutcome::QueueRejected { rejection })
-            }
-        }
-    }
-
-    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        if let Some(binding) = self.binding.load_full()
-            && let Some(kv_router) = binding.router.kv_router_if_enabled()
-        {
-            kv_router.register_workers(worker_ids);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -244,8 +139,9 @@ mod tests {
         time::Duration,
     };
 
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use async_trait::async_trait;
-    use dynamo_kv_router::{config::KvRouterConfig, selector::DefaultWorkerSelector};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -253,20 +149,20 @@ mod tests {
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         engine::{AsyncEngine, AsyncEngineContext},
         pipeline::{
-            AddressedRequest, Context, Error, ManyIn, ManyOut, PushRouter, ResponseStream,
-            RouterMode, SingleIn, StreamingDispatch, context::Controller,
+            AddressedRequest, Context, Error, ManyIn, ManyOut, ResponseStream, RouterMode,
+            SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
         traits::DistributedRuntimeProvider,
     };
-    use futures::{StreamExt, future::join_all};
+    use futures::StreamExt;
     use tokio::sync::watch;
 
     use super::*;
     use crate::{
         discovery::ModelManager,
         kv_router::prefill_router::PrefillBinding,
-        kv_router::{KvPushRouter, KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
+        kv_router::{KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
@@ -344,6 +240,7 @@ mod tests {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(root.to_path_buf())),
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: EventTransportKind::Zmq,
         }
     }
@@ -359,27 +256,15 @@ mod tests {
             .unwrap()
     }
 
-    async fn query_worker(router: &PrefillRouter) -> u64 {
-        match router
-            .query_prefill_worker(
-                &[1, 2, 3],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                RoutingConstraints::default(),
-            )
-            .await
+    /// The advisory builtin-host peek used by `reserve_prefill_worker`'s non-KV arm.
+    fn query_worker(router: &PrefillRouter) -> u64 {
+        router
+            .binding
+            .load_full()
             .unwrap()
-        {
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => {
-                assert_eq!(dp_rank, None);
-                worker_id
-            }
-            PrefillQueryOutcome::QueueRejected { .. } => panic!("RR query cannot queue"),
-        }
+            .router
+            .peek_next_worker()
+            .expect("RR query cannot fail")
     }
 
     async fn shared_router(
@@ -453,21 +338,24 @@ mod tests {
         )
         .await
         .unwrap();
-        let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
-            .await
-            .unwrap();
         let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(
-                push_router,
-                load_context,
-                None,
-                crate::session_affinity::SessionAffinityMode::Hard,
-            )
-            .unwrap(),
+            RoutingHost::builder(client, mode)
+                .load_context(load_context)
+                .dispatch(dispatch as crate::kv_router::LlmDispatch)
+                .build()
+                .await
+                .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
+                target_id: crate::discovery::WorkerSetTargetId::Legacy(
+                    dynamo_runtime::protocols::EndpointId {
+                        namespace: namespace.to_string(),
+                        component: component.to_string(),
+                        name: endpoint_name.to_string(),
+                    },
+                ),
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
                     namespace: namespace.to_string(),
                     component: component.to_string(),
@@ -485,12 +373,7 @@ mod tests {
         (shared, prefill, worker_runtimes, workers)
     }
 
-    async fn tracked_binding(
-        label: &str,
-    ) -> (
-        Arc<PrefillBinding<DefaultWorkerSelector>>,
-        Arc<KvRouter<DefaultWorkerSelector>>,
-    ) {
+    async fn tracked_binding(label: &str) -> (Arc<PrefillBinding>, Arc<KvRouter>) {
         let runtime = Runtime::from_current().unwrap();
         let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
             .await
@@ -526,7 +409,7 @@ mod tests {
                 workers_rx,
                 None,
                 16,
-                DefaultWorkerSelector::new(Some(config.clone()), "prefill"),
+                crate::kv_router::SelectionPolicySource::Registry,
                 Some(config),
                 None,
                 Some(WorkerType::Prefill),
@@ -539,22 +422,21 @@ mod tests {
             .await
             .unwrap(),
         );
-        let push_router =
-            PushRouter::<PreprocessedRequest, LlmResponse>::from_client(client, RouterMode::KV)
-                .await
-                .unwrap();
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(chooser.clone())
+            .build()
+            .await
+            .unwrap();
         let binding = Arc::new(PrefillBinding {
+            target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
-            router: Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap()),
+            router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
         });
         (binding, chooser)
     }
 
-    async fn tracked_prefill_router() -> (
-        Arc<PrefillRouter<DefaultWorkerSelector>>,
-        Arc<KvRouter<DefaultWorkerSelector>>,
-    ) {
+    async fn tracked_prefill_router() -> (Arc<PrefillRouter>, Arc<KvRouter>) {
         let (binding, chooser) = tracked_binding("primary").await;
         let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
         router.binding.store(Some(binding));
@@ -563,6 +445,85 @@ mod tests {
             std::sync::atomic::Ordering::Release,
         );
         (router, chooser)
+    }
+
+    #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let endpoint = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7, 8]);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([7, 8]))
+        );
+        chooser.client().report_instance_down(7);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([8]))
+        );
+        let mut other = endpoint.clone();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
+        router.lifecycle.store(
+            PrefillLifecycleState::Unavailable as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+        use std::sync::mpsc;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let original = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7]);
+        let (replacement, _) = tracked_binding("availability-replacement").await;
+        let mut target = router.target.lock();
+        *target = Some(crate::discovery::WorkerSetTargetId::Legacy(
+            original.clone(),
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for("legacy", &original))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.target_id.clone());
+        router.binding.store(Some(replacement));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
     }
 
     #[tokio::test]
@@ -577,6 +538,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )
@@ -593,6 +555,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )
@@ -654,6 +617,7 @@ mod tests {
                 0.0,
                 0,
                 None,
+                None,
                 RoutingConstraints::default(),
             )
             .await
@@ -662,7 +626,9 @@ mod tests {
         assert_eq!(reservation.dp_rank(), None);
         reservation.release().await.unwrap();
 
-        let concurrent_peeks = join_all((0..16).map(|_| query_worker(&prefill_router))).await;
+        let concurrent_peeks = (0..16)
+            .map(|_| query_worker(&prefill_router))
+            .collect::<Vec<_>>();
         assert!(
             concurrent_peeks
                 .iter()
@@ -670,8 +636,8 @@ mod tests {
         );
 
         for expected_worker in &expected_workers {
-            assert_eq!(query_worker(&prefill_router).await, *expected_worker);
-            assert_eq!(query_worker(&prefill_router).await, *expected_worker);
+            assert_eq!(query_worker(&prefill_router), *expected_worker);
+            assert_eq!(query_worker(&prefill_router), *expected_worker);
             let mut stream = shared_router
                 .generate(Context::new(request()))
                 .await
@@ -707,7 +673,9 @@ mod tests {
             )
             .await;
 
-            let _ = join_all((0..16).map(|_| query_worker(&prefill))).await;
+            for _ in 0..16 {
+                query_worker(&prefill);
+            }
             assert_eq!(
                 workers
                     .iter()

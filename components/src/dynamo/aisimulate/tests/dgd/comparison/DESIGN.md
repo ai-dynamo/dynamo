@@ -1,0 +1,304 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# DGD comparison test design
+
+## Purpose
+
+The comparison suite generates DynamoGraphDeployments for the same deployment intent through:
+
+- the existing DGDR v1beta1 profiler;
+- AI Simulate Sweeper followed by the AI Configurator renderer; and
+- AI Simulate Sweeper followed by the standalone direct renderer.
+
+The runner generates manifests for inspection; it does not deploy them or require the generators to
+choose identical topologies. The issue #8469 suite retains the recipe-matrix rows. Every row has
+native v1beta1 and Sweeper inputs, including rows with documented renderer failures.
+
+## Attribution
+
+This implementation builds on Ashna Mehrotra's work in
+[PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031). In particular, it reuses:
+
+- the initial eight issue #8469 DGDR and Sweeper input pairs;
+- the idea of exercising the existing profiler, Sweeper-AIC, and Sweeper-direct paths together;
+- cluster GPU-inventory validation and isolated preparation of multi-document manifests; and
+- model discovery when a DGD passes `--model` through a container environment variable.
+
+This design replaces that PR's case metadata, hardware profile, resolved-input, and report schemas
+with the smaller case/hardware/suite layout below. It also treats final DGDs as the comparison
+artifacts instead of introducing a custom report contract.
+
+## Dimensions
+
+The suite keeps three independent concepts explicit:
+
+```text
+case       deployment intent and native profiler inputs
+hardware   provider-independent accelerator capabilities and GPU budget
+suite      selected case and hardware combinations
+```
+
+Cloud-provider binding is not part of the hardware SKU. Provider-specific EFA, RoCE, InfiniBand,
+image, and Kubernetes resource settings belong to the existing Recipe Kustomize Components and
+Kustomize matrices. They can be composed with a generated Kustomize base for live deployment.
+
+## Layout
+
+```text
+components/src/dynamo/aisimulate/tests/dgd/comparison/
+├── DESIGN.md
+├── testsuite-issue-8469.yaml
+├── cases/
+│   └── qwen3-32b-vllm-disagg/
+│       ├── dgdr-v1beta1.yaml
+│       ├── sweeper.yaml
+│       ├── recipe.yaml                  # optional provenance
+│       └── recipe.new.yaml              # ignored requirement proposal
+├── hardware/
+│   └── h200-sxm-16gpu/
+│       ├── dgdr-v1beta1.patch.yaml
+│       └── sweeper.patch.yaml
+└── generated/
+    ├── testsuite-issue-8469/
+    │   └── h200-sxm-16gpu/
+    │       └── qwen3-32b-vllm-disagg/
+    └── manual/                         # ignored individual runs
+```
+
+There is one case hierarchy. There is no second recipe catalog or global requirements registry.
+
+## Cases
+
+A case contains the native inputs shared by every hardware run. Hardware values are omitted:
+
+```yaml
+# cases/qwen3-32b-vllm-disagg/dgdr-v1beta1.yaml
+# Abridged to the fields that define the shared comparison intent.
+model: Qwen/Qwen3-32B
+backend: vllm
+image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0
+workload:
+  isl: 1024
+  osl: 1024
+  requestRate: 10
+sla:
+  ttft: 2000
+  itl: 25
+```
+
+```yaml
+# cases/qwen3-32b-vllm-disagg/sweeper.yaml
+search_space:
+  model_name: Qwen/Qwen3-32B
+  deployment_mode: [disagg]
+  backend: [vllm]
+workload:
+  isl: 1024
+  osl: 1024
+  request_rate: 10
+goal:
+  target: goodput_per_gpu
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
+```
+
+Issue #8469 does not define one comparable workload for all recipes. Cases without a historical
+workload use the suite baseline (`isl: 1024`, `osl: 1024`, `requestRate: 10`, TTFT 2000 ms, ITL
+25 ms) in both native inputs. This makes renderer comparison explicit; it does not claim that the
+workload represents the recipe's production use.
+
+Both native inputs are mandatory. A missing `dgdr-v1beta1.yaml` or `sweeper.yaml` is an invalid
+case, not an implicit skip.
+
+## Hardware configurations
+
+Each hardware configuration contains one YAML merge patch per native input schema:
+
+```yaml
+# hardware/h200-sxm-16gpu/dgdr-v1beta1.patch.yaml
+hardware:
+  gpuSku: h200_sxm
+  vramMb: 141120
+  totalGpus: 16
+  numGpusPerNode: 8
+  interconnect: nvlink
+  rdma: true
+```
+
+```yaml
+# hardware/h200-sxm-16gpu/sweeper.patch.yaml
+search_space:
+  hardware_sku: h200_sxm
+  gpu_budget: 16
+```
+
+Mappings merge recursively, scalar values replace existing values, lists replace existing lists,
+and `null` removes a field. The runner validates that the composed inputs agree on their normalized
+GPU SKU and GPU budget.
+
+Hardware patches apply only to profiler inputs. They never repair a generated DGD. Provider
+specialization, when needed, is a subsequent Kustomize composition rather than part of profiling.
+
+## Suites and individual runs
+
+A suite records concrete case and hardware combinations:
+
+```yaml
+source: https://github.com/ai-dynamo/dynamo/issues/8469
+
+tests:
+  - case: qwen3-32b-vllm-disagg
+    hardware: h200-sxm-16gpu
+```
+
+The same combination can be generated without a suite by naming its case and hardware directly.
+Suites are batch selection, not another source of case metadata.
+
+The normal row stays intentionally small:
+
+```yaml
+- case: qwen3-32b-vllm-disagg
+  hardware: h200-sxm-16gpu
+```
+
+Known exceptions are opt-in. `skipped` never runs the selected scope. `broken` runs it and only
+accepts failures whose message matches its `match` regex. Every exception requires a concrete
+reason; evidence links are optional. A historical `broken` entry with no `match` documents the
+problem but does not suppress failures. Record an observed error before adding a matcher: an
+unrelated import, schema or runtime error must still fail the suite. Successful formerly broken
+variants are reported as unexpected passes.
+
+```yaml
+- case: gpt-oss-120b-trtllm-agg
+  hardware: gb200-sxm-4gpu
+  exceptions:
+    render:
+      sweeper-direct:
+        status: broken
+        reason: Direct rendering does not support the selected TRT-LLM topology.
+        match: 'TEP \(Tensor Expert Parallelism\) is not implemented for TrtLLM backend'
+        links:
+          - https://github.com/ai-dynamo/dynamo/issues/8469
+```
+
+Supported exception scopes are:
+
+| Phase | Variant |
+| --- | --- |
+| `render` | `profiler-v1beta1`, `sweeper`, `sweeper-aic`, `sweeper-direct` |
+
+For the exceptional case where none of its variants should run, a row may put `status`, `reason`,
+and optional `links` directly beside `case` and `hardware`. A case-wide `broken` status may also
+specify `match`. A row cannot combine case-wide status with narrower `exceptions`.
+
+## Optional recipes
+
+An optional case-local `recipe.yaml` combines provenance and known hardware requirements:
+
+```yaml
+source: recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml
+
+requirements:
+  h200-sxm-16gpu:
+    gpus: 16
+```
+
+Recipe files retain provenance and known hardware requirements for human comparison. A missing
+recipe or requirement never prevents either generator from running. The runner does not deploy
+recipes or infer GPU requirements.
+
+A future live-deployment runner may try a recipe on otherwise unknown suite hardware. Only a
+successful recipe deployment and inference request would prove the combination; a generated DGD
+alone does not establish recipe support. The existing `load_recipe` and
+`write_discovered_recipe_requirement` helpers support recording that evidence without changing
+the maintained `recipe.yaml`. They write an adjacent ignored `recipe.new.yaml` that retains the
+source and existing requirements and accumulates successive hardware proposals. A requirement
+already matching `recipe.yaml` does not create or rewrite a proposal. No live-deployment or
+hardware-discovery CLI flag is implemented by the current comparison runner.
+
+Review and accept each proposal individually:
+
+```bash
+case_dir=components/src/dynamo/aisimulate/tests/dgd/comparison/cases/qwen3-32b-vllm-disagg
+diff -u "$case_dir/recipe.yaml" "$case_dir/recipe.new.yaml"
+# After reviewing the evidence and proposed requirements for this case:
+mv "$case_dir/recipe.new.yaml" "$case_dir/recipe.yaml"
+```
+
+## Composition
+
+```text
+case/dgdr-v1beta1.yaml
+  + hardware/<name>/dgdr-v1beta1.patch.yaml
+  → dgdr-v1beta1-composed.yaml
+  → v1 profiler
+  → dgd-profiler-v1beta1.yaml
+
+case/sweeper.yaml
+  + hardware/<name>/sweeper.patch.yaml
+  → sweeper-composed.yaml
+  → one Sweeper search and selected Candidate
+  ├──→ AI Configurator renderer → dgd-sweeper-aic.yaml
+  └──→ direct renderer          → dgd-sweeper-direct.yaml
+```
+
+Both Sweeper renderers receive the same selected Candidate.
+
+## Generated files and goldens
+
+Final DGDs are checked-in generated goldens:
+
+```text
+generated/<suite-name>/<hardware>/<case>/
+├── dgd-profiler-v1beta1.yaml
+├── dgd-sweeper-aic.yaml
+└── dgd-sweeper-direct.yaml
+```
+
+These are the possible variants, not three mandatory files per case. A failed search or renderer
+does not produce a placeholder golden. Its absence must agree with a documented render exception,
+or suite rendering fails.
+
+The suite name is the suite filename without `.yaml`, so every checked-in golden has one owning
+testsuite. Individual `--hardware` runs default to the ignored `generated/manual/` tree. All final
+DGDs are complete manifests that can be inspected, diffed, or applied individually. Updating a
+golden is an explicit contributor action.
+
+The same directory may contain ignored diagnostics after a local update run:
+
+```text
+dgdr-v1beta1-composed.yaml
+sweeper-composed.yaml
+candidate-sweeper.yaml
+error-sweeper-aic.txt
+error-sweeper-direct.txt
+.cache/
+```
+
+Composed inputs and Candidates are useful for explaining a diff, but are not stable API outputs or
+goldens. No custom report schema is defined; process output and the test framework carry execution
+status.
+
+Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
+CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
+a stochastic search an exact-diff gate.
+
+The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
+failure isolation. The automatic public Recommend-to-DGD coverage lives in the
+[DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
+
+## Non-goals
+
+The comparison does not require:
+
+- byte-for-byte equality between different generators;
+- identical topology or replica choices;
+- performance equivalence or benchmarking;
+- case-local hardware declarations;
+- a separate recipe hierarchy;
+- a custom report archive; or
+- post-generation patches that hide an invalid generator result.

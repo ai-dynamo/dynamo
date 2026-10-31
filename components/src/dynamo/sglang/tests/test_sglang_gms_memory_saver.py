@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,14 +13,21 @@ import pytest
 pytest.importorskip("gpu_memory_service", reason="gpu_memory_service is required")
 torch = pytest.importorskip("torch", reason="torch is required")
 
+import gpu_memory_service.integrations.sglang as gms_sglang  # noqa: E402
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver  # noqa: E402
 from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )
+from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
+
+# Expected device type for parametrized assertions — matches what
+# GMSMemorySaverImpl will produce via get_vmm_device_type().
+_HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+_EXPECTED_DEVICE = torch.device("xpu", 0) if _HAS_XPU else torch.device("cuda", 0)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -29,6 +37,56 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.core,
 ]
+
+
+@pytest.fixture
+def fake_gms_model_loader(monkeypatch):
+    model_loader = ModuleType("gpu_memory_service.integrations.sglang.model_loader")
+    model_loader.GMSModelLoader = object
+    monkeypatch.setitem(
+        sys.modules,
+        "gpu_memory_service.integrations.sglang.model_loader",
+        model_loader,
+    )
+    monkeypatch.setattr(gms_sglang, "_gms_initialized", False)
+    monkeypatch.setattr(gms_sglang, "_gms_lock_mode", None)
+    monkeypatch.setattr(gms_sglang, "_gms_ro_connect_timeout_ms", None)
+
+
+def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
+    class ReadOnlyServerArgs:
+        def __setattr__(self, name, value):
+            raise AssertionError(f"unexpected direct assignment: {name}={value!r}")
+
+    server_args = ReadOnlyServerArgs()
+    declare_resolution = Mock()
+    monkeypatch.setattr(gms_sglang, "declare_resolution", declare_resolution)
+
+    loader = gms_sglang.setup_gms(server_args)
+
+    declare_resolution.assert_called_once_with(
+        server_args,
+        "dynamo.gms",
+        enable_memory_saver=True,
+    )
+    assert loader is object
+    assert gms_sglang.is_gms_active()
+
+
+def test_setup_gms_rejects_engine_without_resolution_api(
+    monkeypatch,
+    fake_gms_model_loader,
+):
+    """SGLang <0.5.19 support is dropped; fail loudly instead of silently.
+
+    Assigning enable_memory_saver directly is a no-op on builds that resolve
+    config separately from raw ServerArgs, which would leave GMS regions inert.
+    """
+    server_args = SimpleNamespace(enable_memory_saver=False)
+    monkeypatch.setattr(gms_sglang, "declare_resolution", None)
+
+    with pytest.raises(RuntimeError, match="declare_resolution"):
+        gms_sglang.setup_gms(server_args)
 
 
 class _FakeManager:
@@ -65,6 +123,14 @@ class _FakeManager:
 
 @pytest.fixture
 def build_impl(monkeypatch, tmp_path):
+    # Ensure get_vmm_device_type() returns the correct type for
+    # GMSMemorySaverImpl.__init__ which calls it to determine self._device.
+    _dev_type = VMMDeviceType.XPU if _HAS_XPU else VMMDeviceType.CUDA
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "get_vmm_device_type",
+        lambda: _dev_type,
+    )
     monkeypatch.setattr(
         gms_memory_saver,
         "get_socket_path",
@@ -107,9 +173,9 @@ def build_impl(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("tag", "weights_lock", "expected_pool_calls"),
     [
-        ("weights", GrantedLockType.RW, [("weights", torch.device("cuda", 0))]),
+        ("weights", GrantedLockType.RW, [("weights", _EXPECTED_DEVICE)]),
         ("weights", GrantedLockType.RO, []),
-        ("kv_cache", GrantedLockType.RW, [("kv_cache", torch.device("cuda", 0))]),
+        ("kv_cache", GrantedLockType.RW, [("kv_cache", _EXPECTED_DEVICE)]),
         ("cuda_graph", GrantedLockType.RW, []),
     ],
 )
@@ -128,6 +194,24 @@ def test_region_uses_gms_pool_only_for_rw_managed_tags(
         pass
 
     assert pool_calls == expected_pool_calls
+
+
+@pytest.mark.parametrize(
+    "backup_options",
+    [
+        {"enable_cpu_backup": True},
+        {"enable_disk_backup": True},
+        {"enable_cpu_backup": True, "cpu_backup_backend": "pinned"},
+    ],
+)
+def test_region_rejects_enabled_backup_options(build_impl, backup_options):
+    impl, _, _, pool_calls = build_impl()
+
+    with pytest.raises(ValueError, match="unsupported option"):
+        with impl.region("weights", **backup_options):
+            pass
+
+    assert pool_calls == []
 
 
 def test_pause_resume_routes_only_managed_tags(build_impl):

@@ -48,6 +48,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def normalize_speculative_accept_length(
+    accept_length: Optional[float],
+    capabilities: WorkerCapabilities,
+    config: PlannerConfig,
+) -> float:
+    """Clamp a speculative accept length to ``[1.0, nextn + 1]``.
+
+    The decode capability's ``speculative_nextn`` takes precedence over the
+    config fallback. Returns ``1.0`` when speculation is off or the value is
+    missing or not finite.
+    """
+    d_caps = capabilities.decode
+    if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
+        nextn = d_caps.speculative_nextn
+    else:
+        nextn = max(0, int(config.speculative_nextn))
+    if nextn <= 0:
+        return 1.0
+    if accept_length is None or not math.isfinite(accept_length):
+        return 1.0
+    return min(max(float(accept_length), 1.0), float(nextn + 1))
+
+
 class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     """Shared in-memory scaling state for all planner modes.
 
@@ -101,6 +124,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._expected_num_d: Optional[int] = None
         self._prefill_scaling_in_progress: bool = False
         self._decode_scaling_in_progress: bool = False
+        self._pending_num_p = 0
+        self._pending_num_d = 0
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
@@ -129,6 +154,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode: Optional[str] = None
         self._diag_throughput_reason_prefill: Optional[str] = None
         self._diag_throughput_reason_decode: Optional[str] = None
+        self._diag_load_metadata_available: dict[str, bool] = {}
+        self._diag_throughput_metadata_available: dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,7 +164,9 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
         """Replace the current worker capabilities."""
         self._capabilities = capabilities
-        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
+        self._last_accept_length = normalize_speculative_accept_length(
+            self._last_accept_length, self._capabilities, self._config
+        )
         if self._is_easy:
             return
         if self._is_agg and hasattr(self, "_agg_regression"):
@@ -224,7 +253,92 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             kv_hit_rate=predicted_kv_hit_rate,
             accept_length=predicted_accept_length,
         )
-        return self._advance_load(obs)
+        decision = self._advance_load(obs)
+        if decision is not None and (self._pending_num_p or self._pending_num_d):
+            decision.num_prefill = self._startup_reduction(
+                decision.num_prefill, self._num_p_workers, self._pending_num_p
+            )
+            decision.num_decode = self._startup_reduction(
+                decision.num_decode, self._num_d_workers, self._pending_num_d
+            )
+            if decision.num_prefill is None and decision.num_decode is None:
+                return None
+        return decision
+
+    @staticmethod
+    def _startup_reduction(
+        target: Optional[int], ready: int, pending: int
+    ) -> Optional[int]:
+        # Never turn a scale-up recommendation into a cancellation. Ready-equal
+        # targets are meaningful only when there are pending replicas to cancel.
+        if target is None or target > ready or target >= ready + pending:
+            return None
+        return target
+
+    def _startup_disagg_decision(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        *,
+        source: Literal["load", "throughput"],
+    ) -> Optional[ScalingDecision]:
+        """Budget startup reductions against the unchanged peer's desired count.
+
+        Serving counts remain the input to load/consolidation prediction. Only
+        allocation accounting includes pending replicas, and an omitted or up
+        recommendation preserves that role's entire allocation.
+        """
+        targets = (
+            self._startup_reduction(num_p, self._num_p_workers, self._pending_num_p),
+            self._startup_reduction(num_d, self._num_d_workers, self._pending_num_d),
+        )
+        if targets == (None, None):
+            return None
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is not None and d_gpu is not None:
+            # Adjustable roles may retain their serving replicas to respect the
+            # floor; fixed peers retain both serving and pending replicas.
+            current_p = self._num_p_workers + (
+                self._pending_num_p if targets[0] is None else 0
+            )
+            current_d = self._num_d_workers + (
+                self._pending_num_d if targets[1] is None else 0
+            )
+            fitted_p, fitted_d = fit_directional_budget_pair(
+                current_p,
+                current_d,
+                targets[0] if targets[0] is not None else current_p,
+                targets[1] if targets[1] is not None else current_d,
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                # Reductions cannot need a larger ceiling. The final startup
+                # projection checks the hard ceiling and power budget against
+                # the actual applied pair; using a floor-only fit here keeps
+                # its strict floor (no integer-step tolerance) intact.
+                -1,
+                self._min_endpoint_for("prefill"),
+                self._min_endpoint_for("decode"),
+            )
+            targets = (
+                self._startup_reduction(
+                    fitted_p, self._num_p_workers, self._pending_num_p
+                )
+                if targets[0] is not None
+                else None,
+                self._startup_reduction(
+                    fitted_d, self._num_d_workers, self._pending_num_d
+                )
+                if targets[1] is not None
+                else None,
+            )
+        if targets == (None, None):
+            return None
+        if source == "load":
+            self._diag_load_reason = "scale_down"
+        else:
+            self._diag_throughput_reason = "scale"
+        return ScalingDecision(num_prefill=targets[0], num_decode=targets[1])
 
     def advance_throughput_from_prediction(
         self,
@@ -299,6 +413,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode = None
         self._diag_throughput_reason_prefill = None
         self._diag_throughput_reason_decode = None
+        self._diag_load_metadata_available = {}
+        self._diag_throughput_metadata_available = {}
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -318,6 +434,10 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             load_decision_reason_decode=self._diag_load_reason_decode,
             throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
             throughput_decision_reason_decode=self._diag_throughput_reason_decode,
+            load_metadata_available=dict(self._diag_load_metadata_available),
+            throughput_metadata_available=dict(
+                self._diag_throughput_metadata_available
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -333,6 +453,18 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._expected_num_d = counts.expected_num_decode
         self._prefill_scaling_in_progress = counts.prefill_scaling_in_progress
         self._decode_scaling_in_progress = counts.decode_scaling_in_progress
+        self._pending_num_p = counts.pending_num_prefill
+        self._pending_num_d = counts.pending_num_decode
+
+    def _pending_startup(self, component: str) -> int:
+        return self._pending_num_p if component == "prefill" else self._pending_num_d
+
+    def _load_scaling_blocked(self, component: str) -> bool:
+        # Startup inventory is only supplied after deployment-wide drain and
+        # rollout checks. Decisions are still bounded to reductions below.
+        return self._scaling_in_progress(component) and not (
+            self._pending_num_p or self._pending_num_d
+        )
 
     def _scaling_in_progress(self, component: str) -> bool:
         if component == "prefill":
@@ -363,27 +495,19 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             self._decode_regression.add_observations(obs.decode)
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
-    def _effective_speculative_nextn(self) -> int:
-        d_caps = self._capabilities.decode
-        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
-            return d_caps.speculative_nextn
-        return max(0, int(self._config.speculative_nextn))
-
-    def _clamp_accept_length(self, accept_length: Optional[float]) -> float:
-        nextn = self._effective_speculative_nextn()
-        if nextn <= 0:
-            return 1.0
-        if accept_length is None or not math.isfinite(accept_length):
-            return 1.0
-        return min(max(float(accept_length), 1.0), float(nextn + 1))
-
     def _observe_accept_length(self, accept_length: Optional[float]) -> None:
+        """Keep the normalized observation, ignoring missing or non-finite values."""
         if accept_length is None or not math.isfinite(accept_length):
             return
-        self._last_accept_length = self._clamp_accept_length(accept_length)
+        self._last_accept_length = normalize_speculative_accept_length(
+            accept_length, self._capabilities, self._config
+        )
 
     def _current_decode_accept_length(self) -> float:
-        return self._clamp_accept_length(self._last_accept_length)
+        """Return the stored accept length within the current speculation bounds."""
+        return normalize_speculative_accept_length(
+            self._last_accept_length, self._capabilities, self._config
+        )
 
     # ------------------------------------------------------------------
     # Budget

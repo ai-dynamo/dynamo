@@ -5,17 +5,28 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
+from uuid import uuid4
 
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
 
-from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.http.url_validator import (
+    UrlValidationPolicy,
+    check_remote_url_allowed,
+)
 
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
+DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
+_MEDIA_FIELDS = ("image_data", "audio_data", "video_data")
+
+
+def new_sglang_request_id() -> str:
+    """Return an unguessable fixed-width ID used only inside SGLang."""
+    return uuid4().hex
 
 
 def native_generate_payload(
@@ -29,11 +40,28 @@ def native_generate_payload(
     return payload if isinstance(payload, dict) else None
 
 
+def _media_urls(value: Any) -> Iterator[str]:
+    """Yield the URLs in one SGLang media field.
+
+    A field holds one item, a list, or a list per prompt. An item is a URL
+    string or a dict that may carry a ``url``.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        url = value.get("url")
+        if isinstance(url, str):
+            yield url
+    elif isinstance(value, list):
+        for item in value:
+            yield from _media_urls(item)
+
+
 def build_native_generate_request(
     native_payload: Mapping[str, Any],
     *,
     input_ids: list[int],
-    fallback_rid: str,
+    request_id: str,
     priority: int | None,
     sampling_overrides: Mapping[str, Any] | None = None,
     bootstrap_host: str | None = None,
@@ -41,18 +69,52 @@ def build_native_generate_request(
     bootstrap_room: int | None = None,
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
+    prefill_dp_rank: int | None = None,
     lora_path: str | None = None,
+    cache_salt: str | None = None,
+    kv_hint: Mapping[str, Any] | None = None,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
     The Rust frontend preserves the public request opaquely under
     ``extra_args.sglang_tito``. Dynamo replaces only canonical input,
-    routing state, and fields supplied by the selected worker. SGLang owns
-    all remaining validation.
+    routing state, and fields supplied by the selected worker. Media URLs are
+    checked against ``DYN_MM_ALLOW_REMOTE_URLS``; SGLang owns all remaining
+    validation.
+
+    ``request_id`` is router-owned and always replaces a caller-supplied
+    ``rid`` so cancellation cannot target another request.
+    Native session requests pass their caller-visible node ID as the fallback
+    because SGLang keys session continuations by the submitted top-level
+    request ID.
     """
     payload = dict(native_payload)
+    # SGLang downloads these URLs itself, so enforce
+    # DYN_MM_ALLOW_REMOTE_URLS before the request reaches it.
+    policy = UrlValidationPolicy.from_env()
+    for name in _MEDIA_FIELDS:
+        for url in _media_urls(payload.get(name)):
+            check_remote_url_allowed(url, policy)
+    # Peer selection is router-owned, never part of the caller's opaque body.
+    payload.pop("kv_hints", None)
+    if (
+        isinstance(kv_hint, Mapping)
+        and "kv_hints" in GenerateReqInput.__dataclass_fields__
+    ):
+        payload["kv_hints"] = dict(kv_hint)
+    salt = cache_salt if cache_salt is not None else payload.get("cache_salt")
+    if salt is None or salt == "":
+        payload.pop("cache_salt", None)
+    else:
+        # The separately pinned XPU release (0.5.11) silently ignores unknown
+        # dataclass fields. Remove this check when that pin supports cache_salt.
+        if "cache_salt" not in GenerateReqInput.__dataclass_fields__:
+            raise ValueError(
+                "cache_salt is not supported by the installed SGLang engine"
+            )
+        payload["cache_salt"] = salt
     payload["input_ids"] = input_ids
-    payload["rid"] = payload.get("rid") or fallback_rid
+    payload["rid"] = request_id
     payload["stream"] = True
     if priority is None:
         payload.pop("priority", None)
@@ -80,13 +142,13 @@ def build_native_generate_request(
     ):
         if value is not None:
             payload[name] = value
+    if (
+        prefill_dp_rank is not None
+        and "disagg_prefill_dp_rank" in GenerateReqInput.__dataclass_fields__
+    ):
+        payload["disagg_prefill_dp_rank"] = prefill_dp_rank
 
-    native_request = _GENERATE_REQUEST_ADAPTER.validate_python(payload)
-    _shared_logprobs.validate_sglang_top_logprobs(
-        native_request.top_logprobs_num,
-        allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
-    )
-    return native_request
+    return _GENERATE_REQUEST_ADAPTER.validate_python(payload)
 
 
 async def native_generate_stream(
@@ -94,4 +156,8 @@ async def native_generate_stream(
 ) -> AsyncIterator[dict[str, Any]]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
     async for response in engine.tokenizer_manager.generate_request(request, None):
-        yield {"token_ids": [], "engine_data": {"sglang_response": response}}
+        # The router counts output from token_ids; clients get the opaque response.
+        yield {
+            "token_ids": response.get("output_ids") or [],
+            "engine_data": {"sglang_response": response},
+        }

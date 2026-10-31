@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
@@ -38,24 +37,29 @@ from tests.utils.payload_builder import (
     anthropic_messages_stream_payload_default,
     chat_payload,
     chat_payload_default,
+    chat_payload_with_logprobs,
     completion_payload_default,
+    completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    CachedTokensChatPayload,
     ChatPayload,
+    HttpErrorPayload,
     ImageGenerationPayload,
-    LoraTestChatPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
+    SGLangSpecDecodeMetricsPayload,
     VideoGenerationPayload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -152,6 +156,88 @@ sglang_configs = {
             _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
+    ),
+    # Top-k logprobs on chat and completions with no opt-in env var; mirrors
+    # the vLLM and TensorRT-LLM aggregated_logprobs configs.
+    "aggregated_logprobs": SGLangConfig(
+        name="aggregated_logprobs",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                3.9
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                512
+            ),  # 2x safety over min=256; payloads are ~16-token prompts + 30 max_tokens
+            pytest.mark.timeout(360),  # ~7x observed ~51s; CI machines are slower
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                top_logprobs=3,
+            ),
+            completion_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                logprobs=5,
+            ),
+        ],
+    ),
+    # Speculative decoding: Qwen3-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). Both repos are ungated.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": SGLangConfig(
+        name="aggregated_spec_decoding",
+        directory=sglang_dir,
+        script_name="agg_spec_decoding.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("Tengyunw/qwen3_8b_eagle3"),
+            # Measured peak ~20.6 GiB on H200 (8B weights + EAGLE3 draft +
+            # capped KV + CUDA graphs).
+            pytest.mark.profiled_vram_gib(21.0),
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(300),  # ~3x ~65s (H200, models pre-cached)
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-8B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # 3 x up to 1000 tokens: enough decode steps for a stable tokens/verify ratio.
+            chat_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
+            ),
+            SGLangSpecDecodeMetricsPayload(
+                body={},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=[],
+                min_num_requests=4,
+            ),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -273,6 +359,17 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Name one color."}],
+                    "n": 2,
+                    "max_tokens": 1,
+                },
+                expected_response=["supports only n=1"],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
             # because each only runs half the scheduler pipeline.
             metric_payload_default(
@@ -672,44 +769,63 @@ sglang_configs = {
     "video_agg_fd_qwen": SGLangConfig(
         name="video_agg_fd_qwen",
         directory=sglang_dir,
-        script_name="agg_vision.sh",
+        script_name="agg_multimodal_router.sh",
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.profiled_vram_gib(18.7),
             pytest.mark.requested_sglang_kv_tokens(8736),
-            pytest.mark.timeout(390),
+            pytest.mark.timeout(500),
             pytest.mark.pre_merge,
-            # TODO: Enable media-ffmpeg in the SGLang container build, then
-            # remove this skip. Frontend video decoding requires the Dynamo
-            # binding to be built with media-ffmpeg support.
-            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=[
-            "--model-path",
+            "--model",
             "Qwen/Qwen3-VL-2B-Instruct",
-            "--frontend-decoding",
+            "--num-workers",
+            "2",
+            "--single-gpu",
         ],
         env={
             "DYN_MM_ALLOW_INTERNAL": "1",
-            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+            # Decode all 10 frames in the fixture so the routing sequence is
+            # materially larger than the shared text prefix.
+            "DYN_MM_VIDEO_NUM_FRAMES": "10",
         },
-        timeout=360,
+        timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
-                    },
-                ],
-                repeat_count=1,
+            CachedTokensChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Describe the video in detail",
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": MULTIMODAL_VIDEO_URL},
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 100,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                repeat_count=3,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                temperature=0.0,
-                max_tokens=100,
+                min_cached_tokens=128,
+                require_rust_processor_init=True,
+                min_routing_total_blocks=10,
+                # A text-only hit is at most a small fraction of this video
+                # request. Requiring high router-side overlap proves the media
+                # hashes matched the worker KV events instead of accepting a
+                # cached text prefix as a false positive.
+                min_avg_kv_hit_rate=0.9,
             )
         ],
     ),
@@ -830,7 +946,7 @@ sglang_configs = {
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "nixl-read",
             # The clips come from the image_server over plain http on localhost,
             # which the URL policy rejects by default. This model is gated out of
             # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
@@ -867,7 +983,10 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                expected_log=[
+                    "Embedding cache hit for VIDEO URL index 0",
+                    "Initialized NIXL agent",
+                ],
                 temperature=0.0,
                 max_tokens=100,
             ),
@@ -1171,40 +1290,6 @@ def test_sglang_deployment(
 # ── LoRA Tests ──────────────────────────────────────────────────────────────
 
 lora_dir = os.path.join(sglang_dir, "launch/lora")
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing"""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @pytest.mark.sglang

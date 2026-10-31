@@ -24,8 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
+	"maps"
+	"reflect"
+	"sort"
 	"text/template"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -57,14 +60,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 )
 
 const (
-	// Job naming
-	JobNamePrefixOnline = "profile-online-"
-	JobNamePrefixAIC    = "profile-aic-"
-
 	// Container names
 	ContainerNameProfiler             = "profiler"
 	ContainerNameOutputCopier         = "output-copier"
@@ -79,6 +78,8 @@ const (
 	// Annotation keys
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
+	AnnotationDGDRUID             = "nvidia.com/dgdr-uid"
+	AnnotationConfirmedDGDUID     = "nvidia.com/confirmed-dgd-uid"
 
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
@@ -106,37 +107,29 @@ const (
 	DGDOverrideToolPath        = DGDOverrideToolMountPath + "/dgd-apply-overrides"
 	EnvDGDOverrideToolPath     = "DYNAMO_DGD_APPLY_OVERRIDES_BIN"
 
-	// Command line arguments
-	ArgModel   = "--model"
-	ArgBackend = "--backend"
-	ArgTTFT    = "--ttft"
-	ArgITL     = "--itl"
-	ArgConfig  = "--config"
-
 	// Messages
-	MessageValidationPassed          = "DGDR spec validation passed"
-	MessageInitialized               = "DGDR initialized successfully"
-	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
-	MessageProfilingJobCreated       = "Profiling job created"
-	MessageAICProfilingJobCreated    = "AIC profiling job created"
-	MessageProfilingInProgress       = "Profiling is in progress"
-	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
-	MessageSpecAvailable             = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
-	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
-	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
-	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
-	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
-	MessageInvalidState              = "Invalid state"
-	MessageSpecChangeRejected        = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
-	MessageJobCreationFailed         = "JobCreationFailed"
-	MessageDeploymentCreationFailed  = "DeploymentCreationFailed"
-	MessageResultsRetrievalFailed    = "ResultsRetrievalFailed"
-	MessageGenerationFailed          = "GenerationFailed"
-	MessageAIConfiguratorCheckFailed = "AIConfiguratorCheckFailed"
-	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
-	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
-	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
-	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
+	MessageValidationPassed         = "DGDR spec validation passed"
+	MessageInitialized              = "DGDR initialized successfully"
+	MessageDiscoveringHardware      = "Discovering GPU hardware and preparing profiling job"
+	MessageProfilingJobCreated      = "Profiling job created"
+	MessageProfilingInProgress      = "Profiling is in progress"
+	MessageSpecGenerated            = "DynamoGraphDeployment spec generated successfully"
+	MessageSpecAvailable            = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
+	MessageDeploymentCreated        = "DynamoGraphDeployment %s created successfully"
+	MessageDeploymentReady          = "DynamoGraphDeployment %s is ready"
+	MessageDeploymentDegraded       = "DynamoGraphDeployment %s degraded from Ready to %s"
+	MessageDeploymentDeleted        = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
+	MessageInvalidState             = "Invalid state"
+	MessageSpecChangeRejected       = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
+	MessageJobCreationFailed        = "JobCreationFailed"
+	MessageDeploymentCreationFailed = "DeploymentCreationFailed"
+	MessageGenerationFailed         = "GenerationFailed"
+	MessageProfilingCheckFailed     = "ProfilingCheckFailed"
+	MessageModelCachePVCNotFound    = "model cache PVC %s not found in namespace %s"
+	MessageDeploymentNameCollision  = "DynamoGraphDeployment %s already exists in namespace %s and was not created by this request (%s). Refusing to adopt it. Delete this DynamoGraphDeploymentRequest and create a new one whose generated deployment uses a free name."
+
+	// ReasonDeploymentNameCollision marks a DGD identity mismatch.
+	ReasonDeploymentNameCollision = "DeploymentNameCollision"
 )
 
 var errProfilingOutputNotReady = errors.New("profiling output is not ready")
@@ -151,6 +144,13 @@ var errProfilingOutputNotReady = errors.New("profiling output is not ready")
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
+
+# Without kubectl the sidecar would poll forever and strand the DGDR in
+# Profiling; fail the Job instead so the controller can move it to Failed.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "ERROR: kubectl not found in the output-copier image. The image set for the output-copier container through spec.overrides.profilingJob must contain kubectl." >&2
+  exit 1
+fi
 
 STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
 LAST_PHASE=""
@@ -391,13 +391,6 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
 	OperatorImagePullPolicy corev1.PullPolicy
-	// RBACMgr handles RBAC setup for profiling jobs
-	RBACManager RBACManager
-}
-
-// RBACManager interface for managing RBAC resources
-type RBACManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
 }
 
 // GetRecorder implements commonController.Reconciler interface
@@ -450,6 +443,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		}
 		logger.Error(err, "Failed to get DGDR")
 		return ctrl.Result{}, err
+	}
+
+	// A v1beta2 request is stored as a v1beta1 envelope carrier. Until its
+	// reconciler exists, leave that carrier and its children untouched.
+	if dgdr.Spec.V1Beta2 != nil {
+		return ctrl.Result{}, nil
 	}
 
 	// Handle finalizer using common function
@@ -558,12 +557,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return ctrl.Result{}, nil
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageAICProfilingJobCreated)
-	}
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
 
 	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -833,8 +827,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.clearGeneratedSpecAnnotation(ctx, dgdr); err != nil {
+
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -897,6 +897,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -963,16 +972,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger := log.FromContext(ctx)
 
 	// Extract DGD spec from annotation (stored by generateDGDSpec)
-	dgdSpecYAML, ok := dgdr.Annotations[AnnotationGeneratedDGDSpec]
-	if !ok || dgdSpecYAML == "" {
-		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
-	}
-
-	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+		return ctrl.Result{}, err
 	}
-	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -985,9 +988,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build labels (start with generated DGD's labels)
 	labels := make(map[string]string)
 	if generatedDGD.Labels != nil {
-		for k, v := range generatedDGD.Labels {
-			labels[k] = v
-		}
+		maps.Copy(labels, generatedDGD.Labels)
 	}
 	// Add/override with managed labels
 	labels[nvidiacomv1beta1.LabelDGDRName] = dgdr.Name
@@ -997,20 +998,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build annotations (start with generated DGD's annotations)
 	annotations := make(map[string]string)
 	if generatedDGD.Annotations != nil {
-		for k, v := range generatedDGD.Annotations {
-			annotations[k] = v
-		}
+		maps.Copy(annotations, generatedDGD.Annotations)
 	}
+	annotations[AnnotationDGDRUID] = string(dgdr.UID)
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        dgdName,
-			Namespace:   dgdNamespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: generatedDGD.Spec,
+		Name:        dgdName,
+		Namespace:   dgdNamespace,
+		Labels:      labels,
+		Annotations: annotations,
+		Spec:        generatedDGD.Spec,
 	}
 
 	// Note: We don't set owner reference on DGD
@@ -1021,9 +1019,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// The DGD watch reconciles again after the object is in the informer cache.
-			logger.Info("DGD already exists, waiting for informer observation")
-			return ctrl.Result{}, nil
+			// A foreign DGD may not route watch events to this request. Retry the
+			// level-driven observation path even when the informer has not caught up.
+			logger.Info("DGD already exists, requeueing for identity confirmation")
+			return ctrl.Result{RequeueAfter: dgdCollisionRequeueDelay}, nil
 		}
 		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, MessageDeploymentCreationFailed, "Create", "%s", err.Error())
 		// Admission webhook denials and other permanent API rejections (400/403/422)
@@ -1046,21 +1045,180 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
-func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
+// dgdCollisionRequeueDelay retries the identity check after an AlreadyExists create
+// the cache cannot yet see. A foreign DGD carries no labels, so no watch delivers it.
+const dgdCollisionRequeueDelay = 5 * time.Second
+
+// generatedDGDFromAnnotation decodes the deployment this request intends to create
+// from the generated-spec annotation, applying the runtime version override to a fresh copy.
+func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	dgdSpecYAML := dgdr.Annotations[AnnotationGeneratedDGDSpec]
+	if dgdSpecYAML == "" {
+		return nil, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
+	}
+
+	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
+
+	return generatedDGD, nil
+}
+
+// generatedSpecDivergence returns the first field path where liveDGD fails to carry what
+// generatedDGD asks for. Subset, not equality: only liveDGD has been through defaulting.
+func generatedSpecDivergence(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) (string, error) {
+	liveSpec, err := specAsJSONValue(liveDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the live deployment spec for comparison: %w", err)
+	}
+	generatedSpec, err := specAsJSONValue(generatedDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the generated deployment spec for comparison: %w", err)
+	}
+
+	return jsonSubsetDivergence(generatedSpec, liveSpec, "spec"), nil
+}
+
+// specAsJSONValue renders dgd's spec as the generic JSON value the API server saw,
+// so an omitempty field is absent here exactly when it was absent on the wire.
+func specAsJSONValue(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (any, error) {
+	encoded, err := json.Marshal(dgd.Spec)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+// jsonSubsetDivergence returns the path of the first place where have does not carry
+// what want specifies. Keys walk in sorted order so the reported path is stable.
+func jsonSubsetDivergence(want, have any, path string) string {
+	switch wantValue := want.(type) {
+	case map[string]any:
+		haveObject, isObject := have.(map[string]any)
+		if !isObject {
+			return path
+		}
+		keys := make([]string, 0, len(wantValue))
+		for key := range wantValue {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			haveChild, present := haveObject[key]
+			if !present {
+				return path + "." + key
+			}
+			if divergence := jsonSubsetDivergence(wantValue[key], haveChild, path+"."+key); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	case []any:
+		haveList, isList := have.([]any)
+		if !isList || len(haveList) != len(wantValue) {
+			return path
+		}
+		for index := range wantValue {
+			if divergence := jsonSubsetDivergence(wantValue[index], haveList[index], fmt.Sprintf("%s[%d]", path, index)); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	default:
+		if !reflect.DeepEqual(want, have) {
+			return path
+		}
+		return ""
+	}
+}
+
+// failDeploymentNameCollision drives the request terminal. The status-only write preserves
+// the generated-spec annotation, so what this request meant to create stays inspectable.
+// The event follows the status write, so a failed write cannot leave a warning recorded
+// against a request that still reports Deploying and re-emit it on the next reconcile.
+func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
-	if dgdr.Annotations[AnnotationGeneratedDGDSpec] == "" {
-		return nil
+	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	mismatchReason string,
+) (ctrl.Result, error) {
+	message := fmt.Sprintf(MessageDeploymentNameCollision, liveDGD.Name, dgdr.Namespace, mismatchReason)
+
+	log.FromContext(ctx).Info("Refusing to adopt an existing DGD that failed the DGDR identity contract",
+		"dgd", liveDGD.Name, "namespace", dgdr.Namespace, "reason", mismatchReason)
+
+	result, err := r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+		nvidiacomv1beta1.ConditionTypeDeploymentReady, metav1.ConditionFalse,
+		ReasonDeploymentNameCollision, message)
+	if err != nil {
+		return result, err
 	}
-	annotations := map[string]any{AnnotationGeneratedDGDSpec: ""}
+	r.Recorder.Eventf(dgdr, liveDGD, corev1.EventTypeWarning, ReasonDeploymentNameCollision, "Get", "%s", message)
+
+	return result, nil
+}
+
+// confirmDGDIdentity validates an unbound deployment and durably binds its UID before
+// resource adoption. Later observations compare UIDs without rechecking mutable specs.
+// dgdr and dgd must be non-nil; successful persistence updates dgdr's metadata in place.
+func (r *DynamoGraphDeploymentRequestReconciler) confirmDGDIdentity(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (string, error) {
+	// A persisted binding rejects replacements even if they copy the tracking metadata.
+	if uid := dgdr.Annotations[AnnotationConfirmedDGDUID]; uid != "" {
+		if uid != string(dgd.UID) {
+			return "its UID differs from the confirmed deployment", nil
+		}
+		return "", nil
+	}
+
+	// Bootstrap legacy requests once from their tracking metadata. A missing DGD-side
+	// UID remains compatible with older operators; an explicit mismatch never does.
+	if dgd.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
+		dgd.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
+		dgd.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
+		return "it does not carry this request's tracking labels", nil
+	}
+	if uid, bound := dgd.Annotations[AnnotationDGDRUID]; bound && uid != string(dgdr.UID) {
+		return "it is not bound to this request's UID", nil
+	}
+
+	// Validate generated intent only before the original confirmation marker is cleared.
+	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
+		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
+		if err != nil {
+			return "", err
+		}
+		divergence, err := generatedSpecDivergence(dgd, generatedDGD)
+		if err != nil {
+			return "", err
+		}
+		if divergence != "" {
+			return fmt.Sprintf("its %s differs from the spec this request generated", divergence), nil
+		}
+	}
+
+	// Commit the UID and marker together so an interrupted confirmation cannot lose identity.
+	annotations := map[string]any{
+		AnnotationGeneratedDGDSpec: "",
+		AnnotationConfirmedDGDUID:  string(dgd.UID),
+	}
 	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
 		annotations[AnnotationAdditionalResources] = additionalResources
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,
@@ -1069,11 +1227,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
 		},
 	}}
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
-		return fmt.Errorf("failed to clear generated DGD annotation: %w", err)
+		return "", fmt.Errorf("failed to persist confirmed DGD identity: %w", err)
+	}
+	if dgdr.Annotations == nil {
+		dgdr.Annotations = make(map[string]string)
 	}
 	dgdr.Annotations[AnnotationGeneratedDGDSpec] = ""
+	dgdr.Annotations[AnnotationConfirmedDGDUID] = string(dgd.UID)
 	dgdr.ResourceVersion = apply.GetResourceVersion()
-	return nil
+	return "", nil
 }
 
 // adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.
@@ -1127,7 +1289,7 @@ func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nv
 	filtered := ownerReferences[:0]
 	removed := false
 	for _, ownerReference := range ownerReferences {
-		if ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
+		if ownerReference.Kind == nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind &&
 			ownerReference.Name == dgdr.Name {
 			removed = true
 			continue
@@ -1246,12 +1408,6 @@ func getOutputConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest)
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
 }
 
-// isOnlineProfiling returns true. In v1beta1, the profiler decides online vs AIC
-// mode internally based on its config. The controller always uses the same label.
-func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
-	return true
-}
-
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	var errs []error
@@ -1335,50 +1491,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
-// GetGPUDiscoveryFailureReason classifies a GPU discovery error and
-// returns a stable, actionable reason string suitable for structured logging.
-//
-// The classification is based on known error message patterns produced during:
-//   - DCGM exporter pod discovery
-//   - Helm-based GPU operator and DCGM discovery
-//   - Metrics scraping
-//   - Prometheus parsing
-//
-// If the error does not match any known category, "unknown" is returned.
+// GetGPUDiscoveryFailureReason classifies a GPU discovery error into a stable reason string
+// for structured logging. The classification lives in the gpu package so the v1beta2
+// admission path reports the same reasons.
 func GetGPUDiscoveryFailureReason(err error) string {
-	if err == nil {
-		return "unknown"
-	}
-	errMsg := strings.ToLower(err.Error())
-
-	switch {
-	case strings.Contains(errMsg, "list pods"):
-		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
-	case strings.Contains(errMsg, "gpu operator is not installed"):
-		return "GPU Operator not installed in expected namespace"
-	case strings.Contains(errMsg, "helm init failed"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
-		return "timeout while waiting for DCGM exporter pods to become ready"
-	case strings.Contains(errMsg, "http get"):
-		return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
-	case strings.Contains(errMsg, "metrics endpoint") &&
-		strings.Contains(errMsg, "status"):
-		return "DCGM pod metrics endpoint returned non-200 status"
-	case strings.Contains(errMsg, "parse prometheus metrics"):
-		return "failed to parse dcgm Prometheus metrics (invalid format)"
-	case strings.Contains(errMsg, "no gpus detected"):
-		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
-	case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
-		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
-	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
-		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
-		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "failed to create helm path"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	}
-	return "unknown"
+	return gpu.DiscoveryFailureReason(err)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
@@ -1430,8 +1547,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
 	if r.Config.Namespace.Restricted == "" {
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		if err := rbac.EnsureServiceAccountWithRBAC(
 			ctx,
+			r.Client,
 			dgdr.Namespace,
 			ServiceAccountProfilingJob,
 			r.Config.RBAC.DGDRProfilingClusterRoleName,
@@ -1462,10 +1580,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name: "HUGGING_FACE_HUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "hf-token-secret",
-						},
-						Key: "HF_TOKEN",
+						Name: "hf-token-secret",
+						Key:  "HF_TOKEN",
 					},
 				},
 			},
@@ -1542,7 +1658,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 			WorkingDir:   "/workspace",
 		}
-		dynamo.AddStandardEnvVars(&profilerContainer, r.Config)
+		dynamo.AddStandardEnvVars(&profilerContainer, r.Config.Infrastructure)
 
 		// Generate sidecar script from template
 		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
@@ -1582,18 +1698,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			logger.Info("Using PVC for profiling output (from v1alpha1 compatibility fields)", "pvc", outputPVC)
 			profilingOutputVolume = corev1.Volume{
 				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: outputPVC,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: outputPVC,
 				},
 			}
 		} else {
 			profilingOutputVolume = corev1.Volume{
-				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{},
-				},
+				Name:     VolumeNameProfilingOutput,
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			}
 		}
 		volumes := []corev1.Volume{profilingOutputVolume}
@@ -1602,11 +1714,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if modelCachePVC != "" {
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameModelCache,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: modelCachePVC,
-						ReadOnly:  true,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: modelCachePVC,
+					ReadOnly:  true,
 				},
 			})
 		}
@@ -1619,16 +1729,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameProfilingConfig,
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cmRef.Name,
-						},
-						Items: []corev1.KeyToPath{{
-							Key:  cmKey,
-							Path: ProfilingConfigDefaultKey,
-						}},
-					},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: cmRef.Name,
+					Items: []corev1.KeyToPath{{
+						Key:  cmKey,
+						Path: ProfilingConfigDefaultKey,
+					}},
 				},
 			})
 		}
@@ -1641,7 +1747,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			ServiceAccountName: ServiceAccountProfilingJob,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptr.To(true),
+				RunAsNonRoot: new(true),
 				RunAsUser:    ptr.To[int64](1000),
 				RunAsGroup:   ptr.To[int64](1000),
 				FSGroup:      ptr.To[int64](1000),
@@ -1654,14 +1760,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      jobName,
-				Namespace: dgdr.Namespace,
-				Labels: map[string]string{
-					nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
-					nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
-					nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
-				},
+			Name:      jobName,
+			Namespace: dgdr.Namespace,
+			Labels: map[string]string{
+				nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
+				nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
+				nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
 			},
 			Spec: batchv1.JobSpec{
 				BackoffLimit: &backoffLimit,
@@ -1754,7 +1858,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.TotalGPUs,
+		"selectedShapeGpus", gpuInfo.SelectedShapeGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU,
 		"system", gpuInfo.System,
@@ -1763,6 +1868,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		"interconnectTier", gpuInfo.InterconnectTier,
 		"rdma", gpuInfo.RDMAEnabled,
 		"rdmaType", gpuInfo.RDMAType)
+
+	// An automatically derived budget is valid only for discovery's selected node shape.
+	if err := validateAutomaticGPUShape(hw, gpuInfo); err != nil {
+		return changed, err
+	}
 
 	if hw.GPUSKU == "" {
 		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
@@ -1789,14 +1899,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.TotalGPUs == nil && gpuInfo != nil {
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
 		// Will be removed once a fix is in the Profiler/AIC.
-		const defaultMaxAutoGPUs = int32(32)
-		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		const defaultMaxAutoGPUs = 32
+		total := gpuInfo.SelectedShapeGPUs
 		if total > defaultMaxAutoGPUs {
-			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
-				"discovered", total, "cap", defaultMaxAutoGPUs)
+			logger.Info("Capping auto-discovered GPU budget at default limit; set hardware.totalGpus to override",
+				"selectedShapeGpus", total, "cap", defaultMaxAutoGPUs)
 			total = defaultMaxAutoGPUs
 		}
-		hw.TotalGPUs = &total
+		hw.TotalGPUs = new(int32(total))
 		changed = true
 	}
 	if hw.Interconnect == "" && gpuInfo != nil && gpuInfo.Interconnect != "" {
@@ -1816,6 +1926,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	return changed, nil
 }
 
+func validateAutomaticGPUShape(hw *nvidiacomv1beta1.HardwareSpec, gpuInfo *gpu.GPUInfo) error {
+	if hw.TotalGPUs != nil {
+		return nil
+	}
+	if hw.NumGPUsPerNode != nil && int(*hw.NumGPUsPerNode) != gpuInfo.GPUsPerNode {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.numGpusPerNode=%d does not match the selected discovered shape with %d GPUs per node; set hardware.totalGpus explicitly", *hw.NumGPUsPerNode, gpuInfo.GPUsPerNode)
+	}
+	if hw.VRAMMB != nil && !sameVRAMShape(*hw.VRAMMB, gpuInfo.VRAMPerGPU) {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.vramMb=%g does not match the selected discovered shape with %d MiB per GPU; set hardware.totalGpus explicitly", *hw.VRAMMB, gpuInfo.VRAMPerGPU)
+	}
+	return nil
+}
+
+// sameVRAMShape accepts nominal memory sizes while rejecting a materially different GPU variant.
+func sameVRAMShape(requestedMiB float64, discoveredMiB int) bool {
+	discovered := float64(discoveredMiB)
+	return max(requestedMiB-discovered, discovered-requestedMiB) <= discovered/10
+}
+
 func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Attempting GPU discovery for profiling job")
@@ -1829,41 +1958,21 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		return nil, nil
 	}
 
-	var dcgmErr error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err == nil {
-			return discoveredInfo, nil
-		}
-		dcgmErr = err
-
-		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("DCGM discovery failed, falling back to node-label discovery",
-			"reason", reason, "error", err.Error())
+	discoverer := &gpu.Discoverer{
+		Reader:     reader,
+		DCGM:       r.GPUDiscovery,
+		Cache:      r.GPUDiscoveryCache,
+		NodeLabels: r.gpuDiscoveryEnabled,
 	}
-
-	if !r.gpuDiscoveryEnabled() {
+	info, err := discoverer.Discover(ctx, hw.GPUSKU)
+	if err != nil {
 		if discoveryRequired {
-			if dcgmErr != nil {
-				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
-			}
-			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
+			return nil, err
 		}
-		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+		logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged", "error", err.Error())
 		return nil, nil
 	}
-
-	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
-	if err == nil {
-		return discoveredInfo, nil
-	}
-
-	logger.Info("Node-label discovery also failed", "error", err.Error())
-	if discoveryRequired {
-		return nil, fmt.Errorf("auto-discovery failed: %w", err)
-	}
-	logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
-	return nil, nil
+	return info, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.
@@ -1891,7 +2000,10 @@ func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRe
 	if err := alpha.ConvertFrom(dgdr); err != nil {
 		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	return alpha.Spec.ProfilingConfig, nil
+	if alpha.Spec.ProfilingConfig == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
+	}
+	return *alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
@@ -2109,7 +2221,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,
@@ -2292,6 +2404,8 @@ func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, d
 		totalReplicas += component.Replicas
 		if component.AvailableReplicas != nil {
 			totalAvailable += *component.AvailableReplicas
+		} else if component.ReadyReplicas != nil {
+			totalAvailable += *component.ReadyReplicas
 		}
 	}
 
@@ -2419,10 +2533,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 		).
@@ -2438,10 +2550,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 			builder.WithPredicates(predicate.Funcs{
@@ -2463,5 +2573,5 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 		).
 		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
+		Complete(r)
 }

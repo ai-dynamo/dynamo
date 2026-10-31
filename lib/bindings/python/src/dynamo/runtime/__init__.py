@@ -17,6 +17,9 @@ from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import PyAsyncRequestStream as PyAsyncRequestStream
 
+from ._unary import UnaryClient as UnaryClient
+from ._unary import serve_unary_endpoint as serve_unary_endpoint
+
 
 def dynamo_worker(enable_nats: Optional[bool] = None):
     """

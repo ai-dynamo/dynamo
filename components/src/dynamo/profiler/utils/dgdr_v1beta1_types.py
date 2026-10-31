@@ -58,8 +58,11 @@ class SearchStrategy(str, Enum):
 
 
 class GPUSKUType(str, Enum):
+    VRNVL72 = "vr_nvl72"
+    GB200 = "gb200"
     GB200SXM = "gb200_sxm"
     GB10 = "gb10"
+    B300SXM = "b300_sxm"
     B200SXM = "b200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
@@ -174,7 +177,11 @@ class OverridesSpec(BaseModel):
 
     profilingJob: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.",
+        description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.  Security: creating a DGDR is workload-creation authority in its namespace — these overrides carry the same blast radius as creating a Job or Pod directly there, by design. Pod security is enforced centrally by Kubernetes Pod Security Admission on the resulting Pods once the namespace is labeled (see pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards — covering privileged, host namespaces, and hostPath, not only securityContext — not this API. ServiceAccount identity is a separate layer: these overrides can set serviceAccountName and automountServiceAccountToken, which are bounded by RBAC and namespace membership rather than PSA — the same authority any Pod author in the namespace already holds. Grant create/update on DGDRs only to principals trusted to create Pods in the namespace. The profiling Job always runs in the DGDR's own namespace and overrides cannot change that — but namespace containment is not node or cross-tenant isolation. Dynamo's workloads, including this Job, satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting Pod to close the privileged, host-namespace, host-device, and hostPath paths.",
+    )
+    trustRemoteCode: bool = Field(
+        default=False,
+        description="TrustRemoteCode explicitly permits generated vLLM and SGLang workers to execute custom code from the configured model repository. When enabled, the profiler adds --trust-remote-code to every generated worker component after the deployment topology has been generated. Enable this setting only for model repositories you trust.",
     )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -222,19 +229,19 @@ class HardwareSpec(BaseModel):
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected as the GPU type of the node with the most GPUs (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
     )
     vramMb: Optional[float] = Field(
         default=None,
-        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. Nominal values within 10% of the measured value identify the same shape. When this value differs by more than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.",
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget or use a numGpusPerNode or vramMb value that differs from the selected shape. A shape override without an explicit totalGpus is rejected.",
     )
     numGpusPerNode: Optional[int] = Field(
         default=None,
-        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. In clusters whose nodes have different GPU counts, set this explicitly to the node size you intend to schedule on. When this value differs from the auto-selected shape and totalGpus is omitted, the request is rejected.",
     )
     interconnect: Optional[str] = Field(
         default=None,
@@ -246,11 +253,12 @@ class HardwareSpec(BaseModel):
     )
 
 
-class DynamoGraphDeploymentRequestSpec(BaseModel):
-    """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
+class DynamoGraphDeploymentRequestNativeSpec(BaseModel):
+    """DynamoGraphDeploymentRequestNativeSpec contains the native v1beta1 request fields."""
 
-    model: str = Field(
-        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
+    model: Optional[str] = Field(
+        default=None,
+        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.',
     )
     backend: BackendType = Field(
         default="auto",
@@ -298,6 +306,15 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
 
 
+class DynamoGraphDeploymentRequestSpec(DynamoGraphDeploymentRequestNativeSpec):
+    """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive."""
+
+    v1beta2: Optional[Any] = Field(
+        default=None,
+        description="V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1beta1. It is mutually exclusive with native fields. This field is a read-only conversion view; modify the request through the native v1beta2 API.",
+    )
+
+
 class ParetoConfig(BaseModel):
     """ParetoConfig is retained for compatibility with status objects produced by older profiler releases. Deprecated: The profiler no longer generates Pareto configurations."""
 
@@ -331,8 +348,8 @@ class DeploymentInfoStatus(BaseModel):
     )
 
 
-class DynamoGraphDeploymentRequestStatus(BaseModel):
-    """DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest."""
+class DynamoGraphDeploymentRequestNativeStatus(BaseModel):
+    """DynamoGraphDeploymentRequestNativeStatus contains the native v1beta1 status fields."""
 
     phase: Optional[DGDRPhase] = Field(
         default=None,
@@ -361,6 +378,15 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
     observedGeneration: Optional[int] = Field(
         default=None,
         description="ObservedGeneration is the most recent generation observed by the controller.",
+    )
+
+
+class DynamoGraphDeploymentRequestStatus(DynamoGraphDeploymentRequestNativeStatus):
+    """DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest."""
+
+    v1beta2: Optional[Any] = Field(
+        default=None,
+        description="V1Beta2 losslessly preserves a native v1beta2 status while this object is represented through v1beta1.",
     )
 
 

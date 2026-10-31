@@ -28,6 +28,10 @@ func NewWorkerDefaults() *WorkerDefaults {
 func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container := w.getCommonContainer(context)
 	canaryHealthChecksEnabled := runtimefeatures.CanaryHealthChecks.Enabled(context.RuntimeVersion)
+	livenessFailureThreshold := int32(1)
+	if runtimefeatures.IncreasedWorkerFailureThreshold.Enabled(context.RuntimeVersion) {
+		livenessFailureThreshold = 3
+	}
 
 	// Add system port
 	container.Ports = []corev1.ContainerPort{
@@ -43,27 +47,24 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 	}
 
+	// Restart legacy workers after one failed liveness check and newer workers after three.
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   4, // TimeoutSeconds should be < PeriodSeconds
-		FailureThreshold: 1, // A single failed liveness check restarts the Pod.
+		FailureThreshold: livenessFailureThreshold,
 	}
 
 	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic
 	// Since worker registration is done through external KvStore and Transport does not use Kubernetes Service
 	// Still important for external depencies that rely on Pod Readiness
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/health",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   4,
@@ -71,11 +72,9 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 	}
 
 	container.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   5,
@@ -140,10 +139,8 @@ const (
 func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) corev1.Volume {
 	return corev1.Volume{
 		Name: topologyVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: topologyLabelVolumeItems(policy, groveClusterTopologyDomains),
-			},
+		DownwardAPI: &corev1.DownwardAPIVolumeSource{
+			Items: topologyLabelVolumeItems(policy, groveClusterTopologyDomains),
 		},
 	}
 }

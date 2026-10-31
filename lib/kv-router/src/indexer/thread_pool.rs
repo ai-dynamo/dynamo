@@ -15,6 +15,7 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
@@ -96,6 +97,43 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     #[cfg(feature = "bench")]
     observation_active: AtomicBool,
+
+    /// The backend's maintenance thread, if it asked for one and it hasn't been stopped.
+    maintenance: Mutex<Option<MaintenanceThread>>,
+}
+
+/// A thread that runs the backend's maintenance off the event lanes. `shutdown` and
+/// `Drop` stop and join it before the lanes.
+struct MaintenanceThread {
+    /// Dropping this stops the thread.
+    stop: flume::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+impl MaintenanceThread {
+    fn spawn<T: SyncIndexer>(backend: &Arc<T>) -> Option<Self> {
+        let interval = backend.background_maintenance_interval()?;
+        let (stop, stopped) = flume::bounded::<()>(0);
+        // Weak, so the thread never keeps the backend alive.
+        let backend = Arc::downgrade(backend);
+        let handle = std::thread::Builder::new()
+            .name("kv-maint".to_string())
+            .spawn(move || {
+                while let Err(flume::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                    let Some(backend) = backend.upgrade() else {
+                        return;
+                    };
+                    backend.run_background_maintenance();
+                }
+            })
+            .expect("failed to spawn kv-maint thread");
+        Some(Self { stop, handle })
+    }
+
+    fn stop_and_join(self) {
+        drop(self.stop);
+        let _ = self.handle.join();
+    }
 }
 
 struct ThreadPoolLruSink {
@@ -318,6 +356,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             cancel
         });
 
+        let maintenance = MaintenanceThread::spawn(&backend);
+
         Self {
             backend,
             worker_assignments,
@@ -332,6 +372,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             approximate_lru_enabled,
             #[cfg(feature = "bench")]
             observation_active: AtomicBool::new(false),
+            maintenance: Mutex::new(maintenance),
         }
     }
 
@@ -452,6 +493,17 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
+    fn stop_maintenance(&self) {
+        let maintenance = self
+            .maintenance
+            .lock()
+            .expect("maintenance mutex poisoned")
+            .take();
+        if let Some(maintenance) = maintenance {
+            maintenance.stop_and_join();
+        }
+    }
+
     #[cfg(feature = "bench")]
     pub async fn begin_observation(
         &self,
@@ -562,7 +614,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             })
             .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
         let accepted_ns = epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        self.maybe_enqueue_cleanup(worker_idx);
 
         Ok(ObservedEnqueueReceipt {
             accepted_ns,
@@ -626,7 +677,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Anchor { worker, anchor })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        self.maybe_enqueue_cleanup(thread_idx);
         Ok(())
     }
 
@@ -676,17 +726,14 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             self.worker_event_channels[thread_idx]
                 .send(WorkerTask::Event(event.clone()))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(thread_idx);
             self.worker_event_channels[second_idx]
                 .send(WorkerTask::Event(event))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(second_idx);
             return Ok(());
         }
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Event(event))
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        self.maybe_enqueue_cleanup(thread_idx);
         Ok(())
     }
 
@@ -701,7 +748,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            self.maybe_enqueue_cleanup(idx);
             Ok::<_, KvRouterError>(resp_rx)
         };
         let receivers = if let Some(second_idx) = second_idx {
@@ -749,7 +795,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
     /// depends on removal and acknowledgement using that same FIFO lane before activation. This
     /// proves queue progress only; ordinary event errors are logged by the worker.
-    async fn flush_worker_lane_and_wait(
+    #[doc(hidden)]
+    pub async fn flush_worker_lane_and_wait(
         &self,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
@@ -813,10 +860,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 ?error,
                 "Failed to send rank removal task"
             );
-            return;
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker_across_lanes_and_wait(
@@ -855,7 +899,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-        self.maybe_enqueue_cleanup(0);
         Ok(())
     }
 
@@ -990,23 +1033,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
     }
 
-    fn maybe_enqueue_cleanup(&self, thread_idx: usize) {
-        if !self.backend.try_schedule_cleanup() {
-            return;
-        }
-
-        if let Err(e) =
-            self.worker_event_channels[thread_idx].send(WorkerTask::CleanupStaleChildren)
-        {
-            self.backend.cancel_scheduled_cleanup();
-            tracing::error!(
-                "Failed to send cleanup task to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-        }
-    }
-
     async fn record_routing_decision_hashes(
         &self,
         worker: WorkerWithDpRank,
@@ -1088,6 +1114,32 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
+    }
+}
+
+impl ThreadPoolIndexer<ConcurrentRadixTreeCompressed> {
+    pub async fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Result<bool, KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::ContainsWorkerBlock {
+                worker,
+                block_hash,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 }
 
@@ -1197,6 +1249,8 @@ impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.shutdown();
         }
+
+        self.stop_maintenance();
 
         // Send Terminate to all worker threads so they exit their recv loops
         // and drop their Arc<T> clones. Then join the threads to ensure the
@@ -1334,6 +1388,8 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         if let Some(prune_manager) = &self.prune_manager {
             prune_manager.shutdown();
         }
+
+        self.stop_maintenance();
 
         // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {

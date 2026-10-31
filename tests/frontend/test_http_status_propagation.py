@@ -17,7 +17,11 @@ import pytest
 import requests
 
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
-from tests.utils.network_canary import ConnectionCanary, running_canary
+from tests.utils.network_canary import (
+    ConnectionCanary,
+    assert_blocked_url_refused,
+    running_canary,
+)
 from tests.utils.port_utils import ServicePorts
 
 MODEL_NAME = "test-http-status-prop"
@@ -25,7 +29,8 @@ ENDPOINT_PATH = "test.http_status_prop.generate"
 PASSTHROUGH_MODEL_NAME = "test-http-status-prop-passthrough"
 PASSTHROUGH_ENDPOINT_PATH = "test.http_status_prop.generate_passthrough"
 EXPECTED_STATUS = 415
-EXPECTED_MESSAGE = "unsupported-media-via-wire"
+BACKEND_MESSAGE = "unsupported-media-via-wire"
+EXPECTED_MESSAGE = "Unsupported Media Type"
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -99,7 +104,12 @@ def test_http_status_propagates_through_wire(services: int) -> None:
         timeout=30,
     )
     assert response.status_code == EXPECTED_STATUS, response.text
-    assert EXPECTED_MESSAGE in response.text
+    assert response.json() == {
+        "message": EXPECTED_MESSAGE,
+        "type": EXPECTED_MESSAGE,
+        "code": EXPECTED_STATUS,
+    }
+    assert BACKEND_MESSAGE not in response.text
 
 
 @pytest.mark.timeout(120)
@@ -132,9 +142,7 @@ def test_python_backend_ssrf_rejection_is_4xx_with_zero_egress(
         timeout=30,
     )
 
-    assert 400 <= response.status_code < 500, response.text
-    assert "is in a blocked range" in response.text, response.text
-    outbound_canary.assert_no_connection()
+    assert_blocked_url_refused(response, outbound_canary, "is in a blocked range")
 
 
 @pytest.mark.timeout(30)

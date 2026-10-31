@@ -172,6 +172,73 @@ docker exec -it <container_id> bash
   </Step>
 </Steps>
 
+## Decision API Workers
+
+**Experimental.** To serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`, use a dedicated aggregated SGLang CUDA worker on version 0.5.19 or 0.5.22. Other backends and execution modes require separate qualification. These routes are disabled by default.
+
+With the installation and etcd/NATS prerequisites above in place, start the frontend in one terminal:
+
+```bash
+python -m dynamo.frontend --http-port 8000 --enable-systemone-api
+```
+
+Start the worker in another terminal:
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --tp 1 --dp-size 1 --pp-size 1 \
+  --max-running-requests 1 --disable-overlap-schedule \
+  --context-length 2048 --max-total-tokens 2048 \
+  --disable-piecewise-cuda-graph
+```
+
+Do not enable speculative decoding, attention data parallelism, pipeline parallelism, or priority preemption. Wait for the worker's `Published SGLang ... System One capability` message. An otherwise eligible worker running an unsupported version logs a warning and does not advertise decision scoring.
+
+<Warning>
+The entire worker is serialized, including ordinary chat and completion requests. Keep decision workers separate from throughput-oriented chat deployments. This small-model configuration verifies integration; it does not qualify larger checkpoints or establish task accuracy.
+</Warning>
+
+Verify the OpenAI contract:
+
+```bash
+curl --fail-with-body http://localhost:8000/v1/decisions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "The customer requests a refund for a duplicate charge.",
+    "questions": [{
+      "type": "choice", "name": "department",
+      "instructions": "Choose the responsible team.",
+      "choices": [
+        {"value": "billing", "description": "Payments"},
+        {"value": "technical", "description": "Software"}
+      ]
+    }]
+  }'
+```
+
+Verify the Jev contract against the same worker:
+
+```bash
+curl --fail-with-body http://localhost:8000/v1/systemone \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "state": "The customer requests a refund for a duplicate charge.",
+    "chat_template_kwargs": {"enable_thinking": false},
+    "questions": {"department": {
+      "type": "choice", "instructions": "Choose the responsible team.",
+      "criteria": {"billing": "Payments", "technical": "Software"}
+    }}
+  }'
+```
+
+Successful responses contain `model`, `answers`, and `usage`, with zero generated output tokens. OpenAI answers are an ordered array; Jev answers are keyed by question name. Neither route accepts an `nvext` selector or the SGLang-native Decisions wire schema. A local model's predictions and confidence are not guaranteed to match a hosted provider.
+
+For request limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
+
 ## Scaling and larger deployments
 
 The flow above is one worker on one node. To go bigger, you change **flags on the worker** — the frontend command never changes, and you still run just one frontend.

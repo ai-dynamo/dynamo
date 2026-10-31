@@ -4,7 +4,7 @@
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="library/golang"
-ARG BASE_IMAGE_TAG="1.26.6"
+ARG BASE_IMAGE_TAG="1.27.3"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -30,7 +30,7 @@ COPY . .
 FROM base AS linter
 
 # Install golangci-lint using go install (builds with current Go version)
-RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 # Run linting
 RUN golangci-lint run --timeout=5m
@@ -53,6 +53,7 @@ FROM base AS builder
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgdr-run-publisher ./cmd/dgdr-run-publisher && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgd-apply-overrides ./cmd/dgd-apply-overrides
 
 # Emit a CycloneDX SBOM for the operator's Go module set so the licenses
@@ -60,7 +61,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
 # v1.7.0 to keep the SBOM tool itself reproducible.
 #
 # `app -main ./cmd` covers the manager binary (./cmd/main.go = package
-# main in ./cmd). crd-apply and dgd-apply-overrides are separate mains in
+# main in ./cmd). crd-apply, dgdr-run-publisher and dgd-apply-overrides are separate mains in
 # the same module, so their deps are a subset of manager's — a single SBOM
 # is sufficient. Tried `mod` first but its license detection is weaker than
 # `app`'s — everything came back UNKNOWN.
@@ -204,10 +205,11 @@ COPY --from=sources_collect /sources.zip /sources.zip
 
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v4.0.9
+FROM nvcr.io/nvidia/distroless/go:v4.1.7
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .
+COPY --from=builder /workspace/dgdr-run-publisher .
 COPY --from=builder /workspace/dgd-apply-overrides .
 COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
 COPY --from=licenses /legal /legal

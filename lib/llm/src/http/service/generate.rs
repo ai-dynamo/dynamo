@@ -20,24 +20,26 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
+use super::error::{SanitizedError, find_canonical_error_in_chain};
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
+    preprocessed_context_from_headers, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use crate::protocols::common::preprocessed_mm_identifier;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -74,7 +76,12 @@ fn generate_metric_error_type(status: StatusCode) -> ErrorType {
 
 #[derive(Debug)]
 struct GenerateRequestContext {
+    /// Server-minted id for the request context, routing, and logs. Never client-chosen:
+    /// in-flight request state is keyed on it.
     request_id: String,
+    /// Client-facing id echoed in the response body and the `vllm_tito` envelope, following
+    /// vLLM's `x-request-id` > body `request_id` precedence. Correlation only.
+    public_request_id: String,
     data_parallel_rank: Option<u32>,
 }
 
@@ -128,12 +135,13 @@ fn resolve_generate_request_context(
     headers: &HeaderMap,
     body_request_id: Option<&str>,
 ) -> GenerateRequestContext {
-    let request_id = headers
+    let request_id = get_or_create_request_id(headers);
+    let public_request_id = headers
         .get(X_REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
         .or_else(|| body_request_id.map(ToOwned::to_owned))
-        .unwrap_or_else(|| get_or_create_request_id(headers));
+        .unwrap_or_else(|| request_id.clone());
     let data_parallel_rank = headers
         .get(X_DATA_PARALLEL_RANK_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -141,6 +149,7 @@ fn resolve_generate_request_context(
 
     GenerateRequestContext {
         request_id,
+        public_request_id,
         data_parallel_rank,
     }
 }
@@ -150,11 +159,12 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+fn generate_dispatch_span(request_id: &str, public_request_id: &str, model: &str) -> tracing::Span {
     tracing::info_span!(
         target: "request_span",
         "generate",
         request_id = %request_id,
+        x_request_id = %public_request_id,
         model = %model,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
@@ -188,12 +198,48 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
+/// Caller-supplied deadline elapsed before the engine produced a stream: HTTP
+/// 429 with a `Cancelled` metric label, the same contract as the OpenAI and
+/// SGLang generate surfaces.
+fn generate_deadline_exceeded_response() -> Response {
+    generate_error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "deadline_exceeded",
+        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+    )
+}
+
+fn generate_unavailable_response() -> Response {
+    generate_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service_unavailable",
+        SanitizedError::Unavailable.to_string(),
+    )
+}
+
 fn generate_internal_error_response() -> Response {
     generate_error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
         "internal server error".to_string(),
     )
+}
+
+fn generate_invalid_request_response(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<Response> {
+    let error = find_canonical_error_in_chain(error)?;
+    if error.class() != dynamo_runtime::error::ErrorClass::InvalidRequest {
+        return None;
+    }
+    Some(generate_error_response(
+        StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        error
+            .public_message()
+            .unwrap_or("Invalid request")
+            .to_string(),
+    ))
 }
 
 /// Borrowed worker envelope for vLLM-specific request fields.
@@ -292,8 +338,9 @@ fn intersecting_mm_ranges<'a>(
 
 /// Build the routing-only token sequence used by vLLM KV events for multimodal
 /// prompts. The caller-provided `features` object remains opaque to execution;
-/// this projection reads only the hashes and placeholder ranges required to
-/// make request-side KV hashes match worker-side event hashes.
+/// this projection derives content-bound identities from the inline kwargs and
+/// combines them with placeholder ranges so request-side KV hashes match
+/// worker-side event hashes.
 fn generate_mm_routing_info(
     request: &GenerateRequest,
     kv_cache_block_size: u32,
@@ -318,10 +365,15 @@ fn generate_mm_routing_info(
         .get("mm_placeholders")
         .and_then(serde_json::Value::as_object)
         .ok_or("features.mm_placeholders must be a JSON object")?;
+    let kwargs_data = features
+        .get("kwargs_data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.kwargs_data must be a JSON object")?;
 
     if mm_hashes
         .keys()
         .chain(mm_placeholders.keys())
+        .chain(kwargs_data.keys())
         .any(|modality| modality != "image")
     {
         return Err("exact /generate MM routing currently supports image placeholders only");
@@ -330,28 +382,48 @@ fn generate_mm_routing_info(
         return Err("KV cache block size must be non-zero");
     }
 
-    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
-        (None, None) => return Ok(None),
-        (Some(hashes), Some(placeholders)) => (
+    let (hashes, placeholders, kwargs) = match (
+        mm_hashes.get("image"),
+        mm_placeholders.get("image"),
+        kwargs_data.get("image"),
+    ) {
+        (None, None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders), Some(kwargs)) => (
             hashes
                 .as_array()
                 .ok_or("features.mm_hashes.image must be an array")?,
             placeholders
                 .as_array()
                 .ok_or("features.mm_placeholders.image must be an array")?,
+            kwargs
+                .as_array()
+                .ok_or("features.kwargs_data.image must be an array")?,
         ),
-        _ => return Err("image hashes and placeholders must both be present"),
+        _ => return Err("image hashes, placeholders, and kwargs_data must all be present"),
     };
-    if hashes.len() != placeholders.len() {
-        return Err("image hashes and placeholders must have equal lengths");
+    if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+        return Err("image hashes, placeholders, and kwargs_data must have equal lengths");
     }
 
     let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
-    for (hash, placeholder) in hashes.iter().zip(placeholders) {
-        let hash = hash
+    for ((producer_hash, placeholder), encoded_kwargs) in
+        hashes.iter().zip(placeholders).zip(kwargs)
+    {
+        producer_hash
             .as_str()
-            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .filter(|hash| !hash.is_empty())
             .ok_or("multimodal hashes must be non-empty strings")?;
+        let raw_kwargs = BASE64_STANDARD
+            .decode(
+                encoded_kwargs
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or("multimodal kwargs_data must contain non-empty base64 strings")?,
+            )
+            .map_err(|_| "multimodal kwargs_data must contain valid base64")?;
+        let identifier = preprocessed_mm_identifier("image", &raw_kwargs);
+        let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+            .ok_or("content-derived multimodal identifier must not be empty")?;
         let placeholder = placeholder
             .as_object()
             .ok_or("multimodal placeholders must be JSON objects")?;
@@ -537,7 +609,7 @@ fn preprocessed_from_generate(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
     routing_metadata: GenerateRoutingMetadata,
 ) -> anyhow::Result<PreprocessedRequest> {
     let tracker = Arc::new(RequestTracker::new());
@@ -546,7 +618,7 @@ fn preprocessed_from_generate(
         request,
         model,
         data_parallel_rank,
-        request_id,
+        public_request_id,
         routing_metadata,
         tracker,
     )
@@ -556,7 +628,7 @@ fn preprocessed_from_generate_with_tracker(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
     routing_metadata: GenerateRoutingMetadata,
     tracker: Arc<RequestTracker>,
 ) -> anyhow::Result<PreprocessedRequest> {
@@ -567,17 +639,21 @@ fn preprocessed_from_generate_with_tracker(
     } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
-    // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
-    // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
-    // tower/connector LoRA is enabled for an adapter request, fall back to
-    // token-only routing because vLLM scopes the MM identity by that adapter.
-    let mm_routing = if tower_connector_lora_enabled && lora_name.is_some() {
+    // The sidecar protocol does not expose whether tower/connector LoRA is
+    // active, so conservatively treat every adapter's MM identity as scoped.
+    let mm_routing = if lora_name.is_some() {
         tracing::debug!(
             target: "mm_routing",
-            "tower/connector LoRA is active; using token-only multimodal routing"
+            tower_connector_lora_enabled,
+            "LoRA request uses token-only multimodal routing"
         );
         None
     } else {
@@ -593,9 +669,21 @@ fn preprocessed_from_generate_with_tracker(
             }
         }
     };
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, public_request_id))?;
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(kv_transfer_params) = request.kv_transfer_params.as_ref() {
+        extra_args.insert(
+            "kv_transfer_params".to_string(),
+            serde_json::Value::Object(kv_transfer_params.clone()),
+        );
+    }
+    if let Some(skip_reading_prefix_cache) = sampling.skip_reading_prefix_cache() {
+        extra_args.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(skip_reading_prefix_cache),
+        );
+    }
     if let Some(projection) = &mm_routing {
         extra_args.insert(
             "dynamo_mm_routing_hashes".to_string(),
@@ -612,17 +700,9 @@ fn preprocessed_from_generate_with_tracker(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -673,14 +753,22 @@ impl GenerateMetricLifecycle {
         input_tokens: usize,
     ) -> Self {
         let metrics = state.metrics_clone();
+        let inflight = metrics.clone().create_inflight_guard(
+            &metric_model,
+            super::metrics::Endpoint::Generate,
+            false,
+            request_id,
+        );
+        // The prompt is already tokenized, so report its size before any output.
+        inflight.request_metrics().add_input_tokens(input_tokens);
         Self {
-            inflight: metrics.clone().create_inflight_guard(
-                &metric_model,
-                super::metrics::Endpoint::Generate,
-                false,
-                request_id,
+            collector: GenerateMetricCollector::new(
+                inflight.response_collector(),
+                metrics.create_http_queue_guard(&metric_model),
+                tracker,
+                input_tokens,
             ),
-            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            inflight,
             metric_model,
         }
     }
@@ -692,14 +780,14 @@ impl GenerateMetricLifecycle {
 
 impl GenerateMetricCollector {
     fn new(
-        metrics: Arc<super::metrics::Metrics>,
-        model: &str,
+        response: ResponseMetricCollector,
+        http_queue: HttpQueueGuard,
         tracker: Arc<RequestTracker>,
         input_tokens: usize,
     ) -> Self {
         Self {
-            response: metrics.clone().create_response_collector(model),
-            http_queue: Some(metrics.create_http_queue_guard(model)),
+            response,
+            http_queue: Some(http_queue),
             tracker,
             input_tokens,
             output_tokens: 0,
@@ -749,8 +837,8 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases a migrated attempt's usage onto the client's
+            // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
@@ -778,7 +866,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
@@ -813,7 +901,11 @@ async fn handler_generate(
         .to_string();
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
-    let dispatch_span = generate_dispatch_span(&request_context.request_id, &metric_model);
+    let dispatch_span = generate_dispatch_span(
+        &request_context.request_id,
+        &request_context.public_request_id,
+        &metric_model,
+    );
     let mut metric_lifecycle = dispatch_span.in_scope(|| {
         GenerateMetricLifecycle::new(
             state.as_ref(),
@@ -901,7 +993,7 @@ async fn handler_generate(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_context.public_request_id,
         routing_metadata,
         tracker,
     ) {
@@ -918,7 +1010,7 @@ async fn handler_generate(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => {
                 metric_lifecycle.mark_error(generate_metric_error_type(response.0));
@@ -946,6 +1038,7 @@ async fn handler_generate(
             engine,
             context,
             request_id,
+            request_context.public_request_id,
             state.clone(),
             response_options,
             metric_lifecycle,
@@ -969,6 +1062,7 @@ async fn generate_dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
     request_id: String,
+    public_request_id: String,
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
     metric_lifecycle: GenerateMetricLifecycle,
@@ -994,16 +1088,26 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
+            // Deadline is checked before overload so a chain carrying both
+            // markers keeps the deadline outcome, matching the OpenAI surface.
+            let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
+            let invalid_request = generate_invalid_request_response(error.as_ref());
+            inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
+            } else if invalid_request.is_some() {
+                ErrorType::Validation
             } else {
                 ErrorType::Internal
             });
+            if deadline_exceeded {
+                return generate_deadline_exceeded_response();
+            }
             if was_cancelled {
                 return generate_cancelled_response();
             }
@@ -1017,6 +1121,18 @@ async fn generate_dispatch(
                     "service_unavailable",
                     "engine rejected the request".to_string(),
                 );
+            }
+            if was_unavailable {
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no worker available for generate request"
+                );
+                return generate_unavailable_response();
+            }
+            if let Some(response) = invalid_request {
+                tracing::debug!(%request_id, %error, "invalid generate request");
+                return response;
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
             return generate_internal_error_response();
@@ -1032,7 +1148,7 @@ async fn generate_dispatch(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
             stream,
-            request_id.clone(),
+            public_request_id,
             response_options,
         ),
     )
@@ -1066,6 +1182,16 @@ async fn generate_dispatch(
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
+            if super::metrics::request_was_unavailable(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
+                return generate_unavailable_response();
+            }
+            if let Some(response) = generate_invalid_request_response(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Validation);
+                tracing::debug!(%request_id, %error, "invalid generate request");
+                return response;
+            }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
             generate_internal_error_response()
@@ -1074,7 +1200,7 @@ async fn generate_dispatch(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         future::Future,
         pin::Pin,
@@ -1178,7 +1304,33 @@ mod tests {
 
     struct CancelledEngine;
 
+    struct DeadlineEngine;
+
     struct MetricEngine;
+
+    /// Fails dispatch the way an addressed worker that no longer serves the instance does.
+    pub(crate) struct WorkerUnavailableEngine;
+
+    struct WorkerUnavailableStreamEngine;
+
+    struct InvalidArgumentStreamEngine;
+
+    fn worker_unavailable_error() -> dynamo_runtime::error::DynamoError {
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build()
+    }
+
+    fn invalid_argument_error() -> dynamo_runtime::error::DynamoError {
+        let message = "TITO requests currently require an aggregated vLLM worker";
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Backend(
+                dynamo_runtime::error::BackendError::InvalidArgument,
+            ))
+            .message(message)
+            .build()
+    }
 
     struct MigrationMetricBackend {
         calls: AtomicU32,
@@ -1207,6 +1359,67 @@ mod tests {
                 .message("backend cancelled before opening a stream")
                 .build()
                 .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for DeadlineEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                        .unwrap(),
+                )
+                .message("router deadline exceeded before stream start")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(worker_unavailable_error().into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // The dispatch call succeeds and the stream opens; the error arrives mid-stream, the
+            // way an exhausted migration surfaces it.
+            let context = request.context();
+            let stream = futures::stream::iter([Annotated::from_err(worker_unavailable_error())]);
+            Ok(ResponseStream::new(Box::pin(stream), context))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for InvalidArgumentStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([Annotated::from_err(invalid_argument_error())]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
 
@@ -1255,6 +1468,7 @@ mod tests {
                         prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                             audio_tokens: None,
                             cached_tokens: Some(2),
+                            ..Default::default()
                         }),
                         completion_tokens_details: None,
                     }),
@@ -1309,6 +1523,7 @@ mod tests {
                                     dynamo_protocols::types::PromptTokensDetails {
                                         audio_tokens: None,
                                         cached_tokens: Some(prompt_tokens),
+                                        ..Default::default()
                                     },
                                 ),
                                 completion_tokens_details: None,
@@ -1378,7 +1593,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct RequestIdCaptureLayer(Arc<Mutex<Option<String>>>);
+    struct RequestIdCaptureLayer(Arc<Mutex<RequestIdVisitor>>);
 
     impl<S: Subscriber> Layer<S> for RequestIdCaptureLayer {
         fn on_new_span(
@@ -1390,7 +1605,7 @@ mod tests {
             let mut visitor = RequestIdVisitor::default();
             attrs.record(&mut visitor);
             if visitor.request_id.is_some() {
-                *self.0.lock().unwrap() = visitor.request_id;
+                *self.0.lock().unwrap() = visitor;
             }
         }
     }
@@ -1398,18 +1613,23 @@ mod tests {
     #[derive(Default)]
     struct RequestIdVisitor {
         request_id: Option<String>,
+        x_request_id: Option<String>,
     }
 
     impl Visit for RequestIdVisitor {
         fn record_str(&mut self, field: &Field, value: &str) {
             if field.name() == "request_id" {
                 self.request_id = Some(value.to_string());
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(value.to_string());
             }
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             if field.name() == "request_id" {
                 self.request_id = Some(format!("{value:?}"));
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(format!("{value:?}"));
             }
         }
     }
@@ -1561,6 +1781,130 @@ mod tests {
             ),
             1
         );
+    }
+
+    /// Echoes each request's tokens back, and holds every request until `barrier` releases them
+    /// together so both are in flight at once. Records what the worker saw for each request.
+    struct ConcurrentEchoEngine {
+        barrier: tokio::sync::Barrier,
+        seen: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for ConcurrentEchoEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let envelope_request_id = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra["vllm_tito"]["request_id"].as_str())
+                .map(str::to_string);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.id().to_string(), envelope_request_id));
+            self.barrier.wait().await;
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                token_ids: request.token_ids.to_vec(),
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                ..Default::default()
+            })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    /// Serve `engine` through a frontend source/sink pipeline, like the discovery watcher
+    /// does, so responses are matched to callers by request id.
+    pub(crate) fn engine_behind_frontend(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+    ) -> crate::types::openai::generate::GenerateStreamingEngine {
+        use dynamo_runtime::pipeline::{ServiceBackend, Source};
+        let frontend = dynamo_runtime::pipeline::ServiceFrontend::<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+        >::new();
+        frontend
+            .link(ServiceBackend::from_engine(engine))
+            .unwrap()
+            .link_terminal(frontend)
+            .unwrap()
+    }
+
+    async fn concurrent_generate_with_shared_client_id(
+        headers: HeaderMap,
+        body_request_id: Option<&str>,
+        expected_public_id: &str,
+    ) {
+        const MODEL: &str = "generate-concurrent-model";
+        let engine = Arc::new(ConcurrentEchoEngine {
+            barrier: tokio::sync::Barrier::new(2),
+            seen: Mutex::new(Vec::new()),
+        });
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model(
+                MODEL,
+                "generate-concurrent-test",
+                engine_behind_frontend(engine.clone()),
+            )
+            .unwrap();
+
+        let send = |token_ids: Vec<u32>| {
+            let mut body = serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "model": MODEL
+            });
+            if let Some(id) = body_request_id {
+                body["request_id"] = serde_json::json!(id);
+            }
+            let request = serde_json::from_value(body).unwrap();
+            handler_generate(State(state.clone()), headers.clone(), Json(request))
+        };
+        let (first, second) = tokio::time::timeout(
+            Duration::from_secs(10),
+            futures::future::join(send(vec![1, 2, 3]), send(vec![7, 8])),
+        )
+        .await
+        .expect("concurrent generate requests must not hang");
+
+        for (response, expected_tokens) in [(first, vec![1, 2, 3]), (second, vec![7, 8])] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["request_id"], expected_public_id);
+            assert_eq!(
+                body["choices"][0]["token_ids"],
+                serde_json::json!(expected_tokens)
+            );
+        }
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].0, seen[1].0,
+            "each request needs its own context id"
+        );
+        for (context_id, envelope_request_id) in seen.iter() {
+            assert_ne!(context_id, expected_public_id);
+            assert_eq!(envelope_request_id.as_deref(), Some(expected_public_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_generate_requests_sharing_x_request_id_get_their_own_output() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "1".parse().unwrap());
+        concurrent_generate_with_shared_client_id(headers, None, "1").await;
     }
 
     #[tokio::test]
@@ -1772,7 +2116,7 @@ mod tests {
             .as_object_mut()
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
-        assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2]);
         assert_eq!(
             preprocessed
                 .tracker
@@ -1798,7 +2142,7 @@ mod tests {
                     {"offset": 2, "length": 3},
                     {"offset": 7, "length": 2}
                 ]},
-                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+                "kwargs_data": {"image": ["b3BhcXVlLWE=", "b3BhcXVlLWI="]}
             }
         });
         let request: GenerateRequest =
@@ -1813,8 +2157,18 @@ mod tests {
         )
         .expect("build request");
 
-        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
-        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-a",
+        ))
+        .expect("content-derived hash");
+        let hash_b = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-b",
+        ))
+        .expect("content-derived hash");
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_a);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_b);
         let mm = preprocessed
             .mm_routing_info
             .as_ref()
@@ -1827,8 +2181,8 @@ mod tests {
         assert_eq!(mm.expanded_prompt_len, 10);
 
         assert_eq!(
-            preprocessed.token_ids,
-            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
+            preprocessed.token_ids.as_slice(),
+            &[10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
         );
         let envelope = preprocessed
             .extra_args
@@ -1842,49 +2196,40 @@ mod tests {
                 .as_ref()
                 .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
             Some(&serde_json::json!([
-                format!("{}{}", "a".repeat(16), "0".repeat(48)),
-                format!("{}{}", "b".repeat(16), "0".repeat(48))
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
             ]))
         );
 
         // A frontend-approved, marker-form hash must produce the same KV hash
-        // on the request and event paths, including ordinary language-only LoRA.
+        // on the request and event paths.
         let mm_identifier = "1234567890abcdef".repeat(4);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 99, 20],
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": [mm_identifier.clone()]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["cm91dGluZy1h"]}
             }
         }))
         .expect("deserialize request");
         let preprocessed = preprocessed_from_generate(
             request,
-            "adapter-a",
+            "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, false, Some("adapter-a")),
+            routing_metadata(4, false, None),
         )
-        .expect("build LoRA request");
+        .expect("build request");
         let routing = preprocessed
             .mm_routing_info
             .as_ref()
-            .expect("language-only LoRA keeps exact MM routing");
-        assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
+            .expect("base request keeps exact MM routing");
         let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
             &routing.routing_token_ids,
             4,
-            dynamo_kv_router::protocols::BlockHashOptions {
-                lora_name: Some("adapter-a"),
-                ..Default::default()
-            },
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
         );
         let marked_identifier = preprocessed
             .extra_args
@@ -1912,7 +2257,6 @@ mod tests {
             7,
             &[10, 99, 99, 20],
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                lora_name: Some("adapter-a"),
                 mm_extra_info: Some(event_mm_info),
                 image_token_id: Some(99),
                 ..Default::default()
@@ -1934,15 +2278,18 @@ mod tests {
                     "offset": 1,
                     "length": 3,
                     "is_embed": [true, false, true]
-                }]}
+                }]},
+                "kwargs_data": {"image": ["c3BhcnNl"]}
             }
         }))
         .expect("deserialize request");
         let routing = generate_mm_routing_info(&request, 5)
             .expect("valid sparse MM routing metadata")
             .expect("MM routing projection");
-        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
-            .expect("non-empty identifier");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image", b"sparse",
+        ))
+        .expect("content-derived identifier");
         let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
         assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
@@ -1952,7 +2299,8 @@ mod tests {
                 serde_json::json!([10, 99, 42, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "mixed multimodal placeholder spans require is_embed",
             ),
@@ -1961,7 +2309,8 @@ mod tests {
                 serde_json::json!([99, 10, 99, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "image tokens must be covered by multimodal placeholder ranges",
             ),
@@ -1973,7 +2322,8 @@ mod tests {
                     "mm_placeholders": {"image": [
                         {"offset": 1, "length": 3, "is_embed": [true, false, true]},
                         {"offset": 5, "length": 1}
-                    ]}
+                    ]},
+                    "kwargs_data": {"image": ["c3BhcnNlLWE=", "c3BhcnNlLWI="]}
                 }),
                 "sparse multimodal layout cannot be normalized exactly by worker events",
             ),
@@ -2082,7 +2432,11 @@ mod tests {
             .expect("invalid routing metadata must not reject execution");
 
             assert!(preprocessed.mm_routing_info.is_none(), "{name}");
-            assert_eq!(preprocessed.token_ids, expected_token_ids, "{name}");
+            assert_eq!(
+                preprocessed.token_ids.as_slice(),
+                expected_token_ids,
+                "{name}"
+            );
             let envelope = preprocessed
                 .extra_args
                 .as_ref()
@@ -2104,7 +2458,8 @@ mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["YmFzZS1pbWFnZQ=="]}
             }
         });
         let base_request: GenerateRequest =
@@ -2122,30 +2477,39 @@ mod tests {
             "the worker setting alone does not activate adapter-scoped MM identity"
         );
 
-        let adapter_request: GenerateRequest =
-            serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate(
-            adapter_request,
-            "adapter-a",
-            None,
-            "resolved-request",
-            routing_metadata(4, true, Some("adapter-a")),
-        )
-        .expect("build adapter request");
-        assert!(adapter.mm_routing_info.is_none());
-        assert_eq!(
-            adapter
-                .routing
+        for tower_connector_lora_enabled in [false, true] {
+            let adapter_request: GenerateRequest =
+                serde_json::from_value(raw.clone()).expect("deserialize adapter request");
+            let adapter = preprocessed_from_generate(
+                adapter_request,
+                "adapter-a",
+                None,
+                "resolved-request",
+                routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
+            )
+            .expect("build adapter request");
+            assert!(adapter.mm_routing_info.is_none());
+            assert_eq!(
+                adapter
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.lora_name.as_deref()),
+                Some("adapter-a")
+            );
+            assert!(
+                adapter
+                    .extra_args
+                    .as_ref()
+                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .is_none()
+            );
+            let envelope = adapter
+                .extra_args
                 .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
-        let envelope = adapter
-            .extra_args
-            .as_ref()
-            .and_then(|extra| extra.get("vllm_tito"))
-            .expect("vllm_tito envelope");
-        assert_eq!(envelope["features"], raw["features"]);
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope");
+            assert_eq!(envelope["features"], raw["features"]);
+        }
     }
 
     #[test]
@@ -2197,6 +2561,90 @@ mod tests {
     }
 
     #[test]
+    fn generate_projects_training_text_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": -1,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "skip_reading_prefix_cache": false,
+                "skip_special_tokens": false
+            },
+            "kv_transfer_params": {
+                "connector_data": {"block_ids": [1, 2]}
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(-1));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids_hidden,
+            Some(vec![7, 8])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(1));
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("skip_reading_prefix_cache")),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("kv_transfer_params")),
+            Some(&serde_json::json!({"connector_data": {"block_ids": [1, 2]}}))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("vllm_tito"))
+                .and_then(|tito| tito.get("sampling_params"))
+                .and_then(|sampling| sampling.get("top_k")),
+            Some(&serde_json::json!(-1))
+        );
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
     fn generate_request_context_matches_vllm_header_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
@@ -2204,7 +2652,8 @@ mod tests {
 
         let context = resolve_generate_request_context(&headers, Some("body-request"));
 
-        assert_eq!(context.request_id, "header-request");
+        assert_eq!(context.public_request_id, "header-request");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
         assert_eq!(context.data_parallel_rank, Some(3));
     }
 
@@ -2215,22 +2664,36 @@ mod tests {
 
         let context = resolve_generate_request_context(&headers, Some("body-request"));
 
-        assert_eq!(context.request_id, "body-request");
+        assert_eq!(context.public_request_id, "body-request");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
         assert_eq!(context.data_parallel_rank, None);
+
+        let context = resolve_generate_request_context(&HeaderMap::new(), None);
+        assert_eq!(context.public_request_id, context.request_id);
     }
 
     #[test]
     fn generate_dispatch_span_uses_resolved_request_id() {
-        let captured_request_id = Arc::new(Mutex::new(None));
+        let captured_request_id = Arc::new(Mutex::new(RequestIdVisitor::default()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );
 
-        let dispatch_span = generate_dispatch_span("header-request", "test-model");
+        let context = resolve_generate_request_context(&HeaderMap::new(), Some("body-request"));
+        let dispatch_span = generate_dispatch_span(
+            &context.request_id,
+            &context.public_request_id,
+            "test-model",
+        );
 
         assert_eq!(
-            captured_request_id.lock().unwrap().as_deref(),
-            Some("header-request")
+            captured_request_id.lock().unwrap().request_id.as_deref(),
+            Some(context.request_id.as_str())
+        );
+        assert_eq!(
+            captured_request_id.lock().unwrap().x_request_id.as_deref(),
+            Some("body-request")
         );
         let fields = dispatch_span
             .metadata()
@@ -2238,6 +2701,7 @@ mod tests {
             .fields();
         for field in [
             "request_id",
+            "x_request_id",
             "model",
             "input_tokens",
             "output_tokens",
@@ -2250,7 +2714,7 @@ mod tests {
         }
     }
 
-    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+    pub(crate) fn dispatch_test_context() -> Context<PreprocessedRequest> {
         Context::new(
             PreprocessedRequest::builder()
                 .model("test-model".to_string())
@@ -2287,6 +2751,7 @@ mod tests {
         generate_dispatch(
             engine,
             context,
+            request_id.clone(),
             request_id,
             state,
             response_options,
@@ -2433,23 +2898,51 @@ mod tests {
         await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
     }
 
-    async fn dispatch_terminal_finish_reason(
-        finish_reason: crate::protocols::common::FinishReason,
+    async fn dispatch_engine(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        request_id: &str,
     ) -> (Response, Arc<service_v2::State>) {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(TerminalEngine(finish_reason));
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let response = generate_dispatch_for_test(
             engine,
             dispatch_test_context(),
-            "req-terminal-dispatch".to_string(),
+            request_id.to_string(),
             "test-model".to_string(),
             state.clone(),
             GenerateResponseOptions::default(),
         )
         .await;
         (response, state)
+    }
+
+    async fn dispatch_terminal_finish_reason(
+        finish_reason: crate::protocols::common::FinishReason,
+    ) -> (Response, Arc<service_v2::State>) {
+        dispatch_engine(
+            Arc::new(TerminalEngine(finish_reason)),
+            "req-terminal-dispatch",
+        )
+        .await
+    }
+
+    async fn assert_worker_unavailable_returns_503(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+    ) {
+        let (response, state) = dispatch_engine(engine, "req-worker-unavailable").await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2490,6 +2983,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_unavailable_dispatch_returns_503() {
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableEngine)).await;
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_mid_stream_returns_503() {
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableStreamEngine)).await;
+    }
+
+    #[tokio::test]
+    async fn backend_invalid_argument_stream_returns_400() {
+        let (response, state) =
+            dispatch_engine(Arc::new(InvalidArgumentStreamEngine), "req-invalid").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "Invalid request");
+        assert!(!body.to_string().contains("aggregated vLLM worker"));
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], 400);
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Validation,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn immediate_engine_cancellation_returns_499() {
         let engine: crate::types::openai::generate::GenerateStreamingEngine =
             Arc::new(CancelledEngine);
@@ -2507,6 +3038,39 @@ mod tests {
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_deadline_exceeded_returns_429_with_cancelled_metric() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(DeadlineEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-deadline".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "request deadline exceeded");
+        assert_eq!(body["error"]["type"], "deadline_exceeded");
+        assert_eq!(body["error"]["code"], 429);
+        assert!(
+            !body
+                .to_string()
+                .contains("router deadline exceeded before stream start")
+        );
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
@@ -2769,8 +3333,18 @@ mod tests {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let metric_model = state.manager().metric_model_for(MODEL).to_string();
-        let mut collector =
-            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let inflight = state.metrics_clone().create_inflight_guard(
+            &metric_model,
+            Endpoint::Generate,
+            false,
+            "generate-worker-metadata-test",
+        );
+        let mut collector = GenerateMetricCollector::new(
+            inflight.response_collector(),
+            state.metrics_clone().create_http_queue_guard(&metric_model),
+            tracker,
+            3,
+        );
         let mut first = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![10],
             index: Some(0),
@@ -2835,8 +3409,18 @@ mod tests {
         state.metrics_clone().register(&registry).unwrap();
 
         {
-            let mut collector =
-                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            let inflight = state.metrics_clone().create_inflight_guard(
+                &metric_model,
+                Endpoint::Generate,
+                false,
+                "generate-cache-metric-test",
+            );
+            let mut collector = GenerateMetricCollector::new(
+                inflight.response_collector(),
+                state.metrics_clone().create_http_queue_guard(&metric_model),
+                tracker,
+                3,
+            );
             let mut annotated = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![10],
                 index: Some(0),
@@ -2945,8 +3529,10 @@ mod tests {
         );
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        // The retry's cache hit covers the 3 token prompt, so the rebased backend count wins
+        // over the router's estimate of 1.
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 3.0);
     }
 
     #[test]

@@ -51,7 +51,6 @@ from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
-    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
     wait_for_frontend_ready,
@@ -65,6 +64,7 @@ from tests.router.mocker_process import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.router_nvext import parse_sse_json_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +94,15 @@ PLANNER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[2]
     / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
-ROUTER_AIC_CONFIG = {
-    "aic_backend": "vllm",
-    "aic_system": "h200_sxm",
-    "aic_backend_version": "0.14.0",
-    "aic_tp_size": 1,
-    "aic_model_path": "Qwen/Qwen3-32B",
+ROUTER_AIS_CONFIG = {
+    "backend": "vllm",
+    "system": "h200_sxm",
+    "backend_version": "current",
+    "tp": 1,
+    "model": "Qwen/Qwen3-32B",
+    "worker_type": "aggregated",
 }
+
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -210,17 +212,17 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 
-def _require_router_aic() -> dict[str, Any]:
+def _require_router_ais() -> dict[str, Any]:
     pytest.importorskip(
-        "aiconfigurator_core",
-        reason="router AIC test requires aiconfigurator-core",
+        "aisimulate_core",
+        reason="router AIS test requires aisimulate-core",
     )
-    # Rust AIC callback imports aiconfigurator_core.sdk.engine.compile_engine.
+    # The native AIS callback requires the matching Python SDK.
     pytest.importorskip(
-        "aiconfigurator_core.sdk.engine",
-        reason="router AIC test requires aiconfigurator_core.sdk.engine",
+        "aisimulate_core.sdk.engine",
+        reason="router AIS test requires aisimulate_core.sdk.engine",
     )
-    return ROUTER_AIC_CONFIG.copy()
+    return ROUTER_AIS_CONFIG.copy()
 
 
 TEST_PAYLOAD = build_test_payload(MODEL_NAME)
@@ -324,66 +326,64 @@ class CounterWorkerProcess:
         return env, [system_port], []
 
     def __enter__(self):
-        cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(cpu_fd)
-        gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(gpu_fd)
+        with contextlib.ExitStack() as stack:
+            cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(cpu_fd)
+            stack.callback(Path(self._cpu_count_file).unlink, missing_ok=True)
 
-        cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
-        self._cpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._cpu_count_file,
-                "cpu",
-                self._initial_taints[0],
-            ),
-            env=cpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=cpu_health_ports,
-            health_check_urls=cpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-cpu",
-        )
-        gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
-        self._gpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._gpu_count_file,
-                "gpu",
-                self._initial_taints[1],
-            ),
-            env=gpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=gpu_health_ports,
-            health_check_urls=gpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-gpu",
-        )
-        self._cpu_proc.__enter__()
-        self._gpu_proc.__enter__()
+            gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(gpu_fd)
+            stack.callback(Path(self._gpu_count_file).unlink, missing_ok=True)
+
+            cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
+            self._cpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._cpu_count_file,
+                    "cpu",
+                    self._initial_taints[0],
+                ),
+                env=cpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=cpu_health_ports,
+                health_check_urls=cpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-cpu",
+            )
+            gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
+            self._gpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._gpu_count_file,
+                    "gpu",
+                    self._initial_taints[1],
+                ),
+                env=gpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=gpu_health_ports,
+                health_check_urls=gpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-gpu",
+            )
+            stack.enter_context(self._cpu_proc)
+            stack.enter_context(self._gpu_proc)
+            self._exit_stack = stack.pop_all()
+
         logger.info(
             f"Started CPU and GPU counter workers, endpoint: {self.endpoint_path}"
         )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for proc, name in [
-            (self._cpu_proc, "CPU"),
-            (self._gpu_proc, "GPU"),
-        ]:
-            if proc is not None:
-                try:
-                    proc.__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    logger.warning(f"Error stopping {name} counter worker: {e}")
-        for path in [self._cpu_count_file, self._gpu_count_file]:
-            if path:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+        stack = getattr(self, "_exit_stack", None)
+        if stack is None:
+            return None
+        try:
+            return stack.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._exit_stack = None
 
 
 @pytest.mark.timeout(120)
@@ -464,8 +464,8 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
         ),
         pytest.param(
             "kv",
-            {"aic_perf_model": True, "aic_system": "h200_sxm"},
-            id="kv-aic",
+            {"ais_perf_model": True, "ais_system": "h200_sxm"},
+            id="kv-ais",
         ),
         pytest.param("round-robin", {}, id="roundrobin"),
         pytest.param("random", {}, id="random"),
@@ -962,7 +962,7 @@ def test_router_decisions(
 
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-def test_router_decisions_router_aic(
+def test_router_decisions_router_ais(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -971,7 +971,7 @@ def test_router_decisions_router_aic(
     """Validate aggregated KV-router decisions with router-side AIC enabled."""
     logger.info("Starting agg router decisions test with router-side AIC enabled")
 
-    router_aic_config = _require_router_aic()
+    router_ais_config = _require_router_ais()
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": 8,
@@ -996,7 +996,7 @@ def test_router_decisions_router_aic(
         },
         test_kwargs={
             "use_kv_events": True,
-            "router_aic_config": router_aic_config,
+            "router_ais_config": router_ais_config,
         },
     )
 
@@ -1015,7 +1015,9 @@ async def _wait_for_frontend_to_commit_single_pd_role(
         while asyncio.get_running_loop().time() < deadline:
             try:
                 async with session.get(readiness_url) as response:
-                    if response.status == 200:
+                    # This startup milestone is discovery of one role, not serving readiness.
+                    # The second role starts only after this wait; incomplete topology returns 503.
+                    if response.status in (200, 503):
                         body = await response.json()
                         last_response = body
                         role = (
@@ -1070,7 +1072,7 @@ async def _wait_for_expected_disagg_worker_ids(
                 ) as response:
                     if response.status != 200:
                         await response.read()
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.05)
                         continue
 
                     body = await response.text()
@@ -1085,6 +1087,16 @@ async def _wait_for_expected_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
+            # Both roles are registered, so a 200 that decode served as its own
+            # prefill means the prefill hop was skipped (#16529); the activation
+            # window must fail closed with a retryable 503 instead.
+            assert decode_worker_id is None or prefill_worker_id not in (
+                None,
+                decode_worker_id,
+            ), (
+                "Request was served by decode without a prefill hop after the "
+                f"prefill worker registered; worker IDs: {worker_ids}"
+            )
             if (
                 prefill_worker_id is not None
                 and decode_worker_id is not None
@@ -1521,7 +1533,7 @@ def test_disagg_per_role_session_affinity(
 
 
 @pytest.mark.timeout(180)
-def test_router_decisions_disagg_router_aic(
+def test_router_decisions_disagg_router_ais(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -1529,7 +1541,7 @@ def test_router_decisions_disagg_router_aic(
     """Validate disagg KV-router decisions with router-side AIC enabled on the default startup path."""
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")
 
-    router_aic_config = _require_router_aic()
+    router_ais_config = {**_require_router_ais(), "worker_type": "prefill"}
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -1556,7 +1568,7 @@ def test_router_decisions_disagg_router_aic(
             enable_disagg_bootstrap=False,
         ),
         test_payload=TEST_PAYLOAD,
-        test_kwargs={"router_aic_config": router_aic_config},
+        test_kwargs={"router_ais_config": router_ais_config},
     )
 
 
@@ -1755,7 +1767,7 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             assert read_count(workers.gpu_count_file) == baseline_b
 
             update_url = (
-                f"http://127.0.0.1:{system_ports[0]}" "/engine/update/model_taints"
+                f"http://127.0.0.1:{system_ports[0]}/engine/update/model_taints"
             )
             async with session.post(
                 update_url,
