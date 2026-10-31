@@ -592,9 +592,9 @@ fn config(policy: &CorePolicy) -> Result<KvRouterConfig> {
 /// The host owns each booking's lifetime: a booking lasts as long as its
 /// [`Reservation`], which the frontend holds until the response ends or the
 /// client leaves, never a fixed age. Supplying this to the core turns its
-/// age-based expiry off, so the mesh never gets it. It observes nothing:
-/// without peers nothing is mirrored, and over gRPC a mirrored booking
-/// whose free is lost stays until #17670 reconciles them.
+/// age-based expiry off, so it is supplied only without peers, where
+/// nothing is mirrored and there is nothing to observe. The mesh keeps the
+/// core's expiry; over gRPC the hub holds the leases for mirrored bookings.
 struct ReservationLeases;
 
 impl ReplicaRequestLeaseObserver for ReservationLeases {

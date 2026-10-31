@@ -109,37 +109,44 @@ for each family.
 
 ## Replica sync
 
-With `--selection core`, each Global Frontend's embedded router core books
+With `--selection-core`, each Global Frontend's embedded router core books
 requests on pools and, under `--router-policy affinity`, pins sessions to them.
-Replicas share those bookings and pins so every frontend sees every frontend's
-requests in flight (DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639),
-companion [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)). They
-travel over the gRPC `ReplicaSync` stream, served on this frontend's API port
-(`--port`) beside the OpenAI routes; no extra port. A frontend serves the
-stream from startup, before it knows any peer, so a replica can be dialed as
-soon as it is listed. Peers are the other frontends' API addresses, from
-Global Discovery or given statically:
+With `--replica-sync`, replicas share those bookings and pins so every frontend
+sees every frontend's requests in flight (DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639),
+companion [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)).
+`--replica-sync-transport` picks one of two transports:
+
+| `--replica-sync-transport` | Transport | Peers |
+|----------------------------|-----------|-------|
+| `grpc` (default) | The gRPC `ReplicaSync` stream, served on this frontend's API port (`--port`) beside the OpenAI routes; no extra port. Served from startup, before any peer is known, so a replica can be dialed as soon as it is listed. | Other frontends' API addresses, from Global Discovery or `--peer http://host:port`. |
+| `zmq` | The router core's own ZMQ mesh, published on `--replica-sync-port N`. | Other frontends' `--replica-sync-port` endpoints, `--peer tcp://host:port`; static only. |
 
 | Flag | Meaning |
 |------|---------|
-| `--replica-sync off\|grpc` | Whether the core replicates at all. Default `off`. `grpc` needs `--selection core` and serves the stream with or without peers. |
-| `--global-discovery <URL>` | Global Discovery's base URL. Its `GET /routers` lists every frontend's API URL; every entry but this frontend's becomes a peer, and the list is polled every 30 s and followed as it changes. Implies `--replica-sync grpc`. Needs `--replica-url`. |
+| `--replica-sync` | Share bookings and pins. Off by default. Needs `--selection-core`. |
+| `--replica-sync-transport grpc\|zmq` | The transport. Default `grpc`. |
+| `--replica-sync-port N` | `zmq` only: the port this frontend publishes on. Required for `zmq`, refused for `grpc`. |
+| `--global-discovery <URL>` | `grpc` only: Global Discovery's base URL. Its `GET /routers` lists every frontend's API URL; every entry but this frontend's becomes a peer, and the list is polled every 30 s and followed as it changes. Needs `--replica-url`. |
 | `--replica-url <URL>` | This frontend's own API URL as Global Discovery lists it, so it does not dial itself. Needs `--global-discovery`. |
-| `--peer http://host:port` | A static peer. Repeat the flag for each. Implies `--replica-sync grpc`. Static peers stay whatever discovery lists. |
+| `--peer <URL>` | A static peer, as the transport dials it. Repeat the flag for each. Static peers stay whatever discovery lists. |
 
-Rules: `--peer` and `--global-discovery` imply `--replica-sync grpc`, and
-`--replica-sync off` given with either is an error; any of them needs
-`--selection core`; `--global-discovery` and `--replica-url` need each other;
-peers are `http://` API addresses, and an `https://` peer, on the command line
-or in discovery's listing, is refused or skipped (see TLS below). A failed
-discovery poll keeps the last listing.
+Rules: every flag here but `--replica-url` needs `--replica-sync`; a peer's
+scheme must match the transport; an `https://` peer, on the command line or in
+discovery's listing, is refused or skipped (see TLS below). A failed discovery
+poll keeps the last listing.
+
+Over `zmq`, the core keeps its own age-based expiry (five minutes) for every
+booking, since nothing here ends a peer's booking if that peer is lost; a
+request that streams for longer stops counting toward its pool's load once it
+expires. Over `grpc` the hub holds the leases for mirrored bookings, and
+without replica sync a booking lasts exactly as long as its request.
 
 ```bash
-cargo run -p dynamo-global-frontend -- --port 8000 --selection core \
+cargo run -p dynamo-global-frontend -- --port 8000 --selection-core \
   --router-policy affinity --region ohio \
   --pool ohio/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
   --pool-relay ohio/dynamo/blue=http://127.0.0.1:50051 \
-  --global-discovery http://discovery.dynamo:8080 \
+  --replica-sync --global-discovery http://discovery.dynamo:8080 \
   --replica-url http://10.42.0.7:8000
 ```
 
@@ -169,10 +176,6 @@ by more than the publisher's frame buffer loses the oldest frames (counted in
 behind its `grpc` feature; `dynamo_global_router::replica_sync` holds the
 conversions, the hub, the server routes, the dialer, and the peer-set
 follower the frontend's discovery poll feeds.
-
-The router core's own ZMQ mesh (`dynamo_global_router::ReplicaSync`) remains
-in the library for its tests, but the binary no longer exposes it: the
-`--replica-sync-port` and `tcp://` peer flags are gone.
 
 ### TLS
 
