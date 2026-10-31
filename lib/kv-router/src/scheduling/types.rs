@@ -45,7 +45,7 @@ impl std::fmt::Display for AttemptId {
 }
 
 pub type OverloadedWorkerProvider =
-    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Supplies the authoritative set of workers currently available for selection.
 ///

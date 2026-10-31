@@ -18,7 +18,7 @@ use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, RouterMode, SingleIn, async_trait,
+        ResponseStream, SingleIn, async_trait,
         network::egress::route_span::{
             get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
         },
@@ -48,6 +48,7 @@ use crate::{
     },
 };
 
+mod builder;
 mod builtin;
 mod cache_read;
 mod cancellation;
@@ -56,6 +57,7 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
@@ -192,7 +194,7 @@ fn monitor_response_stream(
                                 .is_some_and(|error| crate::migration::is_migratable(error));
                             if !migratable || !guard.release_for_retry().await {
                                 guard
-                                    .abort_with_error(item.error.as_ref().map(|e| e as &AbortCause))
+                                    .abort(item.error.as_ref().map(|e| e as &AbortCause))
                                     .await;
                             }
                             yield item;
@@ -241,9 +243,9 @@ fn monitor_response_stream(
         };
 
         if completed {
-            guard.finish().await;
+            guard.complete().await;
         } else {
-            guard.abort().await;
+            guard.abort(None).await;
         }
         // Released only now: the drain proved it was last, and the booking is already gone.
         if let Some(pending) = pending_terminal.take() {
@@ -314,14 +316,18 @@ pub struct RoutingHost {
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
-    /// Compatibility construction paths that predate routing load ownership leave this unset.
+    /// Required for every mode except KV, where the [`KvRouter`] owns the client.
     #[allow(dead_code)]
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
-/// An admitted KV route awaiting dispatch.
+/// An admitted KV route awaiting dispatch: the selected worker, its booking,
+/// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
+/// [`RoutePlan::abort`] gives it up.
 pub(crate) struct RoutePlan {
-    pub(crate) signals: RoutePlanSignals,
+    /// The phase the worker was selected for; dispatch tracks under it rather
+    /// than re-reading the request.
+    phase: RequestPhase,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
@@ -370,8 +376,22 @@ impl RoutePlan {
         self.budget.remaining()
     }
 
-    #[cfg(test)]
-    pub(crate) async fn abort(self) {
+    pub(crate) fn worker(&self) -> WorkerWithDpRank {
+        self.selection.worker
+    }
+
+    /// Early release for the booking, taken before dispatch so a migration
+    /// retry can free it while the prefill stream still runs.
+    pub(crate) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
+        self.cleanup.attempt_release()
+    }
+
+    /// Give the route up before dispatch: abort the classifier lifecycle with
+    /// `error` as its cause, release the booking, and drop the affinity hold.
+    pub(crate) async fn abort(mut self, error: Option<&Error>) {
+        if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
+            lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
+        }
         self.cleanup.finish().await;
     }
 }
@@ -383,169 +403,6 @@ impl RoutePlan {
 pub type KvPushRouter = RoutingHost;
 
 impl RoutingHost {
-    pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        session_affinity_ttl: Option<Duration>,
-    ) -> Result<Self, Error> {
-        let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl, SessionAffinityMode::Hard))
-            .transpose()?;
-
-        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
-    }
-
-    pub fn new_with_load_context(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        session_affinity_ttl: Option<Duration>,
-        session_affinity_mode: SessionAffinityMode,
-    ) -> Result<Self, Error> {
-        let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl, session_affinity_mode))
-            .transpose()?;
-
-        Ok(Self::new_with_load_context_and_coordinator(
-            inner,
-            kv_router,
-            load_context,
-            affinity,
-        ))
-    }
-
-    pub(crate) fn new_with_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
-    }
-
-    pub(crate) fn new_with_load_context_and_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
-            inner,
-            kv_router,
-            Some(load_context),
-            affinity,
-        )
-    }
-
-    fn new_with_optional_load_context_and_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        // Eagerly register router request metrics (as zeros) so they are
-        // scrapeable before any requests arrive. Both the frontend pipeline
-        // and the standalone router create RoutingHost, so this covers both.
-        let request_metrics =
-            RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
-
-        RoutingHost {
-            inner,
-            policy: RoutingPolicy::Kv(kv_router),
-            request_metrics,
-            session_affinity_mode: affinity
-                .as_ref()
-                .map(AffinityCoordinator::mode)
-                .unwrap_or_default(),
-            affinity,
-            hosted_occupancy: None,
-            lora: None,
-            routing_context: load_context,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_builtin(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-    ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, None, None)
-    }
-
-    pub(crate) fn new_builtin_with_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
-    }
-
-    pub(crate) fn new_builtin_with_capabilities(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-        lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
-    ) -> Result<Self, Error> {
-        if affinity.is_some() && lora.is_some() {
-            anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
-        }
-        let policy = match inner.router_mode() {
-            RouterMode::Direct => RoutingPolicy::Direct,
-            RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
-            mode => {
-                RoutingPolicy::Builtin(BuiltinWorkerSelector::new(mode).ok_or_else(|| {
-                    anyhow::anyhow!("{mode:?} routing is not a first-party policy")
-                })?)
-            }
-        };
-        let required_worker_inputs = match &policy {
-            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
-            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
-            RoutingPolicy::Direct => WorkerInputs::NONE,
-            RoutingPolicy::Kv(_) => unreachable!(),
-        };
-        let hosted_occupancy = matches!(&policy, RoutingPolicy::Builtin(_))
-            .then_some(required_worker_inputs.contains(WorkerInputs::OCCUPANCY))
-            .unwrap_or(false)
-            .then(|| HostedOccupancy::new(&inner))
-            .transpose()?;
-        if lora.is_some()
-            && !matches!(
-                inner.router_mode(),
-                RouterMode::RoundRobin | RouterMode::Random
-            )
-        {
-            anyhow::bail!(
-                "LoRA filtering is unsupported with {:?} routing",
-                inner.router_mode()
-            );
-        }
-        let lora_selector = lora.as_ref().map(|_| {
-            BuiltinWorkerSelector::new(inner.router_mode())
-                .expect("LoRA routing mode was validated above")
-        });
-        let request_metrics =
-            RouterRequestMetrics::from_component(inner.client.endpoint.component());
-        Ok(Self {
-            inner,
-            policy,
-            request_metrics,
-            session_affinity_mode: affinity
-                .as_ref()
-                .map(AffinityCoordinator::mode)
-                .unwrap_or_default(),
-            affinity,
-            hosted_occupancy,
-            lora: lora
-                .zip(lora_selector)
-                .map(|((filter, load_estimator), selector)| LoraRouting {
-                    filter,
-                    load_estimator,
-                    selector,
-                }),
-            routing_context: Some(load_context),
-        })
-    }
-
     pub fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
@@ -630,18 +487,35 @@ impl RoutingHost {
         Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
-    /// Commit a held session to the dispatched worker; a request without a
-    /// session passes its stream through.
-    fn bind_affinity(
+    /// The worker accepted the send: tell the guard, then bind the held session
+    /// to `dispatched_target` and park its lease in the guard, so the binding
+    /// is held exactly as long as the request it belongs to. A commit that
+    /// fails after a successful send stops the worker's generation, aborts the
+    /// attempt with the cause, and fails the request.
+    async fn accept_dispatch(
         &self,
+        guard: &mut RequestGuard,
         hold: Option<Hold>,
         dispatched_target: AffinityTarget,
-        stream: ManyOut<Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        stream_context: &Arc<dyn AsyncEngineContext>,
+    ) -> Result<(), Error> {
+        guard.on_dispatched();
         let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
-            return Ok(stream);
+            return Ok(());
         };
-        affinity.commit_to_stream(hold, dispatched_target, stream)
+        match affinity.commit(hold, dispatched_target) {
+            Ok(lease) => {
+                guard.hold_affinity_lease(lease);
+                Ok(())
+            }
+            Err(error) => {
+                // The worker is already generating for a request the client
+                // will see fail; stop it instead of letting it run to the end.
+                stream_context.stop_generating();
+                guard.abort(Some(error.as_ref())).await;
+                Err(error)
+            }
+        }
     }
 
     /// Check request-supplied targets only at initial selection, not after a route preview
@@ -887,12 +761,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only, &budget)
-            .await?;
         if is_query_only {
+            let phase_label = phase.to_string();
+            let _route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+            let (selection, _) = self
+                .select_with_affinity(&request, phase, true, &budget)
+                .await?;
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
                 let isl_blocks = routing_parts
@@ -934,31 +808,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = match self
-            .track_selection(&request, &mut selection, phase, false, &budget)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        drop(route_guard);
-        let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        self.bind_affinity(operation, selected_target, stream)
+        let plan = self.plan_kv_route(&request, phase, None, budget).await?;
+        self.dispatch_kv_plan(request, plan).await
     }
 }
 

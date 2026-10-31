@@ -21,6 +21,7 @@ use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
+    preprocessor::OpenAIPreprocessor,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -227,6 +228,9 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
+    /// Cached tokenizer and prompt formatter for the System One API.
+    pub(crate) systemone_preprocessor: Option<Arc<OpenAIPreprocessor>>,
+
     /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
     load_context: Option<Arc<RoutingLoadContext>>,
 
@@ -275,6 +279,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
+            systemone_preprocessor: None,
             load_context: None,
             load_thresholds: None,
             prefill_router: None,
@@ -480,6 +485,45 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
+    pub(crate) fn decision_admissions(&self) -> Option<&watch::Receiver<Vec<u64>>> {
+        self.topology_target
+            .as_ref()
+            .map(|target| &target.admitted_ids)
+            .or(self.instance_count_rx.as_ref())
+    }
+
+    pub(crate) fn decision_worker_count(&self) -> usize {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return 0;
+        }
+        let Some(available) = &self.instance_count_rx else {
+            return usize::from(self.topology_target.is_none());
+        };
+        if available.has_changed().is_err() {
+            return 0;
+        }
+        let Some(target) = &self.topology_target else {
+            return available.borrow().len();
+        };
+        if target.admitted_ids.has_changed().is_err() {
+            return 0;
+        }
+        let admitted = target.admitted_ids.borrow();
+        available
+            .borrow()
+            .iter()
+            .filter(|id| admitted.contains(id))
+            .count()
+    }
+
+    pub(crate) fn lifecycle_cancellation(&self) -> Option<CancellationToken> {
+        self.lifecycle_cancellation.clone()
+    }
+
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
         self.lifecycle_cancellation = Some(cancellation);
     }
@@ -550,6 +594,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
+            systemone_preprocessor: None,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),

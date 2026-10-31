@@ -81,7 +81,9 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_host::{
+    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };
@@ -1630,7 +1632,7 @@ impl KvRouter {
         self.selection.scheduler().free(request_id).await
     }
 
-    pub(crate) fn affinity_coordinator(
+    pub fn affinity_coordinator(
         &self,
         ttl: std::time::Duration,
         mode: crate::session_affinity::SessionAffinityMode,

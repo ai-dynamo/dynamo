@@ -33,7 +33,11 @@ use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 pub use policy::WorkerSelectionPolicy;
-use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
+pub(crate) use policy::{CandidatePreparer, PreparedCandidates};
+use policy::{
+    ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates,
+    collect_prepared_candidates,
+};
 #[cfg(any(test, feature = "bench"))]
 use reference::pick_default_worker;
 
@@ -87,6 +91,26 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         _trace: Option<SelectionTraceSpec>,
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         self.select_worker(input).map(|result| (result, None))
+    }
+
+    /// Builds candidate rows before the request reaches the scheduler actor, for
+    /// selectors whose rows depend only on the request and worker configuration
+    /// until load inputs are filled.
+    #[doc(hidden)]
+    fn candidate_preparer(&self) -> Option<CandidatePreparer> {
+        None
+    }
+
+    /// Like [`Self::select_worker_traced`], from rows that [`Self::candidate_preparer`]
+    /// built against the same worker configuration when given. The default ignores them.
+    #[doc(hidden)]
+    fn select_worker_prepared(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        _prepared: Option<PreparedCandidates>,
+        trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker_traced(input, trace)
     }
 }
 
@@ -258,6 +282,23 @@ impl<'a> MaterializedSelectionInput<'a> {
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
         self.max_raw_cached_tokens.get()
+    }
+
+    /// Adopt what preparation computed over the same rows, so the selected
+    /// worker's fetch source comes from the summary that scored every row.
+    fn restore_prepared(
+        &self,
+        max_raw_cached_tokens: Option<usize>,
+        kv_transfer_sources: Option<KvTransferSourceSummary>,
+    ) {
+        self.max_raw_cached_tokens.set(max_raw_cached_tokens);
+        if let Some(sources) = kv_transfer_sources {
+            let _ = self.kv_transfer_sources.set(sources);
+        }
+    }
+
+    fn into_kv_transfer_sources(self) -> Option<KvTransferSourceSummary> {
+        self.kv_transfer_sources.into_inner()
     }
 
     /// Count a worker toward the best eligible cached prefix once every policy
@@ -599,12 +640,11 @@ fn log_selection<C: WorkerConfigLike>(
 fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
-    workers: &HashMap<WorkerId, C>,
-    request: &SchedulingRequest,
-    eligibility: RoutingEligibility<'_>,
-    block_size: u32,
+    input: WorkerSelectionInput<'_, C>,
     trace: Option<SelectionTraceSpec>,
+    prepared: Option<PreparedCandidates>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+    let (workers, request, eligibility, block_size) = input.into_configured()?;
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -633,8 +673,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Composed(state) => {
             let mut state = state.borrow_mut();
-            let has_eligible_worker =
-                collect_policy_candidates(&mut state, &input, workers, request, eligibility)?;
+            let has_eligible_worker = match prepared.filter(|prepared| prepared.matches(&state)) {
+                Some(prepared) => {
+                    collect_prepared_candidates(&mut state, &input, workers, prepared)?
+                }
+                None => {
+                    collect_policy_candidates(&mut state, &input, workers, request, eligibility)?
+                }
+            };
             let ComposedPolicyState {
                 picker,
                 picker_inputs,
