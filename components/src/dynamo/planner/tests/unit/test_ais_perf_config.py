@@ -207,6 +207,73 @@ def test_cold_regression_has_traceable_role_identity(role):
     assert model._engine_diagnostics()["readiness"] == "insufficient_data"
 
 
+_UNOBSERVED = (
+    "system",
+    "backend_version",
+    "gemm_quant_mode",
+    "moe_quant_mode",
+    "fmha_quant_mode",
+    "kvcache_quant_mode",
+    "comm_quant_mode",
+    "attention_backend",
+)
+
+
+def test_cold_regression_records_what_the_worker_reports_and_unknown_otherwise():
+    config = PlannerConfig.model_construct(
+        namespace="worker-group-a", model_name="actual-model", backend="vllm"
+    )
+    caps = EngineCapabilities(
+        num_gpu=1,
+        max_num_batched_tokens=8192,
+        max_num_seqs=256,
+        max_kv_tokens=16384,
+        context_length=4096,
+        kv_cache_block_size=16,
+    )
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=config, capabilities=caps
+    )
+    payload = model._build_ais_config()
+    assert {name: payload[name] for name in _UNOBSERVED} == dict.fromkeys(
+        _UNOBSERVED, "unknown"
+    )
+    # One GPU per worker fixes every parallel width.
+    assert (payload["tp"], payload["pp"], payload["attention_dp"]) == (1, 1, 1)
+    assert (payload["moe_tp_size"], payload["moe_ep_size"]) == (None, None)
+    assert payload["kv_block_size"] == 16
+    assert payload["deployment_limits"] == {
+        "num_gpus": 1,
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 256,
+        "max_kv_tokens": 16384,
+        "context_length": 4096,
+    }
+    # AIS accepts the identity: a cold regression model is constructed.
+    assert model._engine_diagnostics()["readiness"] == "insufficient_data"
+
+
+def test_cold_regression_marks_unobserved_widths_and_limits_unknown():
+    config = PlannerConfig.model_construct(namespace="worker-group-a", backend="vllm")
+    caps = EngineCapabilities(num_gpu=4, max_num_seqs=64)
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=config, capabilities=caps
+    )
+    payload = model._build_ais_config()
+    assert payload["model"] == "unknown"
+    # A wider worker does not report how it splits its GPUs.
+    for name in ("tp", "pp", "attention_dp", "moe_tp_size", "moe_ep_size"):
+        assert payload[name] == "unknown", name
+    assert payload["deployment_limits"] == {
+        "num_gpus": 4,
+        "max_num_batched_tokens": "unknown",
+        "max_num_seqs": 64,
+        "max_kv_tokens": "unknown",
+        "context_length": "unknown",
+    }
+    assert model._engine_diagnostics()["readiness"] == "insufficient_data"
+
+
 def test_worker_capabilities_cannot_silently_override_canonical_identity():
     config = _planner(_role_config(estimation_mode="fpm_regression", kv_block_size=16))
     limits = _limits()
