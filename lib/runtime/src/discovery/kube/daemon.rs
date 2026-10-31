@@ -4,7 +4,7 @@
 use crate::CancellationToken;
 use crate::discovery::{DiscoveryEvent, DiscoveryMetadata};
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
@@ -14,6 +14,7 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -132,68 +133,133 @@ fn cr_event(event: watcher::Event<DynamoWorkerMetadata>) -> Option<CrEvent> {
     }
 }
 
-impl DiscoverySource {
-    fn new(
-        pod_info: &PodInfo,
-        kube_client: KubeClient,
-        events: mpsc::Sender<ReadinessEvent>,
-    ) -> Self {
-        let labels = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+type WatchStream<K> = BoxStream<'static, Result<watcher::Event<K>, watcher::Error>>;
 
+/// Keeps cluster access outside the daemon loop so tests can inject pending watches.
+enum ReadinessWatch {
+    EndpointSlice(WatchStream<EndpointSlice>),
+    Pod(WatchStream<Pod>),
+}
+
+impl ReadinessWatch {
+    fn from_cluster(pod_info: &PodInfo, kube_client: KubeClient) -> Self {
+        let labels = Config::default().labels(
+            "nvidia.com/dynamo-discovery-backend=kubernetes,nvidia.com/dynamo-discovery-enabled=true",
+        );
         match pod_info.mode {
-            KubeDiscoveryMode::Pod => {
-                let api: Api<EndpointSlice> = Api::namespaced(kube_client, &pod_info.pod_namespace);
+            KubeDiscoveryMode::Pod => Self::EndpointSlice(
+                watcher(
+                    Api::namespaced(kube_client, &pod_info.pod_namespace),
+                    labels,
+                )
+                .boxed(),
+            ),
+            KubeDiscoveryMode::Container => Self::Pod(
+                watcher(
+                    Api::namespaced(kube_client, &pod_info.pod_namespace),
+                    labels,
+                )
+                .boxed(),
+            ),
+        }
+    }
+}
+
+impl DiscoverySource {
+    /// Starts the readiness reflector and retains its task for shutdown.
+    fn new(
+        watch: ReadinessWatch,
+        events: mpsc::Sender<ReadinessEvent>,
+        token: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
+        match watch {
+            ReadinessWatch::EndpointSlice(watch) => {
                 let (reader, writer) = reflector::store();
                 tracing::info!("Daemon watching EndpointSlices (pod mode)");
 
-                let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let stream = reflector(writer, watch).default_backoff();
+                let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = endpoint_slice_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
+                    let exit_reason = loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                break "cancelled";
+                            }
+                            res = stream.next() => {
+                                let Some(res) = res else {
+                                    tracing::warn!(
+                                        "EndpointSlice reflector stream ended before daemon shutdown; store is now stale"
+                                    );
+                                    break "stream_ended";
+                                };
+                                match res {
+                                    Ok(event) => {
+                                        if let Some(event) = endpoint_slice_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break "receiver_closed";
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("EndpointSlice reflector error: {e}");
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("EndpointSlice reflector error: {e}");
-                            }
                         }
-                    }
+                    };
+                    tracing::info!(
+                        kind = "EndpointSlice",
+                        mode = "pod",
+                        exit_reason,
+                        "Reflector stopped"
+                    );
                 });
 
-                Self::EndpointSlice(reader)
+                (Self::EndpointSlice(reader), task)
             }
-            KubeDiscoveryMode::Container => {
-                let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
+            ReadinessWatch::Pod(watch) => {
                 let (reader, writer) = reflector::store();
                 tracing::info!("Daemon watching Pods (container mode)");
 
-                let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let stream = reflector(writer, watch).default_backoff();
+                let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = pod_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
+                    let exit_reason = loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                break "cancelled";
+                            }
+                            res = stream.next() => {
+                                let Some(res) = res else {
+                                    tracing::warn!(
+                                        "Pod reflector stream ended before daemon shutdown; store is now stale"
+                                    );
+                                    break "stream_ended";
+                                };
+                                match res {
+                                    Ok(event) => {
+                                        if let Some(event) = pod_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break "receiver_closed";
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Pod reflector error: {e}");
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("Pod reflector error: {e}");
-                            }
                         }
-                    }
+                    };
+                    tracing::info!(
+                        kind = "Pod",
+                        mode = "container",
+                        exit_reason,
+                        "Reflector stopped"
+                    );
                 });
 
-                Self::Pod(reader)
+                (Self::Pod(reader), task)
             }
         }
     }
@@ -244,51 +310,102 @@ impl DiscoveryDaemon {
     /// Reports `Ready` once both reflectors completed their initial list and `list_state` holds
     /// the result, and the terminal state when it ends.
     pub async fn run(self, outputs: DaemonOutputs) {
-        tracing::info!("Discovery daemon starting");
-
-        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
-        let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
-
+        let readiness = ReadinessWatch::from_cluster(&self.pod_info, self.kube_client.clone());
         let metadata_crs: Api<DynamoWorkerMetadata> =
-            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+            Api::namespaced(self.kube_client, &self.pod_info.pod_namespace);
+        Self::run_daemon(
+            readiness,
+            watcher(metadata_crs, Config::default()).boxed(),
+            self.cancel_token,
+            outputs,
+        )
+        .await;
+    }
+
+    /// Runs both reflectors and joins them before reporting the terminal daemon state.
+    async fn run_daemon(
+        readiness: ReadinessWatch,
+        cr_watch: WatchStream<DynamoWorkerMetadata>,
+        cancel_token: CancellationToken,
+        outputs: DaemonOutputs,
+    ) {
+        tracing::info!("Discovery daemon starting");
+        let mode = match &readiness {
+            ReadinessWatch::EndpointSlice(_) => "pod",
+            ReadinessWatch::Pod(_) => "container",
+        };
+        let reflector_token = cancel_token.child_token();
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (source, readiness_task) =
+            DiscoverySource::new(readiness, readiness_tx, reflector_token.clone());
         let (cr_reader, cr_writer) = reflector::store();
         let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
-
-        tracing::info!(
-            "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
-            self.pod_info.pod_namespace
-        );
-
-        let cr_reflector_stream =
-            reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
-        tokio::spawn(async move {
+        let cr_reflector_stream = reflector(cr_writer, cr_watch).default_backoff();
+        let cr_token = reflector_token.clone();
+        let cr_task = tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
-            while let Some(res) = cr_reflector_stream.next().await {
-                match res {
-                    Ok(event) => {
-                        if let Some(event) = cr_event(event)
-                            && cr_tx.send(event).await.is_err()
-                        {
-                            break;
+            let exit_reason = loop {
+                tokio::select! {
+                    _ = cr_token.cancelled() => {
+                        break "cancelled";
+                    }
+                    res = cr_reflector_stream.next() => {
+                        let Some(res) = res else {
+                            tracing::warn!(
+                                "DynamoWorkerMetadata reflector stream ended before daemon shutdown; store is now stale"
+                            );
+                            break "stream_ended";
+                        };
+                        match res {
+                            Ok(event) => {
+                                if let Some(event) = cr_event(event)
+                                    && cr_tx.send(event).await.is_err()
+                                {
+                                    break "receiver_closed";
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
-                    }
                 }
-            }
+            };
+            tracing::info!(
+                kind = "DynamoWorkerMetadata",
+                mode,
+                exit_reason,
+                "Reflector stopped"
+            );
         });
 
-        let state = match event_loop(
+        let result = event_loop(
             source,
             cr_reader,
             readiness_rx,
             cr_rx,
             &outputs,
-            &self.cancel_token,
+            &cancel_token,
         )
-        .await
-        {
+        .await;
+
+        // event_loop owns both receivers; they are dropped before the joins, releasing
+        // reflector sends blocked on full channels even after the event loop stops draining.
+        reflector_token.cancel();
+        for (kind, task) in [
+            ("readiness", readiness_task),
+            ("DynamoWorkerMetadata", cr_task),
+        ] {
+            if let Err(error) = task.await {
+                if error.is_panic() {
+                    tracing::warn!(kind, "Reflector task panicked: {error}");
+                } else {
+                    tracing::debug!(kind, "Reflector task did not exit cleanly: {error}");
+                }
+            }
+        }
+
+        let state = match result {
             Ok(()) => {
                 tracing::info!("Discovery daemon stopped");
                 DaemonState::Stopped
@@ -329,6 +446,10 @@ async fn event_loop(
             }
             event = readiness_rx.recv() => {
                 let Some(event) = event else {
+                    // Child cancellation can close the channel before select observes it.
+                    if cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
                     anyhow::bail!("Readiness reflector stream stopped");
                 };
                 if matches!(event, ReadinessEvent::Rebuild) {
@@ -344,6 +465,10 @@ async fn event_loop(
             }
             event = cr_rx.recv() => {
                 let Some(event) = event else {
+                    // Child cancellation can close the channel before select observes it.
+                    if cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
                     anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
                 };
                 if matches!(event, CrEvent::Rebuild) {
@@ -603,6 +728,140 @@ mod tests {
 
     const TEST_POD_UID: &str = "pod-uid-test";
     const TEST_POD_NAME: &str = "worker-a";
+
+    // The channel becomes pending after InitDone; only cancellation or closing its sender
+    // can end the watch. The drop marker proves the task released it before run returns.
+    struct FakeWatch<K> {
+        receiver: mpsc::Receiver<Result<watcher::Event<K>, watcher::Error>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl<K> futures::Stream for FakeWatch<K> {
+        type Item = Result<watcher::Event<K>, watcher::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.receiver.poll_recv(cx)
+        }
+    }
+
+    impl<K> Drop for FakeWatch<K> {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    type WatchSender<K> = mpsc::Sender<Result<watcher::Event<K>, watcher::Error>>;
+
+    fn fake_watch<K: Send + std::fmt::Debug + 'static>() -> (
+        WatchStream<K>,
+        WatchSender<K>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (sender, receiver) = mpsc::channel(4);
+        sender.try_send(Ok(watcher::Event::Init)).unwrap();
+        sender.try_send(Ok(watcher::Event::InitDone)).unwrap();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream = FakeWatch {
+            receiver,
+            dropped: dropped.clone(),
+        };
+        (stream.boxed(), sender, dropped)
+    }
+
+    async fn assert_reflectors_stop(mode: KubeDiscoveryMode, end_readiness: Option<bool>) {
+        let (readiness, readiness_dropped, close_readiness): (_, _, Box<dyn FnOnce() + Send>) =
+            match mode {
+                KubeDiscoveryMode::Pod => {
+                    let (stream, sender, dropped) = fake_watch();
+                    (
+                        ReadinessWatch::EndpointSlice(stream),
+                        dropped,
+                        Box::new(move || drop(sender)),
+                    )
+                }
+                KubeDiscoveryMode::Container => {
+                    let (stream, sender, dropped) = fake_watch();
+                    (
+                        ReadinessWatch::Pod(stream),
+                        dropped,
+                        Box::new(move || drop(sender)),
+                    )
+                }
+            };
+        let (cr_watch, cr_sender, cr_dropped) = fake_watch();
+        let (state_tx, mut state_rx) = watch::channel(DaemonState::Pending);
+        let outputs = DaemonOutputs {
+            list_state: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: broadcast::channel(16).0,
+            state_tx,
+        };
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(DiscoveryDaemon::run_daemon(
+            readiness,
+            cr_watch,
+            cancel.clone(),
+            outputs,
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state_rx.wait_for(|state| *state == DaemonState::Ready),
+        )
+        .await
+        .expect("both fake watches must initialize")
+        .unwrap();
+        // Negative control: reaching Ready must not itself stop either reflector.
+        assert!(!readiness_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!cr_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        match end_readiness {
+            Some(true) => close_readiness(),
+            Some(false) => drop(cr_sender),
+            None => cancel.cancel(),
+        }
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("daemon shutdown must not hang on a pending watch")
+            .unwrap();
+        assert!(readiness_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(cr_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        if let Some(readiness) = end_readiness {
+            assert!(
+                !cancel.is_cancelled(),
+                "child shutdown must not cancel its parent"
+            );
+            let expected = if readiness {
+                "Readiness reflector stream stopped"
+            } else {
+                "DynamoWorkerMetadata reflector stream stopped"
+            };
+            assert_eq!(
+                *state_rx.borrow(),
+                DaemonState::Failed(expected.to_string())
+            );
+        } else {
+            assert_eq!(*state_rx.borrow(), DaemonState::Stopped);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_joins_pending_reflectors_in_both_modes() {
+        for mode in [KubeDiscoveryMode::Pod, KubeDiscoveryMode::Container] {
+            assert_reflectors_stop(mode, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_stream_end_joins_pending_metadata_reflector() {
+        assert_reflectors_stop(KubeDiscoveryMode::Pod, Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_stream_end_joins_pending_readiness_reflector() {
+        assert_reflectors_stop(KubeDiscoveryMode::Container, Some(false)).await;
+    }
 
     #[tokio::test]
     async fn event_loop_reports_ready_after_both_initial_lists_with_the_state_written() {
