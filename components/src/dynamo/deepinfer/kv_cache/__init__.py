@@ -3,11 +3,26 @@
 
 """Per-rank KV cache managers (see ``base.KVCacheManager``)."""
 
-from .base import Admission, CacheStats, KVCacheManager, make_cache_manager
+from .base import (
+    Admission,
+    CacheStats,
+    EventSink,
+    HeldKV,
+    KVCacheManager,
+    KVEvent,
+    NullEventSink,
+    make_cache_manager,
+    make_event_sink,
+)
 
 __all__ = [
     "Admission",
     "CacheStats",
+    "EventSink",
+    "HeldKV",
     "KVCacheManager",
+    "KVEvent",
+    "NullEventSink",
     "make_cache_manager",
+    "make_event_sink",
 ]

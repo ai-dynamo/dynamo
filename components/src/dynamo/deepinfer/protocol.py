@@ -52,6 +52,10 @@ class AddReq(msgspec.Struct):
     token_ids: bytes
     # deepinfer SamplingParams kwargs.
     sampling: dict[str, Any] = {}
+    # Decode role: the prefill peer's DeepInferHandoff dict.
+    handoff: Optional[dict[str, Any]] = None
+    # Prefill role: keep the KV after prefill for a decode peer to pull.
+    hold_kv: bool = False
 
 
 class Sync(msgspec.Struct):
@@ -68,8 +72,8 @@ class Sync(msgspec.Struct):
     # A prompt entered some rank's scheduler: NORMAL engines make the next
     # step an ANY prefill vote point on every rank.
     new_prompts: bool = False
-    # Some rank has requests outside the scheduler (awaiting KV admission):
-    # the controller keeps polling instead of idling.
+    # Some rank has requests outside the scheduler (decode reads in flight,
+    # KV admission): the controller keeps polling instead of idling.
     pending: bool = False
 
 
@@ -78,6 +82,12 @@ class Cmd(msgspec.Struct):
     op: int = Op.STEP
     adds: list[AddReq] = []
     aborts: list[str] = []
+    # DeepInferHandoff dicts no decode peer will read: a prefill rank drops
+    # its hold, a decode rank tells the prefill peer to.
+    releases: list[dict[str, Any]] = []
+    # Ignored: ranks set decode_step from ``Sync.new_prompts``. Kept for one
+    # release so heads and ranks of adjacent versions still decode each other.
+    decode_step: Optional[int] = None
     # This iteration's global flags; ranks skip the all-reduce.
     sync: Optional[Sync] = None
 
@@ -92,15 +102,21 @@ class Output(msgspec.Struct):
     top_logprobs: list[list[float]] = []
     # None while running; else a Dynamo finish reason (stop/length/cancelled/error).
     finish_reason: Optional[str] = None
+    disaggregated_params: Optional[dict[str, Any]] = None
+    # Prompt tokens served from the prefix cache; set on the terminal output.
+    cached_tokens: Optional[int] = None
 
 
 class RankStats(msgspec.Struct):
     num_running: int = 0
     num_waiting: int = 0
-    # Requests outside the scheduler: awaiting KV admission.
+    # Requests outside the scheduler: awaiting KV space or an incoming transfer.
     num_pending: int = 0
+    # Prefill role: requests whose KV is held for a decode peer.
+    num_held: int = 0
     kv_used_blocks: int = 0
     kv_total_blocks: int = 0
+    kv_hit_rate: Optional[float] = None
 
 
 class EngineMeta(msgspec.Struct):
@@ -116,9 +132,11 @@ class EngineMeta(msgspec.Struct):
 class Ready(msgspec.Struct, tag="ready"):
     rank: int
     meta: EngineMeta
-    # Ranks on other nodes: their host, a digest of their RankSpec (every
-    # node must agree) and their DEEPINFER_* environment (the head refuses a
-    # rank that differs in LOCKSTEP_ENV and warns about other differences).
+    # Ranks on other nodes: the KV event endpoint the head subscribes to,
+    # their host, a digest of their RankSpec (every node must agree) and
+    # their DEEPINFER_* environment (the head refuses a rank that differs in
+    # LOCKSTEP_ENV and warns about other differences).
+    kv_events_endpoint: Optional[str] = None
     host: Optional[str] = None
     spec_digest: Optional[str] = None
     env: Optional[dict[str, str]] = None
@@ -131,6 +149,7 @@ class Reply(msgspec.Struct, tag="reply"):
     u: bool = False
     outputs: list[Output] = []
     stats: RankStats = msgspec.field(default_factory=RankStats)
+    kv_events_published: int = 0
     error: Optional[str] = None
     # This rank ran DeepInfer's close() because the global close flag was set.
     closed: bool = False
@@ -153,6 +172,7 @@ class RawReply(msgspec.Struct, tag="reply"):
     u: bool = False
     outputs: msgspec.Raw = msgspec.Raw()
     stats: RankStats = msgspec.field(default_factory=RankStats)
+    kv_events_published: int = 0
     error: Optional[str] = None
     closed: bool = False
     unfinished: bool = False
@@ -467,7 +487,8 @@ CONNECTION_EVENTS = (
 )
 
 
-# DeepInfer settings that change the KV block or state layout.
+# DeepInfer settings that change the KV block or state layout; part of the KV
+# layout hash (``di_engine.kv_layout``), so prefill and decode must agree too.
 LAYOUT_ENV = (
     "DEEPINFER_USE_NEXTN_DECODE",
     "DEEPINFER_MAX_BACKTRACKING_TOKENS",

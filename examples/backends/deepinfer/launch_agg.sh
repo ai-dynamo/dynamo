@@ -65,7 +65,8 @@ print_launch_banner "Launching DeepInfer Aggregated Serving ($NUM_GPUS GPUs)" \
 
 # The frontend venv must not see the worker's DeepInfer and dynamo.deepinfer paths.
 PYTHONPATH="" "$FRONTEND_PYTHON" -m dynamo.frontend \
-    --http-port "$HTTP_PORT" &
+    --http-port "$HTTP_PORT" \
+    --router-mode kv &
 
 PYTHONPATH="$SHIM_DIR${PYTHONPATH:+:$PYTHONPATH}" \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
@@ -74,6 +75,7 @@ DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --dp-size "$NUM_GPUS" \
     --ep-size "$NUM_GPUS" \
+    --kv-cache-manager prefix \
     --dyn-reasoning-parser deepseek_v41 \
     --dyn-tool-call-parser deepseek_v41 \
     "${EXTRA_ARGS[@]}" &
