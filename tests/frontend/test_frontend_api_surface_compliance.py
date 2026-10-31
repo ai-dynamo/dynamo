@@ -1145,7 +1145,7 @@ def _codex_turn_errors(codex_home: Path) -> list[str]:
                 payload = json.loads(line).get("payload") or {}
             except (json.JSONDecodeError, AttributeError):
                 continue
-            if payload.get("type") != "task_complete":
+            if not isinstance(payload, dict) or payload.get("type") != "task_complete":
                 continue
             error = payload.get("error")
             if isinstance(error, dict) and error.get("message"):
