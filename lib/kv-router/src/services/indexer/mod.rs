@@ -225,7 +225,7 @@ async fn run_common(
         .unwrap_or_default();
 
     if !peers.is_empty() {
-        match recovery::recover_from_peers(&peers, registry).await {
+        match recovery::recover_from_peers(&peers, registry.index()).await {
             Ok(true) => tracing::info!("P2P recovery completed"),
             Ok(false) => tracing::warn!("no reachable peers, starting with empty state"),
             Err(e) => tracing::warn!(error = %e, "P2P recovery failed, starting with empty state"),

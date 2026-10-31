@@ -22,7 +22,7 @@ use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
 use super::backend::Indexer;
-use super::registry::{ListenerControlError, WorkerRegistry};
+use super::registry::{IndexRegistry, ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
 const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
@@ -470,10 +470,13 @@ async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    (StatusCode::OK, Json(dump_registry(&state.registry).await))
+    (
+        StatusCode::OK,
+        Json(dump_registry(state.registry.index()).await),
+    )
 }
 
-pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Value {
+pub(crate) async fn dump_registry(registry: &IndexRegistry) -> serde_json::Value {
     let all = registry.all_indexers_with_block_size();
     let mut handles = Vec::with_capacity(all.len());
 

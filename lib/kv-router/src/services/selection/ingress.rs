@@ -3,13 +3,16 @@
 
 //! How a core-owned KV index is fed with worker KV events.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use super::error::SelectionError;
 use super::types::WorkerCatalogRecord;
 use crate::identity::RoutingPartitionId;
 use crate::services::indexer::backend::Indexer;
-use crate::services::indexer::registry::WorkerRegistry;
+use crate::services::indexer::registry::IndexRegistry;
 
 /// Builds and feeds a partition's index ([`super::KvIndexSource::Owned`]).
 ///
@@ -19,36 +22,31 @@ use crate::services::indexer::registry::WorkerRegistry;
 /// and treats the per-worker hooks as membership it already tracks.
 #[async_trait]
 pub trait KvEventIngress: Send + Sync {
-    /// The index for `key`, created on first use. Called once per partition,
-    /// before any worker attaches.
-    fn open(&self, registry: &WorkerRegistry, key: &RoutingPartitionId, block_size: u32)
-    -> Indexer;
+    /// The core hands the ingress the index registry it feeds and the cancellation
+    /// scope its tasks live in, once, before any other call. Ingresses that run
+    /// nothing ignore it.
+    fn attach(&self, index: &Arc<IndexRegistry>, cancel_token: CancellationToken) {
+        let _ = (index, cancel_token);
+    }
 
-    /// Metadata `record` must carry before this ingress can feed its ranks.
-    /// A non-empty result keeps the worker `Incomplete`. Consulted only when
-    /// the core subscribes to worker KV events.
+    fn open(&self, index: &IndexRegistry, key: &RoutingPartitionId, block_size: u32) -> Indexer;
+
     fn missing_metadata(&self, record: &WorkerCatalogRecord) -> Vec<String> {
         let _ = record;
         Vec::new()
     }
 
-    /// Reconcile event sources, retaining unchanged ranks and their cached state.
-    /// `previous` is the last schedulable record in the same partition.
-    /// Called only when the core subscribes to worker KV events.
     async fn reconcile(
         &self,
-        registry: &WorkerRegistry,
         previous: Option<&WorkerCatalogRecord>,
         record: &WorkerCatalogRecord,
     ) -> Result<(), SelectionError> {
-        let _ = (registry, previous, record);
+        let _ = (previous, record);
         Ok(())
     }
 
-    /// `record` left the catalog: stop feeding it and drop what the index
-    /// holds for it. Called for every worker, subscribed or not.
-    async fn detach(&self, registry: &WorkerRegistry, record: &WorkerCatalogRecord) {
-        let _ = (registry, record);
+    async fn detach(&self, record: &WorkerCatalogRecord) {
+        let _ = record;
     }
 }
 
@@ -59,12 +57,7 @@ pub trait KvEventIngress: Send + Sync {
 pub struct LocalIndexIngress;
 
 impl KvEventIngress for LocalIndexIngress {
-    fn open(
-        &self,
-        registry: &WorkerRegistry,
-        key: &RoutingPartitionId,
-        block_size: u32,
-    ) -> Indexer {
-        registry.get_or_create_indexer(key.clone(), block_size)
+    fn open(&self, index: &IndexRegistry, key: &RoutingPartitionId, block_size: u32) -> Indexer {
+        index.get_or_create_indexer(key.clone(), block_size)
     }
 }

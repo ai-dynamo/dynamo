@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::identity::RoutingPartitionId;
 use crate::protocols::RouterEvent;
 
-use super::registry::WorkerRegistry;
+use super::registry::IndexRegistry;
 
 #[derive(Deserialize)]
 struct DumpEntry {
@@ -17,7 +17,7 @@ struct DumpEntry {
     events: Vec<RouterEvent>,
 }
 
-pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> Result<bool> {
+pub async fn recover_from_peers(peers: &[String], registry: &IndexRegistry) -> Result<bool> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -43,7 +43,7 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
 async fn try_recover_from_peer(
     client: &reqwest::Client,
     peer_url: &str,
-    registry: &WorkerRegistry,
+    registry: &IndexRegistry,
 ) -> Result<()> {
     let dump_url = format!("{peer_url}/dump");
     tracing::info!(url = %dump_url, "fetching dump from peer");

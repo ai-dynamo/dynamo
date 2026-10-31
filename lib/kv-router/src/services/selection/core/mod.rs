@@ -49,8 +49,7 @@ use crate::services::common::replication::{
     setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
-use crate::services::indexer::recovery;
-use crate::services::indexer::registry::WorkerRegistry;
+use crate::services::indexer::registry::IndexRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
@@ -286,7 +285,7 @@ pub struct SelectionCore {
     /// events are disabled, when the primary indexer is a remote service that
     /// workers publish to directly, or when the embedding host feeds events.
     listens_for_kv_events: bool,
-    indexer_registry: Arc<WorkerRegistry>,
+    index_registry: Arc<IndexRegistry>,
     config: Validated<RouterConfig>,
     worker_selection_policy_factory: WorkerSelectionPolicyFactory,
     host: SelectionHost,
@@ -431,14 +430,22 @@ impl SelectionCore {
         session_affinity: Option<SessionAffinityConfig>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
-        let indexer_registry = Arc::new(
-            WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
-                .with_retained_indexers(),
+        // Selection entries and their schedulers retain these indexers across worker updates.
+        let index_registry = Arc::new(
+            IndexRegistry::new(
+                indexer_threads,
+                Arc::new(crate::indexer::KvIndexerMetrics::new_unregistered()),
+            )
+            .with_retained_indexers(),
         );
         let listens_for_kv_events = config.use_kv_events;
-        indexer_registry.set_indexer_policy(indexer_policy);
+        index_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
-            indexer_registry.signal_ready();
+            index_registry.signal_ready();
+        }
+        {
+            let KvIndexSource::Owned(ingress) = &host.cache.index;
+            ingress.attach(&index_registry, cancel_token.clone());
         }
         Self {
             catalog: WorkerCatalog::default(),
@@ -447,7 +454,7 @@ impl SelectionCore {
             reservation_index: Arc::new(RwLock::new(HashMap::new())),
             reservation_sweep_started: OnceCell::new(),
             listens_for_kv_events,
-            indexer_registry,
+            index_registry,
             config,
             worker_selection_policy_factory,
             host,
@@ -510,19 +517,13 @@ impl SelectionCore {
         Ok(())
     }
 
-    pub(crate) async fn recover_indexer_from_peers(
-        &self,
-        peers: &[String],
-    ) -> anyhow::Result<bool> {
-        recovery::recover_from_peers(peers, &self.indexer_registry).await
+    /// The per-partition indexers this core schedules over.
+    pub fn index_registry(&self) -> &Arc<IndexRegistry> {
+        &self.index_registry
     }
 
     pub(crate) fn signal_indexer_ready(&self) {
-        self.indexer_registry.signal_ready();
-    }
-
-    pub(crate) async fn dump_indexer_events(&self) -> serde_json::Value {
-        crate::services::indexer::server::dump_registry(&self.indexer_registry).await
+        self.index_registry.signal_ready();
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {

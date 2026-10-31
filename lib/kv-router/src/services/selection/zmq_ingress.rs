@@ -4,29 +4,59 @@
 //! The ZMQ-direct ingress: workers publish KV events to endpoints the catalog
 //! record names, and the worker registry runs a listener per data-parallel rank.
 
+use std::sync::{Arc, OnceLock};
+
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use super::error::SelectionError;
 use super::ingress::KvEventIngress;
 use super::types::WorkerCatalogRecord;
 use crate::identity::RoutingPartitionId;
 use crate::services::indexer::backend::Indexer;
-use crate::services::indexer::registry::WorkerRegistry;
+use crate::services::indexer::registry::{IndexRegistry, WorkerRegistry};
 
 /// One ZMQ SUB socket per worker rank on the engine's KV-event publisher, with
 /// gap replay from the engine's replay endpoint when it advertises one.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ZmqDirectIngress;
+#[derive(Default)]
+pub struct ZmqDirectIngress {
+    /// The listener registry, created at `attach` over the core's index registry.
+    listeners: OnceLock<Arc<WorkerRegistry>>,
+}
+
+impl std::fmt::Debug for ZmqDirectIngress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ZmqDirectIngress")
+            .field("attached", &self.listeners.get().is_some())
+            .finish()
+    }
+}
+
+impl ZmqDirectIngress {
+    /// The listener registry; `None` until the core attaches this ingress.
+    pub fn listeners(&self) -> Option<&Arc<WorkerRegistry>> {
+        self.listeners.get()
+    }
+
+    fn registry(&self) -> &WorkerRegistry {
+        self.listeners
+            .get()
+            .expect("ZmqDirectIngress used before the selection core attached it")
+    }
+}
 
 #[async_trait]
 impl KvEventIngress for ZmqDirectIngress {
-    fn open(
-        &self,
-        registry: &WorkerRegistry,
-        key: &RoutingPartitionId,
-        block_size: u32,
-    ) -> Indexer {
-        registry.get_or_create_indexer(key.clone(), block_size)
+    fn attach(&self, index: &Arc<IndexRegistry>, cancel_token: CancellationToken) {
+        let _ = self.listeners.set(Arc::new(WorkerRegistry::with_index(
+            index.clone(),
+            cancel_token,
+        )));
+    }
+
+    fn open(&self, index: &IndexRegistry, key: &RoutingPartitionId, block_size: u32) -> Indexer {
+        index.get_or_create_indexer(key.clone(), block_size)
     }
 
     fn missing_metadata(&self, record: &WorkerCatalogRecord) -> Vec<String> {
@@ -49,10 +79,10 @@ impl KvEventIngress for ZmqDirectIngress {
 
     async fn reconcile(
         &self,
-        registry: &WorkerRegistry,
         previous: Option<&WorkerCatalogRecord>,
         record: &WorkerCatalogRecord,
     ) -> Result<(), SelectionError> {
+        let registry = self.registry();
         let block_size = record
             .block_size
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
@@ -126,7 +156,8 @@ impl KvEventIngress for ZmqDirectIngress {
         Ok(())
     }
 
-    async fn detach(&self, registry: &WorkerRegistry, record: &WorkerCatalogRecord) {
+    async fn detach(&self, record: &WorkerCatalogRecord) {
+        let registry = self.registry();
         if registry.has_worker(record.worker_id) {
             if let Err(error) = registry
                 .deregister(record.worker_id, &record.model_name, &record.routing_group)

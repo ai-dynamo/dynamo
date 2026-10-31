@@ -36,7 +36,20 @@ fn local_core_with(
     indexer_threads: usize,
     cancel_token: CancellationToken,
 ) -> SelectionCore {
-    SelectionCore::try_new_local_with_host(
+    local_core_with_ingress(config, indexer_threads, cancel_token).0
+}
+
+/// `local_core_with` plus the ZMQ ingress, for tests that inspect listener state.
+fn local_core_with_ingress(
+    config: crate::config::KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+) -> (
+    SelectionCore,
+    Arc<crate::services::selection::ZmqDirectIngress>,
+) {
+    let (host, ingress) = zmq_host_with_ingress();
+    let core = SelectionCore::try_new_local_with_host(
         config,
         indexer_threads,
         cancel_token,
@@ -44,20 +57,27 @@ fn local_core_with(
         std::sync::Arc::new(|config, role, _| {
             crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         }),
-        zmq_host(),
+        host,
     )
-    .expect("valid test config")
+    .expect("valid test config");
+    (core, ingress)
 }
 
-/// The host the standalone service builds: partitions index worker KV events over ZMQ.
-fn zmq_host() -> SelectionHost {
-    SelectionHost {
+/// The host the standalone service builds (partitions index worker KV events over
+/// ZMQ) plus its ingress, for tests that inspect the listener registry.
+fn zmq_host_with_ingress() -> (
+    SelectionHost,
+    Arc<crate::services::selection::ZmqDirectIngress>,
+) {
+    let ingress = Arc::new(crate::services::selection::ZmqDirectIngress::default());
+    let host = SelectionHost {
         cache: HostCache {
-            index: KvIndexSource::Owned(Arc::new(crate::services::selection::ZmqDirectIngress)),
+            index: KvIndexSource::Owned(ingress.clone()),
             ..HostCache::default()
         },
         ..SelectionHost::default()
-    }
+    };
+    (host, ingress)
 }
 
 /// `new_inner` with the test defaults.
@@ -446,7 +466,7 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     struct OfflineIngress;
     #[async_trait::async_trait]
     impl KvEventIngress for OfflineIngress {
-        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+        fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
                 primary: Arc::new(OfflineRemote),
                 approx: None,
@@ -823,7 +843,7 @@ impl RemotePrimary for ReadyIndexer {
 struct ReadyIngress;
 #[async_trait::async_trait]
 impl KvEventIngress for ReadyIngress {
-    fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+    fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
         Indexer::Remote {
             primary: Arc::new(ReadyIndexer),
             approx: None,
@@ -1157,19 +1177,31 @@ async fn injected_load_providers_restrict_selection() {
 #[tokio::test]
 async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
     let parent = CancellationToken::new();
-    let core = local_core_with(test_config(true), 1, parent.clone());
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, parent.clone());
 
     let record = core
         .upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker upsert");
     assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
-    assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
+    assert_eq!(
+        ingress
+            .listeners()
+            .expect("attached")
+            .listener_cancelled(1, 0),
+        Some(false)
+    );
 
     core.shutdown();
     assert!(core.cancel_token.is_cancelled());
     assert!(!parent.is_cancelled());
-    assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+    assert_eq!(
+        ingress
+            .listeners()
+            .expect("attached")
+            .listener_cancelled(1, 0),
+        Some(true)
+    );
 }
 
 #[rstest::rstest]
@@ -1205,7 +1237,7 @@ async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_thre
 
         // Write through the registry used by listeners, not the selector's saved reference.
         let indexer = core
-            .indexer_registry
+            .index_registry
             .get_indexer(&key)
             .unwrap()
             .indexer
@@ -1231,7 +1263,7 @@ async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_thre
 
 #[tokio::test]
 async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
-    let core = local_core(test_config(true));
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
 
     let record = core
         .upsert_worker(WorkerRequest {
@@ -1246,14 +1278,14 @@ async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
         .await
         .expect("worker upsert");
     assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete, "{record:?}");
-    assert!(!core.indexer_registry.has_worker(1));
+    assert!(!ingress.listeners().expect("attached").has_worker(1));
 }
 
 #[tokio::test]
 async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
     use crate::indexer::KvIndexerInterface;
 
-    let core = local_core(test_config(true));
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
     core.upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker upsert");
@@ -1269,14 +1301,14 @@ async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
     }
     // An endpoint update cancelled right after removing the listener leaves
     // the catalog record schedulable, the listener gone, and its blocks indexed.
-    core.indexer_registry.forget_listener(1, 0);
+    ingress.listeners().expect("attached").forget_listener(1, 0);
 
     let record = core
         .upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker re-upsert");
     assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable, "{record:?}");
-    assert!(core.indexer_registry.has_listener(1, 0));
+    assert!(ingress.listeners().expect("attached").has_listener(1, 0));
     // The purge is queued to the indexer thread; wait for it to land.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1297,12 +1329,14 @@ async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
 
 #[tokio::test]
 async fn upsert_moves_global_worker_id_between_routing_groups() {
-    let core = local_core(test_config(true));
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
     let mut group_a = worker_with_kv_events(1);
     group_a.routing_group = "group-a".to_string();
     core.upsert_worker(group_a).await.expect("group A upsert");
     let indexed = |group: &str| {
-        core.indexer_registry
+        ingress
+            .listeners()
+            .expect("attached")
             .list_filtered(Some("model"), Some(group))
             .len()
     };
@@ -1637,7 +1671,7 @@ async fn shutdown_interrupts_indexer_waits(
     struct PausedIngress(Arc<PausedIndexer>);
     #[async_trait::async_trait]
     impl KvEventIngress for PausedIngress {
-        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+        fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
                 primary: self.0.clone(),
                 approx: None,
@@ -1756,7 +1790,7 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
     struct PausedRecordIngress(Arc<PausedRecord>);
     #[async_trait::async_trait]
     impl KvEventIngress for PausedRecordIngress {
-        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+        fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
                 primary: self.0.clone(),
                 approx: None,
@@ -3319,7 +3353,7 @@ async fn rejoined_worker_feeds_partition_index() {
             .map(|hash| hash.0)
             .collect();
         let indexer = core
-            .indexer_registry
+            .index_registry
             .get_indexer(&key)
             .unwrap()
             .indexer
@@ -3344,7 +3378,7 @@ async fn rejoined_worker_feeds_partition_index() {
         } else {
             assert!(retained.is_empty(), "removed worker retained cached blocks");
             let current = core
-                .indexer_registry
+                .index_registry
                 .get_indexer(&key)
                 .unwrap()
                 .indexer
@@ -3417,15 +3451,14 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
     impl KvEventIngress for PausedUpdate {
         fn open(
             &self,
-            registry: &WorkerRegistry,
+            index: &IndexRegistry,
             key: &RoutingPartitionId,
             block_size: u32,
         ) -> Indexer {
-            registry.get_or_create_indexer(key.clone(), block_size)
+            index.get_or_create_indexer(key.clone(), block_size)
         }
         async fn reconcile(
             &self,
-            _: &WorkerRegistry,
             previous: Option<&WorkerCatalogRecord>,
             _: &WorkerCatalogRecord,
         ) -> Result<(), SelectionError> {
@@ -3435,7 +3468,7 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
             }
             Ok(())
         }
-        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+        async fn detach(&self, _: &WorkerCatalogRecord) {
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -3944,13 +3977,13 @@ async fn cancelled_worker_delete_is_finished_before_re_registration() {
     impl KvEventIngress for PausedDetach {
         fn open(
             &self,
-            registry: &WorkerRegistry,
+            index: &IndexRegistry,
             key: &RoutingPartitionId,
             block_size: u32,
         ) -> Indexer {
-            registry.get_or_create_indexer(key.clone(), block_size)
+            index.get_or_create_indexer(key.clone(), block_size)
         }
-        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+        async fn detach(&self, _: &WorkerCatalogRecord) {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 std::future::pending::<()>().await;
             }

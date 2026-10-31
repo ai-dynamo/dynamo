@@ -89,7 +89,7 @@ impl SelectionServiceBuilder {
             // published over ZMQ; `kv_index` overrides this.
             host: SelectionHost {
                 cache: HostCache {
-                    index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress)),
+                    index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
                     ..HostCache::default()
                 },
                 ..SelectionHost::default()
@@ -256,7 +256,12 @@ impl SelectionServiceBuilder {
         let core = Arc::new(core);
 
         if recover_from_peers {
-            match core.recover_indexer_from_peers(&self.indexer_peers).await {
+            match crate::services::indexer::recovery::recover_from_peers(
+                &self.indexer_peers,
+                core.index_registry(),
+            )
+            .await
+            {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
                 Ok(false) => {
                     tracing::warn!(
@@ -439,7 +444,7 @@ impl SelectionService {
                     }),
                     SelectionHost {
                         cache: HostCache {
-                            index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress)),
+                            index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
                             ..HostCache::default()
                         },
                         ..SelectionHost::default()
@@ -603,11 +608,12 @@ impl SelectionService {
     }
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
-        self.core.dump_indexer_events().await
+        crate::services::indexer::server::dump_registry(self.core.index_registry()).await
     }
 
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
-        self.core.recover_indexer_from_peers(peers).await
+        crate::services::indexer::recovery::recover_from_peers(peers, self.core.index_registry())
+            .await
     }
 
     pub async fn shutdown(&self) {

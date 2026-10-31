@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
-use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
+use dynamo_kv_router::services::indexer::registry::IndexRegistry;
 use dynamo_kv_router::services::selection::KvEventIngress;
 use dynamo_kv_router::{SessionPrefixIndexer, WorkerInputs, WorkerType};
 use dynamo_runtime::component::Endpoint;
@@ -149,12 +149,7 @@ impl RuntimeIngress {
 
 #[async_trait::async_trait]
 impl KvEventIngress for RuntimeIngress {
-    fn open(
-        &self,
-        _registry: &WorkerRegistry,
-        _key: &RoutingPartitionId,
-        _block_size: u32,
-    ) -> Indexer {
+    fn open(&self, _index: &IndexRegistry, _key: &RoutingPartitionId, _block_size: u32) -> Indexer {
         self.indexer.clone()
     }
 }

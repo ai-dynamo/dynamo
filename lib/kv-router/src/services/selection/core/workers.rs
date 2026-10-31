@@ -201,9 +201,7 @@ impl SelectionCore {
 
         if record.not_schedulable_reasons.is_empty()
             && let Some(ingress) = self.ingress()
-            && let Err(error) = ingress
-                .reconcile(&self.indexer_registry, previous.as_ref(), &record)
-                .await
+            && let Err(error) = ingress.reconcile(previous.as_ref(), &record).await
         {
             self.cleanup_indexer_registration(&record).await;
             record
@@ -330,7 +328,7 @@ impl SelectionCore {
                 }
 
                 let KvIndexSource::Owned(ingress) = &self.host.cache.index;
-                let indexer = ingress.open(&self.indexer_registry, &key, block_size);
+                let indexer = ingress.open(&self.index_registry, &key, block_size);
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         indexer.clone(),
@@ -409,7 +407,7 @@ impl SelectionCore {
 
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
         let KvIndexSource::Owned(ingress) = &self.host.cache.index;
-        ingress.detach(&self.indexer_registry, record).await;
+        ingress.detach(record).await;
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {

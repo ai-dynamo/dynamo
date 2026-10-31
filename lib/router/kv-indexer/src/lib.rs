@@ -74,6 +74,7 @@ mod prelude;
 pub mod pruning;
 pub mod radix_tree;
 pub mod recording;
+pub mod registry;
 pub mod residency;
 pub mod session_prefix_index;
 pub mod session_updates;
