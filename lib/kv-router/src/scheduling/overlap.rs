@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use crate::config::KvRouterConfig;
+use super::router_config::CacheHitWeights;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
     DpRank, SharedCacheHits, StorageTier, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -118,19 +118,19 @@ pub struct SelectedWorkerTierSnapshot {
 
 /// Borrowed analysis helper. It never owns indexer details or crosses an await.
 pub struct OverlapAnalysis<'a> {
-    config: &'a KvRouterConfig,
+    weights: &'a CacheHitWeights,
     block_size: u32,
     tiered: &'a TieredMatchDetails,
 }
 
 impl<'a> OverlapAnalysis<'a> {
     pub fn new(
-        config: &'a KvRouterConfig,
+        weights: &'a CacheHitWeights,
         block_size: u32,
         tiered: &'a TieredMatchDetails,
     ) -> Self {
         Self {
-            config,
+            weights,
             block_size,
             tiered,
         }
@@ -138,7 +138,7 @@ impl<'a> OverlapAnalysis<'a> {
 
     pub fn signals(&self) -> OverlapSignals {
         let estimates =
-            cache_hit_estimates_from_tiered_matches(self.config, self.block_size, self.tiered);
+            cache_hit_estimates_from_tiered_matches(self.weights, self.block_size, self.tiered);
         OverlapSignals {
             tier_overlap_blocks: tier_overlap_blocks_from_tiered_matches(self.tiered),
             effective_overlap_blocks: estimates.effective_overlap_blocks,
@@ -195,7 +195,7 @@ pub struct OverlapScoresResponse {
 }
 
 pub fn cache_hit_estimates_from_tiered_matches(
-    config: &KvRouterConfig,
+    weights: &CacheHitWeights,
     block_size: u32,
     tiered_matches: &TieredMatchDetails,
 ) -> CacheHitEstimates {
@@ -208,7 +208,7 @@ pub fn cache_hit_estimates_from_tiered_matches(
         .collect();
 
     for (storage_tier, tier_matches) in &tiered_matches.lower_tier {
-        let weight = cache_hit_weight_for_tier(config, *storage_tier);
+        let weight = cache_hit_weight_for_tier(weights, *storage_tier);
         if weight == 0.0 {
             continue;
         }
@@ -360,11 +360,11 @@ fn saturating_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-fn cache_hit_weight_for_tier(config: &KvRouterConfig, tier: StorageTier) -> f64 {
+fn cache_hit_weight_for_tier(weights: &CacheHitWeights, tier: StorageTier) -> f64 {
     match tier {
         StorageTier::Device => 1.0,
-        StorageTier::HostPinned => config.host_cache_hit_weight,
-        StorageTier::Disk | StorageTier::External => config.disk_cache_hit_weight,
+        StorageTier::HostPinned => weights.host,
+        StorageTier::Disk | StorageTier::External => weights.disk,
     }
 }
 
@@ -400,13 +400,12 @@ mod tests {
                 (StorageTier::External, external),
             ]),
         };
-        let config = KvRouterConfig {
-            host_cache_hit_weight: 0.5,
-            disk_cache_hit_weight: 0.25,
-            ..Default::default()
+        let weights = CacheHitWeights {
+            host: 0.5,
+            disk: 0.25,
         };
 
-        let estimates = cache_hit_estimates_from_tiered_matches(&config, 16, &tiered);
+        let estimates = cache_hit_estimates_from_tiered_matches(&weights, 16, &tiered);
         let tiers = tier_overlap_blocks_from_tiered_matches(&tiered);
 
         assert_eq!(estimates.effective_overlap_blocks[&worker], 5.75);
@@ -437,7 +436,7 @@ mod tests {
         };
 
         let estimates =
-            cache_hit_estimates_from_tiered_matches(&KvRouterConfig::default(), 16, &tiered);
+            cache_hit_estimates_from_tiered_matches(&CacheHitWeights::default(), 16, &tiered);
 
         assert_eq!(estimates.effective_overlap_blocks[&worker_1], 3.25);
         assert_eq!(estimates.cached_tokens[&worker_1], 52);

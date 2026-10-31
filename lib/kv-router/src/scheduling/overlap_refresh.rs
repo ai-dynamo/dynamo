@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::config::KvRouterConfig;
+use super::router_config::CacheHitWeights;
 use crate::indexer::{LowerTierQueryOptions, TieredMatchProvider};
 use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::LocalBlockHash;
@@ -68,15 +68,15 @@ pub trait OverlapScoresRefresh: Send + Sync {
 
 pub struct TieredOverlapRefresher<P> {
     provider: P,
-    config: KvRouterConfig,
+    weights: CacheHitWeights,
     block_size: u32,
 }
 
 impl<P> TieredOverlapRefresher<P> {
-    pub fn new(provider: P, config: KvRouterConfig, block_size: u32) -> Self {
+    pub fn new(provider: P, weights: CacheHitWeights, block_size: u32) -> Self {
         Self {
             provider,
-            config,
+            weights,
             block_size,
         }
     }
@@ -108,7 +108,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
                 return None;
             }
         };
-        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(&self.weights, self.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
             .then(|| tiered.kv_transfer_candidates().cloned())
             .flatten();
@@ -335,7 +335,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 fail: false,
             },
-            KvRouterConfig::default(),
+            CacheHitWeights::default(),
             16,
         );
         let worker = WorkerWithDpRank::new(4, 0);
@@ -351,7 +351,7 @@ mod tests {
 
         let failing = TieredOverlapRefresher::new(
             FakeProvider { calls, fail: true },
-            KvRouterConfig::default(),
+            CacheHitWeights::default(),
             16,
         );
         assert!(failing.refresh(&[LocalBlockHash(1)], false).await.is_none());

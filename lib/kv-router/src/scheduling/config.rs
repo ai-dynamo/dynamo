@@ -1490,6 +1490,37 @@ impl From<&KvRouterConfig> for ConditionalDisaggConfig {
     }
 }
 
+impl From<&KvRouterConfig> for super::router_config::CacheHitWeights {
+    fn from(config: &KvRouterConfig) -> Self {
+        Self {
+            host: config.host_cache_hit_weight,
+            disk: config.disk_cache_hit_weight,
+        }
+    }
+}
+
+impl From<&KvRouterConfig> for super::router_config::RouterConfig {
+    /// The kernel's slice of the flat config. Profiles resolve lazily by model name through
+    /// the policy file this config loaded, so a bad file surfaces when its first partition
+    /// is created, exactly where `policy_profile` fails today.
+    fn from(config: &KvRouterConfig) -> Self {
+        let source = config.clone();
+        Self {
+            selection: SelectionConfig::from(config),
+            conditional_disagg: ConditionalDisaggConfig::from(config),
+            use_kv_events: config.use_kv_events,
+            track_prefill_tokens: config.router_track_prefill_tokens,
+            assume_kv_reuse: config.router_assume_kv_reuse,
+            queue_recheck_interval: config.router_queue_recheck_interval(),
+            profiles: std::sync::Arc::new(move |model: Option<&str>| {
+                source.policy_profile(model).map_err(|error| {
+                    super::router_config::RouterConfigError::Validation(error.to_string())
+                })
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

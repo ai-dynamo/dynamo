@@ -307,7 +307,7 @@ impl SelectionCore {
                 context: &self.tracking_hash,
                 scope: tracking_scope(&entry),
                 assume_kv_reuse: self
-                    .kv_router_config
+                    .config
                     .assume_kv_reuse(req.router_config_override.as_ref()),
             },
         )?;
@@ -326,7 +326,7 @@ impl SelectionCore {
                     .router_config_override
                     .as_ref()
                     .and_then(|cfg| cfg.track_prefill_tokens)
-                    .unwrap_or(self.kv_router_config.router_track_prefill_tokens)
+                    .unwrap_or(self.config.track_prefill_tokens)
         });
         // Hash-only reservations (sequence hashes without block hashes) carry
         // nothing an indexer can key on; recording is skipped for them.

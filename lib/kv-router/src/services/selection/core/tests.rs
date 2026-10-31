@@ -62,6 +62,9 @@ fn core_with(
     let indexer_policy =
         IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
             .expect("indexer policy");
+    let config = crate::scheduling::RouterConfig::from(&config)
+        .validate()
+        .expect("valid router config");
     SelectionCore::new_inner(
         config,
         1,

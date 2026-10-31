@@ -30,6 +30,7 @@ use crate::protocols::{
     WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
+use crate::scheduling::router_config::{CacheHitWeights, RouterConfig, Validated};
 use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
@@ -286,7 +287,7 @@ pub struct SelectionCore {
     /// workers publish to directly, or when the embedding host feeds events.
     listens_for_kv_events: bool,
     indexer_registry: Arc<WorkerRegistry>,
-    kv_router_config: crate::config::KvRouterConfig,
+    config: Validated<RouterConfig>,
     worker_selection_policy_factory: WorkerSelectionPolicyFactory,
     host: SelectionHost,
     worker_type: WorkerType,
@@ -392,8 +393,9 @@ impl SelectionCore {
         let indexer_policy = IndexerPolicy::from_config(
             &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
         )?;
+        let config = RouterConfig::from(&kv_router_config).validate()?;
         Ok(Self::new_inner(
-            kv_router_config,
+            config,
             indexer_threads,
             cancel_token,
             None,
@@ -414,7 +416,7 @@ impl SelectionCore {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_inner(
-        kv_router_config: crate::config::KvRouterConfig,
+        config: Validated<RouterConfig>,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
@@ -432,7 +434,7 @@ impl SelectionCore {
             WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
                 .with_retained_indexers(),
         );
-        let listens_for_kv_events = kv_router_config.use_kv_events;
+        let listens_for_kv_events = config.use_kv_events;
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
             indexer_registry.signal_ready();
@@ -445,7 +447,7 @@ impl SelectionCore {
             reservation_sweep_started: OnceCell::new(),
             listens_for_kv_events,
             indexer_registry,
-            kv_router_config,
+            config,
             worker_selection_policy_factory,
             host,
             worker_type,

@@ -11,6 +11,7 @@ use std::{
 use anyhow::Result;
 #[cfg(test)]
 use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::scheduling::CacheHitWeights;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
@@ -1085,7 +1086,7 @@ impl KvRouter {
         tiered_matches: &indexer::TieredMatchDetails,
     ) -> CacheHitEstimates {
         cache_hit_estimates_from_tiered_matches(
-            &self.kv_router_config,
+            &CacheHitWeights::from(&self.kv_router_config),
             self.block_size,
             tiered_matches,
         )
@@ -1868,16 +1869,18 @@ impl KvRouter {
                 })
                 .collect::<Vec<_>>()
         };
-        Ok(
-            OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
-                .scores_response(
-                    num_blocks,
-                    expected_workers,
-                    shared_enabled,
-                    shared_hits.as_ref(),
-                    shared_error,
-                ),
+        Ok(OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.kv_router_config),
+            self.block_size,
+            &tiered_matches,
         )
+        .scores_response(
+            num_blocks,
+            expected_workers,
+            shared_enabled,
+            shared_hits.as_ref(),
+            shared_error,
+        ))
     }
 
     /// Dump all events from the indexer

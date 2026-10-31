@@ -21,6 +21,7 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
+use dynamo_kv_router::scheduling::CacheHitWeights;
 use dynamo_kv_router::scheduling::{BusyRanksExt, BusyThresholdsExt};
 use dynamo_kv_router::scheduling::{
     OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
@@ -709,9 +710,12 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
             if self.router.acquire_affinity(&mut request)? {
                 if let Some(hashes) = &request.block_hashes {
                     let tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
-                    request.overlap =
-                        OverlapAnalysis::new(&self.router.config, self.router.block_size, &tiered)
-                            .signals();
+                    request.overlap = OverlapAnalysis::new(
+                        &CacheHitWeights::from(&self.router.config),
+                        self.router.block_size,
+                        &tiered,
+                    )
+                    .signals();
                 }
                 let effects = self.router.enqueue_or_admit(request, now_ms)?;
                 admissions.extend(effects.admissions);
@@ -1309,7 +1313,12 @@ impl OfflineReplayRouter {
                 (tiered, token_seq)
             }
         };
-        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config),
+            self.block_size,
+            &tiered,
+        )
+        .signals();
 
         Ok(PendingRequest {
             uuid,

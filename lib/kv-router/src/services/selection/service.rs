@@ -12,6 +12,7 @@ use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
+use crate::scheduling::RouterConfig;
 use crate::services::common::replica_sync::{
     AffinityBindingEvent, PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
@@ -217,8 +218,11 @@ impl SelectionServiceBuilder {
             );
         }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
+        let config = RouterConfig::from(&self.kv_router_config)
+            .validate()
+            .map_err(anyhow::Error::from)?;
         let core = SelectionCore::new_inner(
-            self.kv_router_config,
+            config,
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,

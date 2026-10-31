@@ -18,6 +18,7 @@ pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
 pub mod request_classifier;
+pub mod router_config;
 pub mod selector;
 pub mod shared_cache;
 
@@ -47,6 +48,9 @@ pub use prefill_load::{
 };
 pub use queue_admission::WorkerPlacement;
 pub use request_classifier::{ClassificationError, RequestLifecycle};
+pub use router_config::{
+    CacheHitWeights, PolicyProfileSource, RouterConfig, RouterConfigError, Validated,
+};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,

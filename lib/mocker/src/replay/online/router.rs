@@ -17,6 +17,7 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
     compute_block_hash_for_seq,
 };
+use dynamo_kv_router::scheduling::CacheHitWeights;
 use dynamo_kv_router::scheduling::{
     OverlapAnalysis, ScheduleMode, ScheduleRequest, SessionContext,
 };
@@ -337,7 +338,12 @@ impl KvReplayRouter {
             .indexer
             .find_matches_for_request(&request.tokens, None)
             .await?;
-        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config),
+            self.block_size,
+            &tiered,
+        )
+        .signals();
         let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
             &self.tracking_hash,
             TrackingHashScope {

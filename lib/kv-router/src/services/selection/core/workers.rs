@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
-use crate::plugins::worker_selection::SelectionConfig;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
@@ -143,7 +142,7 @@ impl SelectionCore {
             )));
         }
         let queueing_enabled = self
-            .kv_router_config
+            .config
             .queueing_enabled(Some(&record.model_name))
             .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
         record.not_schedulable_reasons = record.missing_schedulable_metadata(queueing_enabled);
@@ -335,21 +334,19 @@ impl SelectionCore {
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         indexer.clone(),
-                        self.kv_router_config.clone(),
+                        CacheHitWeights::from(&self.config.selection),
                         block_size,
                     ))
                 });
                 let selector = (self.worker_selection_policy_factory)(
-                    &SelectionConfig::from(&self.kv_router_config),
+                    &self.config.selection,
                     self.worker_type,
                     key.as_ref(),
                 );
                 let scores_kv_transfer =
                     WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
                         .contains(WorkerInputs::KV_TRANSFER);
-                let profile = self
-                    .kv_router_config
-                    .policy_profile(Some(&key.model_name))
+                let profile = (self.config.profiles)(Some(&key.model_name))
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
                 let scheduler = LocalScheduler::new(
                     slots,
@@ -364,8 +361,8 @@ impl SelectionCore {
                     self.host.load.overloaded_workers.clone(),
                     self.host.load.available_workers.clone(),
                     self.host.load.reject_thresholds.clone(),
-                    self.kv_router_config.router_queue_recheck_interval(),
-                    self.kv_router_config.router_track_prefill_tokens,
+                    self.config.queue_recheck_interval,
+                    self.config.track_prefill_tokens,
                     self.cancel_token.child_token(),
                     worker_label,
                     true,

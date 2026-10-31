@@ -201,8 +201,9 @@ impl SelectionCore {
         let booked = sequence_hashes.is_some();
         let potential_decode_blocks = response.potential_decode_blocks as u64;
         let decode_busy = self
-            .kv_router_config
-            .conditional_disagg_decode_busy_threshold
+            .config
+            .conditional_disagg
+            .decode_busy_threshold
             .zip(total_kv_blocks)
             .map(|(threshold, total_kv_blocks)| {
                 potential_decode_blocks as f64 > threshold * total_kv_blocks as f64
@@ -212,8 +213,9 @@ impl SelectionCore {
             prefill_token_capacity: load.prefill_token_capacity,
             total_kv_blocks,
             prefill_busy: self
-                .kv_router_config
-                .conditional_disagg_prefill_busy_threshold
+                .config
+                .conditional_disagg
+                .prefill_busy_threshold
                 .map(|threshold| load.prefill_load_exceeds(threshold)),
         });
         SelectResponse {
@@ -342,10 +344,8 @@ impl SelectionCore {
             .prepare_selection_inputs(
                 &entry,
                 &prompt,
-                track_active_blocks.then(|| {
-                    self.kv_router_config
-                        .assume_kv_reuse(router_config_override.as_ref())
-                }),
+                track_active_blocks
+                    .then(|| self.config.assume_kv_reuse(router_config_override.as_ref())),
                 true,
                 retain_kv_transfer_chain,
                 lookup,
@@ -382,7 +382,7 @@ impl SelectionCore {
         let track_prefill_tokens = router_config_override
             .as_ref()
             .and_then(|cfg| cfg.track_prefill_tokens)
-            .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+            .unwrap_or(self.config.track_prefill_tokens);
         // An unbooked selection with an id caches the booking inputs so a
         // follow-up `create_reservation` can replay them by that id.
         let cached_inputs = replay_id.filter(|_| !book).map(|id| {
@@ -782,8 +782,12 @@ impl SelectionCore {
         // when the index lookup fails.
         *lookup = Some(timings);
         let tiered = tiered?;
-        let overlap =
-            OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config.selection),
+            entry.block_size,
+            &tiered,
+        )
+        .signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
             .then(|| tiered.kv_transfer_candidates().cloned())
             .flatten();
