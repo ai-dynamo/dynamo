@@ -7,8 +7,8 @@
 //! read; the pool frontend validates, preprocesses, and formats everything
 //! else exactly as for a request sent to it directly.
 
-use std::future::IntoFuture;
 use std::io;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,18 +17,21 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::serve::ListenerExt;
 use axum::{Json, Router};
 use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
 use futures::StreamExt;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use url::Url;
 
 use crate::PoolSnapshot;
@@ -80,29 +83,73 @@ pub fn app(
         .with_state(proxy)
 }
 
-/// Serves `app` on `listener` until `shutdown` fires, then lets open
-/// requests finish for a grace period.
-pub async fn serve(
-    listener: TcpListener,
-    app: Router,
-    shutdown: CancellationToken,
-) -> io::Result<()> {
-    // Streamed tokens are small writes, which Nagle's algorithm would hold
-    // for the client's delayed ACK.
-    let listener = listener.tap_io(|tcp| {
-        if let Err(error) = tcp.set_nodelay(true) {
-            tracing::debug!(%error, "failed to set TCP_NODELAY");
+/// Serves `app` on `listener` until `shutdown` fires. Then it stops accepting
+/// connections and lets open ones finish their requests; any still open after
+/// a grace period are closed, dropping their response bodies.
+pub async fn serve(listener: TcpListener, app: Router, shutdown: CancellationToken) {
+    // A connection task is polled on every wakeup, i.e. for every forwarded
+    // response chunk, and each poll also polls its shutdown signal. Each
+    // connection waits on its own child token, whose lock no other connection
+    // touches; `axum::serve` has every connection poll one shared `Notify`,
+    // which locks its waiter list on every poll of a pending waiter. This
+    // mirrors lib/llm/src/http/service/server.rs.
+    //
+    // Build each route's handler once, as `Router::into_make_service` does,
+    // not per request.
+    let app = app.with_state(());
+    let graceful = CancellationToken::new();
+    let hard = CancellationToken::new();
+    let _close_connections = hard.clone().drop_guard();
+    let connections = TaskTracker::new();
+    let mut shutdown = pin!(shutdown.cancelled());
+    loop {
+        let stream = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            stream = accept(&listener) => stream,
+        };
+        let connection = serve_connection(stream, app.clone(), graceful.child_token());
+        connections.spawn(hard.child_token().run_until_cancelled_owned(connection));
+    }
+
+    // Refuse new connections at once instead of leaving them in the backlog.
+    drop(listener);
+    graceful.cancel();
+    connections.close();
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, connections.wait()).await;
+}
+
+async fn accept(listener: &TcpListener) -> TcpStream {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                // Streamed tokens are small writes, which Nagle's algorithm
+                // would hold for the client's delayed ACK.
+                if let Err(error) = stream.set_nodelay(true) {
+                    tracing::debug!(%error, "failed to set TCP_NODELAY");
+                }
+                return stream;
+            }
+            // Errors such as EMFILE are transient: back off and retry.
+            Err(error) => {
+                tracing::debug!(%error, "failed to accept a connection");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
-    });
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .into_future();
-    tokio::select! {
-        result = server => result,
-        _ = async {
-            shutdown.cancelled().await;
-            tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } => Ok(()),
+    }
+}
+
+async fn serve_connection(stream: TcpStream, app: Router, graceful: CancellationToken) {
+    let builder = Builder::new(TokioExecutor::new());
+    let service = TowerToHyperService::new(app);
+    let mut connection = pin!(builder.serve_connection(TokioIo::new(stream), service));
+    if graceful
+        .run_until_cancelled(connection.as_mut())
+        .await
+        .is_none()
+    {
+        connection.as_mut().graceful_shutdown();
+        let _ = connection.await;
     }
 }
 
@@ -315,6 +362,15 @@ fn remove_hop_headers(headers: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn accepted_connections_turn_nagle_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(address).await.unwrap();
+        let stream = accept(&listener).await;
+        assert!(stream.nodelay().unwrap());
+    }
 
     #[test]
     fn hop_by_hop_headers_stay_on_their_connection() {

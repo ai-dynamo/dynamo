@@ -220,9 +220,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("listen on {address}"))?;
     tracing::info!(%address, "Global Frontend listening");
-    serve(listener, app, shutdown)
-        .await
-        .context("serve the Global Frontend")
+    serve(listener, app, shutdown).await;
+    Ok(())
 }
 
 /// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
