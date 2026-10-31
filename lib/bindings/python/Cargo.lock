@@ -942,7 +942,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55524e9467214686afafb60b7cedf28549f0ce964457658842999f6ef7ccbae7"
 dependencies = [
  "chrono",
- "daachorse",
+ "daachorse 1.0.1",
  "fancy-regex 0.17.0",
  "icu_normalizer",
  "icu_properties",
@@ -1712,6 +1712,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2"
 
 [[package]]
+name = "daachorse"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2275,7 +2281,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tmq",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tokio",
  "tokio-rayon",
  "tokio-rustls",
@@ -2391,9 +2397,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.4.0"
+version = "8.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
+checksum = "834c27ac7acebd32a223e36eec6e17d39abb4b1fc4db7610748d245f51af6b26"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2456,9 +2462,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.2.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e6a7ebe51c63049c4088131c3e8bfe5687fafb699e659fda20728b34e4dc31"
+checksum = "9a34289b6c5fb74e579dfb209c06d98ae06699042b384a686ebb952fbfe1ba5f"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2630,9 +2636,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "3.1.3"
+version = "4.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0088954e64cd5f8ff9db94d08d60f15caa4ec364391e37b15496cf926752528a"
+checksum = "16b7897aac69b7dc3846aad98ca9ef998eeac32b54c4f0b1f82cf6e949e529b2"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2647,7 +2653,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tiktoken-rs 0.9.1",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tracing",
 ]
 
@@ -2968,7 +2974,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a54c07b9d1217010ec476249998b23430d0f4f85a4504114d81f55f2a43d1610"
 dependencies = [
  "aho-corasick",
- "daachorse",
+ "daachorse 1.0.1",
  "fancy-regex 0.17.0",
  "fastrand",
  "hf-hub 0.4.3",
@@ -4756,7 +4762,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tiktoken-rs 0.12.0",
- "tokenizers 0.23.1",
+ "tokenizers",
  "tokio",
  "tracing",
  "uuid",
@@ -8797,51 +8803,18 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.21.4"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a620b996116a59e184c2fa2dfd8251ea34a36d0a514758c6f966386bd2e03476"
+checksum = "7afbf6e88718afcc138bad01d6ccc3051dbbc3b2ce9793d8b8a3aeb610969cfc"
 dependencies = [
  "ahash",
- "aho-corasick",
  "compact_str",
+ "daachorse 3.0.3",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
  "hf-hub 0.4.3",
- "itertools 0.14.0",
- "log",
- "macro_rules_attribute",
- "monostate",
- "onig",
- "paste",
- "rand 0.9.4",
- "rayon",
- "rayon-cond",
- "regex",
- "regex-syntax",
- "serde",
- "serde_json",
- "spm_precompiled",
- "thiserror 2.0.18",
- "unicode-normalization-alignments",
- "unicode-segmentation",
- "unicode_categories",
-]
-
-[[package]]
-name = "tokenizers"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
-dependencies = [
- "ahash",
- "compact_str",
- "daachorse",
- "dary_heap",
- "derive_builder",
- "esaxx-rs",
- "getrandom 0.3.4",
  "indicatif 0.18.4",
  "itertools 0.14.0",
  "log",

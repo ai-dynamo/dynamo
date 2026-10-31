@@ -188,7 +188,7 @@ tonic-reflection = { version = "0.13.1" }
 prost = { version = "0.13.5" }
 
 # tokenizers
-tokenizers = { version = "0.21.4", default-features = false, features = [
+tokenizers = { version = "0.23.2", default-features = false, features = [
   "onig",
   "esaxx_fast",
   "rustls-tls",

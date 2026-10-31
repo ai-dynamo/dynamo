@@ -1762,7 +1762,9 @@ mod tests {
             "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
         ))
         .unwrap();
-        tokenizer.add_tokens(&[tokenizers::AddedToken::from("\u{fffd}suffix", false)]);
+        tokenizer
+            .add_tokens([tokenizers::AddedToken::from("\u{fffd}suffix", false)])
+            .unwrap();
         let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap();
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(
             crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(tokenizer),
