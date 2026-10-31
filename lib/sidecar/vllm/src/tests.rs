@@ -2919,3 +2919,38 @@ async fn unsupported_features_fail_before_rpc_submission() {
     }
     assert!(server.service.requests.lock().await.is_empty());
 }
+
+// Regression: LoRA records are derived from the base model card, which the
+// worker withdraws while the engine recovers, so adapters were never republished.
+#[tokio::test]
+async fn recovered_engine_republishes_loaded_adapters() {
+    let namespace = "lora_recovery";
+    let (_server, engine, endpoint) = started_lora_engine(FakeVllm::default(), namespace).await;
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    assert_eq!(lora_siblings(&endpoint).await, ["math-r8"]);
+
+    // The worker withdraws the base card before `recover` and registers it after.
+    dynamo_llm::local_model::LocalModel::detach_from_endpoint(&endpoint, None)
+        .await
+        .expect("withdraw base model");
+    engine.recover().await.expect("recover");
+    let mut base = ModelDeploymentCard::with_name_only("model-source");
+    base.source_path = Some("model-source".to_string());
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            DiscoverySpec::from_model(
+                namespace.to_string(),
+                "backend".to_string(),
+                "generate".to_string(),
+                &base,
+            )
+            .expect("base discovery spec"),
+        )
+        .await
+        .expect("register base model");
+    engine.on_recovered().await.expect("on_recovered");
+    assert_eq!(lora_siblings(&endpoint).await, ["math-r8"]);
+}

@@ -97,7 +97,7 @@ impl SidecarFixture for Fixture {
     const GENERATE_OPENING: GenerateOpening = GenerateOpening::WaitsForHeaders;
 
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
-        let mut args = fast_engine_args(EngineType::Trtllm);
+        let mut args = fast_engine_args(EngineType::Trtllm, config.has_kv_events);
         args.speedup_ratio = config.speedup_ratio;
         let service = TrtllmMockerService::new(
             MockerServerConfig {

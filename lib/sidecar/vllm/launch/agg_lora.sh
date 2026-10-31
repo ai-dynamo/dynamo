@@ -124,6 +124,7 @@ python -m dynamo.frontend &
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host 127.0.0.1 \
     --port "$VLLM_RS_HTTP_PORT" \
     --grpc-port "$VLLM_GRPC_PORT" \

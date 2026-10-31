@@ -23,7 +23,16 @@ impl TestServer {
         F: FnOnce(TcpListener, oneshot::Receiver<()>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        Self::start_on(SocketAddr::from(([127, 0, 0, 1], 0)), serve).await
+    }
+
+    /// Serve on `address`, for example to restart a server on its old port.
+    pub async fn start_on<F, Fut>(address: SocketAddr, serve: F) -> anyhow::Result<Self>
+    where
+        F: FnOnce(TcpListener, oneshot::Receiver<()>) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let (shutdown, mut stopping) = watch::channel(false);
@@ -56,6 +65,10 @@ impl TestServer {
 
     pub fn endpoint(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.address
     }
 
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {

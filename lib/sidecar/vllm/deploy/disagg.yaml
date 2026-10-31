@@ -96,7 +96,7 @@ spec:
           - |
             VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
-              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none \
+              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none --shutdown-timeout 30 \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
   - name: decode
     type: decode
@@ -177,6 +177,6 @@ spec:
           - |
             VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
-              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none \
+              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none --shutdown-timeout 30 \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
   backendFramework: vllm

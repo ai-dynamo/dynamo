@@ -107,6 +107,20 @@ impl GrpcChannelPool {
         transport: GrpcTransportConfig,
         bootstrap: bool,
     ) -> Result<Self, DynamoError> {
+        Self::connect_with_keepalive(peer, endpoint, transport, bootstrap, None).await
+    }
+
+    /// [`connect`](Self::connect), optionally with HTTP/2 keepalive: while a
+    /// stream is open, ping every `interval` and close the connection when a
+    /// ping goes unanswered for `timeout`, so a silently dead peer fails open
+    /// streams instead of stalling them. The peer must accept that ping rate.
+    pub async fn connect_with_keepalive(
+        peer: &str,
+        endpoint: &GrpcEndpoint,
+        transport: GrpcTransportConfig,
+        bootstrap: bool,
+        keepalive: Option<(Duration, Duration)>,
+    ) -> Result<Self, DynamoError> {
         let endpoint_label = endpoint.to_string();
         let mut tonic_endpoint =
             Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
@@ -115,6 +129,11 @@ impl GrpcChannelPool {
         let unix_socket = endpoint.is_unix_socket();
         if unix_socket {
             tonic_endpoint = tonic_endpoint.origin(Uri::from_static(UNIX_SOCKET_ORIGIN));
+        }
+        if let Some((interval, timeout)) = keepalive {
+            tonic_endpoint = tonic_endpoint
+                .http2_keep_alive_interval(interval)
+                .keep_alive_timeout(timeout);
         }
         let channels = connect_pool_with(
             peer,

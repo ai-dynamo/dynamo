@@ -67,5 +67,5 @@ spec:
           - -c
           - exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             serve Qwen/Qwen3-0.6B --host 0.0.0.0 --grpc-port 30001
-            --reasoning-parser none
+            --reasoning-parser none --shutdown-timeout 30
   backendFramework: vllm

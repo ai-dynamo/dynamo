@@ -110,6 +110,7 @@ python -m dynamo.frontend &
 # ENCODER_GPU_MEMORY_UTILIZATION sets --gpu-memory-utilization independently.
 CUDA_VISIBLE_DEVICES="$VLLM_ENCODER_GPU" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host 127.0.0.1 \
     --port "$VLLM_ENCODER_HTTP_PORT" \
     --grpc-port "$VLLM_ENCODER_GRPC_PORT" \
@@ -129,6 +130,7 @@ vllm-rs serve "$MODEL" \
 CUDA_VISIBLE_DEVICES="$VLLM_PREFILL_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host 127.0.0.1 \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
@@ -147,6 +149,7 @@ vllm-rs serve "$MODEL" \
 CUDA_VISIBLE_DEVICES="$VLLM_DECODE_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT" \
 vllm-rs serve "$MODEL" \
+    --shutdown-timeout 30 \
     --host 127.0.0.1 \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
