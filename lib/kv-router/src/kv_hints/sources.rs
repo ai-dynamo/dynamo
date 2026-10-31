@@ -19,6 +19,8 @@ use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "standalone-selection")]
+use super::KvSourceLocationsPayload;
 use super::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
     KvTransferEnforcement, RouterHintSourceMetadata, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -279,6 +281,39 @@ impl KvFetchSource {
     pub(crate) fn choice(&self) -> KvTransferSourceChoice {
         self.choice
     }
+}
+
+/// The `kv.fetch` payload for `fetch`: the source's current control endpoint and
+/// the request's block chain up to the source's prefix. `None` when the source
+/// has left `configs` or lost its endpoint since selection.
+#[cfg(feature = "standalone-selection")]
+pub(crate) fn kv_fetch_payload<C: WorkerConfigLike>(
+    configs: &HashMap<WorkerId, C>,
+    fetch: &KvFetchSource,
+    candidates: &KvTransferCandidates,
+) -> Option<KvSourceLocationsPayload> {
+    let source_control_endpoint = match fetch.source() {
+        KvTransferCandidateSource::Worker(worker) => configs
+            .get(&worker.worker_id)?
+            .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)?
+            .source_control_endpoint?
+            .to_string(),
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
+            .routing_snapshot
+            .as_ref()?
+            .router_hint_source(owner)?
+            .metadata
+            .source_control_endpoint
+            .clone(),
+    };
+    let block_hashes = candidates.block_hashes.get(..fetch.prefix_blocks())?;
+    if source_control_endpoint.is_empty() || block_hashes.is_empty() {
+        return None;
+    }
+    Some(KvSourceLocationsPayload {
+        source_control_endpoint,
+        block_hashes: block_hashes.to_vec(),
+    })
 }
 
 #[derive(Clone, Copy)]

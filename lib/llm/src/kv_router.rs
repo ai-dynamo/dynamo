@@ -2240,6 +2240,32 @@ mod tests {
         );
     }
 
+    /// `kv_fetch` reads fetch sources, which come from the KV index, so it starts the index under
+    /// a routing policy that reads no cache inputs.
+    #[test]
+    fn kv_fetch_starts_the_kv_index_for_load_only_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "hint_policies:\n  prefill: [fetch]\n  instances:\n    - name: fetch\n      type: kv_fetch\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+        let hints = registry.resolve_hint_policies(&config).unwrap();
+        let inputs = router_index_inputs(WorkerInputs::LOAD, &hints, WorkerType::Prefill);
+        assert!(needs_kv_index(inputs));
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs),
+            KvEventSourceRequirement::CacheAwareRouting
+        );
+    }
+
     struct FakeSharedCache {
         hits: Option<dynamo_kv_router::protocols::SharedCacheHits>,
         should_error: bool,

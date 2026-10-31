@@ -271,11 +271,13 @@ impl<'a> MaterializedSelectionInput<'a> {
         }
     }
 
-    fn selected_kv_transfer_source<C: WorkerConfigLike>(
+    /// The selected worker's eligible fetch source, from the same summary that
+    /// any fetch scorer saw.
+    fn selected_kv_fetch_source<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
-    ) -> Option<KvTransferSourceChoice> {
+    ) -> Option<KvFetchSource> {
         self.request.kv_transfer_candidates.as_ref()?;
         let target = workers
             .get(&worker.worker_id)?
@@ -285,6 +287,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         let scope = || KvTransferScope::of([(target, local_prefix_blocks)]);
         self.kv_transfer_sources(workers, scope)?
             .source_for(worker, target, local_prefix_blocks)
+            .map(|choice| KvFetchSource::new(worker, choice, local_prefix_blocks))
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
@@ -482,7 +485,8 @@ fn selection_result(
     worker: WorkerWithDpRank,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
-    kv_transfer_source: Option<KvTransferSourceChoice>,
+    committed_kv_fetch: Option<KvFetchSource>,
+    kv_fetch_source: Option<KvFetchSource>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -494,7 +498,8 @@ fn selection_result(
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
-        kv_transfer_source,
+        committed_kv_fetch,
+        kv_fetch_source,
     }
 }
 
@@ -694,6 +699,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
+                fetch_offers,
                 fetches,
                 ..
             } = &mut *state;
@@ -743,15 +749,19 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         spec,
                     )
                 });
-                // A fetch scorer's decision is final, including no fetch.
-                let committed = fetch_scorer
-                    .is_some()
-                    .then(|| fetches.get(row).copied().flatten());
-                Some((candidate.worker, candidate.cost, trace, committed))
+                // A fetch scorer's decision is final, including no fetch. Its offer for
+                // the row is the selected worker's source either way.
+                let fetch = fetch_scorer.is_some().then(|| {
+                    (
+                        fetches.get(row).copied().flatten(),
+                        fetch_offers.get(row).copied().flatten(),
+                    )
+                });
+                Some((candidate.worker, candidate.cost, trace, fetch))
             }
         }
     };
-    let Some((worker, cost, selection_trace, committed)) = selected else {
+    let Some((worker, cost, selection_trace, fetch)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -761,18 +771,19 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let kv_transfer_source = match committed {
-        Some(committed) => committed.map(|fetch| fetch.choice()),
-        // A policy without a fetch scorer commits to no fetch, so the router fetches from the
-        // selected worker's best source.
-        None => input.selected_kv_transfer_source(workers, worker),
+    let (committed_kv_fetch, kv_fetch_source) = match fetch {
+        Some(fetch) => fetch,
+        // A policy without a fetch scorer commits to no fetch; hint policies may still fetch
+        // from the selected worker's source.
+        None => (None, input.selected_kv_fetch_source(workers, worker)),
     };
     let result = selection_result(
         request,
         worker,
         block_size,
         input.max_raw_cached_tokens(),
-        kv_transfer_source,
+        committed_kv_fetch,
+        kv_fetch_source,
     );
     log_selection(
         workers,
@@ -962,7 +973,14 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(
+            &request,
+            first,
+            16,
+            input.max_raw_cached_tokens(),
+            None,
+            None,
+        );
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -979,7 +997,14 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(
+            &request,
+            worker,
+            16,
+            input.max_raw_cached_tokens(),
+            None,
+            None,
+        );
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -1008,7 +1033,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112), None);
+        let result = selection_result(&request, selected, 16, Some(112), None, None);
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 

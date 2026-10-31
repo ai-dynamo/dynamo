@@ -8,9 +8,11 @@
 //! scheduler actor, with the booked worker. Worker choice stays with the configured
 //! worker-selection policy; hint policies never change it.
 //!
-//! The router composes its own fetch, if any, and then every policy's actions in configured order
-//! into one [`crate::kv_hints::KvHint`]. Hosts own eligibility, booking, and delivery. Policies
-//! never reserve capacity, and the engine may still ignore or miss any action.
+//! The router composes every policy's actions in configured order into one
+//! [`crate::kv_hints::KvHint`]. When the worker-selection policy committed the booked worker to a
+//! KV fetch, the policy that declares [`HintRequirements::with_committed_kv_fetch`] must deliver
+//! it, or the booking fails. Hosts own eligibility, booking, and delivery. Policies never reserve
+//! capacity, and the engine may still ignore or miss any action.
 //!
 //! This module is experimental: names and signatures can change without a deprecation period.
 
@@ -24,7 +26,7 @@ mod tests;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::kv_hints::KvHintAction;
+use crate::kv_hints::{KV_FETCH_ACTION_ID, KvFetchSource, KvHintAction, KvSourceLocationsPayload};
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::WorkerWithDpRank;
 
@@ -48,7 +50,8 @@ pub trait HintPolicy: Send + Sync + 'static {
     /// Return KV actions for the booked worker.
     ///
     /// Called once per booked selection, never for previews. An error drops only this policy's
-    /// actions; the booking proceeds with the other policies' actions.
+    /// actions, and the booking proceeds with the other policies' actions, unless this policy
+    /// must deliver the booking's committed fetch: then the booking fails.
     fn hint_kv_locality(
         &self,
         _context: &HintActionContext<'_>,
@@ -62,6 +65,8 @@ pub trait HintPolicy: Send + Sync + 'static {
 pub struct HintRequirements {
     inputs: WorkerInputs,
     actions: bool,
+    kv_fetch_sources: bool,
+    committed_kv_fetch: bool,
 }
 
 impl Default for HintRequirements {
@@ -76,6 +81,8 @@ impl HintRequirements {
         Self {
             inputs: WorkerInputs::NONE,
             actions: false,
+            kv_fetch_sources: false,
+            committed_kv_fetch: false,
         }
     }
 
@@ -92,8 +99,33 @@ impl HintRequirements {
         self
     }
 
+    /// Read the booked worker's eligible fetch source through
+    /// [`HintActionContext::kv_fetch_source`]. The host starts the KV index and retains the
+    /// request's block chain for it, even when the worker-selection policy reads neither.
+    pub fn with_kv_fetch_sources(mut self) -> Self {
+        self.kv_fetch_sources = true;
+        self
+    }
+
+    /// Deliver the fetch the worker-selection policy committed the booked worker to, read through
+    /// [`HintActionContext::committed_kv_fetch`]. When the policy commits fetches, exactly one
+    /// configured hint policy for the role must declare this, or partition setup fails. Its output
+    /// must contain that fetch, or the booking fails.
+    pub fn with_committed_kv_fetch(mut self) -> Self {
+        self.committed_kv_fetch = true;
+        self
+    }
+
     pub fn uses_actions(&self) -> bool {
         self.actions
+    }
+
+    pub fn reads_kv_fetch_sources(&self) -> bool {
+        self.kv_fetch_sources
+    }
+
+    pub fn delivers_committed_kv_fetch(&self) -> bool {
+        self.committed_kv_fetch
     }
 
     /// Requirements a host must satisfy to run every policy in a list.
@@ -101,15 +133,25 @@ impl HintRequirements {
         Self {
             inputs: self.inputs | other.inputs,
             actions: self.actions || other.actions,
+            kv_fetch_sources: self.kv_fetch_sources || other.kv_fetch_sources,
+            committed_kv_fetch: self.committed_kv_fetch || other.committed_kv_fetch,
         }
     }
 
     /// Worker inputs a host must provide for these requirements. Hosts union this with the
-    /// worker-selection policy's inputs before starting indexes and subscriptions.
+    /// worker-selection policy's inputs before starting indexes and subscriptions. Reading fetch
+    /// sources adds [`WorkerInputs::KV_TRANSFER`], whose sources come from the KV index.
     pub fn worker_inputs(&self) -> WorkerInputs {
-        self.inputs
+        if self.kv_fetch_sources {
+            self.inputs | WorkerInputs::KV_TRANSFER
+        } else {
+            self.inputs
+        }
     }
 }
+
+/// Builds a `kv.fetch` payload from a source's current endpoint and the request's block chain.
+pub(crate) type KvFetchPayload<'a> = &'a dyn Fn(&KvFetchSource) -> Option<KvSourceLocationsPayload>;
 
 /// Values available to [`HintPolicy::hint_kv_locality`] for one booked selection.
 pub struct HintActionContext<'a> {
@@ -117,6 +159,9 @@ pub struct HintActionContext<'a> {
     worker: WorkerWithDpRank,
     prompt_tokens: usize,
     block_size: u32,
+    committed_kv_fetch: Option<KvFetchSource>,
+    kv_fetch_source: Option<KvFetchSource>,
+    kv_fetch_payload: Option<KvFetchPayload<'a>>,
 }
 
 impl HintActionContext<'_> {
@@ -138,6 +183,38 @@ impl HintActionContext<'_> {
     /// Tokens per KV block in this partition.
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// The fetch the worker-selection policy's cost assumed for the booked worker, which this
+    /// policy must deliver. `None` unless the policy declared
+    /// [`HintRequirements::with_committed_kv_fetch`] and the selection committed one.
+    pub fn committed_kv_fetch(&self) -> Option<&KvFetchSource> {
+        self.committed_kv_fetch.as_ref()
+    }
+
+    /// The booked worker's eligible fetch source: the one with the longest prefix beyond its
+    /// device and host-pinned prefix, under the same rules the worker-selection policy saw.
+    /// `None` unless the policy declared [`HintRequirements::with_kv_fetch_sources`] and the
+    /// worker has a source.
+    pub fn kv_fetch_source(&self) -> Option<KvFetchSource> {
+        self.kv_fetch_source
+    }
+
+    /// A `kv.fetch` action for `source`, built from the source's current control endpoint and
+    /// the request's block chain. Fails when `source` targets another worker or the source has
+    /// left or lost its endpoint since selection.
+    pub fn kv_fetch_action(&self, source: &KvFetchSource) -> Result<KvHintAction, HintPolicyError> {
+        if source.target() != self.worker {
+            return Err(HintPolicyError::new(format!(
+                "fetch source targets {:?}, but the booked worker is {:?}",
+                source.target(),
+                self.worker
+            )));
+        }
+        self.kv_fetch_payload
+            .and_then(|payload| payload(source))
+            .map(|payload| KvHintAction::fetch(KV_FETCH_ACTION_ID, payload))
+            .ok_or_else(|| HintPolicyError::new("the fetch source is no longer reachable"))
     }
 }
 
@@ -181,11 +258,11 @@ impl HintPolicyInstance {
         self.requirements
     }
 
-    /// The name, and the policy when its KV-action stage runs.
+    /// The name, the requirements, and the policy when its KV-action stage runs.
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
-    pub(crate) fn into_parts(self) -> (Arc<str>, Option<Arc<dyn HintPolicy>>) {
+    pub(crate) fn into_parts(self) -> (Arc<str>, HintRequirements, Option<Arc<dyn HintPolicy>>) {
         let policy = self.requirements.actions.then_some(self.policy);
-        (self.name, policy)
+        (self.name, self.requirements, policy)
     }
 }
 

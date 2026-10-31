@@ -4,11 +4,13 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, `kvcr`, two-tier, and ThunderAgent providers through `register`. The default
+//! catalog adds the named default, `kvcr`, two-tier, and ThunderAgent providers, and the `kv_fetch`
+//! hint policy, through `register`. The default
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod kv_fetch;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
@@ -32,13 +34,14 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     default::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
+    kv_fetch::register(registry)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyFactory};
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
     use super::*;
@@ -115,6 +118,53 @@ worker_selection:
             WorkerType::Prefill,
             RoutingPartitionRef::new("model", "default"),
         );
+    }
+
+    /// `kvcr` pairs with the `kv_fetch` hint policy, which delivers the fetches it commits.
+    #[test]
+    fn resolves_kv_fetch_by_type_name() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let config = |yaml: &str| {
+            std::fs::write(policy_file.path(), yaml).unwrap();
+            KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..Default::default()
+            }
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+
+        let resolved = registry
+            .resolve_hint_policies(&config(
+                r#"
+hint_policies:
+  prefill: [fetch]
+  instances:
+    - name: fetch
+      type: kv_fetch
+      parameters: {min_additional_blocks: 2}
+"#,
+            ))
+            .unwrap();
+        let requirements = resolved.requirements(WorkerType::Prefill);
+        assert!(requirements.delivers_committed_kv_fetch());
+        assert!(requirements.reads_kv_fetch_sources());
+        assert!(
+            requirements
+                .worker_inputs()
+                .contains(WorkerInputs::KV_TRANSFER)
+        );
+        assert!(resolved.names(WorkerType::Decode).is_empty());
+
+        for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
+            let yaml = format!(
+                "hint_policies:\n  prefill: [fetch]\n  instances:\n    - name: fetch\n      type: kv_fetch\n      parameters: {parameters}\n"
+            );
+            assert!(
+                registry.resolve_hint_policies(&config(&yaml)).is_err(),
+                "{parameters}"
+            );
+        }
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

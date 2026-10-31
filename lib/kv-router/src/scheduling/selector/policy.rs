@@ -66,7 +66,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) load_inputs: Vec<WorkerLoadInput>,
     /// The fetch source the host offers each unscored row, index-aligned with them; empty when
     /// the request has no transfer data.
-    fetch_offers: Vec<Option<KvFetchSource>>,
+    pub(super) fetch_offers: Vec<Option<KvFetchSource>>,
     /// Each candidate row's committed fetch, index-aligned with `candidates`; empty without a
     /// fetch scorer.
     pub(super) fetches: Vec<Option<KvFetchSource>>,
@@ -199,6 +199,17 @@ impl WorkerSelectionPolicy {
             }
         }
         self
+    }
+
+    /// Whether a [`KvFetchScorer`] commits candidates to fetches, which a hint policy must
+    /// deliver.
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn commits_kv_fetch(&self) -> bool {
+        match &self.state {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => false,
+            WorkerSelectionPolicyState::Composed(state) => state.borrow().fetch_scorer.is_some(),
+        }
     }
 
     /// Ask the host to constrain selection to an eligible affinity target.
@@ -1312,11 +1323,16 @@ mod tests {
         // The picked row's commitment leaves selection even though it is not the cheapest row.
         let selected = select(Mode::Keep).unwrap();
         assert_eq!(selected.worker.worker_id, 1);
-        let source = selected.kv_transfer_source.expect("committed fetch");
-        assert_eq!(source.source, WorkerWithDpRank::from_worker_id(0).into());
-        assert_eq!(source.prefix_blocks, 3);
-        // Clearing the slot is final: the router does not substitute a source.
-        assert_eq!(select(Mode::Clear).unwrap().kv_transfer_source, None);
+        let source = selected.committed_kv_fetch.expect("committed fetch");
+        assert_eq!(source.target(), selected.worker);
+        assert_eq!(source.source(), WorkerWithDpRank::from_worker_id(0).into());
+        assert_eq!(source.prefix_blocks(), 3);
+        assert_eq!(selected.kv_fetch_source, Some(source));
+        // Clearing the slot is final: nothing is committed, though the worker's source stays
+        // available to best-effort hint policies.
+        let cleared = select(Mode::Clear).unwrap();
+        assert_eq!(cleared.committed_kv_fetch, None);
+        assert_eq!(cleared.kv_fetch_source, Some(source));
         // A source offered for another row fails selection.
         assert!(matches!(
             select(Mode::Move),

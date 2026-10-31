@@ -74,4 +74,6 @@ pub enum RouterPluginRegistryError {
     WorkerSelection(#[from] WorkerSelectionPolicyRegistryError),
     #[error(transparent)]
     RequestClassifier(#[from] RequestClassifierRegistryError),
+    #[error(transparent)]
+    HintPolicy(#[from] hint_policy::HintPolicyRegistryError),
 }

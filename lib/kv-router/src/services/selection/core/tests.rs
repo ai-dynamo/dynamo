@@ -3,11 +3,14 @@
 
 use super::super::affinity::SessionAffinityMode;
 use super::super::input::PromptRequest;
-use super::hint::transfer_hint_payload;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::kv_hints::{
+    KvFetchSource, KvSourceLocationsPayload, KvTransferCandidateSource, kv_fetch_payload,
+};
+use crate::protocols::WorkerConfigLike;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -471,8 +474,46 @@ fn host_with_hints(policies: crate::plugins::hint_policy::HintPolicyFactory) -> 
     }
 }
 
+/// Fetches for the booked worker from its eligible source, best effort, as the
+/// builtin `kv_fetch` preset does without a committed fetch.
+#[derive(Clone)]
+struct BestEffortFetch;
+
+impl crate::plugins::hint_policy::HintPolicy for BestEffortFetch {
+    fn requirements(&self) -> crate::plugins::hint_policy::HintRequirements {
+        crate::plugins::hint_policy::HintRequirements::new()
+            .with_actions()
+            .with_kv_fetch_sources()
+    }
+
+    fn hint_kv_locality(
+        &self,
+        context: &crate::plugins::hint_policy::HintActionContext<'_>,
+    ) -> Result<Vec<KvHintAction>, crate::plugins::hint_policy::HintPolicyError> {
+        Ok(context
+            .kv_fetch_source()
+            .and_then(|source| context.kv_fetch_action(&source).ok())
+            .into_iter()
+            .collect())
+    }
+}
+
+/// [`BestEffortFetch`] for every role.
+fn fetch_hints() -> crate::plugins::hint_policy::HintPolicyFactory {
+    use crate::plugins::hint_policy::{HintPolicy, HintPolicyDefinition, HintPolicyInstance};
+    crate::plugins::hint_policy::HintPolicyFactory::for_all_roles([(
+        "fetch".to_string(),
+        HintPolicyDefinition::new(
+            BestEffortFetch.requirements(),
+            Arc::new(|_, _, _| HintPolicyInstance::new("fetch", BestEffortFetch)),
+        ),
+    )])
+    .unwrap()
+}
+
 /// Two event-driven workers; worker 1 holds every block of an 8-token
-/// prompt. `configure` adjusts each registration before upsert.
+/// prompt. `configure` adjusts each registration before upsert. Bookings fetch
+/// best effort through [`BestEffortFetch`].
 async fn hint_fixture(
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
@@ -485,7 +526,14 @@ async fn hint_fixture_with(
     prompt_tokens: u32,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
-    hint_fixture_on(local_core(config), prompt_tokens, configure).await
+    let core = core_with(
+        config,
+        host_with_hints(fetch_hints()),
+        None,
+        WorkerType::Aggregated,
+        None,
+    );
+    hint_fixture_on(core, prompt_tokens, configure).await
 }
 
 /// Like [`hint_fixture`], with `host`'s hint policies and an optional worker-selection policy.
@@ -3564,7 +3612,11 @@ fn transfer_hint_for_selection(
     let scope = crate::kv_hints::KvTransferScope::of([(target_keys, local)]);
     let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs, scope)
         .source_for(target, target_keys, local)?;
-    transfer_hint_payload(configs, source, candidates)
+    kv_fetch_payload(
+        configs,
+        &KvFetchSource::new(target, source, local),
+        candidates,
+    )
 }
 
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
@@ -3708,16 +3760,17 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
 
 #[test]
 fn hint_is_dropped_when_the_selected_source_left() {
-    let source = crate::kv_hints::KvTransferSourceChoice {
+    let choice = crate::kv_hints::KvTransferSourceChoice {
         source: WorkerWithDpRank::new(8, 0).into(),
         prefix_blocks: 2,
     };
-    let candidates = hint_candidates(&[101, 102, 103], vec![(source.source, 2)]);
+    let source = KvFetchSource::new(WorkerWithDpRank::new(7, 0), choice, 0);
+    let candidates = hint_candidates(&[101, 102, 103], vec![(choice.source, 2)]);
     let mut configs = HashMap::from([(7, hint_config("prefill", &[]))]);
-    assert_eq!(transfer_hint_payload(&configs, source, &candidates), None);
+    assert_eq!(kv_fetch_payload(&configs, &source, &candidates), None);
 
     configs.insert(8, hint_config("prefill", &[(0, "tcp://source:23280")]));
-    let payload = transfer_hint_payload(&configs, source, &candidates).expect("hint");
+    let payload = kv_fetch_payload(&configs, &source, &candidates).expect("hint");
     assert_eq!(payload.source_control_endpoint, "tcp://source:23280");
     assert_eq!(payload.block_hashes.len(), 2);
 }
@@ -4181,7 +4234,7 @@ mod hint_policies {
         HintPolicyInstance, HintRequirements,
     };
     use crate::plugins::worker_selection::{
-        WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+        KvFetchScorer, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
         WorkerSelectionContext,
     };
     use crate::scheduling::WorkerSelectionPolicyError;
@@ -4261,6 +4314,59 @@ mod hint_policies {
         )
     }
 
+    /// Commits every candidate to the fetch the host offers it, at no cost.
+    struct KeepOffers;
+
+    impl KvFetchScorer for KeepOffers {
+        fn score(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            _candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+            _fetches: &mut [Option<KvFetchSource>],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            costs.fill(0.0);
+            Ok(())
+        }
+    }
+
+    /// A routing policy that commits candidates to fetches.
+    fn committing_policy() -> Option<WorkerSelectionPolicyFactory> {
+        Some(Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::new(
+                config.clone(),
+                role.as_str(),
+                Vec::new(),
+                Box::new(LowestCostPicker),
+            )
+            .with_kv_fetch_scorer(Box::new(KeepOffers))
+        }))
+    }
+
+    /// Delivers the committed fetch, or omits it to show the booking fails.
+    #[derive(Clone)]
+    struct Deliver {
+        omit: bool,
+    }
+
+    impl HintPolicy for Deliver {
+        fn requirements(&self) -> HintRequirements {
+            HintRequirements::new()
+                .with_actions()
+                .with_committed_kv_fetch()
+        }
+
+        fn hint_kv_locality(
+            &self,
+            context: &HintActionContext<'_>,
+        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+            match context.committed_kv_fetch() {
+                Some(fetch) if !self.omit => Ok(vec![context.kv_fetch_action(fetch)?]),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
     /// Records how often it runs, and emits one action naming the booked worker and prompt length.
     #[derive(Clone)]
     struct Recorder {
@@ -4324,11 +4430,20 @@ mod hint_policies {
         core.select_and_reserve(request).await.expect("reserve")
     }
 
+    fn fetch_endpoint(action: &KvHintAction) -> String {
+        let payload: KvSourceLocationsPayload =
+            serde_json::from_value(serde_json::to_value(&action.payload).unwrap()).unwrap();
+        payload.source_control_endpoint
+    }
+
     #[tokio::test]
     async fn bookings_compose_policies_in_order_and_previews_never_run_them() {
         let recorder = Recorder::new("record");
         let (core, _entry, tokens) = hint_policy_fixture(
-            hints(vec![("record", definition(recorder.clone()))]),
+            hints(vec![
+                ("fetch", definition(BestEffortFetch)),
+                ("record", definition(recorder.clone())),
+            ]),
             None,
             hint_capable,
         )
@@ -4375,10 +4490,116 @@ mod hint_policies {
             .iter()
             .map(|action| action.action_id.as_str())
             .collect();
-        // The router's fetch comes first; the failed policy and the policy reusing an action
-        // ID contribute nothing, and the booking still succeeds.
-        assert_eq!(ids, ["a1", "record"]);
+        // The failed policy and the policy reusing an action ID contribute nothing, and the
+        // booking still succeeds.
+        assert_eq!(ids, ["record"]);
         assert_eq!(duplicate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_committed_fetch_is_delivered_first() {
+        // Configured first, this policy reuses the fetch's action ID; the delivering policy
+        // still composes first, so this one is the one dropped.
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![
+                ("record", definition(Recorder::new("a1"))),
+                ("deliver", definition(Deliver { omit: false })),
+            ]),
+            committing_policy(),
+            hint_capable,
+        )
+        .await;
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        let hint = response.kv_hint.expect("committed fetch");
+        assert_eq!(hint.actions.len(), 1);
+        assert_eq!(hint.actions[0].action_type, "kv.fetch");
+        assert_eq!(fetch_endpoint(&hint.actions[0]), "tcp://worker-1:9000");
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_committed_fetch_fails_the_booking_and_releases_it() {
+        let (core, entry, tokens) = hint_policy_fixture(
+            hints(vec![("deliver", definition(Deliver { omit: true }))]),
+            committing_policy(),
+            hint_capable,
+        )
+        .await;
+        let mut request = reserve_request("omitted");
+        request.prompt = prompt_of(&tokens);
+        request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
+        let error = core.select_and_reserve(request).await.unwrap_err();
+        assert!(
+            matches!(&error, SelectionError::Internal(message) if message.contains("could not deliver")),
+            "{error:?}"
+        );
+        // Dropping the unhanded booking releases it through the scheduler actor.
+        wait_until("booking release", || {
+            !entry.scheduler.has_request("omitted")
+        })
+        .await;
+        assert!(core.reservation_index.read().get("omitted").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_committing_policy_needs_exactly_one_delivering_hint_policy() {
+        for (case, policies) in [
+            (
+                "none",
+                vec![("record", definition(Recorder::new("record")))],
+            ),
+            (
+                "two",
+                vec![
+                    ("first", definition(Deliver { omit: false })),
+                    ("second", definition(Deliver { omit: false })),
+                ],
+            ),
+        ] {
+            let core = core_with(
+                test_config(true),
+                hints(policies),
+                committing_policy(),
+                WorkerType::Aggregated,
+                None,
+            );
+            // Partition setup fails, so the worker is never schedulable.
+            let record = core
+                .upsert_worker(worker_with_kv_events(1))
+                .await
+                .expect("catalog upsert");
+            assert!(
+                record
+                    .not_schedulable_reasons
+                    .iter()
+                    .any(|reason| reason.contains("with_committed_kv_fetch")),
+                "{case}: {record:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replayed_reservations_deliver_the_cached_commitment() {
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![("deliver", definition(Deliver { omit: false }))]),
+            committing_policy(),
+            hint_capable,
+        )
+        .await;
+        let mut select = select_request();
+        select.selection_id = Some("two-phase".to_string());
+        select.prompt = prompt_of(&tokens);
+        select.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
+        let selected = core.select(select).await.expect("select");
+        assert!(selected.kv_hint.is_none());
+
+        let reserved = core
+            .create_reservation(replay_reservation("two-phase"))
+            .await
+            .expect("reserve");
+        assert_eq!(reserved.worker_id, 2);
+        let hint = reserved.kv_hint.expect("the cached commitment");
+        assert_eq!(hint.message_id, "two-phase");
+        assert_eq!(fetch_endpoint(&hint.actions[0]), "tcp://worker-1:9000");
     }
 
     #[tokio::test]
@@ -4440,46 +4661,126 @@ mod hint_policies {
     }
 
     fn slot<P: HintPolicy>(name: &str, policy: P) -> super::super::hint::HintPolicySlot {
-        let (name, policy) = HintPolicyInstance::new(name, policy).into_parts();
+        let (name, requirements, policy) = HintPolicyInstance::new(name, policy).into_parts();
         super::super::hint::HintPolicySlot {
             name,
+            requirements,
             policy: policy.expect("the policy runs at booking"),
         }
     }
 
-    #[test]
-    fn the_router_fetch_keeps_its_id_and_the_hint_stays_bounded() {
-        let inputs = ActionInputs {
+    /// A fetch from worker 2 for worker 1.
+    fn fetch_for_worker_1() -> KvFetchSource {
+        KvFetchSource::new(
+            WorkerWithDpRank::new(1, 0),
+            crate::kv_hints::KvTransferSourceChoice {
+                source: WorkerWithDpRank::new(2, 0).into(),
+                prefix_blocks: 2,
+            },
+            0,
+        )
+    }
+
+    fn inputs<'a>(
+        committed: Option<KvFetchSource>,
+        source: Option<KvFetchSource>,
+        payload: &'a dyn Fn(&KvFetchSource) -> Option<KvSourceLocationsPayload>,
+    ) -> ActionInputs<'a> {
+        ActionInputs {
             request_id: "composed",
             worker: WorkerWithDpRank::new(1, 0),
             prompt_tokens: 8,
             block_size: 4,
-        };
-        let router_fetch = KvHintAction::fetch(
-            "a1",
-            KvSourceLocationsPayload {
-                source_control_endpoint: "tcp://worker-2:9000".to_string(),
-                block_hashes: vec![crate::protocols::ExternalSequenceBlockHash(7)],
-            },
-        );
+            committed_kv_fetch: committed,
+            kv_fetch_source: source,
+            kv_fetch_payload: Some(payload),
+        }
+    }
+
+    fn reachable(_: &KvFetchSource) -> Option<KvSourceLocationsPayload> {
+        Some(KvSourceLocationsPayload {
+            source_control_endpoint: "tcp://worker-2:9000".to_string(),
+            block_hashes: vec![crate::protocols::ExternalSequenceBlockHash(7)],
+        })
+    }
+
+    fn unreachable(_: &KvFetchSource) -> Option<KvSourceLocationsPayload> {
+        None
+    }
+
+    #[test]
+    fn the_hint_stays_bounded_and_ids_stay_unique() {
         let policies = [
-            // A non-fetch action may not take the router's fetch ID.
-            slot("reuses_fetch_id", Recorder::new("a1")),
-            // Fills the hint to its limit.
-            slot("burst", Burst(31)),
+            slot("burst", Burst(32)),
             // Would overflow the limit, so it is dropped whole.
             slot("record", Recorder::new("record")),
+            // Reuses an ID, so it is dropped whole.
+            slot("reused", Recorder::new("burst-0")),
         ];
-        let hint = super::super::hint::compose_kv_hint(&policies, &inputs, Some(router_fetch))
+        let hint = super::super::hint::compose_kv_hint(&policies, &inputs(None, None, &reachable))
+            .unwrap()
             .expect("composed hint");
         assert_eq!(hint.actions.len(), 32);
-        assert_eq!(hint.actions[0].action_id, "a1");
-        assert_eq!(hint.actions[0].action_type, "kv.fetch");
         assert!(
-            hint.actions[1..]
+            hint.actions
                 .iter()
                 .all(|action| action.action_type == "test.burst")
         );
+    }
+
+    #[test]
+    fn a_committed_fetch_whose_source_left_fails_but_a_best_effort_one_is_skipped() {
+        let fetch = fetch_for_worker_1();
+        let deliver = [slot("deliver", Deliver { omit: false })];
+        // The committed source lost its endpoint after selection: the booking fails.
+        let error =
+            super::super::hint::compose_kv_hint(&deliver, &inputs(Some(fetch), None, &unreachable))
+                .unwrap_err();
+        assert!(matches!(error, SelectionError::Internal(_)), "{error:?}");
+        // The same source, uncommitted, is fetched best effort and skipped when unreachable.
+        let best_effort = [slot("fetch", BestEffortFetch)];
+        let hint = super::super::hint::compose_kv_hint(
+            &best_effort,
+            &inputs(None, Some(fetch), &reachable),
+        )
+        .unwrap()
+        .expect("best-effort fetch");
+        assert_eq!(hint.actions[0].action_type, "kv.fetch");
+        assert!(
+            super::super::hint::compose_kv_hint(
+                &best_effort,
+                &inputs(None, Some(fetch), &unreachable)
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn fetch_values_reach_only_the_policies_that_declare_them() {
+        let fetch = fetch_for_worker_1();
+        let inputs = inputs(Some(fetch), Some(fetch), &reachable);
+        let context = inputs.context(HintRequirements::new().with_actions());
+        assert_eq!(context.committed_kv_fetch(), None);
+        assert_eq!(context.kv_fetch_source(), None);
+        let context = inputs.context(
+            HintRequirements::new()
+                .with_actions()
+                .with_committed_kv_fetch()
+                .with_kv_fetch_sources(),
+        );
+        assert_eq!(context.committed_kv_fetch(), Some(&fetch));
+        assert_eq!(context.kv_fetch_source(), Some(fetch));
+        // A fetch for another worker cannot be formatted for this booking.
+        let elsewhere = KvFetchSource::new(
+            WorkerWithDpRank::new(3, 0),
+            crate::kv_hints::KvTransferSourceChoice {
+                source: WorkerWithDpRank::new(2, 0).into(),
+                prefix_blocks: 2,
+            },
+            0,
+        );
+        assert!(context.kv_fetch_action(&elsewhere).is_err());
     }
 
     #[tokio::test]
