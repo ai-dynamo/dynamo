@@ -222,10 +222,11 @@ impl ReusablePreciseTimer {
 }
 
 async fn sleep_until_tokio(deadline: Instant) {
-    if deadline <= Instant::now() {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if deadline <= tokio::time::Instant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        tokio::time::sleep_until(deadline).await;
     }
 }
 
@@ -242,6 +243,26 @@ pub async fn sleep_until_precise(deadline: Instant) {
 mod tests {
     use super::*;
     use std::task::Poll;
+
+    /// Wall-clock progress must not expire a deadline on Tokio's paused clock.
+    #[tokio::test(start_paused = true)]
+    async fn tokio_timer_ignores_wall_clock_progress_when_paused() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        // Deliberately advance only the system clock past the deadline.
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(1),
+                sleep_until_tokio(deadline.into_std()),
+            )
+            .await
+            .is_err(),
+            "the timer completed before its virtual deadline"
+        );
+        sleep_until_tokio(deadline.into_std()).await;
+        assert!(tokio::time::Instant::now() >= deadline);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_expired_precise_sleep_yields_to_runtime() {
