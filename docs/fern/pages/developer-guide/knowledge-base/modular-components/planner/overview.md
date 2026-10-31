@@ -171,7 +171,7 @@ is set. The decision logs identify the missing capacity metadata.
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. With `optimization_target: sla`, a lower `load_scaling_down_sensitivity` value reduces model-based scale-down events; the endpoint floors are what keep capacity on an idle pool.
 
 ## Documentation
 
@@ -220,7 +220,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `load_adjustment_interval_seconds` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
 | `max_num_fpm_samples` | `64` | Maximum retained FPM observations for online tuning or regression |
 | `fpm_sample_bucket_size` | `16` | Number of buckets for observation retirement (must be perfect square) |
-| `load_scaling_down_sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
+| `load_scaling_down_sensitivity` | `80` | SLA-mode scale-down sensitivity 0-100 (100=aggressive). 0 blocks model-based scale-down, but a fully idle pool still shrinks one replica at a time to its endpoint floor (minimum 1); see [Unavailable Scaling Inputs](planner-guide.md#unavailable-scaling-inputs). Ignored unless `optimization_target` is `sla` |
 | `load_min_observations` | `5` | Minimum observations before regression activates |
 | `prefill_scale_up_queue_tokens` / `prefill_scale_down_queue_tokens` | `null` | Queue token thresholds for `optimization_target: load` prefill scaling. |
 | `decode_scale_up_kv_rate` / `decode_scale_down_kv_rate` | `null` | Decode KV utilization thresholds for `optimization_target: load` decode scaling. |
