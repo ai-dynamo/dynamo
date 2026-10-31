@@ -34,10 +34,17 @@ _fpm_trace_invalid_warning_emitted = False
 class StructuralTagConfig(msgspec.Struct, forbid_unknown_fields=True):
     scope: Literal["auto", "always"] = "always"
     schema: Literal["auto", "strict"] = "auto"
-    allow_tool_calls_with_structured_output: bool = False
+    allow_tool_calls_with_structured_output: Optional[bool] = None
     exclude_special_tokens: Optional[bool] = None
     reasoning_boundary: Literal["auto", "structural_tag", "backend"] = "auto"
     tool_arguments_any_order: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        config = msgspec.to_builtins(self)
+        # Keep scope serialized: its Python default differs from Rust's default.
+        if self.allow_tool_calls_with_structured_output is None:
+            del config["allow_tool_calls_with_structured_output"]
+        return config
 
 
 _STRUCTURAL_TAG_CONFIG_DECODER = msgspec.json.Decoder(type=StructuralTagConfig)
@@ -643,14 +650,12 @@ def resolve_structural_tag_config(
             and structural_tag_setting.tool_arguments_any_order
         ):
             _validate_xgrammar_any_order_support()
-        return msgspec.to_builtins(structural_tag_setting)
+        return structural_tag_setting.to_dict()
 
     if legacy_enable is False:
         return None
 
-    return msgspec.to_builtins(
-        StructuralTagConfig(
-            scope=legacy_scope if legacy_scope is not None else "always",
-            schema=legacy_schema if legacy_schema is not None else "auto",
-        )
-    )
+    return StructuralTagConfig(
+        scope=legacy_scope if legacy_scope is not None else "always",
+        schema=legacy_schema if legacy_schema is not None else "auto",
+    ).to_dict()

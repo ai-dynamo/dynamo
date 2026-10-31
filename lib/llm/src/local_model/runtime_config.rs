@@ -111,7 +111,8 @@ pub enum StructuralTagReasoningBoundary {
 pub struct StructuralTagConfig {
     pub scope: StructuralTagScope,
     pub schema: StructuralTagSchemaMode,
-    pub allow_tool_calls_with_structured_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_tool_calls_with_structured_output: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_special_tokens: Option<bool>,
     pub reasoning_boundary: StructuralTagReasoningBoundary,
@@ -897,6 +898,24 @@ mod tests {
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
+        assert!(
+            serde_json::to_value(StructuralTagConfig::default())
+                .unwrap()
+                .get("allow_tool_calls_with_structured_output")
+                .is_none()
+        );
+        for enabled in [true, false] {
+            let value = serde_json::json!({"allow_tool_calls_with_structured_output": enabled});
+            let config: StructuralTagConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                config.allow_tool_calls_with_structured_output,
+                Some(enabled)
+            );
+            assert_eq!(
+                serde_json::to_value(config).unwrap()["allow_tool_calls_with_structured_output"],
+                enabled
+            );
+        }
         assert_eq!(
             serde_json::from_value::<StructuralTagConfig>(serde_json::json!({})).unwrap(),
             StructuralTagConfig::default()
@@ -909,7 +928,7 @@ mod tests {
         let config = StructuralTagConfig {
             scope: StructuralTagScope::Always,
             schema: StructuralTagSchemaMode::Strict,
-            allow_tool_calls_with_structured_output: true,
+            allow_tool_calls_with_structured_output: Some(true),
             exclude_special_tokens: Some(false),
             reasoning_boundary: StructuralTagReasoningBoundary::Backend,
             tool_arguments_any_order: true,

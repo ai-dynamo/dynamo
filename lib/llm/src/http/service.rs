@@ -92,19 +92,21 @@ fn apply_request_tool_call_parsing_options(
         .response_format
         .as_ref()
         .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
-    let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        (
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        ),
-        &converted_tool_choice,
-        &converted_tools,
-        request.inner.parallel_tool_calls,
-        structural_tag_config,
-        has_structured_output,
-        parsing_options.exclude_tools_when_tool_choice_none,
-    )?
-    .is_required();
+    let uses_structural_tag =
+        !crate::preprocessor::tool_choice::has_explicit_guided_decoding(request)
+            && crate::preprocessor::structural_tag::structural_tag_decision(
+                (
+                    parsing_options.tool_call_parser.as_deref(),
+                    parsing_options.reasoning_parser.as_deref(),
+                ),
+                &converted_tool_choice,
+                &converted_tools,
+                request.inner.parallel_tool_calls,
+                structural_tag_config,
+                has_structured_output,
+                parsing_options.exclude_tools_when_tool_choice_none,
+            )?
+            .is_required();
     let guided_tool_constraint =
         crate::preprocessor::tool_choice::guided_tool_constraint_with_effective_tools(
             request,
@@ -577,23 +579,34 @@ mod tests {
             }))
             .expect("response_format must deserialize"),
         );
-        let config = crate::local_model::runtime_config::StructuralTagConfig {
-            allow_tool_calls_with_structured_output: true,
-            ..Default::default()
-        };
-        let parsing_options = ParsingOptions {
-            tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag: Some(config),
-            ..Default::default()
-        };
+        for setting in [None, Some(true), Some(false)] {
+            let config = crate::local_model::runtime_config::StructuralTagConfig {
+                allow_tool_calls_with_structured_output: setting,
+                ..Default::default()
+            };
+            let parsing_options = ParsingOptions {
+                tool_call_parser: Some("qwen3_coder".to_string()),
+                structural_tag: Some(config),
+                ..Default::default()
+            };
 
-        let result = apply_request_tool_call_parsing_options(parsing_options, &request)
-            .expect("tools with structured output must resolve a constraint");
+            let result = apply_request_tool_call_parsing_options(parsing_options.clone(), &request)
+                .expect("tools with structured output must resolve a constraint");
+            assert_eq!(
+                result.guided_tool_constraint,
+                if setting == Some(false) {
+                    GuidedToolConstraint::None
+                } else {
+                    GuidedToolConstraint::StructuralTag
+                }
+            );
 
-        assert_eq!(
-            result.guided_tool_constraint,
-            GuidedToolConstraint::StructuralTag
-        );
+            let mut guided_request = request.clone();
+            guided_request.common.guided_json = Some(json!({"type": "object"}));
+            let result =
+                apply_request_tool_call_parsing_options(parsing_options, &guided_request).unwrap();
+            assert_eq!(result.guided_tool_constraint, GuidedToolConstraint::None);
+        }
     }
 
     // `tool_choice: none` must never leave the client able to observe a tool call or

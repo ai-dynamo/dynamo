@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Troubleshooting Tool Calls
 subtitle: Capture raw model output with logprobs so issues can be localized
@@ -20,6 +20,16 @@ diagnostic info.
 
 > [!IMPORTANT]
 >  Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`.
+
+## Tools with a Structured Final Answer
+
+If a request combines tools, `tool_choice="auto"`, and `response_format` but
+returns only JSON, check whether the deployment supports combined grammars.
+Composition defaults to enabled for validated parsers v2 families. Explicit
+`allow_tool_calls_with_structured_output: false`, parsers v1, and the Python vLLM
+chat processor retain JSON-only behavior for this combination. See
+[Tools with Structured Output](structural-tag.md#tools-with-structured-output)
+for the supported families and configuration.
 
 ## The request
 

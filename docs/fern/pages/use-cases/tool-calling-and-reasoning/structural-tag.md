@@ -111,7 +111,7 @@ The flag without a value uses the defaults below. Every field is optional:
 |---|---|---|---|
 | `scope` | `auto`, `always` | `always` | Selects eligible tool-calling requests. |
 | `schema` | `auto`, `strict` | `auto` | Selects which tool argument schemas are enforced. |
-| `allow_tool_calls_with_structured_output` | boolean | `false` | Lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Requires parsers v2. |
+| `allow_tool_calls_with_structured_output` | boolean | model-family dependent | Lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Defaults to enabled for validated parsers v2 families; see [Tools with Structured Output](#tools-with-structured-output). |
 | `exclude_special_tokens` | boolean, `null` | `null` | Controls reasoning and tool-call marker exclusions. `null` preserves the model-family default. Requires parsers v2. |
 | `reasoning_boundary` | `auto`, `structural_tag`, `backend` | `auto` | Selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `auto` follows the backend's advertised policy. `backend` requires parsers v2 and a reasoning parser. |
 | `tool_arguments_any_order` | boolean | `false` | Allows tool argument properties in any order. This weakens required-property and duplicate-key validation and requires parsers v2 with XGrammar >= 0.2.3. Structured-output schemas are unaffected. |
@@ -123,6 +123,40 @@ configured accordingly.
 
 `DYN_STRUCTURAL_TAG` accepts `true`, `false`, or the same JSON object. Unknown
 fields and invalid values are rejected during worker startup.
+
+## Tools with Structured Output
+
+When a request includes tools, `tool_choice="auto"`, and `response_format`,
+Dynamo combines tool calls and the response schema into one grammar. The model
+can call a tool first, then return a schema-valid final answer after your
+application sends the tool result. This applies to Chat Completions and Responses,
+including streaming.
+
+Composition defaults to enabled on compatible parsers v2 routes for the `qwen3`,
+`deepseek_v4`, and `glm47` families. Their tool-parser aliases, including
+`qwen3_coder`, `deepseek-v4`, `deepseekv4`, and `glm45`, use the same policy.
+Explicit `false` disables composition; explicit `true` requires a compatible v2
+route with a structural-tag builder. Disabling structural tags also disables
+composition.
+
+To retain JSON-only output for requests that combine tools with `response_format`,
+set the worker option:
+
+```bash
+--dyn-structural-tag '{"allow_tool_calls_with_structured_output": false}'
+```
+
+Automatic composition preserves the existing guided-decoding precedence when a
+request also supplies `guided_json`, `guided_regex`, `guided_choice`, or
+`guided_grammar`. If combined-grammar construction fails, Dynamo logs a warning
+and retains the response-format JSON constraint. Explicitly enabling composition
+instead rejects conflicting constraints and reports grammar-construction errors.
+
+Parsers v1, other families without automatic composition, and the Python vLLM
+chat processor retain JSON-only behavior for this request combination. The Python
+processor does not implement composition and ignores an explicit opt-in. On those
+paths, omit `response_format` during the tool loop and send it on a separate final
+request.
 
 ## Preserve Previous Behavior
 
