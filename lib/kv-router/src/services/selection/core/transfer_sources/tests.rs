@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::identity::{
-    CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     StableDpSlotId,
 };
 use crate::protocols::{
@@ -34,6 +34,7 @@ fn config() -> SelectionWorkerConfig {
             (1, "tcp://donor:9001".to_string()),
         ]),
         kv_event_source_mode: None,
+        kv_transfer_keys: Default::default(),
     }
 }
 
@@ -75,7 +76,7 @@ fn owner_id() -> CacheOwnerId {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(3),
+            ClusterId::new(3),
         ),
         StableDpSlotId::new([4; 16], IdentitySource::Explicit),
     )
