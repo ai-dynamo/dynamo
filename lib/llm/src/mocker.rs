@@ -902,7 +902,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
 
-        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let replay_key = request
             .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
             .or_else(|| {
@@ -963,7 +962,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             output_token_ids: planned_output_token_ids,
-            uuid: Some(request_uuid),
+            // A migration retry reuses the logical request ID and can land here while an
+            // earlier attempt is still active, so each invocation gets its own engine ID.
+            uuid: Some(Uuid::new_v4()),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
             replay_context: request
@@ -1008,7 +1009,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let identity = BootstrapIdentity {
                 handoff_id,
                 bootstrap_room: bootstrap_info.bootstrap_room,
-                request_id: request_uuid,
+                request_id: ctx.id().parse().unwrap_or_else(|_| Uuid::new_v4()),
             };
             let order = match order_for_engine(self.engine_args.backend) {
                 Ok(order) => order,
@@ -1918,6 +1919,61 @@ mod tests {
         let mut replacement = engine.generate(input).await.unwrap();
         while replacement.next().await.is_some() {}
         assert_eq!(live.active_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_with_same_request_id_runs_beside_active_attempt() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let request_id = Uuid::from_u128(101).to_string();
+        let attempt = |max_tokens| {
+            SingleIn::with_id_and_metadata(
+                decode_request(1, max_tokens),
+                request_id.clone(),
+                BTreeMap::new(),
+            )
+        };
+
+        let mut first = engine.generate(attempt(10_000)).await.unwrap();
+        first.next().await.unwrap().data.unwrap();
+        let mut retry = engine
+            .generate(attempt(2))
+            .await
+            .expect("a retry must not collide with the still-active first attempt");
+        assert_eq!(live.active_request_count(), 2);
+
+        let mut output_tokens = 0;
+        let mut finish = None;
+        while let Some(output) = retry.next().await {
+            let output = output.data.unwrap();
+            output_tokens += output.token_ids.len();
+            if output.finish_reason.is_some() {
+                finish = output.finish_reason;
+            }
+        }
+        assert_eq!(output_tokens, 2);
+        assert_eq!(finish, LLMEngineOutput::length().finish_reason);
+        assert_eq!(live.active_request_count(), 1);
+        first.next().await.unwrap().data.unwrap();
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while live.active_request_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the first attempt must cancel it");
     }
 
     #[tokio::test]
