@@ -1016,7 +1016,7 @@ def preprocess_chat_request(
                     "return_assistant_tokens_mask": False,
                 },
             ),
-            has_tools=template_kwargs.get("tools") is not None,
+            tools=template_kwargs.get("tools"),
         )
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 

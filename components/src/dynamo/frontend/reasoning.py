@@ -10,21 +10,13 @@ from jinja2.exceptions import TemplateError
 
 
 def _requires_reasoning_string(
-    render_template: Callable[..., str], has_tools: bool
+    render_template: Callable[..., str], tools: list[dict[str, Any]] | None
 ) -> bool:
     # Match the Rust renderer: Jinja interpolation and ~ stringify lists with
     # literal "\\x01", not byte 0x01. Compare complete sentinels including the
     # control bytes, not just their printable names.
     first = "\x01dynamo_reasoning_probe_first\x01"
     last = "\x01dynamo_reasoning_probe_last\x01"
-    tool = {
-        "type": "function",
-        "function": {
-            "name": "probe",
-            "description": "",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }
 
     def render(reasoning: str | list[str]) -> str:
         return render_template(
@@ -44,7 +36,7 @@ def _requires_reasoning_string(
                 },
                 {"role": "tool", "tool_call_id": "call_probe", "content": "r"},
             ],
-            tools=[tool] if has_tools else None,
+            tools=tools,
         )
 
     try:
@@ -77,7 +69,7 @@ def normalize_reasoning_content(
     messages: list[dict[str, Any]],
     *,
     render_template: Callable[..., str] | None = None,
-    has_tools: bool = False,
+    tools: list[dict[str, Any]] | None = None,
     string_only: bool = False,
 ) -> None:
     """Adapt copied history using the real renderer's effective request options.
@@ -94,7 +86,7 @@ def normalize_reasoning_content(
         return
     if not string_only:
         if render_template is None or not _requires_reasoning_string(
-            render_template, has_tools
+            render_template, tools
         ):
             return
     for msg in segmented:

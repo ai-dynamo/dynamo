@@ -27,6 +27,14 @@ _SEGMENTS = (
     "{% if not loop.last %}{{ message.tool_calls[loop.index0].function.name }}"
     "{% endif %}{% endfor %}{% endfor %}"
 )
+_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calc",
+        "description": "calculator",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
 
 def assistant(reasoning):
@@ -52,7 +60,7 @@ def test_string_templates_render_segments_as_unescaped_text(template):
     segments = ["Check 'quotes' and \\slashes.\n", "", "Then add.", ""]
     messages = [assistant(segments)]
     render = template_renderer(template)
-    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    normalize_reasoning_content(messages, render_template=render, tools=[_TOOL])
     rendered = render(messages)
     assert rendered == "Check 'quotes' and \\slashes.\n\nThen add."
     assert segments == ["Check 'quotes' and \\slashes.\n", "", "Then add.", ""]
@@ -62,7 +70,7 @@ def test_segment_aware_template_preserves_interleaving():
     messages = [assistant(["before", "after"])]
     original = copy.deepcopy(messages)
     render = template_renderer(_SEGMENTS)
-    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    normalize_reasoning_content(messages, render_template=render, tools=[_TOOL])
     assert messages == original
     assert render(messages) == "beforecalcafter"
 
@@ -85,8 +93,32 @@ def test_probe_handles_templates_that_read_tool_schemas():
     ]
     messages = [assistant(["before", "after"])]
     render = template_renderer(template, tools=tools)
-    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    normalize_reasoning_content(messages, render_template=render, tools=tools)
     assert render(messages) == '"c"xbefore\nafter'
+
+
+@pytest.mark.parametrize("tool_name", ["calc", "other"])
+def test_probe_uses_request_tools_when_template_branches_on_tool_name(tool_name):
+    template = (
+        "{% for message in messages if message.role == 'assistant' %}"
+        "{% if tools[0].function.name == 'calc' %}"
+        "{{ message.reasoning_content }}{% else %}"
+        "{% for segment in message.reasoning_content %}{{ segment }}"
+        "{% if not loop.last %}{{ message.tool_calls[loop.index0].function.name }}"
+        "{% endif %}{% endfor %}{% endif %}{% endfor %}"
+    )
+    tools = copy.deepcopy([_TOOL])
+    tools[0]["function"]["name"] = tool_name
+    original_tools = copy.deepcopy(tools)
+    messages = [assistant(["before", "after"])]
+    render = template_renderer(template, tools=tools)
+
+    normalize_reasoning_content(messages, render_template=render, tools=tools)
+
+    assert render(messages) == (
+        "before\nafter" if tool_name == "calc" else "beforecalcafter"
+    )
+    assert tools == original_tools
 
 
 @pytest.mark.parametrize("separately", [False, True])
@@ -106,7 +138,7 @@ def test_json_serialization_distinguishes_lists_from_segments(separately):
     )
     messages = [assistant(["before", "after"])]
     render = template_renderer(template)
-    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    normalize_reasoning_content(messages, render_template=render, tools=[_TOOL])
     assert render(messages) == (
         '"before"calc"after"' if separately else '"before\\nafter"'
     )
@@ -125,7 +157,7 @@ def test_template_selection_matches_tool_use_default(has_tools):
     normalize_reasoning_content(
         messages,
         render_template=template_renderer({"default": _DIRECT, "tool_use": _SEGMENTS}),
-        has_tools=has_tools,
+        tools=[_TOOL] if has_tools else None,
     )
     assert messages[0]["reasoning_content"] == (
         ["before", "after"] if has_tools else "before\nafter"
@@ -160,7 +192,7 @@ def test_probe_uses_request_options_without_reusing_another_requests_result():
         original_options = copy.deepcopy(options)
         render = template_renderer(template, reasoning_effort="high", options=options)
         messages = [assistant(["before", "after"])]
-        normalize_reasoning_content(messages, render_template=render, has_tools=True)
+        normalize_reasoning_content(messages, render_template=render, tools=[_TOOL])
         assert messages[0]["reasoning_content"] == (
             ["before", "after"] if segmented else "before\nafter"
         )

@@ -3869,7 +3869,10 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 else "{% if reasoning_effort != 'high' or render_options.mode != 'flat' %}"
                 "{{ raise_exception('request render options required') }}{% endif %}"
                 "{% for message in messages if message.role == 'assistant' %}"
+                "{% if tools[0].function.name == 'calc' %}"
                 "{{ '<think>' ~ message.reasoning_content ~ '</think>' }}"
+                "{% else %}{% for segment in message.reasoning_content %}"
+                "{{ segment }}{% endfor %}{% endif %}"
                 "{% endfor %}"
             )
 
