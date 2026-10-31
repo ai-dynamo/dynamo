@@ -1580,8 +1580,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name: "HUGGING_FACE_HUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
-						Name: "hf-token-secret",
-						Key:  "HF_TOKEN",
+						Name:     "hf-token-secret",
+						Key:      "HF_TOKEN",
+						Optional: new(true),
 					},
 				},
 			},
