@@ -862,6 +862,8 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+For `/v1/completions`, an omitted or `null` `max_tokens` lets the backend resolve its generation default. The vLLM token-input worker uses its resolved model generation configuration or vLLM sampling default, bounding a finite default by the remaining context. The same default resolution applies to chat completions and Responses requests that reach this worker without an output limit. Set `--override-generation-config '{"max_new_tokens": 64}'` on the vLLM worker to configure that default. Explicit client limits remain subject to backend validation and stopping behavior.
+
 ### Image API Compatibility
 
 **Experimental.** Image editing requires a backend and model that support
