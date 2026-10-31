@@ -10,6 +10,7 @@
 pub mod classifier_rows;
 pub mod config;
 pub mod filter;
+pub mod host;
 pub mod identity;
 pub mod kv_hints;
 pub mod local;
@@ -19,6 +20,8 @@ pub mod overlap_summary;
 pub mod prefill_load;
 pub mod protocols;
 pub mod queue;
+pub mod replication;
+pub mod selection;
 pub mod selector;
 pub mod shared_cache;
 pub mod tracking_hash;

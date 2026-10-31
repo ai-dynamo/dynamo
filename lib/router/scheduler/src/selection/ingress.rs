@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use super::error::SelectionError;
 use super::types::WorkerCatalogRecord;
 use crate::identity::RoutingPartitionId;
-use crate::services::indexer::backend::Indexer;
-use crate::services::indexer::registry::IndexRegistry;
+use dynamo_kv_indexer::backend::Indexer;
+use dynamo_kv_indexer::registry::IndexRegistry;
 
 /// Builds and feeds a partition's index ([`super::KvIndexSource::Owned`]).
 ///

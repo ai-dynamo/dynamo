@@ -50,6 +50,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
+uuid = { workspace = true }
+once_cell = { version = "1" }
 
 [dev-dependencies]
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }

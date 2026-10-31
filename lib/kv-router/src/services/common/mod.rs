@@ -13,8 +13,6 @@ pub(crate) mod http;
 
 #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
 pub(crate) mod replica_sync;
-#[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
-pub(crate) mod replication;
 
 #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
 pub(crate) mod replica_sync_http;

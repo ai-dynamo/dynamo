@@ -15,10 +15,10 @@ use super::error::SelectionError;
 
 type RoutingTokensAndMmInfos<'a> = (&'a [u32], Option<&'a [Option<BlockExtraInfo>]>);
 
-pub(super) struct TrackingHashInput<'a> {
-    pub(super) context: &'a TrackingHashContext,
-    pub(super) scope: TrackingHashScope<'a>,
-    pub(super) assume_kv_reuse: bool,
+pub struct TrackingHashInput<'a> {
+    pub context: &'a TrackingHashContext,
+    pub scope: TrackingHashScope<'a>,
+    pub assume_kv_reuse: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,7 +79,7 @@ pub struct PromptView<'a> {
 impl PromptView<'_> {
     /// `tracking` is `None` when the caller does not track active blocks; the
     /// tracking hashes are then left empty instead of computed and discarded.
-    pub(super) fn normalize_for_selection(
+    pub fn normalize_for_selection(
         &self,
         block_size: u32,
         default_is_eagle: bool,
@@ -109,7 +109,7 @@ impl PromptView<'_> {
         normalize_hashes(block_hashes, sequence_hashes, isl_tokens)
     }
 
-    pub(super) fn normalize_for_reservation(
+    pub fn normalize_for_reservation(
         &self,
         default_is_eagle: bool,
         tracking: TrackingHashInput<'_>,
@@ -283,16 +283,16 @@ fn signed_sequence_hashes(sequence_hashes: &[i64]) -> Vec<SequenceHash> {
     sequence_hashes.iter().map(|hash| *hash as u64).collect()
 }
 
-pub(super) struct NormalizedPrompt {
-    pub(super) block_hashes: Vec<LocalBlockHash>,
-    pub(super) sequence_hashes: Vec<SequenceHash>,
-    pub(super) isl_tokens: usize,
+pub struct NormalizedPrompt {
+    pub block_hashes: Vec<LocalBlockHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
+    pub isl_tokens: usize,
     /// Zero for hash-only inputs.
-    pub(super) block_hashing: Duration,
-    pub(super) seq_hashing: Duration,
+    pub block_hashing: Duration,
+    pub seq_hashing: Duration,
 }
 
-pub(super) struct NormalizedReservation {
-    pub(super) sequence_hashes: Vec<SequenceHash>,
-    pub(super) isl_tokens: usize,
+pub struct NormalizedReservation {
+    pub sequence_hashes: Vec<SequenceHash>,
+    pub isl_tokens: usize,
 }

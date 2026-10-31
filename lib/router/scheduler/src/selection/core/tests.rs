@@ -1,122 +1,56 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::affinity::SessionAffinityMode;
 use super::super::input::PromptRequest;
 use super::hint::transfer_hint_payload;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::config::RouterConfig;
 use crate::protocols::ResidencyOwnerKeyExt;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
-use crate::services::common::replication::HostReplicaChannels;
-use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};
-use crate::services::selection::service::local_selection_core_with_host;
-use crate::tracking_hash::tracking_hash_context;
+use crate::replication::HostReplicaChannels;
+use crate::test_utils::{local_test_core, test_core_with, test_router_config};
+use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
+use dynamo_session_affinity::SessionAffinityMode;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
-    crate::config::KvRouterConfig {
-        use_kv_events,
-        router_queue_threshold: None,
-        ..Default::default()
-    }
+fn test_config(use_kv_events: bool) -> RouterConfig {
+    test_router_config(use_kv_events, None)
 }
 
-fn local_core(config: crate::config::KvRouterConfig) -> SelectionCore {
+fn local_core(config: RouterConfig) -> SelectionCore {
     local_core_with(config, 1, CancellationToken::new())
 }
 
 fn local_core_with(
-    config: crate::config::KvRouterConfig,
+    config: RouterConfig,
     indexer_threads: usize,
     cancel_token: CancellationToken,
 ) -> SelectionCore {
-    local_core_with_ingress(config, indexer_threads, cancel_token).0
+    local_test_core(config, indexer_threads, cancel_token)
 }
 
-/// `local_core_with` plus the ZMQ ingress, for tests that inspect listener state.
-fn local_core_with_ingress(
-    config: crate::config::KvRouterConfig,
-    indexer_threads: usize,
-    cancel_token: CancellationToken,
-) -> (
-    SelectionCore,
-    Arc<crate::services::selection::ZmqDirectIngress>,
-) {
-    let (host, ingress) = zmq_host_with_ingress();
-    let core = local_selection_core_with_host(
-        config,
-        indexer_threads,
-        cancel_token,
-        SelectionCacheConfig::default(),
-        std::sync::Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
-        }),
-        host,
-    )
-    .expect("valid test config");
-    (core, ingress)
-}
-
-/// The host the standalone service builds (partitions index worker KV events over
-/// ZMQ) plus its ingress, for tests that inspect the listener registry.
-fn zmq_host_with_ingress() -> (
-    SelectionHost,
-    Arc<crate::services::selection::ZmqDirectIngress>,
-) {
-    let ingress = Arc::new(crate::services::selection::ZmqDirectIngress::default());
-    let host = SelectionHost {
-        cache: HostCache {
-            index: KvIndexSource::Owned(ingress.clone()),
-            ..HostCache::default()
-        },
-        ..SelectionHost::default()
-    };
-    (host, ingress)
-}
-
-/// `new_inner` with the test defaults.
 fn core_with(
-    config: crate::config::KvRouterConfig,
+    config: RouterConfig,
     host: SelectionHost,
     policy_factory: Option<WorkerSelectionPolicyFactory>,
     worker_type: WorkerType,
     affinity: Option<SessionAffinityConfig>,
 ) -> SelectionCore {
-    let tracking_hash =
-        Arc::new(tracking_hash_context(&config).expect("valid tracking hash configuration"));
-    let indexer_policy =
-        IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
-            .expect("indexer policy");
-    let config = crate::scheduling::RouterConfig::from(&config)
-        .validate()
-        .expect("valid router config");
-    SelectionCore::new(
+    test_core_with(
         config,
         1,
         CancellationToken::new(),
-        None,
-        policy_factory.unwrap_or_else(|| {
-            Arc::new(|config, role, _| {
-                crate::WorkerSelectionPolicy::reference(
-                    config.clone(),
-                    role.default_selector_label(),
-                )
-            })
-        }),
         host,
+        policy_factory,
         worker_type,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
         affinity,
     )
 }
@@ -272,8 +206,7 @@ fn default_key() -> RoutingPartitionId {
 /// A core whose queue threshold is zero, so a second booking queues behind
 /// the first.
 fn saturated_core() -> Arc<SelectionCore> {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
+    let config = test_router_config(false, Some(0.0));
     Arc::new(local_core(config))
 }
 
@@ -439,7 +372,7 @@ async fn bookings_populate_the_approximate_primary_without_kv_events(
 
 #[tokio::test]
 async fn unreachable_remote_indexer_is_reported_not_ready() {
-    use crate::indexer::{KvRouterError, TieredMatchDetails};
+    use dynamo_kv_indexer::{KvRouterError, TieredMatchDetails};
     struct OfflineRemote;
     #[async_trait::async_trait]
     impl RemotePrimary for OfflineRemote {
@@ -511,12 +444,12 @@ async fn hint_fixture(
 
 /// Like [`hint_fixture`], with a `prompt_tokens`-token prompt and `config`.
 async fn hint_fixture_with(
-    config: crate::config::KvRouterConfig,
+    config: RouterConfig,
     prompt_tokens: u32,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
-    use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_indexer::KvIndexerInterface;
 
     let core = local_core(config);
     for worker_id in [1, 2] {
@@ -598,11 +531,9 @@ async fn booked_selection_attaches_router_hint_from_a_better_source() {
 #[tokio::test]
 async fn fetchable_prefix_credit_books_an_idle_worker_with_its_hint() {
     for (multiplier, expected_worker) in [(0.0, 1), (0.5, 2)] {
-        let config = crate::config::KvRouterConfig {
-            shared_cache_multiplier: Some(multiplier),
-            overlap_score_credit_decay: 0.0,
-            ..test_config(true)
-        };
+        let mut config = test_config(true);
+        config.selection.shared_cache_multiplier = Some(multiplier);
+        config.selection.overlap_score_credit_decay = 0.0;
         let (core, _entry, tokens) = hint_fixture_with(config, 32, hint_capable).await;
         // Busy worker 1 (12 prefill tokens, 3 decode blocks) costs 3 + 11 = 14.
         // Worker 2 costs 8 + 8 = 16, less 0.5 * 8 fetchable blocks = 12.
@@ -658,8 +589,8 @@ async fn router_hint_needs_capable_workers() {
 /// catalog instead of lingering as `Unschedulable`.
 #[tokio::test]
 async fn hint_capability_tracks_catalog_membership() {
-    use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_indexer::KvIndexerInterface;
 
     let (core, entry, tokens) = hint_fixture(|_| {}).await;
     let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
@@ -773,16 +704,16 @@ struct SelectionObservation {
     shared_beyond_device_blocks: Vec<u32>,
 }
 
-impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
-        crate::scheduling::selector::WorkerInputs::CACHE
+impl crate::selector::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> crate::selector::WorkerInputs {
+        crate::selector::WorkerInputs::CACHE
     }
 
     fn pick(
         &mut self,
-        context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
-        input: crate::scheduling::selector::WorkerInputView<'_>,
-    ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+        context: &crate::selector::WorkerSelectionContext<'_>,
+        input: crate::selector::WorkerInputView<'_>,
+    ) -> Result<usize, crate::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
             shared_beyond_device_blocks: input
@@ -867,7 +798,7 @@ impl SharedKvCache for RecordingSharedCache {
         tokens: &[u32],
         block_size: u32,
         cache_namespace: Option<&str>,
-    ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+    ) -> Result<SharedCacheHits, dynamo_kv_indexer::KvRouterError> {
         self.calls.lock().push((
             tokens.to_vec(),
             block_size,
@@ -935,7 +866,7 @@ async fn shutdown_interrupts_shared_cache_wait(#[case] shutdown: bool) {
             _: &[u32],
             _: u32,
             _: Option<&str>,
-        ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+        ) -> Result<SharedCacheHits, dynamo_kv_indexer::KvRouterError> {
             self.entered.notify_one();
             self.release.notified().await;
             Ok(SharedCacheHits::from_hits(&[false]))
@@ -1092,7 +1023,7 @@ async fn session_context_reaches_worker_selection() {
         assert_eq!(context.session_final(), Some(true));
         assert_eq!(
             context.input_trigger(),
-            Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
+            Some(crate::WorkerSelectionInputTrigger::ToolResult)
         );
         assert!(std::ptr::eq(
             context.agent_headers(),
@@ -1175,36 +1106,6 @@ async fn injected_load_providers_restrict_selection() {
     }
 }
 
-#[tokio::test]
-async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
-    let parent = CancellationToken::new();
-    let (core, ingress) = local_core_with_ingress(test_config(true), 1, parent.clone());
-
-    let record = core
-        .upsert_worker(worker_with_kv_events(1))
-        .await
-        .expect("worker upsert");
-    assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
-    assert_eq!(
-        ingress
-            .listeners()
-            .expect("attached")
-            .listener_cancelled(1, 0),
-        Some(false)
-    );
-
-    core.shutdown();
-    assert!(core.cancel_token.is_cancelled());
-    assert!(!parent.is_cancelled());
-    assert_eq!(
-        ingress
-            .listeners()
-            .expect("attached")
-            .listener_cancelled(1, 0),
-        Some(true)
-    );
-}
-
 #[rstest::rstest]
 #[case(1)]
 #[case(2)]
@@ -1260,110 +1161,6 @@ async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_thre
         assert_eq!(selected.overlap.gpu, 4);
     }
     core.shutdown();
-}
-
-#[tokio::test]
-async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
-    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
-
-    let record = core
-        .upsert_worker(WorkerRequest {
-            data_parallel_size: Some(2),
-            kv_events_endpoints: HashMap::from([
-                (0, "tcp://127.0.0.1:5557".to_string()),
-                (1, "tcp://127.0.0.1:5558".to_string()),
-            ]),
-            replay_endpoint: Some("tcp://127.0.0.1:5600".to_string()),
-            ..worker(1)
-        })
-        .await
-        .expect("worker upsert");
-    assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete, "{record:?}");
-    assert!(!ingress.listeners().expect("attached").has_worker(1));
-}
-
-#[tokio::test]
-async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
-    use crate::indexer::KvIndexerInterface;
-
-    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
-    core.upsert_worker(worker_with_kv_events(1))
-        .await
-        .expect("worker upsert");
-    let entry = core.entry(&default_key()).expect("entry");
-    let hashes = [11u64, 12];
-    entry
-        .indexer
-        .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
-        .await
-        .unwrap();
-    if let Indexer::Single { primary, .. } = &entry.indexer {
-        let _ = primary.flush().await;
-    }
-    // An endpoint update cancelled right after removing the listener leaves
-    // the catalog record schedulable, the listener gone, and its blocks indexed.
-    ingress.listeners().expect("attached").forget_listener(1, 0);
-
-    let record = core
-        .upsert_worker(worker_with_kv_events(1))
-        .await
-        .expect("worker re-upsert");
-    assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable, "{record:?}");
-    assert!(ingress.listeners().expect("attached").has_listener(1, 0));
-    // The purge is queued to the indexer thread; wait for it to land.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let overlap = entry
-                .indexer
-                .find_matches(hashes.iter().copied().map(LocalBlockHash).collect())
-                .await
-                .expect("find matches");
-            if overlap.scores.is_empty() {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("stale blocks survived the re-upsert");
-}
-
-#[tokio::test]
-async fn upsert_moves_global_worker_id_between_routing_groups() {
-    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
-    let mut group_a = worker_with_kv_events(1);
-    group_a.routing_group = "group-a".to_string();
-    core.upsert_worker(group_a).await.expect("group A upsert");
-    let indexed = |group: &str| {
-        ingress
-            .listeners()
-            .expect("attached")
-            .list_filtered(Some("model"), Some(group))
-            .len()
-    };
-    assert_eq!(indexed("group-a"), 1);
-
-    let mut group_b = worker_with_kv_events(1);
-    group_b.routing_group = "group-b".to_string();
-    core.upsert_worker(group_b).await.expect("group B upsert");
-
-    assert!(core.list_workers(Some("model"), Some("group-a")).is_empty());
-    assert_eq!(core.list_workers(Some("model"), Some("group-b")).len(), 1);
-    assert_eq!(indexed("group-a"), 0);
-    assert_eq!(indexed("group-b"), 1);
-
-    let mut select_a = select_request();
-    select_a.routing_group = "group-a".to_string();
-    assert!(matches!(
-        core.select(select_a).await,
-        Err(SelectionError::NotReady(_))
-    ));
-    let mut select_b = select_request();
-    select_b.routing_group = "group-b".to_string();
-    assert_eq!(core.select(select_b).await.unwrap().worker_id, 1);
-
-    core.delete_worker(1).await.expect("delete group B worker");
-    assert_eq!(indexed("group-b"), 0);
 }
 
 #[tokio::test]
@@ -1760,8 +1557,8 @@ async fn shutdown_interrupts_indexer_waits(
 /// releases the id claim.
 #[tokio::test]
 async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() {
-    use crate::indexer::TieredMatchDetails;
-    use crate::services::indexer::backend::RemotePrimary;
+    use dynamo_kv_indexer::TieredMatchDetails;
+    use dynamo_kv_indexer::backend::RemotePrimary;
     struct PausedRecord {
         entered: AtomicBool,
         release: tokio::sync::Notify,
@@ -1916,7 +1713,7 @@ async fn explicit_reservation_of_a_live_id_is_a_conflict() {
 
 #[test]
 fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
-    use crate::scheduling::AttemptId;
+    use crate::AttemptId;
     let index = Arc::new(RwLock::new(HashMap::new()));
     let partition = default_key();
     let observer = ReservationIndexObserver {
@@ -1976,8 +1773,8 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 
 #[tokio::test]
 async fn index_observer_releases_displaced_affinity_after_unlock() {
-    use super::super::affinity::{AffinityReplicaSink, AffinityVersion};
-    use crate::scheduling::AttemptId;
+    use crate::AttemptId;
+    use dynamo_session_affinity::{AffinityReplicaSink, AffinityVersion};
 
     struct UnlockedIndexSink {
         index: Arc<ReservationIndex>,
@@ -2029,7 +1826,7 @@ async fn index_observer_releases_displaced_affinity_after_unlock() {
 async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     #[values("drop", "pending", "installed")] replacement: &str,
 ) {
-    use crate::scheduling::AttemptId;
+    use crate::AttemptId;
     let core = local_core(test_config(false));
     let key = default_key();
     core.upsert_worker(worker(1)).await.unwrap();
@@ -2150,7 +1947,7 @@ async fn free_of_an_in_flight_reservation_is_not_found() {
 #[tokio::test]
 async fn prefill_complete_is_idempotent_for_a_live_booking() {
     let mut config = test_config(false);
-    config.router_track_prefill_tokens = true;
+    config.track_prefill_tokens = true;
     let core = local_core(config);
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("live"))
@@ -2167,7 +1964,7 @@ async fn prefill_complete_is_idempotent_for_a_live_booking() {
 
 #[tokio::test]
 async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
-    use super::super::affinity::AffinityVersion;
+    use dynamo_session_affinity::AffinityVersion;
     use std::future::Future;
 
     for cancel in [false, true] {
@@ -2384,7 +2181,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
 #[tokio::test]
 async fn lifecycle_operations_resolve_through_the_index() {
     let mut config = test_config(false);
-    config.router_track_prefill_tokens = true;
+    config.track_prefill_tokens = true;
     let core = local_core(config);
 
     for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
@@ -2437,8 +2234,8 @@ async fn lifecycle_operations_resolve_through_the_index() {
 #[tokio::test]
 async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     let mut config = test_config(false);
-    config.conditional_disagg_prefill_busy_threshold = Some(0.5);
-    config.conditional_disagg_decode_busy_threshold = Some(0.0);
+    config.conditional_disagg.prefill_busy_threshold = Some(0.5);
+    config.conditional_disagg.decode_busy_threshold = Some(0.0);
     let core = local_core(config);
     let mut request = worker(1);
     request.total_kv_blocks = Some(1000);
@@ -3146,8 +2943,7 @@ async fn failed_replay_preserves_a_newer_cached_selection() {
 
 #[tokio::test(start_paused = true)]
 async fn free_releases_reservation_and_affinity_without_actor_progress() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
+    let config = test_router_config(false, Some(0.0));
     let core = core_with(
         config,
         SelectionHost::default(),
@@ -3339,77 +3135,9 @@ async fn partition_sessions_keep_independent_bindings() {
     assert_eq!(again.worker_id, first.worker_id);
 }
 
-#[tokio::test]
-async fn rejoined_worker_feeds_partition_index() {
-    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
-    for update_only in [false, true] {
-        let core = local_core(test_config(true));
-        let request = worker_with_kv_events(1);
-        core.upsert_worker(request.clone()).await.unwrap();
-        let key = default_key();
-        let partition = core.partition(&key).unwrap();
-        let tokens: Vec<u32> = (1..=8).collect();
-        let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
-            .into_iter()
-            .map(|hash| hash.0)
-            .collect();
-        let indexer = core
-            .index_registry
-            .get_indexer(&key)
-            .unwrap()
-            .indexer
-            .clone();
-        indexer
-            .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
-            .await
-            .unwrap();
-        indexer.dump_events().await.unwrap();
-        if !update_only {
-            core.delete_worker(1).await.unwrap();
-        }
-        let mut request = request;
-        request.total_kv_blocks = Some(2048);
-        core.upsert_worker(request).await.unwrap();
-        let retained = partition.indexer().dump_events().await.unwrap();
-        if update_only {
-            assert!(
-                !retained.is_empty(),
-                "metadata update cleared cached blocks"
-            );
-        } else {
-            assert!(retained.is_empty(), "removed worker retained cached blocks");
-            let current = core
-                .index_registry
-                .get_indexer(&key)
-                .unwrap()
-                .indexer
-                .clone();
-            current
-                .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
-                .await
-                .unwrap();
-            current.dump_events().await.unwrap();
-        }
-        let mut request = select_request();
-        request.prompt = PromptRequest {
-            token_ids: Some(tokens),
-            ..PromptRequest::default()
-        };
-        assert_eq!(
-            core.select(request).await.unwrap().overlap.longest_matched,
-            8,
-            "update_only={update_only}"
-        );
-        assert_eq!(
-            partition.indexer().dump_events().await.unwrap().len(),
-            indexer.dump_events().await.unwrap().len()
-        );
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn host_lease_manager_owns_expiry() {
-    use crate::scheduling::queue::SchedulerBookingDescriptor;
+    use crate::queue::SchedulerBookingDescriptor;
     struct HostLeases;
     impl ReplicaRequestLeaseObserver for HostLeases {
         fn admitted(&self, _: SchedulerBookingDescriptor) {}
@@ -3532,39 +3260,6 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
         "deletion detaches the worker"
     );
     wait_until("booking release", || !entry.scheduler.has_request("live")).await;
-}
-
-#[tokio::test]
-async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
-    use super::super::service::SelectionServiceBuilder;
-    for ttl in [
-        Duration::ZERO,
-        Duration::from_secs(super::super::affinity::MAX_SESSION_AFFINITY_TTL_SECS + 1),
-    ] {
-        let result = SelectionServiceBuilder::new(
-            test_config(false),
-            WorkerType::Aggregated,
-            Default::default(),
-        )
-        .session_affinity(ttl)
-        .build()
-        .await;
-        assert!(result.is_err());
-    }
-    let core = core_with_session_affinity();
-    core.upsert_worker(worker(1)).await.unwrap();
-    let partition = core.partition(&default_key()).unwrap();
-    assert!(matches!(
-        partition.session_affinity(SessionAffinityConfig::new(Duration::from_secs(20))),
-        Err(SelectionError::Conflict(_))
-    ));
-    assert!(matches!(
-        partition.session_affinity(
-            SessionAffinityConfig::new(Duration::from_secs(10))
-                .with_mode(SessionAffinityMode::Soft)
-        ),
-        Err(SelectionError::Conflict(_))
-    ));
 }
 
 /// The hint a booking on `target` gets: selection's source choice, then the

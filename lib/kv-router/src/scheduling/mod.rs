@@ -61,8 +61,6 @@ pub use dynamo_scheduler::prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use lora_filter::LoraWorkerFilter;
-#[cfg(feature = "standalone-selection")]
-pub(crate) use lora_filter::narrow_allowed_worker_ids_by_lora;
 pub use policy_config::{
     BusyRanksExt, BusyThresholds, BusyThresholdsExt, PolicyClassConfig, PolicyProfile,
     RejectThresholdsProvider, RouterPolicyConfig, RouterPolicyConfigError,

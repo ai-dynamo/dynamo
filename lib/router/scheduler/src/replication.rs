@@ -18,24 +18,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
-use crate::sequences::multi_worker::RateLimitedFailureLog;
-use crate::sequences::{
+use dynamo_session_affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
+use dynamo_slot_tracker::multi_worker::RateLimitedFailureLog;
+use dynamo_slot_tracker::{
     LocalWorkerLoad, SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher,
     SequenceSubscriber,
 };
-#[cfg(feature = "standalone-selection")]
-use dynamo_session_affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
 
-pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+pub const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
-pub(crate) const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
+pub const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
 pub use dynamo_session_affinity::wire::AffinityBindingEvent;
 
-#[cfg(feature = "standalone-selection")]
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
 /// into a transport channel. Best effort: a full channel drops the update.
-pub(crate) struct AffinityMeshSink {
+pub struct AffinityMeshSink {
     partition: RoutingPartitionId,
     tx: mpsc::Sender<AffinityBindingEvent>,
     cancel_token: CancellationToken,
@@ -43,9 +41,8 @@ pub(crate) struct AffinityMeshSink {
     unexpected_closed_drops: parking_lot::Mutex<RateLimitedFailureLog>,
 }
 
-#[cfg(feature = "standalone-selection")]
 impl AffinityMeshSink {
-    pub(crate) fn new(
+    pub fn new(
         partition: RoutingPartitionId,
         tx: mpsc::Sender<AffinityBindingEvent>,
         cancel_token: CancellationToken,
@@ -60,7 +57,6 @@ impl AffinityMeshSink {
     }
 }
 
-#[cfg(feature = "standalone-selection")]
 impl AffinityReplicaSink for AffinityMeshSink {
     fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion) {
         let update = AffinityBindingEvent {
@@ -104,7 +100,7 @@ impl AffinityReplicaSink for AffinityMeshSink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ScopedReplicaEvent {
+pub struct ScopedReplicaEvent {
     pub model_name: String,
     pub routing_group: String,
     pub block_size: u32,
@@ -112,11 +108,11 @@ pub(crate) struct ScopedReplicaEvent {
 }
 
 impl ScopedReplicaEvent {
-    pub(crate) fn partition_ref(&self) -> RoutingPartitionRef<'_> {
+    pub fn partition_ref(&self) -> RoutingPartitionRef<'_> {
         RoutingPartitionRef::new(&self.model_name, &self.routing_group)
     }
 
-    pub(crate) fn into_parts(self) -> (RoutingPartitionId, u32, ActiveSequenceEvent) {
+    pub fn into_parts(self) -> (RoutingPartitionId, u32, ActiveSequenceEvent) {
         (
             RoutingPartitionId::new(self.model_name, self.routing_group),
             self.block_size,
@@ -125,7 +121,7 @@ impl ScopedReplicaEvent {
     }
 }
 
-pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
+pub type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 
 #[derive(Debug, Clone)]
 pub struct ReplicaSyncConfig {
@@ -136,7 +132,7 @@ pub struct ReplicaSyncConfig {
 }
 
 impl ReplicaSyncConfig {
-    pub(crate) fn new(
+    pub fn new(
         process_id: u64,
         outbound_tx: ReplicaEventSender,
         cancel_token: CancellationToken,
@@ -149,27 +145,23 @@ impl ReplicaSyncConfig {
         }
     }
 
-    pub(crate) fn with_affinity_publisher(
-        mut self,
-        tx: mpsc::Sender<AffinityBindingEvent>,
-    ) -> Self {
+    pub fn with_affinity_publisher(mut self, tx: mpsc::Sender<AffinityBindingEvent>) -> Self {
         self.affinity_tx = Some(tx);
         self
     }
 
-    pub(crate) fn process_id(&self) -> u64 {
+    pub fn process_id(&self) -> u64 {
         self.process_id
     }
 
     /// The token that stops every publisher and subscriber built from this config.
-    pub(crate) fn cancel_token(&self) -> &CancellationToken {
+    pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
     }
 
-    #[cfg(feature = "standalone-selection")]
     /// Sink that publishes session bindings into the mesh, when this runtime
     /// carries them.
-    pub(crate) fn affinity_sink(
+    pub fn affinity_sink(
         &self,
         partition: &RoutingPartitionId,
     ) -> Option<Arc<dyn AffinityReplicaSink>> {
@@ -182,12 +174,12 @@ impl ReplicaSyncConfig {
         })
     }
 
-    pub(crate) fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
+    pub fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
         event.router_id == self.process_id
     }
 }
 
-pub(crate) struct ScopedReplicaSync {
+pub struct ScopedReplicaSync {
     pub publisher: ScopedSequencePublisher,
     pub enabled: bool,
     pub process_id: u64,
@@ -238,7 +230,6 @@ pub struct HostReplicaChannels {
     pub ingress_observer: Option<Arc<dyn ReplicaIngressObserver>>,
 }
 
-#[cfg(feature = "standalone-selection")]
 /// Per-partition factory for [`HostReplicaChannels`]; `None` disables replica
 /// sync for that partition.
 pub type HostReplicaSyncFactory =
@@ -260,7 +251,7 @@ struct ScopedReplicaPublisher {
 }
 
 impl ScopedSequencePublisher {
-    pub(crate) fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
             replica: None,
             host_tx: None,
@@ -268,7 +259,7 @@ impl ScopedSequencePublisher {
         }
     }
 
-    pub(crate) fn host(outbound: mpsc::Sender<ActiveSequenceEvent>) -> Self {
+    pub fn host(outbound: mpsc::Sender<ActiveSequenceEvent>) -> Self {
         Self {
             replica: None,
             host_tx: Some(outbound),
@@ -276,13 +267,12 @@ impl ScopedSequencePublisher {
         }
     }
 
-    #[cfg(feature = "standalone-selection")]
-    pub(crate) fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
+    pub fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
         self.load_sink = sink;
         self
     }
 
-    pub(crate) fn enabled(
+    pub fn enabled(
         partition: Arc<RoutingPartitionId>,
         block_size: u32,
         tx: ReplicaEventSender,
@@ -367,17 +357,17 @@ impl SequencePublisher for ScopedSequencePublisher {
     }
 }
 
-pub(crate) struct ChannelSequenceSubscriber {
+pub struct ChannelSequenceSubscriber {
     rx: mpsc::Receiver<ActiveSequenceEvent>,
     observer: Option<Arc<dyn ReplicaIngressObserver>>,
 }
 
 impl ChannelSequenceSubscriber {
-    pub(crate) fn new(rx: mpsc::Receiver<ActiveSequenceEvent>) -> Self {
+    pub fn new(rx: mpsc::Receiver<ActiveSequenceEvent>) -> Self {
         Self { rx, observer: None }
     }
 
-    pub(crate) fn with_observer(
+    pub fn with_observer(
         rx: mpsc::Receiver<ActiveSequenceEvent>,
         observer: Option<Arc<dyn ReplicaIngressObserver>>,
     ) -> Self {
@@ -404,7 +394,7 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
     }
 }
 
-pub(crate) fn setup_scoped_replica_sync(
+pub fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
     partition: &RoutingPartitionId,
     block_size: u32,
@@ -454,20 +444,20 @@ pub(crate) fn setup_scoped_replica_sync(
 
 /// Inbound side of one partition's replica channel: forwards mesh events to
 /// the partition's tracker. Best effort; a full channel drops the event.
-pub(crate) struct ReplicaInbox {
+pub struct ReplicaInbox {
     tx: mpsc::Sender<ActiveSequenceEvent>,
     full_drops: parking_lot::Mutex<RateLimitedFailureLog>,
 }
 
 impl ReplicaInbox {
-    pub(crate) fn new(tx: mpsc::Sender<ActiveSequenceEvent>) -> Self {
+    pub fn new(tx: mpsc::Sender<ActiveSequenceEvent>) -> Self {
         Self {
             tx,
             full_drops: parking_lot::Mutex::default(),
         }
     }
 
-    pub(crate) fn deliver(
+    pub fn deliver(
         &self,
         partition: &RoutingPartitionId,
         expected_block_size: u32,
@@ -624,7 +614,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "standalone-selection")]
     #[test]
     fn affinity_sink_warns_on_unexpected_close() {
         let publish_to_closed_channel = |cancel_token: CancellationToken| {
@@ -704,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_ingress_observer_counts_applied_events_and_drains_to_zero() {
-        use crate::sequences::{ActiveSequencesMultiWorker, NoopSequencePublisher};
+        use dynamo_slot_tracker::{ActiveSequencesMultiWorker, NoopSequencePublisher};
         use std::sync::atomic::Ordering::Relaxed;
 
         const N: usize = 1_000;

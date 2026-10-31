@@ -204,30 +204,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::config::KvRouterConfig;
-    use crate::services::selection::SelectionCacheConfig;
-    use crate::services::selection::service::local_selection_core;
+    use crate::test_utils::{local_test_core, test_router_config};
 
     fn core() -> Arc<SelectionCore> {
-        Arc::new(
-            local_selection_core(
-                KvRouterConfig {
-                    use_kv_events: false,
-                    router_queue_threshold: None,
-                    ..Default::default()
-                },
-                1,
-                CancellationToken::new(),
-                SelectionCacheConfig::default(),
-                std::sync::Arc::new(|config, role, _| {
-                    crate::WorkerSelectionPolicy::reference(
-                        config.clone(),
-                        role.default_selector_label(),
-                    )
-                }),
-            )
-            .expect("valid test config"),
-        )
+        Arc::new(local_test_core(
+            test_router_config(false, None),
+            1,
+            CancellationToken::new(),
+        ))
     }
 
     fn schedulable(worker_id: WorkerId) -> WorkerRequest {

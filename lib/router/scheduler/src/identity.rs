@@ -18,3 +18,8 @@ pub use dynamo_kv_indexer::identity::{
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
     MAX_EXPLICIT_IDENTITY_VALUE_BYTES,
 };
+
+/// The routing group a request or worker record belongs to when it names none.
+pub fn default_routing_group() -> String {
+    DEFAULT_ROUTING_GROUP.to_string()
+}

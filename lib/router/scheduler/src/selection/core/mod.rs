@@ -17,41 +17,40 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::config::{CacheHitWeights, RouterConfig, Validated};
 use crate::identity::RoutingPartitionId;
-use crate::indexer::{
-    LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
-};
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
-use crate::plugins::worker_selection::WorkerInputs;
+use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::queue::SchedulerBookingDescriptor;
-use crate::scheduling::router_config::{CacheHitWeights, RouterConfig, Validated};
-use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
-use crate::scheduling::{
-    KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider,
-    ScheduleMode, ScheduleRequest, SessionContext, TieredOverlapRefresher,
-    WorkerAvailabilityProvider, effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
-    prefill_load_hint_from_effective_tokens,
-};
-use crate::sequences::{
-    ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
-    ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
-};
-use crate::services::common::replication::{
+use crate::queue::SchedulerBookingDescriptor;
+use crate::replication::{
     AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityMeshSink, HostReplicaSyncFactory, ReplicaInbox,
     ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
 };
-use crate::services::indexer::backend::{Indexer, IndexerPolicy};
-use crate::services::indexer::registry::IndexRegistry;
-use crate::services::overlap::MooncakeOverlapSummary;
+use crate::selector::{WorkerSelectionPolicy, WorkerSelector};
+use crate::shared_cache::SharedKvCache;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use crate::{
+    KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, OverloadedWorkerProvider,
+    PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider, ScheduleMode, ScheduleRequest,
+    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
+    prefill_load_hint_from_effective_tokens,
+};
+use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
+use dynamo_kv_indexer::registry::IndexRegistry;
+use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};
+use dynamo_slot_tracker::{
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
+    ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
+};
+use dynamo_worker_selection::WorkerInputs;
+use dynamo_worker_selection::lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 
 mod hint;
 mod operation;
@@ -69,9 +68,6 @@ pub use operation::{
     SelectionRun, SessionBinding,
 };
 
-use super::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
-};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, LocalIndexIngress};
@@ -83,9 +79,12 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord,
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
-use crate::WorkerSelectionPolicyFactory;
-use crate::WorkerType;
-use crate::services::common::replication::AffinityBindingEvent;
+use crate::replication::AffinityBindingEvent;
+use crate::types::WorkerSelectionPolicyFactory;
+use dynamo_router_protocol::worker_type::WorkerType;
+use dynamo_session_affinity::{
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+};
 
 pub type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -135,7 +134,7 @@ struct SelectionEntry {
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
-    affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
+    affinity_replication: Option<(u64, Arc<dyn dynamo_session_affinity::AffinityReplicaSink>)>,
 }
 
 impl SelectionEntry {
@@ -347,7 +346,7 @@ impl SelectionCore {
         let index_registry = Arc::new(
             IndexRegistry::new(
                 indexer_threads,
-                Arc::new(crate::indexer::KvIndexerMetrics::new_unregistered()),
+                Arc::new(dynamo_kv_indexer::KvIndexerMetrics::new_unregistered()),
             )
             .with_retained_indexers(),
         );
@@ -388,7 +387,7 @@ impl SelectionCore {
     }
 
     /// Export session bindings through a bounded channel for the host to carry.
-    pub(super) fn with_session_binding_publisher(
+    pub fn with_session_binding_publisher(
         mut self,
         writer_id: u64,
     ) -> (Self, mpsc::Receiver<AffinityBindingEvent>) {
@@ -400,13 +399,13 @@ impl SelectionCore {
     fn session_binding_sink(
         &self,
         partition: &RoutingPartitionId,
-    ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
+    ) -> Option<(u64, Arc<dyn dynamo_session_affinity::AffinityReplicaSink>)> {
         self.session_binding_tx.as_ref().map(|(writer_id, tx)| {
             let sink =
                 AffinityMeshSink::new(partition.clone(), tx.clone(), self.cancel_token.clone());
             (
                 *writer_id,
-                Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
+                Arc::new(sink) as Arc<dyn dynamo_session_affinity::AffinityReplicaSink>,
             )
         })
     }
@@ -421,7 +420,7 @@ impl SelectionCore {
         self.cancel_token.cancel();
     }
 
-    pub(super) fn ensure_running(&self) -> Result<(), SelectionError> {
+    pub fn ensure_running(&self) -> Result<(), SelectionError> {
         if self.cancel_token.is_cancelled() {
             return Err(SelectionError::NotReady(
                 "selection service is shutting down".to_string(),
@@ -430,16 +429,22 @@ impl SelectionCore {
         Ok(())
     }
 
+    /// The core's own cancellation token (a child of the one it was built with), for tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
+
     /// The per-partition indexers this core schedules over.
     pub fn index_registry(&self) -> &Arc<IndexRegistry> {
         &self.index_registry
     }
 
-    pub(crate) fn signal_indexer_ready(&self) {
+    pub fn signal_indexer_ready(&self) {
         self.index_registry.signal_ready();
     }
 
-    pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
+    pub fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
         let (key, block_size, event) = envelope.into_parts();
         if self
             .replica_config
@@ -459,7 +464,7 @@ impl SelectionCore {
     }
 
     /// Apply a session binding a replica published.
-    pub(crate) fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
+    pub fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
         let Some(entry) = self.entry(&event.partition) else {
             tracing::trace!(
                 key = %event.partition,

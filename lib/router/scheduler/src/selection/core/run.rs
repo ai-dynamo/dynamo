@@ -42,8 +42,8 @@
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
-use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
 use super::hint::transfer_hint_payload;
+use dynamo_session_affinity::{SessionAffinityMode, validate_dispatch_target};
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).

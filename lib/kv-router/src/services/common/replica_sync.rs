@@ -11,12 +11,12 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::replication::{
-    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityBindingEvent, REPLICA_EVENT_CHANNEL_CAPACITY,
-    ReplicaEventSender, ReplicaSyncConfig, ScopedReplicaEvent,
-};
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
+};
+use dynamo_scheduler::replication::{
+    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityBindingEvent, REPLICA_EVENT_CHANNEL_CAPACITY,
+    ReplicaEventSender, ReplicaSyncConfig, ScopedReplicaEvent,
 };
 
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;

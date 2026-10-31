@@ -21,7 +21,7 @@ use crate::sequences::{
     SequenceRequest,
 };
 
-use crate::services::common::replication::{
+use dynamo_scheduler::replication::{
     ReplicaInbox, ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
 };

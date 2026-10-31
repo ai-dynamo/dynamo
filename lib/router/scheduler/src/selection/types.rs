@@ -9,22 +9,22 @@ use std::sync::Arc;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::config::RouterConfigOverride;
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::kv_hints::{KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache};
+use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{
     BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
     RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::config::RouterConfigOverride;
-pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
-use crate::services::overlap::MooncakeOverlapSummary;
+pub use crate::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
+use crate::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
 
 pub const DEFAULT_MODEL_NAME: &str = "default";
 
-pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+pub const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
     DEFAULT_MODEL_NAME.to_string()
@@ -203,7 +203,7 @@ impl WorkerCatalogRecord {
         }
     }
 
-    pub(super) fn key(&self) -> RoutingPartitionId {
+    pub fn key(&self) -> RoutingPartitionId {
         RoutingPartitionId::new(self.model_name.clone(), self.routing_group.clone())
     }
 
@@ -211,7 +211,7 @@ impl WorkerCatalogRecord {
         self.data_parallel_start_rank.unwrap_or(0)
     }
 
-    pub(super) fn dp_size(&self) -> u32 {
+    pub fn dp_size(&self) -> u32 {
         self.data_parallel_size.unwrap_or(1)
     }
 
@@ -242,7 +242,7 @@ impl WorkerCatalogRecord {
         })
     }
 
-    pub(super) fn listener_endpoints(&self) -> HashMap<u32, String> {
+    pub fn listener_endpoints(&self) -> HashMap<u32, String> {
         if !self.kv_events_endpoints.is_empty() {
             return self.kv_events_endpoints.clone();
         }

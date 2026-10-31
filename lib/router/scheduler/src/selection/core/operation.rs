@@ -9,15 +9,16 @@ use std::time::Duration;
 
 use dynamo_tokens::SequenceHash;
 
+use crate::config::RouterConfigOverride;
 use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerId,
     WorkerWithDpRank,
 };
-use crate::scheduling::config::RouterConfigOverride;
-use crate::scheduling::queue::BookingHandle;
-use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext};
+use crate::queue::BookingHandle;
+use crate::{AdvisoryWorkerLoad, SchedulingResponse, SessionContext};
+use dynamo_admission::queue::QueueRejection;
 
 use super::super::error::SelectionError;
 use super::super::input::PromptView;

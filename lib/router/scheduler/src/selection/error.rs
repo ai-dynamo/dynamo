@@ -3,9 +3,9 @@
 
 use http::StatusCode;
 
-use crate::indexer::KvRouterError;
-use crate::scheduling::KvSchedulerError;
-use crate::sequences::SequenceError;
+use crate::KvSchedulerError;
+use dynamo_kv_indexer::KvRouterError;
+use dynamo_slot_tracker::SequenceError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {

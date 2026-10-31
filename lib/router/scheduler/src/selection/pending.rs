@@ -262,7 +262,7 @@ mod tests {
         cache_with(CAP, usize::MAX)
     }
 
-    fn key() -> RoutingPartitionId {
+    pub fn key() -> RoutingPartitionId {
         RoutingPartitionId::new("model", "default")
     }
 

@@ -16,9 +16,9 @@ use crate::scheduling::RouterConfig;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
-use crate::services::common::replication::AffinityBindingEvent;
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::tracking_hash_context;
+use dynamo_scheduler::replication::AffinityBindingEvent;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
 use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost};

@@ -6,7 +6,7 @@
 //! release them.
 
 use super::*;
-use crate::scheduling::queue::BookingHandle;
+use crate::queue::BookingHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_CLAIM_ID: AtomicU64 = AtomicU64::new(1);
@@ -588,7 +588,7 @@ pub(super) fn spawn_reservation_index_sweep(
     index: Arc<ReservationIndex>,
     cancel_token: CancellationToken,
 ) {
-    let period = crate::sequences::active_request_expiry_duration();
+    let period = dynamo_slot_tracker::active_request_expiry_duration();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
