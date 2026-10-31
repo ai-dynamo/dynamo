@@ -625,7 +625,7 @@ Emitted by every process that routes requests: the frontend, which serves them o
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
@@ -647,7 +647,7 @@ The cache reuse funnel shows how much of the incoming prompt could be reused, an
 | **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `dynamo_component_router_kv_selected_cached_prefix_tokens_total` |
 | **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `dynamo_component_router_kv_worker_reused_tokens_total` |
 
-F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They need no enable flag.
+F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They are populated only with `--router-mode kv` and need no additional enable flag. Incoming tokens (F0) are recorded in every router mode.
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
