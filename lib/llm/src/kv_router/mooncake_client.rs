@@ -14,7 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use dynamo_kv_router::{SessionPrefixIndexer, SharedKvCache, protocols::ExternalSequenceBlockHash};
+use dynamo_kv_router::{
+    SessionPrefixIndexer, SharedKvCache,
+    protocols::{ExternalSequenceBlockHash, TokensWithHashes},
+};
 
 use super::KvRouter;
 
@@ -186,6 +189,60 @@ pub(super) async fn command_resolved_blocks(
 }
 
 impl KvRouter {
+    async fn unpin_orphaned_session_blocks(
+        &self,
+        client: &MooncakeClient,
+        hashes: &[ExternalSequenceBlockHash],
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        let mut results = Vec::new();
+        for batch in hashes.chunks(512) {
+            results.extend(self.unpin_blocks(client, batch).await?);
+        }
+        Ok(results)
+    }
+
+    /// Retain this request's observed prefix for a session and release orphaned soft pins.
+    pub async fn update_session(
+        &self,
+        client: &MooncakeClient,
+        session_id: &str,
+        mut request: TokensWithHashes,
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        ensure!(!request.is_empty(), "request token IDs must not be empty");
+        ensure!(
+            request.block_size() == self.block_size(),
+            "request block size does not match router block size"
+        );
+        let hashes: Vec<_> = request
+            .get_or_compute_seq_hashes()
+            .iter()
+            .copied()
+            .map(ExternalSequenceBlockHash)
+            .collect();
+        let cache = self.shared_cache().context("shared cache is not enabled")?;
+        cache.resolve_object_keys(&[], Some(&client.tenant_id))?;
+        let index = self
+            .session_prefix_index()
+            .context("session prefix index is not enabled")?;
+        let orphaned = index.retain_session_prefix(session_id, &hashes);
+        self.unpin_orphaned_session_blocks(client, &orphaned).await
+    }
+
+    /// Delete a session's observed associations and release orphaned soft pins.
+    pub async fn close_session(
+        &self,
+        client: &MooncakeClient,
+        session_id: &str,
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        let cache = self.shared_cache().context("shared cache is not enabled")?;
+        cache.resolve_object_keys(&[], Some(&client.tenant_id))?;
+        let index = self
+            .session_prefix_index()
+            .context("session prefix index is not enabled")?;
+        let orphaned = index.close_session(session_id);
+        self.unpin_orphaned_session_blocks(client, &orphaned).await
+    }
+
     /// Read all observed session chains, or one currently observed frontier's chain.
     /// Frontier hashes identify chain ends, not anchors that truncate a chain.
     pub fn get_session_blocks(

@@ -2977,6 +2977,34 @@ class KvRouter:
         """
         ...
 
+    async def update_session(
+        self,
+        client: MooncakeClient,
+        session_id: str,
+        token_ids: list[int],
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
+    ) -> list[MooncakeKeyResult]:
+        """Keep only this request's observed session prefix; unpin unshared old blocks.
+
+        Use the full request token IDs and the same multimodal, LoRA, and namespace
+        hash context as routing. Unobserved request tails are not added. The command
+        updates the local index before Mooncake responds; failures can leave soft
+        pins until their TTL expires. Drain in-flight session requests/events first.
+        Inspect every returned error_code; other sessions' observed prefixes stay pinned.
+        """
+        ...
+
+    async def close_session(self, client: MooncakeClient, session_id: str) -> list[MooncakeKeyResult]:
+        """Remove this session's index associations; unpin unshared observed blocks.
+
+        Unknown sessions are no-ops. Drain in-flight requests/events first; a late
+        event can restore an association. This does not track pins from other clients.
+        Inspect per-key results; failed unpins expire by TTL.
+        """
+        ...
+
     async def unpin_session_frontier(self, client: MooncakeClient, session_id: str, frontier_hash: int) -> list[MooncakeKeyResult]:
         """Release the current root-to-frontier chain, inclusive; other branches remain.
 

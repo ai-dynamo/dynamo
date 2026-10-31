@@ -2967,6 +2967,68 @@ impl KvRouter {
         })
     }
 
+    #[pyo3(signature = (client, session_id, token_ids, block_mm_infos=None, lora_name=None, cache_namespace=None))]
+    fn update_session<'p>(
+        &self,
+        py: Python<'p>,
+        client: &MooncakeClient,
+        session_id: String,
+        token_ids: Vec<u32>,
+        block_mm_infos: Option<Bound<PyAny>>,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router = Arc::clone(self.inner.kv_router());
+        let client = client.inner.clone();
+        let mm_infos = block_mm_infos
+            .as_ref()
+            .map(depythonize_block_mm_infos)
+            .transpose()?;
+        let mut request = TokensWithHashes::new(token_ids, router.block_size())
+            .with_is_eagle(router.is_eagle());
+        if let Some(infos) = mm_infos {
+            request = request.with_mm_infos(infos);
+        }
+        if let Some(name) = lora_name {
+            request = request.with_lora_name(name);
+        }
+        if let Some(namespace) = cache_namespace {
+            request = request.with_cache_namespace(namespace);
+        }
+        crate::future_into_py(py, async move {
+            let results = router
+                .update_session(&client, &session_id, request)
+                .await
+                .map_err(to_pyerr)?;
+            Python::with_gil(|py| {
+                pythonize(py, &results)
+                    .map(|value| value.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    fn close_session<'p>(
+        &self,
+        py: Python<'p>,
+        client: &MooncakeClient,
+        session_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router = Arc::clone(self.inner.kv_router());
+        let client = client.inner.clone();
+        crate::future_into_py(py, async move {
+            let results = router
+                .close_session(&client, &session_id)
+                .await
+                .map_err(to_pyerr)?;
+            Python::with_gil(|py| {
+                pythonize(py, &results)
+                    .map(|value| value.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
     fn unpin_session_frontier<'p>(
         &self,
         py: Python<'p>,

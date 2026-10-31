@@ -1239,6 +1239,79 @@ mod tests {
         no_release.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn session_lifecycle_unpins_only_last_observed_user() {
+        use crate::kv_router::mooncake_client::{MooncakeClient, command_resolved_blocks};
+
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
+        let index = Arc::new(SessionPrefixIndexer::new());
+        cache.attach_session_prefix_index(Arc::clone(&index));
+        let worker = WorkerWithDpRank::new(7, 0);
+        let a = ExternalSequenceBlockHash(11);
+        let b = ExternalSequenceBlockHash(22);
+        index
+            .update_session_from_stored_blocks("s1", worker, None, &[a, b])
+            .unwrap();
+        index
+            .update_session_from_stored_blocks("s2", worker, None, &[a])
+            .unwrap();
+
+        let keys = |hash: u64| {
+            ["k", "v"]
+                .map(|kind| format!("{hash:016x}{}_0_{kind}", "0".repeat(48)))
+                .to_vec()
+        };
+        cache.apply_batch(
+            &"default".into(),
+            MooncakeKeyLayout::Hicache,
+            1,
+            [keys(11), keys(22)]
+                .concat()
+                .into_iter()
+                .map(|key| MooncakeObjectEvent {
+                    event_type: "stored".into(),
+                    object_key: Some(key),
+                    tenant_id: "default".into(),
+                    session_id: None,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let mut server = mockito::Server::new_async().await;
+        let client = MooncakeClient::new(&server.url(), "default").unwrap();
+        for hash in [22, 11] {
+            let orphaned = if hash == 22 {
+                index.retain_session_prefix("s1", &[a])
+            } else {
+                assert!(index.close_session("s1").is_empty());
+                index.close_session("s2")
+            };
+            assert_eq!(orphaned, vec![ExternalSequenceBlockHash(hash)]);
+            let expected = keys(hash);
+            let response: Vec<_> = expected
+                .iter()
+                .map(|key| serde_json::json!({"key":key,"error_code":0}))
+                .collect();
+            let command = server
+                .mock("POST", "/api/v1/soft_unpin")
+                .match_body(mockito::Matcher::Json(
+                    serde_json::json!({"tenant_id":"default","keys":expected}),
+                ))
+                .with_body(serde_json::json!({"results":response}).to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            assert_eq!(
+                command_resolved_blocks(&cache, &client, &orphaned, None)
+                    .await
+                    .unwrap()
+                    .len(),
+                2
+            );
+            command.assert_async().await;
+        }
+    }
+
     #[test]
     fn object_key_resolution_preserves_components_and_remaining_media() {
         let config = SglangHicacheMooncakeConfig {
