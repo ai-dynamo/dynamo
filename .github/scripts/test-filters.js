@@ -61,6 +61,21 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'lib/sidecar/trtllm/ci/resolve_nightly.py',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'nightly resolver changes run its CPU tests'
+  },
+  {
+    file: '.github/workflows/pr.yaml',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'PR workflow wiring runs the nightly resolver CPU tests'
+  },
+  {
+    file: 'lib/llm/src/lib.rs',
+    expect: { sidecar_trtllm_image: false },
+    desc: 'unrelated Rust changes do not run resolver CPU tests'
+  },
+  {
     file: 'scripts/protocol_compatibility/composition/openai.py',
     expect: { ignore: true, rust: false, core: false, frontend: false },
     desc: 'protocol tooling is covered without unrelated runtime builds'
@@ -203,7 +218,7 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
   },
   {
@@ -233,7 +248,7 @@ const testCases = [
   },
   {
     file: 'Cargo.lock',
-    expect: { sidecar: true, rust: true },
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true },
     desc: 'root lockfile is a sidecar image build input'
   },
 

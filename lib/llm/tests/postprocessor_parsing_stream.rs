@@ -6337,10 +6337,12 @@ fn kimi_native_calls(
 // parser-only conformance cannot express an open downstream stream or OpenAI IDs.
 #[tokio::test]
 async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings() {
-    // TODO: 0.7.17 still buffers count-before-string native calls until completion.
-    // Keep this acceptance test enabled until the parser library streams them.
+    // dynamo-parsers-v2 0.8.9 (frontend-crates #384) streams count-before-string
+    // native calls before closure, so every route the v2 crate serves (explicit
+    // v2 and auto) releases them early; only an explicit v1 selection still
+    // buffers them until completion.
     let flag = dynamo_runtime::config::selected_parser_version().unwrap()
-        == dynamo_runtime::config::ParserVersion::V2;
+        != dynamo_runtime::config::ParserVersion::V1;
     let q = "q".repeat(4096);
     let shapes = [
         (

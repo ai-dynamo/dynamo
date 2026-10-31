@@ -51,6 +51,13 @@ kv_cache_config:
   use_kv_cache_manager_v2: false
 ```
 
+Starting with TensorRT-LLM 1.4.0rc2, the pairing is strict in both directions: the `PYTHON` transceiver requires KV cache manager v2, and the `CPP` transceiver requires v1. Any other combination fails at startup. TensorRT-LLM creates a transceiver whenever `cache_transceiver_config.backend` is set, including on aggregated workers. Dynamo applies these rules to a worker with a transceiver:
+
+- When `use_kv_cache_manager_v2` is unset and the runtime is `CPP`, Dynamo selects KV cache manager v1.
+- Multimodal workers that publish polled KV events (`--enable-multimodal --publish-kv-events`) and workers that sleep their KV cache (`--load-format gms`, snapshot) use KV cache manager v1. They therefore require `transceiver_runtime: CPP`; Dynamo refuses to start them otherwise.
+
+Dynamo never changes `transceiver_runtime` itself. Set it identically on the prefill and decode workers: a mismatched pair starts cleanly but fails every disaggregated request.
+
 The two paths produce different transceivers, which is how you tell them apart at runtime: direct UCX logs `UcxConnectionManager`, while NIXL with UCX underneath logs `NixlTransferAgent ... using NIXL backend: UCX`. Read the worker's startup log for the transceiver class rather than inferring it from the configuration.
 
 ## AWS EFA

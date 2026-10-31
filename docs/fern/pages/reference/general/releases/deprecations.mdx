@@ -37,6 +37,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update launch commands, imports, dashboards, alerts, and saved JSON together. Upgrade KV state agents and the routers that read their events together, because a router cannot decode state-agent events from the other version. Regenerate version-3 `dc_ckf_consumer_bench` corpora as version 4 before loading them.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend admin API is off by default and moves to a separate loopback port** ([#17165](https://github.com/ai-dynamo/dynamo/pull/17165)). `/router_policy`, `/router_policy/busy_threshold`, and `/busy_threshold` are no longer served on the inference port, and `DYN_DISABLE_FRONTEND_ADMIN_API` is removed.
+
+  > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026

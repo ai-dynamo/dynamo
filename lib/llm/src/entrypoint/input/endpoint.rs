@@ -147,7 +147,7 @@ pub async fn run(
             // network path admits each request through this worker's gate
             // first: the config's own, shared with every endpoint serving a
             // clone of it.
-            let admission_gate = admission_gate.get_or_create(&component);
+            let admission_gate = admission_gate.get_or_create(&component)?;
             let ingress = Ingress::for_engine(AdmissionEngine::new(
                 Arc::clone(&admission_gate),
                 inner_engine,

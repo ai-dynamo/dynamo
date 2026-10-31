@@ -3,6 +3,8 @@
 
 //! Building an OpenEngine `GenerateRequest` from a Dynamo request.
 
+use std::collections::HashMap;
+
 use super::*;
 use crate::test_fixtures::*;
 use serde_json::json;
@@ -10,8 +12,8 @@ use serde_json::json;
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
     let request = request();
-    let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
-        .expect("build request");
+    let proto =
+        build_generate_request(request, "req-1", "served-model", None, AGG).expect("build request");
     assert_eq!(proto.request_id, "req-1");
     assert_eq!(proto.model, "served-model");
     match proto.input.as_ref().expect("input") {
@@ -75,12 +77,162 @@ fn request_maps_sampling_stop_and_output_fields() {
 }
 
 #[test]
+fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
+    let mut req = request();
+    // Routing-only multimodal metadata has already served its purpose by the
+    // time the request reaches a worker and must not block engine delivery.
+    req.mm_routing_info = Some(Default::default());
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "data:image/png;base64,aW1hZ2U=",
+        ],
+    );
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("first-image".to_string()), None],
+    )]));
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect("image request");
+    assert_eq!(proto.media.len(), 2);
+    assert_eq!(proto.media[0].modality, pb::Modality::Image as i32);
+    assert_eq!(
+        proto.media[0].source,
+        Some(pb::media_item::Source::Url(
+            "https://example.com/first.png".to_string()
+        ))
+    );
+    assert_eq!(proto.media[0].uuid, "first-image");
+    assert_eq!(
+        proto.media[1].source,
+        Some(pb::media_item::Source::DataUri(
+            "data:image/png;base64,aW1hZ2U=".to_string()
+        ))
+    );
+    assert!(proto.media[1].uuid.is_empty());
+}
+
+#[test]
+fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "https://example.com/second.png",
+        ],
+    );
+    req.extra_args = Some(json!({
+        "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
+    }));
+
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect("image request");
+    assert!(proto.media.iter().all(|item| item.uuid.is_empty()));
+}
+
+#[test]
+fn image_media_requires_the_loaded_models_advertised_capability() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/image.png"]);
+
+    for model_limits in [None, limits(4096)] {
+        let error = build_generate_request(req.clone(), "req", "model", model_limits, AGG)
+            .expect_err("a text-only or unknown model must reject images");
+        assert!(
+            error
+                .to_string()
+                .contains("does not advertise image support"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn images_reject_unknown_or_overridden_engine_windows() {
+    for engine_window in [None, Some(32768)] {
+        for max_tokens in [None, Some(1)] {
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            req.stop_conditions.max_tokens = max_tokens;
+            let limits = Some(ModelLimits {
+                context_length: Some(4096),
+                engine_context_length: engine_window,
+                supports_image: Some(true),
+                ..Default::default()
+            });
+            let error = build_generate_request(req, "req", "model", limits, AGG)
+                .expect_err("media expansion cannot honor a different window");
+            assert!(error.to_string().contains("--context-length to match"));
+        }
+    }
+}
+
+#[test]
+fn unsupported_media_modalities_and_sources_are_rejected() {
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/media".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("only images are supported");
+    assert!(
+        error.to_string().contains("video_url"),
+        "unexpected error: {error}"
+    );
+
+    let mut req = request();
+    add_images(&mut req, ["file:///tmp/image.png"]);
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("the engine cannot fetch a local Dynamo path");
+    assert!(error.to_string().contains("http, https, or data URI"));
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::UuidOnly("cached-image".to_string())],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("OpenEngine cannot resolve a source-less UUID");
+    assert!(error.to_string().contains("requires an image source"));
+}
+
+#[test]
+fn image_metadata_that_cannot_be_honored_is_rejected() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/image.png"]);
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("one".to_string()), Some("two".to_string())],
+    )]));
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
+        .expect_err("UUIDs must align positionally");
+    assert!(error.to_string().contains("UUID count"));
+
+    req.multi_modal_uuids = None;
+    req.mm_processor_kwargs = Some(serde_json::json!({"do_resize": false}));
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
+        .expect_err("processor overrides cannot be dropped");
+    assert!(error.to_string().contains("mm_processor_kwargs"));
+
+    req.mm_processor_kwargs = Some(serde_json::json!({}));
+    req.media_io_kwargs = Some(serde_json::json!({"image": {"mode": "RGB"}}));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("media I/O overrides cannot be dropped");
+    assert!(error.to_string().contains("media_io_kwargs"));
+}
+
+#[test]
 fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
     let mut req = request();
     req.stop_conditions.stop_token_ids = Some(vec![7]);
     req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
     req.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
     let stopping = proto.stopping.unwrap();
     assert_eq!(stopping.include_stop_in_output, Some(true));
     let stop_ids: Vec<_> = stopping
@@ -98,7 +250,7 @@ fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
 fn empty_visible_stop_tokens_leave_stop_trimming_on() {
     let mut req = request();
     req.stop_conditions.stop_token_ids_visible = Some(Vec::new());
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
     assert_eq!(proto.stopping.unwrap().include_stop_in_output, None);
 }
 
@@ -106,7 +258,7 @@ fn empty_visible_stop_tokens_leave_stop_trimming_on() {
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("must require max_tokens");
     assert!(error.to_string().contains("max_tokens"));
 }
@@ -117,8 +269,8 @@ fn omitted_max_tokens_defaults_to_remaining_context() {
     req.stop_conditions.max_tokens = None;
     // request() carries three prompt tokens ([11, 22, 33]); the default fills the
     // remaining context: max(1, context_length - prompt_len).
-    let proto = build_generate_request(&req, "req", "model", limits(100), AGG)
-        .expect("build with fallback");
+    let proto =
+        build_generate_request(req, "req", "model", limits(100), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(97));
 }
 
@@ -128,7 +280,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
     req.stop_conditions.max_tokens = None;
     // Prompt already fills (or exceeds) the context: default must not underflow to 0.
     let proto =
-        build_generate_request(&req, "req", "model", limits(2), AGG).expect("build with fallback");
+        build_generate_request(req, "req", "model", limits(2), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(1));
 }
 
@@ -136,7 +288,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
 fn top_k_all_tokens_is_left_unset() {
     let mut req = request();
     req.sampling_options.top_k = Some(-1);
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
     assert_eq!(proto.sampling.unwrap().top_k, None);
 }
 
@@ -189,7 +341,7 @@ fn logprobs_zero_keeps_selected_without_alternatives() {
     req.output_options.logprobs = Some(0);
     // The wire request must still ask TRT-LLM for one candidate so the selected
     // token's logprob is computed.
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req.clone(), "req", "model", None, AGG).expect("build");
     match proto
         .response
         .unwrap()
@@ -219,12 +371,14 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
     let proto = build_generate_request(
-        &req,
+        req,
         "req",
         "model",
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            supports_image: Some(false),
+            ..Default::default()
         }),
         AGG,
     )
@@ -250,7 +404,7 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     let prompt_len = req.token_ids.len() as u32;
     let window = prompt_len + 8;
 
-    let error = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let error = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect_err("a minimum above the remaining budget cannot be served");
     let message = error.to_string();
     assert!(
@@ -270,7 +424,7 @@ fn a_prefill_request_does_not_judge_a_minimum_against_its_own_window() {
     req.stop_conditions.min_tokens = Some(64);
     let window = req.token_ids.len() as u32 + 8;
 
-    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+    build_generate_request(req, "req", "model", limits(window), PREFILL)
         .expect("only the decode worker's window governs the minimum");
 }
 
@@ -283,7 +437,7 @@ fn a_minimum_within_the_derived_budget_is_served() {
     req.stop_conditions.min_tokens = Some(8);
     let window = req.token_ids.len() as u32 + 64;
 
-    let proto = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let proto = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect("a minimum that fits is not a conflict");
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
@@ -328,15 +482,9 @@ fn conversation_identity_follows_session_or_transmitted_rank_hint() {
             req.agent_context = session_id.map(|session_id| {
                 serde_json::from_value(json!({"session_id": session_id})).unwrap()
             });
-            let proto = build_generate_request_with_routing(
-                &req,
-                "req",
-                "model",
-                None,
-                mode,
-                allow_dp_rank,
-            )
-            .expect("build request");
+            let proto =
+                build_generate_request_with_routing(req, "req", "model", None, mode, allow_dp_rank)
+                    .expect("build request");
             let expected = if session_id == Some(" session ") {
                 Some("session")
             } else {
@@ -359,12 +507,40 @@ fn conversation_identity_follows_session_or_transmitted_rank_hint() {
     }
 }
 
+#[test]
+fn image_requests_preserve_rank_hint_conversation_identity() {
+    use dynamo_backend_common::engine::RoutingHints;
+
+    for mode in [AGG, DisaggregationMode::Prefill, DisaggregationMode::Decode] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        req.routing = Some(RoutingHints {
+            dp_rank: Some(1),
+            ..Default::default()
+        });
+        let proto = build_generate_request_with_routing(
+            req,
+            "image-req",
+            "model",
+            image_limits(4096),
+            mode,
+            true,
+        )
+        .expect("image request with rank targeting");
+        assert_eq!(proto.media.len(), 1);
+        assert_eq!(
+            proto.extra.unwrap().fields["conversation_id"].kind,
+            Some(prost_types::value::Kind::StringValue("image-req".into())),
+        );
+    }
+}
+
 /// Applies `mutate` to a baseline request and asserts `build_generate_request`
 /// rejects it with a message mentioning `expect`.
 fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
     let mut req = request();
     mutate(&mut req);
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("request must be rejected");
     assert!(
         error.to_string().contains(expect),
@@ -384,7 +560,7 @@ fn prefill_request_is_marked_context_only() {
     req.stop_conditions.max_tokens = Some(128);
     req.stop_conditions.min_tokens = Some(8);
     req.output_options.logprobs = Some(1);
-    let proto = build_generate_request(&req, "req", "model", None, DisaggregationMode::Prefill)
+    let proto = build_generate_request(req, "req", "model", None, DisaggregationMode::Prefill)
         .expect("build prefill request");
 
     assert!(
@@ -426,13 +602,69 @@ fn prefill_request_is_marked_context_only() {
     assert!(proto.kv.is_none(), "prefill carries no session to replay");
 }
 
+#[test]
+fn image_media_is_preserved_across_prefill_and_decode_requests() {
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            MultimodalData::RawUrl("https://example.com/first.png".to_string()),
+            MultimodalData::RawUrl("data:image/png;base64,c2Vjb25k".to_string()),
+        ],
+    )]));
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("first-image".to_string()),
+            Some("second-image".to_string()),
+        ],
+    )]));
+    let image_limits = Some(ModelLimits {
+        context_length: Some(4096),
+        engine_context_length: Some(4096),
+        supports_image: Some(true),
+        ..Default::default()
+    });
+
+    let prefill = build_generate_request(
+        req.clone(),
+        "req",
+        "model",
+        image_limits,
+        DisaggregationMode::Prefill,
+    )
+    .expect("build image prefill");
+    assert!(is_context_only(&prefill));
+    assert_eq!(prefill.stopping.as_ref().unwrap().max_tokens, Some(1));
+    assert_eq!(prefill.media.len(), 2);
+    assert_eq!(prefill.media[0].uuid, "first-image");
+    assert_eq!(prefill.media[1].uuid, "second-image");
+
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session())
+            .expect("encode handoff"),
+        prompt_tokens_details: None,
+    });
+    let decode = build_generate_request(
+        req,
+        "req",
+        "model",
+        image_limits,
+        DisaggregationMode::Decode,
+    )
+    .expect("build image decode");
+    assert!(!is_context_only(&decode));
+    assert_eq!(decode.media, prefill.media);
+    assert_eq!(decode.kv.and_then(|kv| kv.session), Some(fake_session()));
+}
+
 /// Conditional disaggregation dispatches straight to a decode worker with no
 /// handoff, expecting it to run the context phase itself. Rejecting that would
 /// fail every bypassed request.
 #[test]
 fn decode_without_a_prefill_result_runs_the_whole_request() {
     let proto = build_generate_request(
-        &request(),
+        request(),
         "req",
         "model",
         limits(4096),
@@ -463,7 +695,7 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
         prompt_tokens_details: None,
     });
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
-        let error = build_generate_request(&req, "req", "model", None, mode)
+        let error = build_generate_request(req.clone(), "req", "model", None, mode)
             .expect_err("handoff must be rejected");
         assert!(
             error

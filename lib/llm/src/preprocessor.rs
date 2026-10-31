@@ -1550,6 +1550,24 @@ fn exact_mm_routing_supports_modality(modality: &str, frontend_decoding: bool) -
     modality == "image_url" || (modality == "video_url" && frontend_decoding)
 }
 
+#[cfg(any(test, all(feature = "mm-routing", feature = "media-ffmpeg")))]
+fn log_video_routing_capability(model_id: &str, model_type: &str, frontend_video_decoding: bool) {
+    tracing::info!(
+        target: "mm_routing",
+        model = %model_id,
+        model_type,
+        frontend_video_decoding,
+        "video routing processor available; exact routing requires KV router mode and eligible requests"
+    );
+    if !frontend_video_decoding {
+        tracing::info!(
+            target: "mm_routing",
+            model = %model_id,
+            "frontend video decoding disabled; video requests use text-prefix routing"
+        );
+    }
+}
+
 #[cfg(feature = "mm-routing")]
 fn aggregate_image_tokens(
     image_tokens: Option<usize>,
@@ -2972,6 +2990,11 @@ impl OpenAIPreprocessor {
                 )
             });
 
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let frontend_video_decoding = mdc
+            .media_decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.video.is_some());
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -3161,12 +3184,7 @@ impl OpenAIPreprocessor {
         if video_routing_processor.is_some()
             && let Some((model_id, model_type, _)) = image_token_inputs.as_ref()
         {
-            tracing::info!(
-                target: "mm_routing",
-                model = %model_id,
-                model_type = %model_type,
-                "exact video-aware KV routing enabled"
-            );
+            log_video_routing_capability(model_id, model_type, frontend_video_decoding);
         }
 
         #[cfg(feature = "mm-routing")]
@@ -9484,6 +9502,37 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn video_routing_startup_does_not_claim_active_routing() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        for frontend_video_decoding in [false, true] {
+            let mut output = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(output.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                log_video_routing_capability("test-model", "qwen3_vl", frontend_video_decoding);
+            });
+            output.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            output.read_to_string(&mut logs).unwrap();
+
+            assert!(logs.contains("video routing processor available"));
+            assert!(logs.contains("KV router mode and eligible requests"));
+            assert!(logs.contains(&format!(
+                "frontend_video_decoding={frontend_video_decoding}"
+            )));
+            assert!(!logs.contains("exact video-aware KV routing enabled"));
+            assert_eq!(
+                logs.contains("video requests use text-prefix routing"),
+                !frontend_video_decoding
+            );
+        }
+    }
 
     #[tokio::test]
     async fn gpt_oss_disabled_aliases_keep_reasoning_separate() {

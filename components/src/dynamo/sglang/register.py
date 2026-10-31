@@ -473,12 +473,33 @@ def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
 
 
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
-    if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
+    # SGLang's direct external linker writes GPU KV straight to Mooncake with its own
+    # key layout and names keys after model_path rather than served_model_name.
+    linker = (
+        bool(getattr(server_args, "enable_unified_cache_external_linker", False))
+        and getattr(server_args, "unified_cache_external_linker_backend", None)
+        == "mooncake"
+    )
+    if (
+        getattr(server_args, "hicache_storage_backend", None) != "mooncake"
+        and not linker
+    ):
         return None
 
-    extra_config = _parse_hicache_storage_extra_config(
-        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    # Since sgl-project/sglang#46388 the linker reads its storage options from
+    # --unified-cache-external-linker-config (a JSON object) and falls back to the
+    # deprecated --hicache-storage-backend-extra-config only when that is unset.
+    linker_config = (
+        getattr(server_args, "unified_cache_external_linker_config", None)
+        if linker
+        else None
     )
+    if isinstance(linker_config, dict):
+        extra_config = dict(linker_config)
+    else:
+        extra_config = _parse_hicache_storage_extra_config(
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
+        )
 
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
@@ -529,8 +550,10 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
         "key_prefix": _mooncake_key_prefix(
-            extra_config, getattr(server_args, "served_model_name", None)
+            extra_config,
+            getattr(server_args, "model_path" if linker else "served_model_name", None),
         ),
+        "key_layout": "linker" if linker else "hicache",
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 

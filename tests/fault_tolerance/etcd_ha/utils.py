@@ -24,6 +24,10 @@ from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
+# 10s (the pre-#15266 default) leaves engine teardown time inside the 30s exit wait.
+# The startup keepalive-detection warning is harmless: stopping etcd fails it at once.
+ETCD_LEASE_TTL_SECS = 10
+
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Process manager for Dynamo frontend with ETCD HA support."""
@@ -36,6 +40,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         extra_env = {
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
+            "ETCD_LEASE_TTL": str(ETCD_LEASE_TTL_SECS),
         }
         # terminate_all_matching_process_names=False is required here: the frontend
         # is launched as `python -m dynamo.frontend`, so its _command_name is the
