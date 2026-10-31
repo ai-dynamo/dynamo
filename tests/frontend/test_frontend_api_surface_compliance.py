@@ -825,6 +825,7 @@ def _assert_agent_parent_context_in_trace(
     timeout_s: float = 30.0,
     *,
     require_observed_parent: bool = False,
+    failure_detail: str = "",
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
@@ -844,6 +845,7 @@ def _assert_agent_parent_context_in_trace(
     pytest.fail(
         f"request trace did not contain parent agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
+        + (f"\n{failure_detail}" if failure_detail else "")
     )
 
 
@@ -1122,7 +1124,33 @@ def _run_codex_subagent_smoke(
         "codex subagent",
         trace_start_index,
         require_observed_parent=True,
+        failure_detail=(
+            f"codex turn errors: {_codex_turn_errors(codex_home)}\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        ),
     )
+
+
+def _codex_turn_errors(codex_home: Path) -> list[str]:
+    """Return the turn errors Codex recorded in its session rollouts.
+
+    When the frontend rejects a child agent's request, Codex still exits 0 and
+    prints only the parent model's summary; the HTTP error body is kept only in
+    the session rollouts, as the child's `task_complete` error.
+    """
+    errors = []
+    for rollout in sorted((codex_home / "sessions").rglob("rollout-*.jsonl")):
+        for line in rollout.read_text(errors="replace").splitlines():
+            try:
+                payload = json.loads(line).get("payload") or {}
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if payload.get("type") != "task_complete":
+                continue
+            error = payload.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                errors.append(error["message"])
+    return errors
 
 
 def _run_claude_exec_smoke(
