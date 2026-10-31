@@ -851,6 +851,12 @@ fn drain_deferred_reasoning(state: &mut ChoiceReasoningState) -> (Option<String>
 /// content, a held partial marker inside reasoning stays reasoning. Shared by
 /// the terminal-chunk finalize and the end-of-stream fallback so the two
 /// cannot disagree. Finalizes at most once per choice; see `parser_finished`.
+///
+/// Every parsed choice is finalized, on its terminal chunk or, failing that,
+/// at end of stream. A parser can hold text until EOF decides it — a partial
+/// marker, MiniMax M3's marker-free text, a gpt-oss message stranded behind a
+/// malformed Harmony header — and that text is otherwise dropped with the
+/// parser state. A parser holding nothing flushes nothing.
 fn finish_reasoning_parser(state: &mut ChoiceReasoningState) -> (Option<String>, Option<String>) {
     if state.parser_finished {
         return (None, None);
@@ -874,10 +880,10 @@ struct ReasoningState {
     // retained when an end-of-stream flush may follow, to keep the per-token
     // clone off the common reasoning hot path: under
     // `defer_reasoning_for_nonempty_content` it is the latest such response;
-    // under `finalize_parser_at_finish` alone it is cloned once, while a parsed
-    // choice's parser is unfinished. Chunks with no choices (the trailing
-    // usage-only chunk) are never retained — that envelope has no delta slot
-    // to attach the flushed bytes to, so the flush would be dropped.
+    // otherwise it is cloned once, while a parsed choice's parser is
+    // unfinished. Chunks with no choices (the trailing usage-only chunk) are
+    // never retained — that envelope has no delta slot to attach the flushed
+    // bytes to, so the flush would be dropped.
     last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
     // Nemotron force-reasoning parsers start inside the reasoning block, so
     // leading model output with no `<think>` is reported as reasoning even when
@@ -910,14 +916,6 @@ struct ReasoningState {
     // into `content` in the first place. Scoped to the flag so no other parser
     // pays it.
     defer_reasoning_for_nonempty_content: bool,
-    // Finalize each choice's parser on its terminal chunk even without the
-    // deferral above, for parsers that retain undecided text until EOF
-    // (MiniMax M3), and at end of stream for a choice whose parser is still
-    // unfinished: it sent no `finish_reason`, or its terminal chunk carried
-    // content parts. Otherwise a turn whose output never shows a marker, such
-    // as grammar-constrained output under an adaptive prompt, is dropped
-    // whole with the parser state. See `is_minimax_m3_reasoning_parser`.
-    finalize_parser_at_finish: bool,
     // Set once the backend has sent an error annotation. The end-of-stream
     // flush must not run after that: an error is terminal, and emitting
     // recovered reasoning as ordinary `content` after it would put text on the
@@ -5988,13 +5986,10 @@ impl OpenAIPreprocessor {
             && !(Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request));
 
-        // Only a force_nonempty_content request needs the deferral and the EOF
-        // flush of a truncated `<think>` prefix; gating on the request keeps the
-        // per-token clone and the finish_reasoning_stream() flush off every
-        // other request's path (a MiniMax M3 parser is still finalized on its
-        // terminal chunk, or at end of stream without one; see
-        // `finalize_parser_at_finish`). Same predicate the aggregator uses, so
-        // the streaming and non-streaming paths cannot disagree.
+        // `force_nonempty_content` selects the deferral; every reasoning parser
+        // is finalized at finish regardless (see `finish_reasoning_parser`).
+        // Same predicate the aggregator uses, so the streaming and
+        // non-streaming paths cannot disagree.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -6011,11 +6006,13 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
-        // A MiniMax M3 parser can also release held text in an end-of-stream
-        // chunk (see `finalize_parser_at_finish`), so its usage is held too.
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
+        // Any stage above that can emit an end-of-stream chunk must have the
+        // usage trailer held behind it: clients treat the usage-only chunk as
+        // the end of the stream. Every reasoning parser can, since each is
+        // finalized at finish.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning
+            || defer_reasoning_for_nonempty_content
             || should_strip_disabled_reasoning_start
-            || (should_parse_reasoning && Self::is_minimax_m3_reasoning_parser(reasoning_parser))
         {
             Box::pin(Self::hold_usage_until_stream_end(stream))
         } else {
@@ -7620,8 +7617,6 @@ impl OpenAIPreprocessor {
     {
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
-        let finalize_parser_at_finish =
-            Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
         let state = ReasoningState {
             stream: Box::pin(stream),
             parser_name,
@@ -7630,7 +7625,6 @@ impl OpenAIPreprocessor {
             choices: HashMap::new(),
             last_response: None,
             defer_reasoning_for_nonempty_content,
-            finalize_parser_at_finish,
             saw_terminal_error: false,
         };
 
@@ -7640,8 +7634,11 @@ impl OpenAIPreprocessor {
                 // end-of-stream branch below stays quiet. The chunk still takes
                 // the normal path — `is_error()` keys on the annotation event,
                 // not on `data`, so short-circuiting here would change how a
-                // data-carrying error chunk is processed.
-                if response.is_error() {
+                // data-carrying error chunk is processed. Captured before
+                // `map_data` consumes `response`: the terminal-choice drain
+                // below needs it too.
+                let is_terminal_error = response.is_error();
+                if is_terminal_error {
                     state.saw_terminal_error = true;
                 }
                 // Split disjoint field borrows so the per-choice map and the
@@ -7654,14 +7651,12 @@ impl OpenAIPreprocessor {
                         bypass_bare_guided_json,
                         choices,
                         defer_reasoning_for_nonempty_content,
-                        finalize_parser_at_finish,
                         ..
                     } = &mut state;
                     let parser_name = &*parser_name;
                     let prompt_injected_reasoning = *prompt_injected_reasoning;
                     let bypass_bare_guided_json = *bypass_bare_guided_json;
                     let defer_reasoning = *defer_reasoning_for_nonempty_content;
-                    let finalize_parser_at_finish = *finalize_parser_at_finish;
 
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
@@ -7801,7 +7796,14 @@ impl OpenAIPreprocessor {
                             // A guided-JSON choice that bypassed the parser never
                             // fed it anything, so finishing that parser could only
                             // contribute text the choice never generated.
+                            //
+                            // Skip an error chunk: it may still carry `data`
+                            // with a `finish_reason` (`is_error()` keys on the
+                            // annotation event), and draining onto it would put
+                            // recovered text on the wire for a failed
+                            // generation. See `saw_terminal_error`.
                             if defer_reasoning
+                                && !is_terminal_error
                                 && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
@@ -7832,12 +7834,11 @@ impl OpenAIPreprocessor {
                                 }
                             }
 
-                            // Without the deferral, a parser that retains
-                            // undecided text until EOF is finalized here, on
-                            // the same terminal delta and under the same
-                            // conditions; see `finish_reasoning_parser`.
+                            // Without the deferral, the parser is finalized
+                            // here, on the same terminal delta and under the
+                            // same conditions; see `finish_reasoning_parser`.
                             if !defer_reasoning
-                                && finalize_parser_at_finish
+                                && !is_terminal_error
                                 && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
@@ -7878,8 +7879,7 @@ impl OpenAIPreprocessor {
                 // carry no delta slot, so using one as the flush envelope would
                 // drop the very bytes the flush exists to preserve.
                 let retain_envelope = state.defer_reasoning_for_nonempty_content
-                    || (state.finalize_parser_at_finish
-                        && state.last_response.is_none()
+                    || (state.last_response.is_none()
                         && state.choices.values().any(|choice_state| {
                             choice_state.guided_json_bypass_decision == Some(false)
                                 && !choice_state.parser_finished
@@ -7893,9 +7893,7 @@ impl OpenAIPreprocessor {
                     state.last_response = Some(processed_response.clone());
                 }
                 Some((processed_response, state))
-            } else if state.saw_terminal_error
-                || !(state.defer_reasoning_for_nonempty_content || state.finalize_parser_at_finish)
-            {
+            } else if state.saw_terminal_error {
                 // After a backend error the buffered bytes are dropped rather
                 // than surfaced: the request failed, so there is no answer to
                 // complete. See `saw_terminal_error`.
@@ -7908,13 +7906,11 @@ impl OpenAIPreprocessor {
                 // an aborted or truncated generation. The synthetic chunk it
                 // builds is the only case where recovered bytes arrive after the
                 // last upstream chunk, which is unavoidable when there was no
-                // terminal chunk to attach them to. Only the
-                // force_nonempty_content path and a parser finalized at finish
-                // (MiniMax M3) reach this branch; every other parser took the
-                // `None` branch above and keeps its original no-flush EOF
-                // behavior. Taking the envelope below rather than cloning it
-                // makes this branch one-shot: once it is gone the next poll ends
-                // the stream.
+                // terminal chunk to attach them to. A parser holding nothing
+                // leaves `flushed` empty, so no synthetic chunk is produced.
+                // Taking the envelope below rather than cloning it makes this
+                // branch one-shot: once it is gone the next poll ends the
+                // stream.
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
                 let defer_reasoning = state.defer_reasoning_for_nonempty_content;
@@ -8178,7 +8174,10 @@ impl OpenAIPreprocessor {
             let mut pending_usage = None;
             let mut transport_failed = false;
             while let Some(response) = stream.next().await {
-                if response.error.is_some() {
+                // `is_error()` keys on the annotation event; an error event is
+                // valid without a `DynamoError` payload, which `error.is_some()`
+                // would miss, releasing the held trailer after the error.
+                if response.is_error() {
                     transport_failed = true;
                     pending_usage = None;
                     yield response;
@@ -12278,6 +12277,404 @@ responses_tools: None,
         );
     }
 
+    fn reasoning_flush_chunk(
+        text: Option<&str>,
+        finish: bool,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = text.map(|t| ChatCompletionMessageContent::Text(t.to_string()));
+        choice.finish_reason = finish.then_some(FinishReason::Stop);
+        chunk
+    }
+
+    fn collect_reasoning_flush(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for response in output {
+            let Some(data) = response.data.as_ref() else {
+                continue;
+            };
+            for choice in data.inner.choices.iter().filter(|c| c.index == 0) {
+                if let Some(ChatCompletionMessageContent::Text(text)) =
+                    choice.delta.content.as_ref()
+                {
+                    content.push_str(text);
+                }
+                if let Some(text) = choice.delta.reasoning_content.as_ref() {
+                    reasoning.push_str(text);
+                }
+            }
+        }
+        (content, reasoning)
+    }
+
+    async fn run_reasoning_flush(
+        chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+        parser: &str,
+        defer: bool,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(chunks),
+            parser.to_string(),
+            false,
+            false,
+            defer,
+        )
+        .collect::<Vec<_>>()
+        .await
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_rides_the_terminal_chunk() {
+        // The recovered bytes must land on the chunk that carries
+        // `finish_reason`, not after it: a client that stops reading at the
+        // terminal chunk would never see a later one.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                reasoning_flush_chunk(None, true),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let terminal_index = output
+            .iter()
+            .position(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason.is_some())
+                })
+            })
+            .expect("a terminal chunk must be present");
+        let terminal = output[terminal_index].data.as_ref().unwrap();
+        let carried = terminal.inner.choices.iter().any(|choice| {
+            matches!(
+                choice.delta.content.as_ref(),
+                Some(ChatCompletionMessageContent::Text(text)) if text.contains("<thi")
+            ) || choice
+                .delta
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|text| text.contains("<thi"))
+        });
+        assert!(carried, "flushed bytes must ride the terminal chunk");
+        assert_eq!(
+            terminal_index,
+            output.len() - 1,
+            "no chunk may follow the terminal one when it absorbed the flush"
+        );
+        let (content, _) = collect_reasoning_flush(&output);
+        assert!(
+            content.contains("Answer"),
+            "recovery must not cost the answer that already streamed: {content:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_falls_back_when_stream_never_finishes() {
+        // An aborted or truncated generation sends no `finish_reason` at all, so
+        // there is no terminal chunk to attach the flush to. The synthetic chunk
+        // is the only way those bytes reach the client.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            content.contains("<thi") || reasoning.contains("<thi"),
+            "a stream that ends without finish_reason must still flush: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_is_silent_after_a_backend_error() {
+        // An error is terminal. Emitting recovered text as ordinary content
+        // after it would put an answer on the wire that the generation never
+        // successfully produced.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                Annotated::from_error("backend exploded"),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            !content.contains("<thi") && !reasoning.contains("<thi"),
+            "buffered bytes must stay dropped after a terminal error: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+        assert!(
+            output.iter().any(|response| response.is_error()),
+            "the error itself must still reach the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_is_silent_on_a_data_carrying_error_chunk() {
+        // `is_error()` keys on the annotation event, not on `data`, so an error
+        // chunk can still carry a delta AND a `finish_reason`. The terminal
+        // drain must skip it for the same reason `saw_terminal_error` silences
+        // the end-of-stream branch: the generation failed, so there is no answer
+        // to complete and nothing recovered belongs on the wire.
+        let mut terminal = reasoning_flush_chunk(None, true);
+        terminal.event = Some("error".to_string());
+        terminal.error = Some(dynamo_runtime::error::DynamoError::msg("backend exploded"));
+
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                terminal,
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            !content.contains("<thi") && !reasoning.contains("<thi"),
+            "a failed generation must not emit recovered text: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_leaves_a_well_formed_stream_untouched() {
+        let chunks = vec![
+            reasoning_flush_chunk(Some("<think>thought</think>"), false),
+            reasoning_flush_chunk(Some("Answer"), false),
+            reasoning_flush_chunk(None, true),
+        ];
+        let expected_len = chunks.len();
+        let output = run_reasoning_flush(chunks, "deepseek_r1", false).await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert_eq!(content, "Answer");
+        assert_eq!(reasoning, "thought");
+        assert_eq!(
+            output.len(),
+            expected_len,
+            "a parser holding nothing must not add a chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_precedes_a_trailing_usage_chunk() {
+        // Clients treat the usage-only chunk as the end of the stream, so a
+        // recovery chunk emitted after it is never read. `hold_usage_until_stream_end`
+        // is what keeps the order right, and it has to wrap every reasoning
+        // parser now that the EOF flush is no longer limited to the deferral
+        // path.
+        let mut usage_chunk = reasoning_flush_chunk(None, false);
+        {
+            let data = usage_chunk.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+
+        // No `finish_reason` anywhere, so recovery happens on the EOF fallback
+        // rather than riding a terminal chunk — the case where ordering matters.
+        let inner = OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                usage_chunk,
+            ]),
+            "deepseek_r1".to_string(),
+            false,
+            false,
+            false,
+        );
+        let output = OpenAIPreprocessor::hold_usage_until_stream_end(inner)
+            .collect::<Vec<_>>()
+            .await;
+
+        let usage_index = output
+            .iter()
+            .position(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            })
+            .expect("the usage trailer must survive");
+        let recovery_index = output
+            .iter()
+            .position(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        matches!(
+                            choice.delta.content.as_ref(),
+                            Some(ChatCompletionMessageContent::Text(text)) if text.contains("<thi")
+                        ) || choice
+                            .delta
+                            .reasoning_content
+                            .as_ref()
+                            .is_some_and(|text| text.contains("<thi"))
+                    })
+                })
+            })
+            .expect("the held bytes must be recovered");
+
+        assert!(
+            recovery_index < usage_index,
+            "recovered text must precede the usage trailer, got recovery at \
+             {recovery_index} and usage at {usage_index}"
+        );
+
+        // Negative control: without the wrapper the EOF recovery chunk lands
+        // after the usage trailer. This is what makes applying
+        // `hold_usage_until_stream_end` to every reasoning parser load-bearing
+        // rather than decorative.
+        let mut bare_usage = reasoning_flush_chunk(None, false);
+        {
+            let data = bare_usage.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+        let unheld = OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                bare_usage,
+            ]),
+            "deepseek_r1".to_string(),
+            false,
+            false,
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let unheld_usage = unheld
+            .iter()
+            .position(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            })
+            .expect("usage trailer");
+        assert_eq!(
+            unheld_usage,
+            unheld.len() - 2,
+            "without the wrapper the recovery chunk trails the usage chunk, \
+             which is the ordering this test exists to prevent"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_usage_trailer_is_discarded_after_an_event_only_error() {
+        // An error annotation is valid without a `DynamoError` payload:
+        // `is_error()` keys on `event == "error"`, and `cloned_error` falls back
+        // to `comment` or to "unknown error". A held usage trailer must be
+        // dropped for that shape too, or the stream reports a successful trailer
+        // after a terminal error.
+        let mut usage_chunk = reasoning_flush_chunk(None, false);
+        {
+            let data = usage_chunk.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+        // event-only: `error` is deliberately None.
+        let event_only_error: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["backend went away".to_string()]),
+            error: None,
+        };
+        assert!(
+            event_only_error.is_error() && event_only_error.error.is_none(),
+            "fixture must be an event-only error"
+        );
+
+        let output = OpenAIPreprocessor::hold_usage_until_stream_end(stream::iter(vec![
+            reasoning_flush_chunk(Some("Answer"), false),
+            usage_chunk,
+            event_only_error,
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            output.iter().any(|response| response.is_error()),
+            "the error must still reach the client"
+        );
+        assert!(
+            !output.iter().any(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            }),
+            "a held usage trailer must not be emitted after a terminal error: {:?}",
+            output
+                .iter()
+                .map(|response| response.data.is_some())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_does_not_double_emit_on_the_deferral_path() {
+        // Terminal-chunk draining and the EOF fallback must stay mutually
+        // exclusive; `drained` and `parser_finished` are what enforce that.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("reasoned answer"), false),
+                reasoning_flush_chunk(None, true),
+            ],
+            "nemotron_deci",
+            true,
+        )
+        .await;
+
+        let (content, _reasoning) = collect_reasoning_flush(&output);
+        assert_eq!(
+            content.matches("reasoned answer").count(),
+            1,
+            "the deferred answer must be released exactly once: {content:?}"
+        );
+    }
     #[tokio::test]
     async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
         let input = stream::iter(vec![
