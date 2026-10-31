@@ -412,6 +412,13 @@ message ModelDeploymentStatus
   uint64 ready_frontends = 3;
   // Stable links to catalog pools serving the model in this namespace.
   repeated KvPoolId serving_pools = 4;
+  // Serving capacity of the model's topology members in this namespace: the
+  // same sums as PoolDeploymentStatus, over every member endpoint whether or
+  // not it has materialized a pool. live_workers is set while the topology
+  // has a member for the model; max_concurrency while every member worker
+  // declares its limit.
+  optional uint64 live_workers = 5;
+  optional uint64 max_concurrency = 6;
 }
 
 // Frontend load of one model. Key: (namespace, canonical_model_id), as in

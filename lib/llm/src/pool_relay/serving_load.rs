@@ -64,7 +64,7 @@ pub(super) const SOURCE_RETENTION: Duration = Duration::from_secs(10 * 60);
 const SILENT_STREAM_WARNING: Duration = Duration::from_secs(30);
 
 /// One complete serving-load view: every catalog pool and every model a catalog
-/// pool registers or a fresh frontend serves.
+/// pool registers, a fresh frontend serves, or the topology gives a capacity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ServingLoadSnapshot {
     pub(super) pools: Vec<PoolServingLoad>,
@@ -94,6 +94,8 @@ pub(super) struct ModelServingLoad {
     pub(super) observed_frontends: u64,
     pub(super) ready_frontends: u64,
     pub(super) serving_pools: Vec<PoolId>,
+    /// Capacity of the model's topology members, with or without a pool.
+    pub(super) deployment: Option<PoolDeployment>,
 }
 
 /// Builds [`ServingLoadSnapshot`]s from the pool registry and frontend frames.
@@ -200,6 +202,7 @@ impl ServingLoadAggregator {
                     .serving_pool_loads(&scheduler_rosters.recent(SCHEDULER_FRESHNESS, now), now),
                 models: reports.model_loads(
                     &catalog,
+                    &topology.capacities,
                     &self.relay_namespace,
                     &frontend_rosters.recent(FRONTEND_FRESHNESS, now),
                     now,

@@ -305,7 +305,11 @@ restarts and restart from zero with each `relay_incarnation`; compute rates only
 incarnation.
 Fields that belong to the other view kind are never set. `PoolDeploymentStatus` fields are unset
 while the pool's runtime configuration is invalid or, for `max_concurrency`, while a worker
-does not declare its limit.
+does not declare its limit. `ModelDeploymentStatus.live_workers` and `max_concurrency` are the
+same sums over every topology member serving the model in its namespace, whether or not the
+member has materialized a pool, so a subscriber can size a model's request load against its
+workers' capacity before, or without, KV events; `max_concurrency` is unset while any member
+worker does not declare its limit.
 
 Router `active_prefill_tokens` is the scheduler's live estimate of prefill work it has assigned
 and not yet seen complete, the same number the router schedules with. With a prefill model
