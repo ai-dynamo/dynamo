@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, TypeAlias
 
 from jinja2.exceptions import TemplateError
@@ -33,6 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .reasoning import normalize_reasoning_content
 from .responses_history import responses_history_recipients, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
@@ -541,6 +542,8 @@ def _render_deepseek_v4_prompt_token_ids(
         ) from exc
 
     encoding_messages = copy.deepcopy(messages)
+    # The native encoder formats reasoning_content as a string, without Jinja.
+    normalize_reasoning_content(encoding_messages, string_only=True)
     for msg in encoding_messages:
         content = msg.get("content")
         if content is None:
@@ -1002,6 +1005,19 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        normalize_reasoning_content(
+            messages,
+            render_template=partial(
+                tokenizer.apply_chat_template,
+                **{
+                    **template_kwargs,
+                    "tokenize": False,
+                    "return_dict": False,
+                    "return_assistant_tokens_mask": False,
+                },
+            ),
+            tools=template_kwargs.get("tools"),
+        )
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
         try:
