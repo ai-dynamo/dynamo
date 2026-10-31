@@ -78,7 +78,6 @@ struct DecoderUnfoldState {
     /// Tokenizer used to decode top-logprob token_ids when the backend omits text
     /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
     tokenizer: Tokenizer,
-    skip_special_tokens: bool,
     /// Text flushed from a choice's decoder because the underlying engine stream ended
     /// without ever sending that choice a terminal `finish_reason`, queued here so each
     /// flushed choice can be emitted as its own synthetic final chunk.
@@ -98,36 +97,57 @@ struct DecoderUnfoldState {
 /// latter may release contextual or byte-fallback backlog belonging to earlier IDs. Partial
 /// byte tokens retain the tokenizer's standalone representation (typically U+FFFD); the
 /// tokenizer API does not expose their original vocabulary bytes.
-fn decode_token_text(
-    tokenizer: &Tokenizer,
-    token_id: TokenIdType,
-    skip_special_tokens: bool,
-) -> Option<String> {
-    tokenizer
-        .decode(&[token_id], skip_special_tokens)
-        .ok()
-        .map(String::from)
+///
+/// Special tokens are always kept. A request's `skip_special_tokens` governs the generated
+/// text, not logprob metadata: like vLLM (`convert_ids_list_to_tokens`), an EOS or other
+/// special token is reported by its own string rather than as an empty one.
+fn decode_token_text(tokenizer: &Tokenizer, token_id: TokenIdType) -> Option<String> {
+    tokenizer.decode(&[token_id], false).ok().map(String::from)
 }
 
-/// Fills missing candidate metadata only from complete, lossless single-ID decodes.
-fn fill_missing_top_logprob_text(
-    tokenizer: &Tokenizer,
-    top_logprobs: &mut TopLogprobs,
-    skip_special_tokens: bool,
-) {
+/// Fills missing candidate metadata only from complete, lossless single-ID decodes, with
+/// special tokens kept as for the sampled token (see [`decode_token_text`]). Engine-provided
+/// values are left unchanged, except that an empty engine string counts as missing: an
+/// engine that decodes candidates with `skip_special_tokens` sends one for every special
+/// token.
+fn fill_missing_top_logprob_text(tokenizer: &Tokenizer, top_logprobs: &mut TopLogprobs) {
     for position in top_logprobs.iter_mut() {
         for entry in position.iter_mut() {
-            if entry.token.is_none()
-                && let Ok(decoded) = tokenizer.decode(&[entry.token_id], skip_special_tokens)
+            if entry.token.as_deref().is_none_or(str::is_empty)
+                && let Ok(decoded) = tokenizer.decode(&[entry.token_id], false)
                 && decoded.is_complete()
                 && !decoded.as_str().contains('\u{fffd}')
             {
                 let token: String = decoded.into();
-                if entry.bytes.is_none() && !token.is_empty() {
+                if entry.bytes.as_ref().is_none_or(Vec::is_empty) && !token.is_empty() {
                     entry.bytes = Some(token.as_bytes().to_vec());
                 }
                 entry.token = Some(token);
             }
+        }
+    }
+}
+
+/// Reports each sampled token by the string the engine sent for it, when it sent one.
+///
+/// An engine that returns top logprobs with text (vLLM includes the sampled token among
+/// them, with its byte-fallback correction applied) knows the exact string for the
+/// sampled ID; single-ID decode can only approximate it for partial byte tokens. Entries
+/// the engine sent without text were filled by [`fill_missing_top_logprob_text`] with the
+/// same single-ID decode the decoder uses, so they agree with it either way.
+fn prefer_engine_token_text(
+    tokens: &mut [Option<String>],
+    token_ids: &[TokenIdType],
+    top_logprobs: &TopLogprobs,
+) {
+    for ((token, token_id), position) in tokens.iter_mut().zip(token_ids).zip(top_logprobs) {
+        if let Some(text) = position
+            .iter()
+            .find(|entry| entry.token_id == *token_id)
+            .and_then(|entry| entry.token.as_ref())
+            .filter(|text| !text.is_empty())
+        {
+            *token = Some(text.clone());
         }
     }
 }
@@ -227,7 +247,6 @@ impl Backend {
             retain_model_stop_token_text: params.retain_model_stop_token_text,
             finished: false,
             tokenizer: tokenizer.clone(),
-            skip_special_tokens: params.skip_special_tokens,
             pending_flush: Vec::new(),
             stream_ended: false,
             migration_possible: params.migration_possible,
@@ -312,7 +331,7 @@ impl
                     // on the same path, so we ship the simple version. Revisit if a
                     // streaming flamegraph with top_logprobs=20 puts this above ~1%:
                     // the cheapest win is a shared LRU on the Tokenizer keyed by
-                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
+                    // token_id — top-k entries repeat heavily
                     // across positions and requests. Do NOT batch as a single
                     // decode(&[ids..]) call: BPE merge / leading-space rules differ
                     // between single-token and sequence decode and will corrupt strings.
@@ -322,11 +341,7 @@ impl
                         .as_mut()
                         .and_then(|data| data.top_logprobs.as_mut())
                     {
-                        fill_missing_top_logprob_text(
-                            &state.tokenizer,
-                            top_logprobs,
-                            state.skip_special_tokens,
-                        );
+                        fill_missing_top_logprob_text(&state.tokenizer, top_logprobs);
                     }
 
                     // A worker may send already-trimmed text alongside the raw
@@ -366,9 +381,11 @@ impl
                                 data.token_ids
                                     .iter()
                                     .map(|token_id| {
+                                        // Special tokens kept, as for every logprob
+                                        // entry (see `decode_token_text`).
                                         state
                                             .tokenizer
-                                            .decode(&[*token_id], state.skip_special_tokens)
+                                            .decode(&[*token_id], false)
                                             .ok()
                                             // Lossy text cannot recover the original token bytes.
                                             .filter(|decoded| {
@@ -436,6 +453,15 @@ impl
                             {
                                 data.jailed_text = decoder.checkpoint();
                             }
+                        }
+                        // The engine's per-token strings are reported as sent, except that
+                        // its top-logprob string for the sampled ID wins, as on the
+                        // decoder path below.
+                        if let Some(data) = &mut output.data
+                            && let (Some(tokens), Some(top_logprobs)) =
+                                (data.tokens.as_mut(), data.top_logprobs.as_ref())
+                        {
+                            prefer_engine_token_text(tokens, &data.token_ids, top_logprobs);
                         }
                         return Some((output, state));
                     }
@@ -568,6 +594,10 @@ impl
                         if let Some(top_logprobs) = data.top_logprobs.as_mut() {
                             top_logprobs.truncate(consumed);
                         }
+                    }
+                    let mut tokens = tokens;
+                    if let Some(top_logprobs) = data.top_logprobs.as_ref() {
+                        prefer_engine_token_text(&mut tokens, &data.token_ids, top_logprobs);
                     }
                     data.tokens = Some(tokens);
                     // Snapshot of whatever this choice's decoder is still withholding as a
@@ -1013,6 +1043,14 @@ impl Decoder {
             && !retains_model_stop_text
         {
             let mut result = self.finish()?;
+            // The stop token's text is dropped from the output, but its logprob entry
+            // still reports the token itself.
+            if needs_token_text {
+                result.token = self
+                    .tokenizer
+                    .as_ref()
+                    .and_then(|tokenizer| decode_token_text(tokenizer, token_id));
+            }
             result.stop_trigger.get_or_insert_with(|| {
                 if self.user_stop_ids.contains(&token_id) {
                     StopTrigger::UserStopTokenDetected(token_id)
@@ -1044,9 +1082,7 @@ impl Decoder {
         let selected_token = if needs_token_text {
             self.tokenizer
                 .as_ref()
-                .and_then(|tokenizer| {
-                    decode_token_text(tokenizer, token_id, self.skip_special_tokens)
-                })
+                .and_then(|tokenizer| decode_token_text(tokenizer, token_id))
                 .or_else(|| decoded_text.clone())
         } else {
             None
@@ -1666,7 +1702,7 @@ mod tests {
             },
         ]];
 
-        fill_missing_top_logprob_text(&tokenizer, &mut top_logprobs, true);
+        fill_missing_top_logprob_text(&tokenizer, &mut top_logprobs);
 
         assert_eq!(top_logprobs[0][0].token.as_deref(), Some("Okay"));
         assert_eq!(top_logprobs[0][0].bytes, Some(b"Okay".to_vec()));
@@ -1753,6 +1789,283 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    fn top_logprob(token_id: TokenIdType, token: Option<&str>) -> TopLogprob {
+        TopLogprob {
+            rank: 1,
+            token_id,
+            token: token.map(str::to_string),
+            logprob: -0.1,
+            bytes: None,
+        }
+    }
+
+    /// Runs one EOS-terminated chunk (`Okay` then the hidden stop token 103) through the
+    /// Backend and the chat delta generator, returning the Backend's per-token strings and
+    /// the client-visible logprob entries.
+    async fn eos_logprob_entries(
+        top_logprobs: Option<TopLogprobs>,
+    ) -> (
+        Vec<Option<String>>,
+        Vec<dynamo_protocols::types::ChatCompletionTokenLogprob>,
+    ) {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: vec![101, 103],
+                    log_probs: Some(vec![-0.1; 2]),
+                    top_logprobs,
+                    index: Some(0),
+                    ..Default::default()
+                }]),
+            });
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        let tokens = output.tokens.clone();
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .and_then(|logprobs| logprobs.content.clone())
+            .expect("client-visible logprob content");
+        (tokens, content)
+    }
+
+    /// A hidden stop token is dropped from the text but still reported by its own string
+    /// in logprobs, with special tokens kept regardless of `skip_special_tokens`. Without
+    /// engine candidates the Backend has to decode it itself.
+    #[tokio::test]
+    async fn test_hidden_stop_token_logprob_reports_the_token_string() {
+        let (tokens, content) = eos_logprob_entries(None).await;
+        assert_eq!(
+            tokens,
+            vec![Some("Okay".to_string()), Some("<|user|>".to_string())]
+        );
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1].token, "<|user|>");
+        assert_eq!(content[1].bytes, Some(b"<|user|>".to_vec()));
+    }
+
+    /// With a tokenizer that honors `skip_special_tokens` (default true), special tokens
+    /// are dropped from the generated text but kept in logprob metadata: a mid-output
+    /// special token and a hidden stop token are both reported by their own string.
+    #[tokio::test]
+    async fn test_special_tokens_omitted_from_text_but_kept_in_logprobs() {
+        let special = |id: u32, content: &str| {
+            serde_json::json!({"id": id, "content": content, "special": true,
+                "single_word": false, "lstrip": false, "rstrip": false, "normalized": false})
+        };
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [special(1, "<eos>"), special(2, "<|mid|>")],
+            "normalizer": null, "pre_tokenizer": null, "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {"<0x61>": 0, "<eos>": 1, "<|mid|>": 2},
+                "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![1]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: vec![0, 2, 0, 1],
+                    log_probs: Some(vec![-0.1; 4]),
+                    index: Some(0),
+                    ..Default::default()
+                }]),
+            });
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<BackendOutput> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|output| output.data)
+            .collect();
+        let text: String = outputs
+            .iter()
+            .filter_map(|output| output.text.as_deref())
+            .collect();
+        assert_eq!(text, "aa");
+        let tokens: Vec<Option<String>> = outputs
+            .iter()
+            .flat_map(|output| output.tokens.clone())
+            .collect();
+        assert_eq!(
+            tokens,
+            ["a", "<|mid|>", "a", "<eos>"].map(|t| Some(t.to_string()))
+        );
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let content: Vec<_> = outputs
+            .into_iter()
+            .filter_map(|output| {
+                generator
+                    .choice_from_postprocessor(output)
+                    .expect("OpenAI response conversion succeeds")
+                    .inner
+                    .choices
+                    .first()
+                    .and_then(|choice| choice.logprobs.as_ref())
+                    .and_then(|logprobs| logprobs.content.clone())
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            content
+                .iter()
+                .map(|entry| entry.token.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "<|mid|>", "a", "<eos>"]
+        );
+        assert_eq!(content[1].bytes, Some(b"<|mid|>".to_vec()));
+        assert_eq!(content[3].bytes, Some(b"<eos>".to_vec()));
+    }
+
+    /// The engine's string for the sampled token wins over single-ID decode; an empty
+    /// engine string does not.
+    #[tokio::test]
+    async fn test_logprob_token_text_prefers_the_engine_string() {
+        let (tokens, content) = eos_logprob_entries(Some(vec![
+            vec![top_logprob(101, Some("Okay!"))],
+            vec![top_logprob(103, Some(""))],
+        ]))
+        .await;
+        assert_eq!(
+            tokens,
+            vec![Some("Okay!".to_string()), Some("<|user|>".to_string())]
+        );
+        assert_eq!(content[0].token, "Okay!");
+        assert_eq!(content[0].bytes, Some(b"Okay!".to_vec()));
+        assert_eq!(content[1].top_logprobs[0].token, "<|user|>");
+        assert_eq!(content[1].top_logprobs[0].bytes, Some(b"<|user|>".to_vec()));
+    }
+
+    /// An engine that decodes its own text bypasses the decoder; its top-logprob string
+    /// for the sampled ID still wins over the per-token string it sent.
+    #[tokio::test]
+    async fn test_engine_decoded_chunk_prefers_the_engine_logprob_string() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: vec![101],
+                    tokens: Some(vec![Some("Okay".to_string())]),
+                    text: Some("Okay".to_string()),
+                    log_probs: Some(vec![-0.1]),
+                    top_logprobs: Some(vec![vec![top_logprob(101, Some("Okay!"))]]),
+                    index: Some(0),
+                    ..Default::default()
+                }]),
+            });
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay!".to_string())]);
+    }
+
+    #[test]
+    fn test_prefer_engine_token_text_matches_the_sampled_id() {
+        let mut tokens = vec![Some("a".to_string()), Some("b".to_string()), None];
+        prefer_engine_token_text(
+            &mut tokens,
+            &[1, 2, 3],
+            &vec![
+                // The sampled ID is not the first candidate.
+                vec![top_logprob(9, Some("x")), top_logprob(1, Some("A"))],
+                // The sampled ID is not among the candidates.
+                vec![top_logprob(9, Some("x"))],
+                vec![top_logprob(3, Some("C"))],
+            ],
+        );
+        assert_eq!(
+            tokens,
+            vec![
+                Some("A".to_string()),
+                Some("b".to_string()),
+                Some("C".to_string())
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1938,7 +2251,10 @@ mod tests {
 
         assert_eq!(output.index, Some(0));
         assert_eq!(output.text.as_deref(), Some("Okay"));
-        assert_eq!(output.tokens, vec![Some("Okay".to_string()), None]);
+        assert_eq!(
+            output.tokens,
+            vec![Some("Okay".to_string()), Some("<|user|>".to_string())]
+        );
         assert_eq!(output.token_ids, vec![101, 103]);
         assert_eq!(output.log_probs, Some(vec![-0.1; 2]));
         assert_eq!(output.top_logprobs.as_ref().map(Vec::len), Some(2));
