@@ -5,7 +5,9 @@
 //! `create_reservation` replay path, and the lifecycle calls that advance or
 //! release them.
 
+use super::hint::compose_kv_hint;
 use super::*;
+use crate::plugins::hint_policy::runtime::ActionInputs;
 use crate::scheduling::queue::BookingHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,6 +27,9 @@ struct ReservationBooking {
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
+    /// The replayed selection's prompt length, for the hint policies its booking runs; `None`
+    /// for an explicit reservation, which skips selection and runs no hint policy.
+    hint_prompt_tokens: Option<usize>,
 }
 
 /// `selection_id` -> the booking it holds.
@@ -247,6 +252,7 @@ impl SelectionCore {
                 lora_name: pending.lora_name.clone(),
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
+                hint_prompt_tokens: Some(pending.isl_tokens),
             },
         )
         .await
@@ -355,6 +361,7 @@ impl SelectionCore {
                 lora_name: req.prompt.lora_name,
                 routing_hashes,
                 session_id: None,
+                hint_prompt_tokens: None,
             },
         )
         .await
@@ -380,6 +387,7 @@ impl SelectionCore {
             lora_name,
             routing_hashes,
             session_id,
+            hint_prompt_tokens,
         } = booking;
 
         let claim = self.claim_reservation(&selection_id, &key)?;
@@ -406,6 +414,16 @@ impl SelectionCore {
                 worker,
                 lora_name,
             })?;
+        // A replayed selection runs its partition's hint policies for the booked worker.
+        let kv_hint = hint_prompt_tokens.and_then(|prompt_tokens| {
+            let inputs = ActionInputs {
+                request_id: &selection_id,
+                worker,
+                prompt_tokens,
+                block_size: entry.block_size,
+            };
+            compose_kv_hint(&entry.hint_policies, &inputs, None)
+        });
         let affinity_lease = match session {
             Some((table, session_id, hold)) => {
                 self.commit_session(table, hold, session_id, worker, &key)?
@@ -424,6 +442,7 @@ impl SelectionCore {
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
             endpoint,
+            kv_hint,
         })
     }
 

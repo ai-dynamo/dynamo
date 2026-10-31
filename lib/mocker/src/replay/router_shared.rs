@@ -118,6 +118,9 @@ pub(super) fn replay_selector_with_seed(
     if config.request_classifier_config()?.is_some() {
         anyhow::bail!("offline replay does not support request_classifier plugins");
     }
+    if config.hint_policy_config()?.is_some() {
+        anyhow::bail!("replay does not support hint_policies");
+    }
     if let Some(instance) = config
         .selected_worker_selection_policy_instance()
         .map_err(anyhow::Error::from)?
@@ -161,6 +164,28 @@ mod tests {
             error
                 .to_string()
                 .contains("offline replay does not support request_classifier")
+        );
+    }
+
+    #[test]
+    fn replay_selector_rejects_hint_policies() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy.path(),
+            "hint_policies:\n  aggregated: [x]\n  instances:\n    - name: x\n      type: test\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..Default::default()
+        };
+        let Err(error) = replay_selector(&config) else {
+            panic!("hint policies ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("replay does not support hint_policies")
         );
     }
 

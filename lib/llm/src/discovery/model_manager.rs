@@ -2425,9 +2425,14 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // A policy that does not consume cache input must not create a shared-cache client or
-        // subscribe to its updates.
-        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
+        // Hint policies start the resources they read even when the worker-selection policy reads
+        // none. Without cache input from either, create no shared-cache client and subscribe to
+        // no KV events.
+        let hint_policies = crate::kv_router::plugins::router_plugin_registry()
+            .resolve_hint_policies(&effective_kv_router_config)?;
+        let index_inputs =
+            crate::kv_router::router_index_inputs(policy.inputs(), &hint_policies, worker_type);
+        let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
         let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
@@ -2453,7 +2458,7 @@ impl ModelManager {
         let kv_event_source_requirement = KvEventSourceRequirement::derive(
             worker_role,
             &effective_kv_router_config,
-            policy.inputs(),
+            index_inputs,
         );
         let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(

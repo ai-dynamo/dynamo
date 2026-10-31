@@ -3,12 +3,13 @@
 
 //! Public contracts, configuration, and registration for statically linked router plugins.
 //!
-//! Plugin authors implement [`worker_selection`] or [`request_classifier`] and register their
-//! providers with [`RouterPluginRegistry`]. Signal accessors and callback signatures are unchanged.
+//! Plugin authors implement [`worker_selection`], [`request_classifier`], or the experimental
+//! [`hint_policy`] contract and register their providers with [`RouterPluginRegistry`].
 //! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
 //!
 //! Legacy imports remain compatibility re-exports until v1.7; new plugins should use this module.
 
+pub mod hint_policy;
 mod registry;
 pub mod request_classifier;
 pub mod worker_selection;

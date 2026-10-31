@@ -9,6 +9,9 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use super::hint_policy::{
+    HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry, HintPolicyRegistryError,
+};
 use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
@@ -64,11 +67,13 @@ impl WorkerSelectionPolicyProviderError {
     }
 }
 
-/// A startup-only registry of worker-selection and request-classifier plugins linked into an image.
+/// A startup-only registry of worker-selection, request-classifier, and hint-policy plugins linked
+/// into an image.
 #[derive(Clone, Default)]
 pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
     request_classifiers: RequestClassifierRegistry,
+    hint_policies: HintPolicyRegistry,
     default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
@@ -160,9 +165,29 @@ impl RouterPluginRegistry {
         self.request_classifiers.resolve(config)
     }
 
+    /// Register a hint-policy type, a peer of worker-selection and request-classifier plugins.
+    pub fn register_hint_policy(
+        &mut self,
+        name: impl Into<String>,
+        provider: HintPolicyProvider,
+    ) -> Result<(), HintPolicyRegistryError> {
+        self.hint_policies.register(name, provider)
+    }
+
+    /// Resolve the configured hint policies once at startup. Hint policies are opt-in: without
+    /// `hint_policies` in the router policy config, no worker role runs any.
+    pub fn resolve_hint_policies(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
+        self.hint_policies.resolve(config)
+    }
+
     /// Whether this image has no linked router plugin types.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.request_classifiers.is_empty()
+        self.providers.is_empty()
+            && self.request_classifiers.is_empty()
+            && self.hint_policies.is_empty()
     }
 
     /// Compatibility entry point for worker-only catalogs.

@@ -524,6 +524,8 @@ impl RoutingHost {
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
+        // The router owns the KV hint: the selection's hint policies composed it for this attempt
+        // and worker, so it replaces any hint the request carried, and a retry replaces it again.
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
         guard.begin_dispatch(&phase_label, updated_request.content());

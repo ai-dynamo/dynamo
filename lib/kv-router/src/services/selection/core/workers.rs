@@ -294,6 +294,8 @@ impl SelectionCore {
                     block_size,
                     host_replica,
                 );
+                // Instantiate before any partition task starts, so a rejected policy leaves nothing.
+                let hint_policies = self.partition_hint_policies(&key)?;
                 let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
                     scoped_replica_sync
@@ -382,6 +384,7 @@ impl SelectionCore {
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
                     affinity_replication: self.session_binding_sink(&key),
+                    hint_policies,
                 }))
             })?
             .clone();
@@ -412,6 +415,32 @@ impl SelectionCore {
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
         let KvIndexSource::Owned(ingress) = &self.host.cache.index;
         ingress.detach(&self.indexer_registry, record).await;
+    }
+
+    /// Construct this partition's hint policies, keeping those that run at booking.
+    fn partition_hint_policies(
+        &self,
+        key: &RoutingPartitionId,
+    ) -> Result<Vec<HintPolicySlot>, SelectionError> {
+        let factory = self
+            .host
+            .hints
+            .policies
+            .clone()
+            .unwrap_or_else(HintPolicyFactory::none);
+        let instances = factory
+            .instances(&self.kv_router_config, self.worker_type, key.as_ref())
+            .map_err(|error| SelectionError::Internal(error.to_string()))?;
+        Ok(instances
+            .into_iter()
+            .filter_map(|instance| {
+                let (name, policy) = instance.into_parts();
+                Some(HintPolicySlot {
+                    name,
+                    policy: policy?,
+                })
+            })
+            .collect())
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {
