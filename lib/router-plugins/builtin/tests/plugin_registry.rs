@@ -3,13 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::plugins::request_classifier::WorkerView;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
-};
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 
 struct PassThrough;
 

@@ -4,10 +4,7 @@
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
 use super::parameters::PolicyParameters;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
 /// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV

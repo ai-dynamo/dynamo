@@ -9,16 +9,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::protocols::WorkerAffinityTarget;
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{
-    ScoredWorkerCandidate, SelectionConfig, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 struct SoftPinRepinPicker {
     max_active_requests: usize,
@@ -33,7 +24,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::WorkerLoadInput],
+        loads: &[dynamo_kv_router::plugins::prelude::WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates
@@ -122,11 +113,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 

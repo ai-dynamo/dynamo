@@ -12,13 +12,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::{
-    RuntimePolicyError, WorkerFilter, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
-    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::RequestAwarePicker;
 use scorer::ActiveRequestsScorer;

@@ -2,19 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 mod support;
 use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, default_registry};
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
-};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelectionInput;
+use dynamo_scheduler::host::WorkerSelector;
 use std::collections::{HashMap, HashSet};
 use support::*;
 
 #[test]
 fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
-    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    use dynamo_kv_router::plugins::prelude::*;
     use serde_json::json;
 
     let (workers, mut request) = fixture(2, 160);
@@ -108,7 +104,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
 
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
-    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    use dynamo_kv_router::plugins::prelude::*;
     for (config, role) in [
         (
             KvRouterConfig {
@@ -165,7 +161,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
 
 #[test]
 fn runtime_cache_tier_weights_change_selection_without_device_credit() {
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
 
     for role in [WorkerType::Prefill, WorkerType::Decode] {
         for name in [
@@ -633,7 +629,7 @@ fn mandatory_pin_is_preserved() {
 
 #[test]
 fn configured_parameters_replace_request_score_overrides() {
-    use dynamo_kv_router::RouterConfigOverride;
+    use dynamo_scheduler::host::RouterConfigOverride;
     let (workers, mut request) = fixture(2, 160);
     for (worker, load) in &mut request.worker_loads {
         load.active_prefill_tokens = 0;
@@ -844,7 +840,7 @@ fn patch(parameters: serde_json::Value) -> serde_json::Map<String, serde_json::V
 
 #[test]
 fn selector_runtime_update_keeps_the_seeded_random_stream() {
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
 
     let (workers, request) = fixture(16, 2048);
     let config = KvRouterConfig {
@@ -878,7 +874,7 @@ fn selector_runtime_update_keeps_the_seeded_random_stream() {
 
 #[test]
 fn selector_controls_share_runtime_state_and_clones_start_fresh() {
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
 
     let config = KvRouterConfig {
         router_temperature: 0.5,

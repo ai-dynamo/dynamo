@@ -11,12 +11,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{SelectionConfig, WorkerFilter, WorkerSelectionPolicy, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
@@ -117,12 +112,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        KvSchedulerError, SchedulingRequest, WorkerSelectionInput, WorkerSelectionPolicyError,
-        WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 

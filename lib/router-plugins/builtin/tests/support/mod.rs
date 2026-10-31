@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
-use dynamo_kv_router::{WorkerLoadProjection, WorkerSelectionInput};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelectionInput;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]

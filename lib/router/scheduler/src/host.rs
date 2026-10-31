@@ -23,6 +23,11 @@ pub use crate::selection::input::{PromptRequest, PromptView};
 pub use crate::selection::membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use crate::selection::pending::SelectionCacheConfig;
 pub use crate::selection::types::{SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle};
+#[cfg(any(test, feature = "testing", feature = "bench"))]
+pub use crate::selector::DefaultWorkerSelector;
+/// The synchronous selection entry a host or a replay harness drives directly, and the
+/// reference selector tests compare against.
+pub use crate::selector::{WorkerSelectionInput, WorkerSelector};
 pub use crate::tracking_hash::{TrackingHashConfig, TrackingHashContext};
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 pub use dynamo_admission::classifier::RequestLifecycle;

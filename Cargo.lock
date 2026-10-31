@@ -2353,6 +2353,8 @@ dependencies = [
  "async-trait",
  "criterion",
  "dynamo-kv-router",
+ "dynamo-scheduler",
+ "dynamo-session-affinity",
  "fastrand",
  "parking_lot",
  "rustc-hash 2.1.2",
@@ -2380,6 +2382,7 @@ name = "dynamo-custom-policy-example-disagg-filter-score-pick"
 version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-scheduler",
  "serde",
 ]
 
@@ -2416,6 +2419,7 @@ name = "dynamo-custom-policy-example-soft-pin-repin"
 version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-scheduler",
  "serde",
 ]
 

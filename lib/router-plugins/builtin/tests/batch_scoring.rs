@@ -4,14 +4,10 @@
 //! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
-use dynamo_kv_router::SelectionConfig;
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{Arc, Mutex};
 
-use dynamo_kv_router::{
-    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelector,
-};
 use support::fixture;
 
 #[derive(Debug, PartialEq)]
@@ -291,7 +287,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         vec![Box::new(FailSecondScoreOnce(0))],
         Box::new(CheckColumns),
     );
-    let select = |request: &dynamo_kv_router::scheduling::SchedulingRequest| {
+    let select = |request: &dynamo_kv_router::plugins::prelude::SchedulingRequest| {
         policy.select_worker(support::selection_input(&workers, request, 16))
     };
     assert!(

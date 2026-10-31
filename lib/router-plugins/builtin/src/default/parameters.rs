@@ -3,11 +3,7 @@
 
 //! Startup parameters and provider registration for the default policy.
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::config::SharedCacheType;
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 use std::sync::Arc;
 
 use super::policy_for_role;
@@ -123,8 +119,8 @@ impl PolicyParameters {
     pub(super) fn from_runtime(
         values: serde_json::Map<String, serde_json::Value>,
         config: &SelectionConfig,
-    ) -> Result<Self, dynamo_kv_router::plugins::worker_selection::RuntimePolicyError> {
-        use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
+    ) -> Result<Self, dynamo_kv_router::plugins::prelude::RuntimePolicyError> {
+        use dynamo_kv_router::plugins::prelude::*;
         // Runtime maps are resolved; startup parameters may be absent or null.
         if values.values().any(serde_json::Value::is_null) {
             return Err(RuntimePolicyError::InvalidParameters(

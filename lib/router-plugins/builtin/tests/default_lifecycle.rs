@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use dynamo_custom_policy_builtin::default_factory;
-use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::plugins::prelude::*;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
     local_selection_core,
 };
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId};
 
 fn worker(worker_id: u64) -> WorkerRequest {
     WorkerRequest {
@@ -66,7 +65,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
     let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
@@ -89,7 +88,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
-    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    use dynamo_kv_router::plugins::prelude::*;
     let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
@@ -139,10 +138,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::{
-        WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-        WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
     use std::sync::Arc;
 
     struct FailOnce(bool);

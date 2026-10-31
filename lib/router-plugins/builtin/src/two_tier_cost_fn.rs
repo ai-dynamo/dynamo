@@ -29,16 +29,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
@@ -187,11 +178,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 

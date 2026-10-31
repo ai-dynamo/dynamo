@@ -8,12 +8,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{SelectionConfig, WorkerSelectionPolicy};
+use dynamo_kv_router::plugins::prelude::*;
 use picker::LowestCostPicker;
 use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 

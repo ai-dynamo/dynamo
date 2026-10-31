@@ -3,10 +3,7 @@
 
 //! Active-request scorer for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Scores active requests above the least-loaded surviving candidate.
 pub(crate) struct ActiveRequestsScorer;

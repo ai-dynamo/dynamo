@@ -3,12 +3,8 @@
 
 mod support;
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::{
-    SharedCacheHits, WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
-};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

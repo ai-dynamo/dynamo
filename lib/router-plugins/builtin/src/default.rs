@@ -12,10 +12,7 @@ use parameters::PolicyParameters;
 pub(super) use parameters::register;
 pub use selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::{SelectionConfig, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
 

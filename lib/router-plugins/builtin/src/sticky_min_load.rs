@@ -17,19 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::SelectionConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_session_affinity::{MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES};
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";
