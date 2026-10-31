@@ -142,8 +142,19 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
   Maximum number of CTAs (cooperative thread arrays) NCCL may use for KVBM broadcasts.
 </ParamField>
 
-<ParamField path="DYN_KVBM_ENABLE_NUMA" type="boolean" default="false">
-  Enable NUMA-aware allocation for the host cache.
+## NUMA Host Memory
+
+<ParamField path="DYN_MEMORY_DISABLE_NUMA" type="boolean" default="false">
+  Disable NUMA-aware pinned host-memory allocation. By default, KVBM attempts allocation and
+  first-touch placement on a worker thread pinned to the GPU's NUMA node. Unknown topology falls
+  back to direct allocation; failed thread pinning logs an error and continues. An inherited
+  process memory policy still affects placement, and the allocation's allowed CPU set must
+  include CPUs on the target node.
+</ParamField>
+
+<ParamField path="DYN_KVBM_ENABLE_NUMA" type="boolean" default="unset">
+  **Deprecated.** Has no effect on pinned host-cache allocation. NUMA-aware allocation is enabled
+  by default; use `DYN_MEMORY_DISABLE_NUMA=1` to disable it.
 </ParamField>
 
 ## NixL backends
