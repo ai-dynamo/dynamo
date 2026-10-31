@@ -1064,10 +1064,6 @@ shared:
   - performance
   - router
   - global-router
-- glob: lib/kv-router/src/services/shared_cache/
-  owners:
-  - router
-  - kv-memory
 - glob: lib/kv-events/src/zmq_wire/extra_keys.rs
   owners:
   - router

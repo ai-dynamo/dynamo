@@ -13,7 +13,6 @@ pub mod overlap {
 pub mod overlap_refresh {
     pub use dynamo_scheduler::overlap_refresh::*;
 }
-pub mod policy;
 pub mod policy_config;
 pub mod policy_queue;
 #[cfg(test)]

@@ -46,7 +46,6 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }
-ordered-float = { workspace = true }
 once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"

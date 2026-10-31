@@ -39,8 +39,8 @@ types re-exported from the crate root.
 
 - `metrics`: Prometheus metrics for router internals
 - `runtime-protocols`: integration points with `dynamo-runtime`
-- `standalone-indexer`: standalone indexer, overlap, and shared-cache services
-  (`services::indexer`, `services::overlap`, `services::shared_cache`)
+- `standalone-indexer`: standalone indexer and overlap services
+  (`services::indexer`, `services::overlap`)
 - `standalone-selection`: standalone worker-selection service
   (`services::selection`); implies `standalone-indexer`
 - `standalone-slot-tracker`: standalone slot-tracker service
