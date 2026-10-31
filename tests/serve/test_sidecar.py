@@ -28,6 +28,7 @@ from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
     disaggregated_token_count_payload,
+    forced_tool_call_payloads,
     http_cancellation_payloads,
     kv_routing_payload,
     sglang_generate_cancellation_payloads,
@@ -86,6 +87,7 @@ CANCELLATION_CONTEXT_LEN = 4096
 def _aggregated_payloads(metrics: EngineMetrics):
     return [
         *chat_logprobs_and_structured_output_payloads(),
+        *forced_tool_call_payloads(),
         *http_cancellation_payloads(metrics, max_tokens=CANCELLATION_MAX_TOKENS),
     ]
 
@@ -179,6 +181,8 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
+            # The sidecar publishes this parser to the frontend in the model card.
+            "DYN_TOOL_CALL_PARSER": "hermes",
         },
         request_payloads=[
             *_aggregated_payloads(
@@ -207,6 +211,8 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "DYN_SGLANG_ENABLE_GENERATE": "1",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
+            # With a parser set, forced tool calls use SGLang's structural tags.
+            "DYN_TOOL_CALL_PARSER": "hermes",
         },
         request_payloads=[
             *_aggregated_payloads(
