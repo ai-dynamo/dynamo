@@ -37,7 +37,8 @@ pub trait ResponseMerger: Send + Sync {
     fn prefill_need(&self, request: &Value) -> PrefillNeed;
 
     /// Join the next streamed chunk onto the response so far. Fields without
-    /// a rule take `next`'s value.
+    /// a rule take `next`'s value; prompt-side fields take `next`'s value
+    /// unless it is empty.
     fn join_step(&self, joined: &mut Value, next: Value);
 
     /// Move prefill's prompt-side values into a decode response or chunk.
@@ -52,7 +53,9 @@ pub trait ResponseMerger: Send + Sync {
 pub enum JoinOp {
     /// Streamed chunks: earlier items or text, then later ones.
     Append,
-    /// P/D: prefill's value replaces decode's.
+    /// P/D: prefill's value replaces decode's. Streamed chunks: an empty
+    /// value keeps the earlier one, since an engine may report a prompt-side
+    /// value only once.
     TakePrefill,
     /// P/D: prefill's base64 bytes overwrite the start of decode's.
     OverlayBase64Prefix,
@@ -130,6 +133,17 @@ fn object<'a>(mut value: &'a mut Value, path: &[String]) -> Option<&'a mut Map<S
     value.as_object_mut()
 }
 
+/// Null, or an empty list, string or object.
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) => values.is_empty(),
+        Value::String(text) => text.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
 /// The field's value, inserting `null` first when the key is absent.
 fn slot<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Value {
     if !object.contains_key(key) {
@@ -163,13 +177,25 @@ impl ResponseMerger for RuleSet {
     }
 
     fn join_step(&self, joined: &mut Value, mut next: Value) {
-        for rule in self.rules.iter().filter(|rule| rule.op == JoinOp::Append) {
+        for rule in &self.rules {
+            if rule.op == JoinOp::OverlayBase64Prefix {
+                continue;
+            }
             let Some(head) = object(joined, &rule.parent).and_then(|o| o.remove(&rule.key)) else {
                 continue;
             };
             let Some(target) = object(&mut next, &rule.parent) else {
                 continue;
             };
+            if rule.op == JoinOp::TakePrefill {
+                if !is_empty(&head) {
+                    let tail = slot(target, &rule.key);
+                    if is_empty(tail) {
+                        *tail = head;
+                    }
+                }
+                continue;
+            }
             match (head, slot(target, &rule.key)) {
                 (Value::Array(mut head), Value::Array(tail)) => {
                     head.append(tail);
@@ -515,6 +541,39 @@ mod tests {
                 prop_assert_eq!(result, target);
             }
         }
+    }
+
+    #[test]
+    fn steps_keep_a_prompt_value_over_later_empty_ones() {
+        let join = |chunks: &[Value]| {
+            let mut assembler = ResponseAssembler::new(rules());
+            chunks
+                .iter()
+                .for_each(|chunk| assembler.push(chunk.clone()));
+            assembler.finish().unwrap()
+        };
+        // Reported once, then empty or absent: the reported value survives.
+        assert_eq!(
+            join(&[
+                json!({"m": {"prompt": [1, 2], "n": 1}}),
+                json!({"m": {"prompt": [], "n": 2}}),
+                json!({"m": {"n": 3}}),
+            ]),
+            json!({"m": {"prompt": [1, 2], "n": 3}})
+        );
+        // A later non-empty value is the current one.
+        assert_eq!(
+            join(&[
+                json!({"m": {"prompt": [1, 2]}}),
+                json!({"m": {"prompt": [3]}}),
+            ]),
+            json!({"m": {"prompt": [3]}})
+        );
+        // Without a reported value the last chunk's stays.
+        assert_eq!(
+            join(&[json!({"m": {"prompt": []}}), json!({"m": {}})]),
+            json!({"m": {}})
+        );
     }
 
     #[test]

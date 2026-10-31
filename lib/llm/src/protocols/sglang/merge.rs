@@ -5,6 +5,8 @@
 //!
 //! With incremental streaming, each chunk holds only the new part of `text`,
 //! `output_ids` and the output-side lists; the rest is the current full value.
+//! The Python server repeats input logprobs on every chunk; the Rust server
+//! sends them on the first chunk only, so later empty values keep them.
 //! In P/D, decode never runs the prompt: input logprobs come from prefill, and
 //! prefill's `routed_experts` rows replace decode's stale prompt rows
 //! (sgl-project/sglang#44002).
@@ -24,6 +26,9 @@
 //! - `python/sglang/srt/managers/scheduler_components/batch_result_processor.py`
 //!   (`_maybe_collect_routed_experts`) and `disaggregation/prefill.py`: which
 //!   server reports which `routed_experts` rows (`overlay_base64_prefix`).
+//! - `rust/sglang-server/src/api_server/core/frame.rs`: `CoreOutput::meta_info`
+//!   (which frames carry input logprobs) and `append_delta` (the Rust server's
+//!   own unary join keeps the last non-empty input logprobs).
 //!
 //! `components/src/dynamo/sglang/tests/test_sglang_generate_merge_contract.py`
 //! checks the file against the installed SGLang and fails on unclassified
@@ -112,6 +117,9 @@ mod tests {
         unary: Value,
         /// Aggregated incremental chunks.
         aggregated: Vec<Value>,
+        /// The Rust server's aggregated chunks: input logprobs on the first
+        /// only, then an empty `input_token_logprobs` and no other input lists.
+        rust: Vec<Value>,
         /// Decode's chunks: no input logprobs, stale routed-experts prompt rows.
         decode: Vec<Value>,
         /// Prefill's final response.
@@ -135,6 +143,12 @@ mod tests {
                 .enumerate()
                 .map(|(i, id)| json!([if i == 0 { Value::Null } else { json!(-(i as i64)) }, id, null]))
                 .collect();
+            // Top-k and requested-token rows; the first position has none.
+            let input_rows: Vec<Value> = input_logprobs
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| if i == 0 { Value::Null } else { json!([entry]) })
+                .collect();
             // Prefill reports the prompt rows; decode's copy of them is stale.
             let prompt_bytes = stale.len();
             let mut decode_experts = stale.clone();
@@ -154,6 +168,8 @@ mod tests {
                     "completion_tokens": end,
                     "finish_reason": if last { json!({"type": "length"}) } else { Value::Null },
                     "input_token_logprobs": input_logprobs,
+                    "input_top_logprobs": input_rows,
+                    "input_token_ids_logprobs": input_rows,
                     "output_token_logprobs": tokens.iter().map(|(id, _, lp)| json!([lp, id, null])).collect::<Vec<_>>(),
                 });
                 if last {
@@ -166,11 +182,27 @@ mod tests {
                 }));
                 start = end;
             }
+            let rust = aggregated
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let mut chunk = chunk.clone();
+                    if i > 0 {
+                        let meta = chunk["meta_info"].as_object_mut().unwrap();
+                        meta.insert("input_token_logprobs".into(), json!([]));
+                        meta.remove("input_top_logprobs");
+                        meta.remove("input_token_ids_logprobs");
+                    }
+                    chunk
+                })
+                .collect();
             let decode = aggregated
                 .iter()
                 .map(|chunk| {
                     let mut chunk = chunk.clone();
-                    chunk["meta_info"]["input_token_logprobs"] = json!([]);
+                    for key in ["input_token_logprobs", "input_top_logprobs", "input_token_ids_logprobs"] {
+                        chunk["meta_info"][key] = json!([]);
+                    }
                     if chunk["meta_info"].get("routed_experts").is_some() {
                         chunk["meta_info"]["routed_experts"] = json!(STANDARD.encode(&decode_experts));
                     }
@@ -189,10 +221,12 @@ mod tests {
                     "completion_tokens": 1,
                     "finish_reason": {"type": "length"},
                     "input_token_logprobs": input_logprobs,
+                    "input_top_logprobs": input_rows,
+                    "input_token_ids_logprobs": input_rows,
                     "routed_experts": STANDARD.encode(&experts[..prompt_bytes]),
                 },
             });
-            Case { unary, aggregated, decode, prefill }
+            Case { unary, aggregated, rust, decode, prefill }
         }
     }
 
@@ -213,6 +247,13 @@ mod tests {
         #[test]
         fn aggregated_chunks_join_into_the_unary_response(case in case()) {
             prop_assert_eq!(unary(None, &case.aggregated), case.unary);
+        }
+
+        /// The Rust server's chunks join into the same response: the first
+        /// chunk's input logprobs survive the later empty ones.
+        #[test]
+        fn rust_chunks_join_into_the_unary_response(case in case()) {
+            prop_assert_eq!(unary(None, &case.rust), case.unary);
         }
 
         /// P/D returns what aggregated serving returns, unary and streamed:
