@@ -2008,6 +2008,7 @@ impl<
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
+                    log_fields: selected.selection.log_fields,
                 },
             })
         })
@@ -2067,6 +2068,7 @@ impl<
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
+            log_fields: selected.selection.log_fields,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2517,6 +2519,7 @@ mod tests {
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
                 kv_transfer_source: None,
+                log_fields: None,
             })
         }
     }
