@@ -898,6 +898,9 @@ navigation:
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
+              - page: Cosmos3 Nano Reasoner
+                path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
+                slug: cosmos3-nano-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra
