@@ -6,15 +6,16 @@
 //! `--selection-core` selects through the embedded router core instead of
 //! the Global Router's own selectors, with each pool as one of the core's
 //! workers and every `--router-policy` as one of its plugins. With
-//! `--replica-sync-port` and `--peer`, the core shares its requests in
-//! flight and session pins with the other Global Frontends:
+//! `--replica-sync`, the core shares its requests in flight and session
+//! pins with the other Global Frontends (`--peer`) over its ZMQ mesh,
+//! publishing on `--replica-sync-port`:
 //!
 //! ```bash
 //! cargo run -p dynamo-global-frontend -- --port 8000 --selection-core \
 //!     --router-policy affinity --region ohio \
 //!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000 \
 //!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051 \
-//!     --replica-sync-port 5600 --peer tcp://10.42.1.5:5600
+//!     --replica-sync --replica-sync-port 5600 --peer tcp://10.42.1.5:5600
 //! ```
 
 use std::collections::HashSet;
@@ -96,13 +97,17 @@ struct Args {
     /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
-    /// `--selection-core`: the port this replica publishes its requests in
-    /// flight and session pins on, for the other Global Frontends.
-    #[arg(long)]
+    /// Share this replica's requests in flight and session pins with the
+    /// other Global Frontends over the router core's ZMQ mesh. Needs
+    /// `--selection-core` and `--replica-sync-port`.
+    #[arg(long, requires_all = ["selection_core", "replica_sync_port"])]
+    replica_sync: bool,
+    /// `--replica-sync`: the port this replica publishes on.
+    #[arg(long, requires = "replica_sync")]
     replica_sync_port: Option<u16>,
-    /// `--selection-core`: another Global Frontend's `--replica-sync-port`
+    /// `--replica-sync`: another Global Frontend's `--replica-sync-port`
     /// endpoint, as `tcp://host:port`. Repeat the flag for each peer.
-    #[arg(long = "peer", value_parser = parse_peer, requires = "replica_sync_port")]
+    #[arg(long = "peer", value_parser = parse_peer, requires = "replica_sync")]
     peers: Vec<String>,
 }
 
@@ -189,7 +194,9 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
 }
 
 fn replica_sync(args: &Args) -> Option<ReplicaSync> {
-    args.replica_sync_port.map(|port| ReplicaSync {
+    // The parser makes `--replica-sync` bring its port.
+    let port = args.replica_sync_port.filter(|_| args.replica_sync)?;
+    Some(ReplicaSync {
         port,
         peers: args.peers.clone(),
     })
@@ -239,9 +246,6 @@ async fn main() -> Result<()> {
     }
     if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
         tracing::warn!("--pool-relay is used only by --router-policy affinity");
-    }
-    if !args.selection_core && args.replica_sync_port.is_some() {
-        bail!("--replica-sync-port needs --selection-core");
     }
 
     let shutdown = CancellationToken::new();
@@ -391,17 +395,20 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_current_and_the_core_takes_peers() {
+    fn the_core_and_replica_sync_are_off_unless_asked_for() {
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
-        assert_eq!(args.selection, SelectionPath::Current);
+        assert!(!args.selection_core);
+        assert!(!args.replica_sync);
+        assert_eq!(replica_sync(&args), None);
+        let args = Args::try_parse_from(["global-frontend", pool, "--selection-core"]).unwrap();
         assert_eq!(replica_sync(&args), None);
 
         let args = Args::try_parse_from([
             "global-frontend",
             pool,
-            "--selection",
-            "core",
+            "--selection-core",
+            "--replica-sync",
             "--replica-sync-port",
             "5600",
             "--peer",
@@ -422,12 +429,18 @@ mod tests {
             })
         );
 
-        // A peer needs the port this replica publishes on, and the mesh
-        // dials tcp:// endpoints only.
-        assert!(
-            Args::try_parse_from(["global-frontend", pool, "--peer", "tcp://10.0.0.2:5600"])
-                .is_err()
-        );
+        // Replica sync needs the core and the port this replica publishes
+        // on; its port and peers need replica sync.
+        for rejected in [
+            &["--replica-sync", "--replica-sync-port", "5600"][..],
+            &["--selection-core", "--replica-sync"],
+            &["--selection-core", "--replica-sync-port", "5600"],
+            &["--selection-core", "--peer", "tcp://10.0.0.2:5600"],
+        ] {
+            let args = [&["global-frontend", pool][..], rejected].concat();
+            assert!(Args::try_parse_from(&args).is_err(), "{rejected:?}");
+        }
+        // The mesh dials tcp:// endpoints only.
         assert!(parse_peer("http://10.0.0.2:5600").is_err());
         assert!(parse_peer("tcp://10.0.0.2").is_err());
         assert!(parse_peer("tcp://:5600").is_err());
