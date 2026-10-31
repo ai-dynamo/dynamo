@@ -2510,6 +2510,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tracing",
  "url",
 ]
 
@@ -2678,6 +2680,7 @@ dependencies = [
  "dynamo-bench",
  "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-discovery-client",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",

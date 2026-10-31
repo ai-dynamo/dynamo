@@ -39,6 +39,7 @@ impl PoolRelay {
         tuning=None,
         sources_file=None,
         connection_revision=None,
+        global_discovery_url=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -57,6 +58,7 @@ impl PoolRelay {
         tuning: Option<std::collections::HashMap<String, u64>>,
         sources_file: Option<String>,
         connection_revision: Option<String>,
+        global_discovery_url: Option<String>,
     ) -> PyResult<Self> {
         if namespace_filter.is_some() && namespaces.is_some() {
             return Err(PyValueError::new_err(
@@ -231,6 +233,12 @@ impl PoolRelay {
                 },
                 producer,
                 transport,
+                global_discovery_url: global_discovery_url
+                    .map(|url| url.parse())
+                    .transpose()
+                    .map_err(|error| {
+                        PyValueError::new_err(format!("invalid global_discovery_url: {error}"))
+                    })?,
             },
             inner: Arc::new(OnceCell::new()),
         })

@@ -2131,6 +2131,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-client"
+version = "1.7.0"
+dependencies = [
+ "dynamo-global-common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
@@ -2215,6 +2240,7 @@ dependencies = [
  "dialoguer",
  "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-discovery-client",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",

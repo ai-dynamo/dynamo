@@ -9,6 +9,10 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
+/// The most of an error response's body a [`DiscoveryClientError::Status`]
+/// keeps.
+const MAX_ERROR_BODY: usize = 1024;
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DiscoveryClientError {
@@ -23,6 +27,8 @@ pub enum DiscoveryClientError {
         #[source]
         source: reqwest::Error,
     },
+    /// `body` keeps at most the first 1 KiB of the response, so a proxy's
+    /// error page does not fill logs or health reports.
     #[error("{url} returned {status}: {body}")]
     Status {
         url: Url,
@@ -111,10 +117,12 @@ impl GlobalDiscoveryClient {
         if status.is_success() {
             return Ok(response);
         }
+        let mut body = response.text().await.unwrap_or_default();
+        body.truncate(body.floor_char_boundary(MAX_ERROR_BODY));
         Err(DiscoveryClientError::Status {
             url: url.clone(),
             status,
-            body: response.text().await.unwrap_or_default(),
+            body,
         })
     }
 }

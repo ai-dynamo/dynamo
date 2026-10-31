@@ -53,6 +53,7 @@ class PoolRelayCliConfig:
     tuning: tuple[tuple[str, int], ...]
     sources_file: str | None = None
     connection_revision: str | None = None
+    global_discovery_url: str | None = None
 
 
 class RelayShutdownWaiter(Protocol):
@@ -163,6 +164,10 @@ def parse_args(
     parser.add_argument("--expected-unique-blocks", type=_positive_int)
 
     parser.add_argument("--bind", help="Plaintext WAN gRPC listen address")
+    parser.add_argument(
+        "--global-discovery-url",
+        help="Global Discovery Service root to read Global Router replicas from",
+    )
 
     parsed = parser.parse_args(argv)
     cluster_id = _string_value(parsed.cluster_id, environment, "DYN_CLUSTER_ID")
@@ -275,6 +280,12 @@ def parse_args(
     if bind is not None and not bind.strip():
         parser.error("--bind must not be empty")
 
+    global_discovery_url = _string_value(
+        parsed.global_discovery_url, environment, "DYN_RELAY_GLOBAL_DISCOVERY_URL"
+    )
+    if global_discovery_url is not None and not global_discovery_url.strip():
+        parser.error("--global-discovery-url must not be empty")
+
     tuning: list[tuple[str, int]] = []
     for key in TUNING_KEYS:
         environment_name = f"DYN_RELAY_{key.upper()}"
@@ -304,6 +315,7 @@ def parse_args(
         tuning=tuple(tuning),
         sources_file=sources_file,
         connection_revision=connection_revision,
+        global_discovery_url=global_discovery_url,
     )
 
 

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,12 +11,13 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use dynamo_global_discovery_client::{
-    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
-    PoolRegistration, RouterReplica, RouterReplicaId,
+    Capacity, DiscoveryClientError, Freshness, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
+    PoolRegistration, RouterCache, RouterReplica, RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 #[derive(Clone)]
@@ -24,6 +26,8 @@ struct FakeService(Arc<Mutex<FakeState>>);
 struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
+    /// The body served with a non-200 `routers_status`.
+    error_body: String,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
 }
@@ -33,6 +37,7 @@ impl FakeService {
         Self(Arc::new(Mutex::new(FakeState {
             routers_status: StatusCode::OK,
             routers_body: routers_body.to_owned(),
+            error_body: "not synced".to_owned(),
             registrations: Vec::new(),
         })))
     }
@@ -60,7 +65,7 @@ async fn serve(app: axum::Router) -> std::net::SocketAddr {
 async fn serve_routers(State(fake): State<FakeService>) -> Response {
     let state = fake.0.lock().unwrap();
     if state.routers_status != StatusCode::OK {
-        return (state.routers_status, "not synced").into_response();
+        return (state.routers_status, state.error_body.clone()).into_response();
     }
     (
         [(header::CONTENT_TYPE, "application/json")],
@@ -152,6 +157,24 @@ async fn reports_a_non_2xx_status() {
 }
 
 #[tokio::test]
+async fn keeps_only_the_start_of_a_long_error_body() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    {
+        let mut state = fake.0.lock().unwrap();
+        state.routers_status = StatusCode::BAD_GATEWAY;
+        // Byte 1024 falls inside an "é", so the cut must step back one byte.
+        state.error_body = format!("a{}", "é".repeat(2000));
+    }
+    let client = fake.client().await;
+
+    let error = client.routers().await.unwrap_err();
+    let DiscoveryClientError::Status { body, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(body, &format!("a{}", "é".repeat(511)));
+}
+
+#[tokio::test]
 async fn a_cut_off_body_is_a_request_error() {
     // The body ends before its Content-Length. That is a transport failure,
     // not a change in the JSON shape, so it must not be reported as `Decode`.
@@ -222,4 +245,47 @@ async fn a_redirect_is_an_error() {
         matches!(&error, DiscoveryClientError::Status { status, .. } if *status == StatusCode::MOVED_PERMANENTLY),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn router_cache_follows_the_service() {
+    let fake = FakeService::new(
+        r#"{ "routers": [{ "replica": "aws-ohio/global-router-0", "url": "http://10.0.12.7:50061" }] }"#,
+    );
+    let cache = RouterCache::spawn(
+        fake.client().await,
+        Duration::from_millis(50),
+        CancellationToken::new(),
+    );
+    let mut routers = cache.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), routers.changed())
+        .await
+        .expect("the cache did not read the routers")
+        .unwrap();
+    assert_eq!(
+        *routers.borrow_and_update(),
+        HashSet::from([replica(
+            "aws-ohio/global-router-0",
+            "http://10.0.12.7:50061"
+        )])
+    );
+    assert_eq!(cache.freshness(), Freshness::Current);
+
+    // A failing service keeps the routers and reports why.
+    fake.0.lock().unwrap().routers_status = StatusCode::SERVICE_UNAVAILABLE;
+    let reason = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Freshness::Stale(reason) = cache.freshness() {
+                return reason;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cache did not go stale");
+    assert!(
+        reason.contains("/discovery/routers returned 503"),
+        "{reason}"
+    );
+    assert_eq!(routers.borrow().len(), 1);
 }
