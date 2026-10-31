@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in TP1 retained-GPU cache with isolated CUDA IPC or MNNVL delivery.
+"""Opt-in retained-GPU cache with isolated CUDA IPC or MNNVL delivery.
 
 The primary cache uses vLLM's existing ref-counted cache policy and scheduling
 contract, but its storage is a CUDA allocation, never a host mmap. Local stores
@@ -19,10 +19,9 @@ import uuid
 from dataclasses import replace
 
 import msgspec
-from kvcr import KVCR, KVCRBindings
+from kvcr import KVCR, KVCRBindings, ZmqPeerControlChannel
 from kvcr.config import KVCRBackendConfigs, KVCRConfig, RemoteFWGPUOptions
-from kvcr.control_channels import ZmqPeerControlChannel
-from kvcr.types import RegionDescriptor, TransferError
+from kvcr.types import MemoryRef, RegionDescriptor, TransferError
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -30,7 +29,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.v1.kv_offload.base import OffloadingEvent, OffloadingSpec
+from vllm.v1.kv_offload.base import (
+    OffloadingEvent,
+    OffloadingSpec,
+    RequestOffloadingContext,
+)
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.base import JobResult, SecondaryTierManager
@@ -47,7 +50,13 @@ from vllm.v1.kv_offload.tiering.manager import (
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
-from .gpu_memory import GPUCacheRegion, GPUCacheWorker, GPUFabricCacheRegion
+from .gpu_layout import parallel_layout_domain
+from .gpu_memory import (
+    GPUCacheRegion,
+    GPUCacheWorker,
+    GPUFabricCacheRegion,
+    GPUMultiRankCacheRegion,
+)
 
 logger = logging.getLogger(__name__)
 _RETAINED_FAILED_GPU_MANAGERS = []
@@ -131,6 +140,31 @@ class GPUPrimaryManager(CPUOffloadingManager):
         self.region.cleanup()
 
 
+class _GPUFrameworkPinAdapter(_FrameworkPinAdapter):
+    """Pin one logical slot once, then expose every tensor-parallel part."""
+
+    def _resolve_pin(self, parent, keys):
+        result = super()._resolve_pin(parent, keys)
+        if result is None:
+            return None
+        pin_handle, descriptors = result
+        try:
+            expanded = {}
+            for key, refs in descriptors.items():
+                if refs is None:
+                    expanded[key] = None
+                    continue
+                if len(refs) != 1:
+                    raise ValueError("Expected one logical retained-GPU slot")
+                expanded[key] = self._tier._make_descriptors(refs[0].element_index)
+            return pin_handle, expanded
+        except BaseException:
+            # The inherited adapter has already pinned the primary slot. Its
+            # completion must be returned even when multipart validation fails.
+            self.release_pin(pin_handle)
+            raise
+
+
 class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
     """Transport-only secondary over the retained CUDA primary cache."""
 
@@ -149,7 +183,9 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
             )
         ports = config.get("control_ports")
         if not isinstance(ports, list) or len(ports) != 1 or type(ports[0]) is not int:
-            raise ValueError("GPU KVCR TP1 requires exactly one integer control port")
+            raise ValueError(
+                "GPU KVCR requires exactly one integer control port per engine"
+            )
         if not 1 <= ports[0] <= 65535:
             raise ValueError("GPU KVCR control port is out of range")
         if config.get("router_capabilities") != ["router_hint_gpu_direct"]:
@@ -179,13 +215,23 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
                 gpu_transport="mnnvl", fabric_domain=spec.fabric_domain
             )
         self._key_adapter = _VllmKeyAdapter()
-        self._framework_pin_adapter = _FrameworkPinAdapter(self)
+        self._framework_pin_adapter = _GPUFrameworkPinAdapter(self)
         self._inventory_events = []
         self._finished_jobs = []
         self._jobs_by_op = {}
         self._local_dram_mmap = None
         self._hazard_ops = set()
         self._region = region
+        banks = getattr(region, "banks", (region,))
+        self._part_labels = (
+            tuple(f":rank{rank}" for rank in range(len(banks)))
+            if len(banks) > 1
+            else ("",)
+        )
+        if len(banks) != spec.config.parallel.world_size:
+            raise ValueError("Retained GPU bank count differs from tensor parallelism")
+        if any(bank.shape != (spec.num_chunks, spec.row_bytes) for bank in banks):
+            raise ValueError("Retained GPU rank banks have different row geometry")
         control = ZmqPeerControlChannel(
             config.get("control_host", "0.0.0.0"),
             ports[0],
@@ -197,7 +243,7 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
         try:
             self._kvcr = KVCR(
                 KVCRConfig(
-                    pool_layouts=[("", region.shape[1])],
+                    pool_layouts=[("", spec.row_bytes)],
                     enable_telemetry=True,
                     operation_timeout_ms=config.get("operation_timeout_ms", 3000),
                     abandon_timeout_ms=config.get("abandon_timeout_ms", 5000),
@@ -218,11 +264,13 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
                     framework_regions=[
                         RegionDescriptor(
                             mem_type="VRAM",
-                            device_Id=region.tensor.device.index,
-                            addr=region.tensor.data_ptr(),
-                            count=region.shape[0],
-                            size=region.shape[1],
+                            device_Id=bank.tensor.device.index,
+                            addr=bank.tensor.data_ptr(),
+                            count=bank.shape[0],
+                            size=bank.shape[1],
+                            label=label,
                         )
+                        for label, bank in zip(self._part_labels, banks, strict=True)
                     ],
                     remote_fw_gpu=RemoteFWGPUOptions(**remote_options),
                 ),
@@ -257,6 +305,44 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
         # The primary already owns the completed GPU copy. Do not deposit to
         # any KVCR-managed host/disk pool or make an additional payload copy.
         self._finished_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+
+    def on_new_request(self, req_context):
+        if req_context.kv_hints is not None:
+            self._kvcr.submit_hint(
+                request_id=req_context.req_id, hints=req_context.kv_hints
+            )
+        return RequestOffloadingContext()
+
+    def _make_descriptors(self, chunk_id):
+        if type(chunk_id) is not int or not 0 <= chunk_id < self._region.shape[0]:
+            raise ValueError("Retained GPU slot is outside the registered banks")
+        return [
+            MemoryRef(
+                end_point_name=self._kvcr.config.nixl_agent_name,
+                element_index=chunk_id,
+                label=label,
+            )
+            for label in self._part_labels
+        ]
+
+    def submit_load(self, job_metadata):
+        # KVCR owns one operation for all rank parts of each key. A partial
+        # transfer cannot publish a logical block or release its primary slot.
+        blocks = {
+            self._key_adapter.encode(key): self._make_descriptors(int(chunk_id))
+            for key, chunk_id in zip(
+                job_metadata.keys, job_metadata.chunk_ids, strict=True
+            )
+        }
+        if not blocks:
+            self._finished_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
+        op_handle = self._kvcr.deliver(
+            blocks, request_id=job_metadata.req_context.req_id
+        )
+        self._jobs_by_op[op_handle] = (job_metadata.job_id, len(blocks), True, set())
 
     def shutdown(self):
         try:
@@ -361,12 +447,37 @@ class GPUOffloadingSpec(OffloadingSpec):
 
     def __init__(self, config):
         super().__init__(config)
+        parallel = config.parallel
+        world_size = parallel.world_size
         if (
-            config.parallel.world_size != 1
+            type(world_size) is not int
+            or world_size not in (1, 2)
+            or getattr(parallel, "tp_size", 1) != world_size
+            or any(
+                getattr(parallel, name, 1) != 1
+                for name in ("pp_size", "pcp_size", "dcp_size")
+            )
             or config.canonical_layout
             or config.replicated_layout
         ):
-            raise ValueError("Direct GPU KV cache currently requires exact-layout TP1")
+            raise ValueError(
+                "Direct GPU KV cache requires raw-layout TP1 or TP2 without PP/CP"
+            )
+        self.gpu_rank_devices = self.extra_config.get("gpu_rank_devices")
+        if world_size > 1 and (
+            not isinstance(self.gpu_rank_devices, list)
+            or len(self.gpu_rank_devices) != world_size
+            or any(
+                type(device) is not int or device < 0
+                for device in self.gpu_rank_devices
+            )
+            or len(set(self.gpu_rank_devices)) != world_size
+        ):
+            raise ValueError("TP2 requires an explicit unique gpu_rank_devices mapping")
+        if world_size > 1 and getattr(parallel, "data_parallel_size", 1) != 1:
+            raise ValueError(
+                "Retained GPU TP2 currently requires data parallel size one"
+            )
         if (
             not self.kv_events_config.enable_kv_cache_events
             or not self.kv_events_config.self_describing_kv_events
@@ -399,7 +510,8 @@ class GPUOffloadingSpec(OffloadingSpec):
         self.row_bytes = config.worker_kv_bytes_per_block * self.blocks_per_chunk
         if self.row_bytes <= 0:
             raise ValueError("GPU KV row geometry must be known at startup")
-        self.num_chunks = capacity // self.row_bytes
+        self.logical_row_bytes = world_size * self.row_bytes
+        self.num_chunks = capacity // self.logical_row_bytes
         if self.num_chunks <= 0:
             raise ValueError("GPU cache budget cannot hold one full KV row")
         self.tiers = self.extra_config.get("secondary_tiers")
@@ -422,11 +534,18 @@ class GPUOffloadingSpec(OffloadingSpec):
             or tuple(tls) != ("cuda_ipc", "tcp", "self")
         ):
             raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
+        if world_size > 1:
+            # Raw TP shards are not interchangeable with a TP1 row. KVCR also
+            # validates each labeled part's byte geometry before starting DMA.
+            if self.tiers[0].get("compatibility_domain") != domain:
+                raise ValueError("TP2 tier must match its certified layout domain")
+            self.base_domain = parallel_layout_domain(domain, world_size)
         self._manager = self._worker = None
 
     def _resolve_gpu_transport(self):
         if self._transport_resolved:
             return
+        domain = self.base_domain
         if self.gpu_transport == "mnnvl":
             # This optional GPU profile is the only path that initializes the
             # fabric helper. Default/CPU capability publication stays untouched.
@@ -439,22 +558,34 @@ class GPUOffloadingSpec(OffloadingSpec):
                 )
             self.fabric_domain = identity.domain
             domain = fabric.effective_domain(self.base_domain, identity.domain)
-            self.extra_config = dict(
-                self.extra_config, router_hint_transfer_domain=domain
-            )
-            self.tiers = [dict(self.tiers[0], compatibility_domain=domain)]
+        self.extra_config = dict(self.extra_config, router_hint_transfer_domain=domain)
+        self.tiers = [dict(self.tiers[0], compatibility_domain=domain)]
         self._transport_resolved = True
 
     def get_manager(self):
         if self._manager is None:
             self._resolve_gpu_transport()
-            if self.gpu_transport == "mnnvl":
+            if self.config.parallel.world_size > 1:
+                region = GPUMultiRankCacheRegion(
+                    self.config.engine_id,
+                    self.num_chunks,
+                    self.row_bytes,
+                    self.base_domain,
+                    gpu_rank_devices=self.gpu_rank_devices,
+                    gpu_transport=self.gpu_transport,
+                )
+            elif self.gpu_transport == "mnnvl":
                 region = GPUFabricCacheRegion(
                     self.config.engine_id,
                     self.num_chunks,
                     self.row_bytes,
                     self.base_domain,
                 )
+            else:
+                region = GPUCacheRegion(
+                    self.config.engine_id, self.num_chunks, self.row_bytes
+                )
+            if self.gpu_transport == "mnnvl":
                 if (
                     region.fabric_domain != self.fabric_domain
                     or region.compatibility_domain
@@ -464,10 +595,6 @@ class GPUOffloadingSpec(OffloadingSpec):
                     raise RuntimeError(
                         "Observed GPU fabric changed before KVCR registration"
                     )
-            else:
-                region = GPUCacheRegion(
-                    self.config.engine_id, self.num_chunks, self.row_bytes
-                )
             primary = GPUPrimaryManager(self, region)
             tier = GPUKVCRSecondaryTierManager(self, region, self.tiers[0])
             self._manager = GPUTieringManager(primary, tier)

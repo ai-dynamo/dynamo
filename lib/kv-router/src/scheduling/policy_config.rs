@@ -4,12 +4,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::sequences::WorkerLoadProjection;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::RawWorkerSelectionConfig;
@@ -41,8 +46,8 @@ pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
     pub quantum: usize,
-    pub prefill_busy_threshold: Option<usize>,
-    pub prefill_busy_threshold_frac: Option<f64>,
+    /// The limits this class waits on.
+    pub busy_thresholds: BusyThresholds,
     pub request_queue_limit_per_worker: Option<usize>,
     pub raw_isl_token_queue_limit_per_worker: Option<usize>,
     pub cached_token_queue_limit_per_worker: Option<usize>,
@@ -50,7 +55,7 @@ pub struct PolicyClassConfig {
 
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
-        self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+        self.busy_thresholds.is_configured()
     }
 
     /// Any zero per-worker limit means `queue_rejection` rejects every queued
@@ -61,15 +66,129 @@ impl PolicyClassConfig {
             || self.raw_isl_token_queue_limit_per_worker == Some(0)
             || self.cached_token_queue_limit_per_worker == Some(0)
     }
+}
 
-    pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
-        let absolute_busy = self
+/// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
+/// past them, and rejects the request when no eligible worker remains.
+pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync + 'static>;
+
+/// Per-rank load limits. A rank is full once its booked load passes any configured limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BusyThresholds {
+    /// Booked prefill tokens above which a rank is full.
+    // TODO(v1.7): Remove the absolute threshold; use `prefill_busy_threshold_frac`.
+    pub prefill_busy_threshold: Option<usize>,
+    /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
+    /// rank does not report it, the fraction is taken of
+    /// [`DEFAULT_MAX_BATCHED_TOKENS`](crate::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS).
+    pub prefill_busy_threshold_frac: Option<f64>,
+    /// Fraction of the rank's `total_kv_blocks` above which the KV blocks its active
+    /// requests hold make it full. A rank that does not report `total_kv_blocks` skips it.
+    pub decode_busy_threshold_frac: Option<f64>,
+}
+
+impl BusyThresholds {
+    /// Whether any limit is set.
+    pub fn is_configured(&self) -> bool {
+        self.prefill_busy_threshold.is_some()
+            || self.prefill_busy_threshold_frac.is_some()
+            || self.decode_busy_threshold_frac.is_some()
+    }
+
+    /// Whether a rank with this `LOAD` row and capacity is within every configured limit.
+    pub fn has_room(&self, load: &WorkerLoadInput, capacity: WorkerCapacity) -> bool {
+        let tokens = load.active_prefill_tokens();
+        let prefill_budget = capacity.prefill_budget();
+        let absolute_full = self
             .prefill_busy_threshold
-            .is_some_and(|threshold| active_tokens > threshold);
-        let fractional_busy = self.prefill_busy_threshold_frac.is_some_and(|threshold| {
-            (active_tokens as f64) > threshold * (max_batched_tokens as f64)
-        });
-        absolute_busy || fractional_busy
+            .is_some_and(|threshold| tokens > threshold);
+        let fractional_full = self
+            .prefill_busy_threshold_frac
+            .is_some_and(|threshold| (tokens as f64) > threshold * (prefill_budget as f64));
+        let decode_full = self
+            .decode_busy_threshold_frac
+            .zip(capacity.total_kv_blocks())
+            .is_some_and(|(threshold, total_kv_blocks)| {
+                (load.active_decode_blocks() as f64) > threshold * (total_kv_blocks as f64)
+            });
+        !(absolute_full || fractional_full || decode_full)
+    }
+
+    /// Whether this rank's `LOAD` row exceeds any configured limit. A rank without a
+    /// projection counts as idle.
+    pub fn rank_is_full(
+        &self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
+        !self.has_room(&load, capacity)
+    }
+
+    /// Whether no configured rank of `worker_id` has room, judged on the `LOAD` rows in `loads`.
+    pub fn worker_is_full<C: WorkerConfigLike>(
+        &self,
+        worker_id: WorkerId,
+        config: &C,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        let capacity = WorkerCapacity::of(config);
+        let start = config.data_parallel_start_rank();
+        let end = start.saturating_add(config.data_parallel_size());
+        (start..end).all(|dp_rank| {
+            self.rank_is_full(WorkerWithDpRank::new(worker_id, dp_rank), capacity, loads)
+        })
+    }
+}
+
+/// Ranks past a set of busy thresholds, counted per worker while a request's load is
+/// projected. Only a worker with at least one full rank has an entry, so the map stays empty
+/// while no worker is near its limits and selection pays nothing to consult it.
+#[derive(Debug, Default)]
+pub(crate) struct FullRankCounts {
+    limits: BusyThresholds,
+    full_ranks: FxHashMap<WorkerId, u32>,
+}
+
+impl FullRankCounts {
+    /// Start a pass judged against `limits`, forgetting the previous pass.
+    pub(crate) fn reset(&mut self, limits: BusyThresholds) {
+        self.limits = limits;
+        self.full_ranks.clear();
+    }
+
+    /// Forget what the current pass recorded; it starts over from the first rank.
+    pub(crate) fn clear(&mut self) {
+        self.full_ranks.clear();
+    }
+
+    /// Judge one rank's projected load against the limits and count it when it has no room.
+    #[inline]
+    pub(crate) fn record(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        projection: &WorkerLoadProjection,
+    ) {
+        if !self
+            .limits
+            .has_room(&WorkerLoadInput::from_projection(*projection), capacity)
+        {
+            *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.full_ranks.is_empty()
+    }
+
+    /// Whether every one of the worker's `dp_size` ranks was counted full.
+    #[inline]
+    pub(crate) fn worker_is_full(&self, worker_id: WorkerId, dp_size: u32) -> bool {
+        self.full_ranks
+            .get(&worker_id)
+            .is_some_and(|&full| full >= dp_size)
     }
 }
 
@@ -146,8 +265,11 @@ impl PolicyProfile {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
             quantum: 1,
-            prefill_busy_threshold: None,
-            prefill_busy_threshold_frac: router_queue_threshold,
+            busy_thresholds: BusyThresholds {
+                prefill_busy_threshold: None,
+                prefill_busy_threshold_frac: router_queue_threshold,
+                decode_busy_threshold_frac: None,
+            },
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,
             cached_token_queue_limit_per_worker: None,
@@ -441,6 +563,7 @@ struct RawPolicyClassConfig {
     quantum: usize,
     prefill_busy_threshold: Option<usize>,
     prefill_busy_threshold_frac: Option<f64>,
+    decode_busy_threshold_frac: Option<f64>,
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
@@ -589,14 +712,19 @@ fn resolve_policy_class(
             raw.name
         )));
     }
-    if raw
-        .prefill_busy_threshold_frac
-        .is_some_and(|value| !value.is_finite() || value < 0.0)
-    {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} prefill_busy_threshold_frac must be finite and non-negative",
-            raw.name
-        )));
+    for (field, value) in [
+        (
+            "prefill_busy_threshold_frac",
+            raw.prefill_busy_threshold_frac,
+        ),
+        ("decode_busy_threshold_frac", raw.decode_busy_threshold_frac),
+    ] {
+        if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err(RouterPolicyConfigError::Validation(format!(
+                "{location} policy class {:?} {field} must be finite and non-negative",
+                raw.name
+            )));
+        }
     }
 
     let binding = match (raw.policy_family.as_deref(), raw.cache_bucket.as_deref()) {
@@ -622,13 +750,22 @@ fn resolve_policy_class(
             )));
         }
     };
+    if raw.prefill_busy_threshold.is_some() {
+        tracing::warn!(
+            policy_class = %raw.name,
+            "prefill_busy_threshold is deprecated and will be removed in v1.7; use prefill_busy_threshold_frac"
+        );
+    }
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
             quantum: raw.quantum,
-            prefill_busy_threshold: raw.prefill_busy_threshold,
-            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+            busy_thresholds: BusyThresholds {
+                prefill_busy_threshold: raw.prefill_busy_threshold,
+                prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+                decode_busy_threshold_frac: raw.decode_busy_threshold_frac,
+            },
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -714,6 +851,14 @@ pub(crate) fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequences::WorkerLoadProjection;
+
+    fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
+        WorkerLoadInput::from_projection(WorkerLoadProjection {
+            active_prefill_tokens,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn worker_selection_only_config_preserves_parameter_mapping() {
@@ -920,7 +1065,13 @@ models:
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
         assert_eq!(exact.default_class().name, "model-cached");
-        assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
+        assert_eq!(
+            exact
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            None
+        );
         assert!(!exact.default_class().queueing_enabled());
         assert!(
             exact
@@ -942,8 +1093,92 @@ models:
 
         let unmatched = config.resolve_profile(Some("other"), Some(3.0), RouterQueuePolicy::Fcfs);
         assert_eq!(unmatched.default_class().name, "root-default");
-        assert_eq!(unmatched.default_class().prefill_busy_threshold, Some(100));
-        assert_eq!(unmatched.default_class().prefill_busy_threshold_frac, None);
+        assert_eq!(
+            unmatched
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold,
+            Some(100)
+        );
+        assert_eq!(
+            unmatched
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            None
+        );
+    }
+
+    #[test]
+    fn has_room_without_limits_or_reported_budget() {
+        let mut limits = BusyThresholds::default();
+        assert!(!limits.is_configured());
+        assert!(limits.has_room(&prefill_load(usize::MAX), WorkerCapacity::default()));
+
+        // An unreported budget is taken as DEFAULT_MAX_BATCHED_TOKENS.
+        limits.prefill_busy_threshold_frac = Some(0.5);
+        let half_default =
+            (crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS / 2) as usize;
+        assert!(limits.has_room(&prefill_load(half_default), WorkerCapacity::default()));
+        assert!(!limits.has_room(&prefill_load(half_default + 1), WorkerCapacity::default()));
+    }
+
+    #[test]
+    fn decode_limit_bounds_held_kv_blocks() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: decode-bound
+    policy_family: standard
+    cache_bucket: all
+    quantum: 4
+    decode_busy_threshold_frac: 0.5
+"#,
+        )
+        .unwrap();
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        let class = profile.default_class();
+        assert!(class.queueing_enabled());
+
+        let limits = class.busy_thresholds;
+        let held = |active_decode_blocks| {
+            WorkerLoadInput::from_projection(WorkerLoadProjection {
+                active_decode_blocks,
+                // The incoming request's blocks do not count toward the limit.
+                additional_active_blocks: 1_000,
+                ..Default::default()
+            })
+        };
+        let kv = |total_kv_blocks| WorkerCapacity::new(None, total_kv_blocks);
+        assert!(limits.has_room(&held(50), kv(Some(100))));
+        assert!(!limits.has_room(&held(51), kv(Some(100))));
+        // An unreported KV capacity skips the decode limit.
+        assert!(limits.has_room(&held(1_000_000), kv(None)));
+
+        let invalid = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: decode-bound
+    policy_family: standard
+    cache_bucket: all
+    quantum: 4
+    decode_busy_threshold_frac: -0.1
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            invalid
+                .to_string()
+                .contains("decode_busy_threshold_frac must be finite and non-negative")
+        );
     }
 
     #[test]
@@ -968,14 +1203,19 @@ models:
         .unwrap();
 
         let exact = config.resolve_profile(Some("exact-model"), Some(7.0), RouterQueuePolicy::Wspt);
-        assert!(exact.default_class().worker_is_busy(11, 10_000_000));
-        assert!(exact.default_class().worker_is_busy(6, 10));
-        assert!(!exact.default_class().worker_is_busy(5, 10));
+        let limits = exact.default_class().busy_thresholds;
+        let budget = |tokens| WorkerCapacity::new(Some(tokens), None);
+        assert!(!limits.has_room(&prefill_load(11), budget(10_000_000)));
+        assert!(!limits.has_room(&prefill_load(6), budget(10)));
+        assert!(limits.has_room(&prefill_load(5), budget(10)));
 
         let fallback = config.resolve_profile(Some("other"), Some(7.0), RouterQueuePolicy::Wspt);
         assert_eq!(fallback.default_class().name, SYNTHETIC_POLICY_CLASS);
         assert_eq!(
-            fallback.default_class().prefill_busy_threshold_frac,
+            fallback
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
             Some(7.0)
         );
         assert_eq!(
@@ -1179,7 +1419,12 @@ policy_classes:
             "custom_priority",
             "explicit classes intentionally bypass cache classification"
         );
-        assert_eq!(root.default_class().prefill_busy_threshold_frac, Some(16.0));
+        assert_eq!(
+            root.default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            Some(16.0)
+        );
 
         let model = config.resolve_profile(
             Some("example/large-model"),
@@ -1208,5 +1453,108 @@ policy_classes:
                 .all(|class| class.name != "custom_priority"),
             "model profiles must completely replace root classes"
         );
+    }
+
+    #[test]
+    fn prefill_budget_defaults_when_unreported() {
+        use crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS;
+        assert_eq!(
+            WorkerCapacity::default().prefill_budget(),
+            DEFAULT_MAX_BATCHED_TOKENS
+        );
+        assert_eq!(WorkerCapacity::new(Some(64), None).prefill_budget(), 64);
+        assert_eq!(WorkerCapacity::default().max_num_batched_tokens(), None);
+        // Every reported value round-trips; there is no sentinel.
+        let max = WorkerCapacity::new(Some(u64::MAX), Some(u64::MAX));
+        assert_eq!(max.max_num_batched_tokens(), Some(u64::MAX));
+        assert_eq!(max.total_kv_blocks(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn unobserved_rank_row_is_unavailable_and_idle() {
+        let seen = WorkerWithDpRank::new(1, 0);
+        let unseen = WorkerWithDpRank::new(1, 1);
+        let mut loads = FxHashMap::default();
+        loads.insert(
+            seen,
+            WorkerLoadProjection {
+                active_prefill_tokens: 7,
+                ..Default::default()
+            },
+        );
+        let unobserved = || WorkerLoadProjection {
+            additional_active_blocks: 3,
+            ..Default::default()
+        };
+
+        let row = WorkerLoadInput::for_worker(&loads, seen, unobserved);
+        assert!(row.is_available());
+        assert_eq!(row.active_prefill_tokens(), 7);
+
+        let row = WorkerLoadInput::for_worker(&loads, unseen, unobserved);
+        assert!(!row.is_available());
+        assert_eq!(row.active_prefill_tokens(), 0);
+        assert_eq!(row.decode_cost_blocks(), 3.0);
+    }
+
+    #[test]
+    fn worker_is_full_only_when_every_rank_is_full() {
+        let limits = BusyThresholds {
+            prefill_busy_threshold: Some(10),
+            ..Default::default()
+        };
+        let config = crate::test_utils::SimpleWorkerConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        let capacity = WorkerCapacity::of(&config);
+        let busy = WorkerLoadProjection {
+            active_prefill_tokens: 11,
+            ..Default::default()
+        };
+        let mut loads = FxHashMap::default();
+
+        loads.insert(WorkerWithDpRank::new(5, 2), busy);
+        // Rank 3 has no projection and counts as idle.
+        assert!(limits.rank_is_full(WorkerWithDpRank::new(5, 2), capacity, &loads));
+        assert!(!limits.rank_is_full(WorkerWithDpRank::new(5, 3), capacity, &loads));
+        assert!(!limits.worker_is_full(5, &config, &loads));
+
+        loads.insert(WorkerWithDpRank::new(5, 3), busy);
+        assert!(limits.worker_is_full(5, &config, &loads));
+
+        // A rank outside the worker's range does not stand in for one inside it.
+        loads.remove(&WorkerWithDpRank::new(5, 3));
+        loads.insert(WorkerWithDpRank::new(5, 0), busy);
+        assert!(!limits.worker_is_full(5, &config, &loads));
+    }
+
+    #[test]
+    fn zero_capacity_is_unreported() {
+        let zero = WorkerCapacity::new(Some(0), Some(0));
+        assert_eq!(zero.max_num_batched_tokens(), None);
+        assert_eq!(zero.total_kv_blocks(), None);
+        assert_eq!(zero, WorkerCapacity::default());
+
+        // vLLM under the Ray data-parallel backend registers `total_kv_blocks = 0` as a
+        // placeholder; the decode limit skips such a rank instead of calling it full.
+        let limits = BusyThresholds {
+            decode_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        };
+        let held = WorkerLoadInput::from_projection(WorkerLoadProjection {
+            active_decode_blocks: 1_000,
+            ..Default::default()
+        });
+        assert!(limits.has_room(&held, WorkerCapacity::new(None, Some(0))));
+        assert!(!limits.has_room(&held, WorkerCapacity::new(None, Some(1_000))));
+
+        // A zero prefill budget falls back to the default budget instead of being full at once.
+        let limits = BusyThresholds {
+            prefill_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        };
+        assert!(limits.has_room(&prefill_load(1), WorkerCapacity::new(Some(0), None)));
     }
 }

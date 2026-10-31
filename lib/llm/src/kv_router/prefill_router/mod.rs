@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource},
+    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -441,11 +441,11 @@ impl
                 .await
             {
                 Ok(Some(decision)) => {
-                    let signals = decision.plan.signals;
+                    let worker = decision.plan.worker();
                     tracing::info!(
                         request_id = %request_id,
-                        worker_id = signals.worker.worker_id,
-                        dp_rank = signals.worker.dp_rank,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
                         net_new_tokens = decision.net_new_tokens,
                         overlap_tokens = decision.overlap_tokens,
                         "Conditional disagg routing to decode worker"
@@ -563,13 +563,20 @@ impl
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let (prepared, prefill_stream) = router
+            let PrefillDispatch {
+                metadata: prepared,
+                stream: prefill_stream,
+                booking,
+            } = router
                 .select_and_dispatch_prefill(
                     prefill_context,
                     self.decode_routing_host.get().map(Arc::as_ref),
                     |request, target| self.prepare_prefill_dispatch(request, target, endpoint_id),
                 )
                 .await?;
+            if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
+                state.store_prefill_release(booking);
+            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 prefill_completion =
@@ -1242,9 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
         use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
-        use dynamo_runtime::{
-            DistributedRuntime, Runtime, distributed::DistributedConfig, pipeline::PushRouter,
-        };
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -1282,10 +1287,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let inner = PushRouter::from_client(client, RouterMode::KV)
-            .await
-            .unwrap();
-        let host = Arc::new(RoutingHost::new(inner, Arc::new(chooser), None).unwrap());
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::KV)
+                .kv_router(Arc::new(chooser))
+                .build()
+                .await
+                .unwrap(),
+        );
         let router = active_conditional_router();
         assert!(router.decode_routing_host.set(host).is_ok());
         let downstream = Arc::new(QueryOnlyDecodeHost::default());

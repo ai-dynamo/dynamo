@@ -738,3 +738,29 @@ def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain()
             WorkerType.Decode,
         )
     runtime.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"tensor_parallel_size": 4},
+        {"data_parallel_size": 2},
+        {"distributed_executor_backend": "ray"},
+        {"pipeline_parallel_size": 2},
+        {"prefill_context_parallel_size": 2},
+        {"decode_context_parallel_size": 2},
+    ],
+)
+def test_gpu_tp2_discovery_rejects_unsupported_parallel_topologies(changes):
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector()],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = 2
+    for field, value in changes.items():
+        setattr(args, field, value)
+    runtime = MagicMock()
+    with pytest.raises(ValueError, match="TP1 or TP2|single local MP"):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+    runtime.set_engine_specific.assert_not_called()

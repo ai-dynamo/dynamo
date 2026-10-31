@@ -211,6 +211,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
+    enable_systemone_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
@@ -238,6 +239,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
+
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -617,7 +624,9 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
                 "When > 0, enables migration after worker disconnects, response timeouts, "
-                "incomplete streams, and worker-local overload rejection."
+                "incomplete streams, and worker-local overload rejection. Also limits replacement "
+                "attempts over the lifetime of an explicit-commit PCM realtime transcription "
+                "session; unfinished audio is replayed to a compatible warm worker."
             ),
             arg_type=int,
         )
@@ -733,7 +742,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
         )
         add_argument(
             g,
@@ -753,6 +762,16 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). "
                 "This feature is experimental and may change."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-systemone-api",
+            env_var="DYN_ENABLE_SYSTEMONE_API",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable typed decision APIs (/v1/decisions and "
+                "/v1/systemone) for qualified aggregate SGLang models."
             ),
         )
         add_negatable_bool_argument(

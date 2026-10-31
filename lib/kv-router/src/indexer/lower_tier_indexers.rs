@@ -426,7 +426,7 @@ pub fn query_lower_tiers_with_options_and_snapshot(
 mod tests {
     use super::*;
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::indexer::KvIndexerInterface;
@@ -476,7 +476,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )

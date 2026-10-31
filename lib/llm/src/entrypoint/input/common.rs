@@ -14,17 +14,14 @@ use crate::{
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
-    kv_router::{
-        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
-        metrics::RouterRequestMetrics,
-    },
+    kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
+    session_affinity::{SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -40,13 +37,11 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
-        SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, RouterMode, SegmentSource,
+        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
-
-type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
 pub struct PreprocessedRouting {
@@ -150,52 +145,6 @@ fn validate_router_mode_for_lora(
     }
 }
 
-fn preprocessed_backend_engine(
-    router: LlmPushRouter,
-    router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter>>,
-    model_manager: &Arc<crate::discovery::ModelManager>,
-    endpoint_id: &dynamo_runtime::protocols::EndpointId,
-    affinity: Option<AffinityCoordinator>,
-    load_context: Arc<RoutingLoadContext>,
-) -> anyhow::Result<Arc<RoutingHost>> {
-    // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
-    // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
-    // arms below are only reached with LoRA serving disabled.
-    validate_router_mode_for_lora(
-        router_mode,
-        model_manager.lora_enabled(),
-        affinity.is_some(),
-    )?;
-
-    let routing_host = match router_mode {
-        RouterMode::KV => {
-            let Some(chooser) = chooser else {
-                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
-            };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                router,
-                chooser,
-                load_context,
-                affinity,
-            ))
-        }
-        _ => {
-            let lora = model_manager
-                .lora_filter_for(endpoint_id)
-                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::new_builtin_with_capabilities(
-                router,
-                load_context,
-                affinity,
-                lora,
-            )?)
-        }
-    };
-
-    Ok(routing_host)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn build_preprocessed_routing(
     client: &Client,
@@ -272,20 +221,6 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let router = LlmPushRouter::from_client_with_state(
-        router_client,
-        router_mode,
-        None,
-        embedding_cache_indexer,
-        cache_key_extractor,
-    )
-    .await?;
-
-    // Eagerly register router request metrics so they appear as zeros before
-    // RoutingHost is constructed. The host repeats this idempotently so the
-    // standalone router path is covered as well.
-    RouterRequestMetrics::from_component(client.endpoint.component());
-
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
         PrefillRouter::disabled_with_session_affinity_mode(
             model_manager.clone(),
@@ -295,15 +230,26 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
-    let routing_host = preprocessed_backend_engine(
-        router,
-        router_mode,
-        chooser,
-        &model_manager,
-        &endpoint_id,
-        affinity,
-        load_context,
-    )?;
+
+    // LoRA-aware selection lives in the host only for the built-in modes; under
+    // KV routing the KV router applies the adapter filter itself.
+    let lora = (router_mode != RouterMode::KV)
+        .then(|| {
+            model_manager
+                .lora_filter_for(&endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(&endpoint_id)))
+        })
+        .flatten();
+    let routing_host = Arc::new(
+        RoutingHost::builder(router_client, router_mode)
+            .kv_router(chooser)
+            .load_context(load_context)
+            .affinity_coordinator(affinity)
+            .lora(lora)
+            .multimodal_cache(embedding_cache_indexer.zip(cache_key_extractor))
+            .build()
+            .await?,
+    );
     if router_mode.is_kv_routing()
         && (prefill_router.conditional_disagg_enabled()
             || routing_host

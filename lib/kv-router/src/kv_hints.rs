@@ -3,12 +3,19 @@
 
 //! Typed KV-cache hints attached to selected backend requests.
 
+mod sources;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
     ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
+};
+
+pub use sources::{
+    CacheOwnerKvTransferKeys, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
+    KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
@@ -186,6 +193,8 @@ pub struct KvTransferCandidates {
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
+// Cross-role advisory lookup keeps its separate, eligibility-filtered ranking.
+// Same-role execution selection uses KvTransferSourceSummary instead.
 impl KvTransferCandidates {
     pub fn best_source<F>(
         &self,

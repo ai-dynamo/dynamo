@@ -155,7 +155,7 @@ use super::RouteDoc;
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
-const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
 
@@ -672,6 +672,96 @@ struct MetricsHandlerState {
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SystemOnePhase {
+    Preflight,
+    FirstBranch,
+    Fanout,
+}
+
+impl SystemOnePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::FirstBranch => "first_branch",
+            Self::Fanout => "fanout",
+        }
+    }
+}
+
+struct SystemOneMetrics {
+    questions: HistogramVec,
+    input_tokens: HistogramVec,
+    candidate_ids: HistogramVec,
+    cached_tokens: HistogramVec,
+    admitted_branches: IntCounterVec,
+    phase_seconds: HistogramVec,
+}
+
+impl SystemOneMetrics {
+    fn new(prefix: &str) -> Self {
+        let work_histogram = |name: &str, help: &str, max: f64| {
+            HistogramVec::new(
+                HistogramOpts::new(format!("{prefix}_{name}"), help)
+                    .buckets(generate_log_buckets(1.0, max, 12)),
+                &["model"],
+            )
+            .expect("fixed System One work metric is valid")
+        };
+        Self {
+            questions: work_histogram(
+                frontend_service::SYSTEMONE_QUESTIONS,
+                "Questions per admitted System One request",
+                128.0,
+            ),
+            input_tokens: work_histogram(
+                frontend_service::SYSTEMONE_INPUT_TOKENS,
+                "Expanded prompt tokens per admitted System One request",
+                65_536.0,
+            ),
+            candidate_ids: work_histogram(
+                frontend_service::SYSTEMONE_CANDIDATE_IDS,
+                "Requested candidate token IDs per admitted System One request",
+                32_640.0,
+            ),
+            cached_tokens: work_histogram(
+                frontend_service::SYSTEMONE_CACHED_TOKENS,
+                "Cached prompt tokens reported by a completed System One branch",
+                65_536.0,
+            ),
+            admitted_branches: IntCounterVec::new(
+                Opts::new(
+                    format!(
+                        "{prefix}_{}",
+                        frontend_service::SYSTEMONE_ADMITTED_BRANCHES_TOTAL
+                    ),
+                    "Total question branches admitted for System One dispatch",
+                ),
+                &["model"],
+            )
+            .expect("fixed System One branch metric is valid"),
+            phase_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    format!("{prefix}_{}", frontend_service::SYSTEMONE_PHASE_SECONDS),
+                    "Duration of a System One execution phase in seconds",
+                )
+                .buckets(generate_log_buckets(0.001, 120.0, 15)),
+                &["model", "phase"],
+            )
+            .expect("fixed System One phase metric is valid"),
+        }
+    }
+
+    fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.questions.clone()))?;
+        registry.register(Box::new(self.input_tokens.clone()))?;
+        registry.register(Box::new(self.candidate_ids.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.admitted_branches.clone()))?;
+        registry.register(Box::new(self.phase_seconds.clone()))
+    }
+}
+
 pub struct Metrics {
     load_incarnation: u64,
     load_sequence: AtomicU64,
@@ -698,6 +788,7 @@ pub struct Metrics {
     /// inference rather than the 1-512s LLM-generation range. Labeled by
     /// `model`.
     embedding_latency: HistogramVec,
+    systemone: SystemOneMetrics,
 
     // Per-request multimodal content-part count histograms (labeled by `model`).
     images_per_request: HistogramVec,
@@ -756,6 +847,11 @@ pub(crate) struct RequestMetrics {
     // Prompt tokens and phase flags transition together; gauge deltas may arrive
     // out of order across pipeline tasks, so gauges are signed and samples clamp.
     state: AtomicU64,
+    // Output tokens not yet added to `output_tokens`, published every
+    // `LOCAL_FLUSH_TOKENS` and when the request finishes: the per-model counter
+    // is one atomic shared by every in-flight request, and adding to it on every
+    // token bounces its cache line between cores.
+    pending_output_tokens: AtomicU64,
     awaiting_first_token_requests: prometheus::IntGauge,
     awaiting_first_token_input_tokens: prometheus::IntGauge,
     generating_input_tokens: prometheus::IntGauge,
@@ -780,6 +876,7 @@ impl RequestMetrics {
         awaiting_first_token_requests.inc();
         Self {
             state: AtomicU64::new(0),
+            pending_output_tokens: AtomicU64::new(0),
             awaiting_first_token_requests,
             awaiting_first_token_input_tokens: metrics
                 .inflight_input_tokens
@@ -843,7 +940,11 @@ impl RequestMetrics {
         if tokens == 0 || state & FINISHED != 0 {
             return;
         }
-        self.output_tokens.inc_by(tokens as u64);
+        let tokens = tokens as u64;
+        let pending = self.pending_output_tokens.fetch_add(tokens, Relaxed) + tokens;
+        if pending >= LOCAL_FLUSH_TOKENS {
+            self.flush_output_tokens();
+        }
         if state & GENERATING != 0 {
             return;
         }
@@ -857,12 +958,20 @@ impl RequestMetrics {
         self.generating_input_tokens.add(input);
     }
 
+    fn flush_output_tokens(&self) {
+        let tokens = self.pending_output_tokens.swap(0, Relaxed);
+        if tokens > 0 {
+            self.output_tokens.inc_by(tokens);
+        }
+    }
+
     /// Stop tracking the request. Only the first call on any clone counts.
     fn finish(&self) {
         let previous = self.state.fetch_or(FINISHED, Relaxed);
         if previous & FINISHED != 0 {
             return;
         }
+        self.flush_output_tokens();
         let input = (previous & INPUT_TOKENS) as i64;
         if previous & GENERATING != 0 {
             self.generating_input_tokens.sub(input);
@@ -870,6 +979,14 @@ impl RequestMetrics {
             self.awaiting_first_token_requests.dec();
             self.awaiting_first_token_input_tokens.sub(input);
         }
+    }
+}
+
+impl Drop for RequestMetrics {
+    fn drop(&mut self) {
+        // `finish` publishes the pending tokens, but an `add_output_tokens` that
+        // raced it may have added more.
+        self.flush_output_tokens();
     }
 }
 
@@ -951,6 +1068,11 @@ pub enum Endpoint {
 
     /// Generate (token-in/token-out)
     Generate,
+
+    /// System One typed decisions
+    SystemOne,
+    /// OpenAI decisions
+    Decisions,
 }
 
 /// Metrics for the HTTP service
@@ -1038,7 +1160,6 @@ pub struct ResponseMetricCollector {
     // so observations are equivalent.
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
-    itl_pending_tokens: u64,
     input_sequence_length: prometheus::Histogram,
     cached_tokens: prometheus::Histogram,
     // Per-model multimodal count histogram handles, resolved once at construction.
@@ -1178,6 +1299,7 @@ impl Metrics {
             );
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+        let systemone = SystemOneMetrics::new(&prefix);
 
         let awaiting_first_token_requests = IntGaugeVec::new(
             Opts::new(
@@ -1586,6 +1708,7 @@ impl Metrics {
             time_to_first_token,
             inter_token_latency,
             embedding_latency,
+            systemone,
             images_per_request,
             videos_per_request,
             audio_per_request,
@@ -1690,6 +1813,40 @@ impl Metrics {
             .observe(seconds);
     }
 
+    pub(crate) fn observe_systemone_work(
+        &self,
+        model: &str,
+        questions: usize,
+        input_tokens: usize,
+        candidate_ids: usize,
+    ) {
+        for (histogram, count) in [
+            (&self.systemone.questions, questions),
+            (&self.systemone.input_tokens, input_tokens),
+            (&self.systemone.candidate_ids, candidate_ids),
+        ] {
+            histogram.with_label_values(&[model]).observe(count as f64);
+        }
+        self.systemone
+            .admitted_branches
+            .with_label_values(&[model])
+            .inc_by(questions as u64);
+    }
+
+    pub(crate) fn observe_systemone_branch(&self, model: &str, cached_tokens: usize) {
+        self.systemone
+            .cached_tokens
+            .with_label_values(&[model])
+            .observe(cached_tokens as f64);
+    }
+
+    pub(crate) fn observe_systemone_phase(&self, model: &str, phase: SystemOnePhase, seconds: f64) {
+        self.systemone
+            .phase_seconds
+            .with_label_values(&[model, phase.as_str()])
+            .observe(seconds);
+    }
+
     /// Get the cumulative count of embedding latency observations for the given
     /// model. Test helper.
     #[cfg(test)]
@@ -1751,6 +1908,7 @@ impl Metrics {
             input_tokens: self.inflight_input_tokens.clone(),
             input_tokens_total: self.input_tokens_counter.clone(),
         }))?;
+        self.systemone.register(registry)?;
         registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
@@ -2278,6 +2436,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
             Endpoint::Generate => write!(f, "generate"),
+            Endpoint::SystemOne => write!(f, "systemone"),
+            Endpoint::Decisions => write!(f, "decisions"),
         }
     }
 }
@@ -2298,6 +2458,8 @@ impl Endpoint {
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
             Endpoint::Generate => "generate",
+            Endpoint::SystemOne => "systemone",
+            Endpoint::Decisions => "decisions",
         }
     }
 }
@@ -2367,7 +2529,6 @@ impl ResponseMetricCollector {
             model,
             time_to_first_token,
             inter_token_latency: None,
-            itl_pending_tokens: 0,
             input_sequence_length,
             cached_tokens,
             images_per_request,
@@ -2601,21 +2762,14 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
-            self.itl_pending_tokens = self.itl_pending_tokens.saturating_add(num_tokens as u64);
-            let should_flush = self.itl_pending_tokens >= ITL_LOCAL_FLUSH_TOKENS;
-            {
-                // Resolve the request-local histogram on the first ITL only, then reuse
-                // it without re-hashing the model label for each output token.
-                let histogram = self.local_inter_token_latency();
-                for _ in 0..num_tokens {
-                    histogram.observe(itl);
-                }
-                if should_flush {
-                    histogram.flush();
-                }
+            // Resolve the request-local histogram on the first ITL only, then reuse
+            // it without re-hashing the model label for each output token.
+            let histogram = self.local_inter_token_latency();
+            for _ in 0..num_tokens {
+                histogram.observe(itl);
             }
-            if should_flush {
-                self.itl_pending_tokens = 0;
+            if histogram.get_sample_count() >= LOCAL_FLUSH_TOKENS {
+                histogram.flush();
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
@@ -2658,7 +2812,6 @@ impl Drop for ResponseMetricCollector {
         if let Some(histogram) = &self.inter_token_latency {
             histogram.flush();
         }
-        self.itl_pending_tokens = 0;
 
         if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
             let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
@@ -3536,6 +3689,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -3559,6 +3713,7 @@ mod tests {
         let annotated = crate::types::Annotated::from_data(data);
 
         process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+        drop(collector);
 
         assert_eq!(
             metrics
@@ -3571,45 +3726,34 @@ mod tests {
     }
 
     #[test]
-    fn test_output_tokens_counter_increments() {
+    fn test_output_tokens_counter_flushes_at_threshold_and_drop() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
+        let global = metrics.output_tokens_counter.with_label_values(&[model]);
 
-        // Create response collector
         let mut collector = response_collector(&metrics, model);
-
-        // Simulate first chunk (5 tokens)
         collector.observe_response(100, 5);
+        collector.observe_response(100, 58);
+        assert_eq!(
+            global.get(),
+            0,
+            "a partial local batch must remain unpublished"
+        );
 
-        // Verify counter incremented by 5
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 5);
+        collector.observe_response(100, 1);
+        assert_eq!(
+            global.get(),
+            LOCAL_FLUSH_TOKENS,
+            "the 64th pending output token must flush the local counter"
+        );
 
-        // Simulate second chunk (10 tokens)
-        collector.observe_response(100, 10);
-
-        // Verify counter incremented to 15
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 15);
-
-        // Simulate third chunk (7 tokens)
         collector.observe_response(100, 7);
-
-        // Verify counter incremented to 22
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 22);
+        assert_eq!(global.get(), LOCAL_FLUSH_TOKENS);
+        drop(collector);
+        assert_eq!(global.get(), 71, "drop must publish the remaining tokens");
     }
 
     #[test]
@@ -4107,14 +4251,14 @@ mod tests {
         collector.observe_response(10, 1);
         assert_eq!(
             global.get_sample_count(),
-            ITL_LOCAL_FLUSH_TOKENS,
+            LOCAL_FLUSH_TOKENS,
             "the 64th pending ITL sample must flush the local histogram"
         );
 
         collector.observe_response(10, 7);
         assert_eq!(
             global.get_sample_count(),
-            ITL_LOCAL_FLUSH_TOKENS,
+            LOCAL_FLUSH_TOKENS,
             "the next partial batch must remain local"
         );
         drop(collector);
@@ -4287,29 +4431,10 @@ mod tests {
 
         let model = "test-model";
         let mut collector = response_collector(&metrics, model);
-
-        // Simulate chunk with zero tokens (should not increment)
         collector.observe_response(100, 0);
-
-        // Verify counter remains 0
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 0);
-
-        // Add some tokens
         collector.observe_response(100, 5);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model])
-                .get(),
-            5
-        );
-
-        // Try zero tokens again (should not change counter)
         collector.observe_response(100, 0);
+        drop(collector);
         assert_eq!(
             metrics
                 .output_tokens_counter
@@ -4327,47 +4452,15 @@ mod tests {
 
         let model1 = "model-1";
         let model2 = "model-2";
-
-        // Create collectors for different models
         let mut collector1 = response_collector(&metrics, model1);
         let mut collector2 = response_collector(&metrics, model2);
 
-        // Increment model1
         collector1.observe_response(100, 10);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model1])
-                .get(),
-            10
-        );
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model2])
-                .get(),
-            0
-        );
-
-        // Increment model2
         collector2.observe_response(200, 20);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model1])
-                .get(),
-            10
-        );
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model2])
-                .get(),
-            20
-        );
-
-        // Increment model1 again
         collector1.observe_response(100, 5);
+        drop(collector1);
+        drop(collector2);
+
         assert_eq!(
             metrics
                 .output_tokens_counter
@@ -5433,6 +5526,7 @@ mod tests {
             id: Some("test-id".to_string()),
             data: Some(
                 crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    message_boundary: None,
                     inner: CreateChatCompletionStreamResponse {
                         id: "test-id".to_string(),
                         choices: vec![choice],
@@ -5824,6 +5918,7 @@ mod tests {
                 logprobs: None,
             };
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: REQUEST_ID.to_string(),
                     choices: vec![choice],
@@ -6139,5 +6234,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn systemone_metrics_use_configured_prefix_and_bounded_labels() {
+        let metrics = Metrics::new_with_prefix(Some("custom_frontend".to_string()));
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+        metrics.observe_systemone_work("served-model", 3, 120, 7);
+        metrics.observe_systemone_branch("served-model", 80);
+        for phase in [
+            SystemOnePhase::Preflight,
+            SystemOnePhase::FirstBranch,
+            SystemOnePhase::Fanout,
+        ] {
+            metrics.observe_systemone_phase("served-model", phase, 0.125);
+        }
+
+        let families: Vec<_> = registry
+            .gather()
+            .into_iter()
+            .filter(|family| family.name().starts_with("custom_frontend_systemone_"))
+            .collect();
+        assert_eq!(families.len(), 6);
+        for family in &families {
+            for metric in family.get_metric() {
+                for label in metric.get_label() {
+                    match label.name() {
+                        "model" => assert_eq!(label.value(), "served-model"),
+                        "phase" => assert!(matches!(
+                            label.value(),
+                            "preflight" | "first_branch" | "fanout"
+                        )),
+                        other => panic!("unexpected System One label {other}"),
+                    }
+                }
+            }
+        }
+        for (suffix, expected) in [
+            ("questions", 3.0),
+            ("input_tokens", 120.0),
+            ("candidate_ids", 7.0),
+            ("cached_tokens", 80.0),
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == format!("custom_frontend_systemone_{suffix}"))
+                .unwrap();
+            let histogram = family.get_metric()[0].get_histogram();
+            assert_eq!(histogram.sample_count(), 1);
+            assert_eq!(histogram.sample_sum(), expected);
+        }
+        let branches = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_admitted_branches_total")
+            .unwrap();
+        assert_eq!(branches.get_metric()[0].get_counter().value(), 3.0);
+        let phases = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_phase_seconds")
+            .unwrap();
+        assert_eq!(phases.get_metric().len(), 3);
+        assert!(phases.get_metric().iter().all(|metric| {
+            let histogram = metric.get_histogram();
+            histogram.sample_count() == 1 && histogram.sample_sum() == 0.125
+        }));
     }
 }

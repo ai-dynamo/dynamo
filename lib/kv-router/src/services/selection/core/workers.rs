@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
@@ -345,6 +346,9 @@ impl SelectionCore {
                     self.worker_type,
                     key.as_ref(),
                 );
+                let scores_kv_transfer =
+                    WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
+                        .contains(WorkerInputs::KV_TRANSFER);
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
@@ -361,6 +365,7 @@ impl SelectionCore {
                     // these stay `None` unless an embedding host injects them.
                     self.host.load.overloaded_workers.clone(),
                     self.host.load.available_workers.clone(),
+                    self.host.load.reject_thresholds.clone(),
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),
@@ -374,10 +379,13 @@ impl SelectionCore {
                     indexer,
                     transfer_source_slots,
                     workers_tx,
+                    hint_capable_workers: AtomicBool::new(false),
+                    scores_kv_transfer,
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
+                    affinity_replication: self.session_binding_sink(&key),
                 }))
             })?
             .clone();
@@ -415,6 +423,10 @@ impl SelectionCore {
             return;
         };
         let workers = self.catalog.scheduler_configs_for_key(key);
+        // Selections read this per request instead of scanning the map.
+        entry
+            .hint_capable_workers
+            .store(hint_capable_partition(&workers), Ordering::Relaxed);
         // Lifecycle transitions between non-schedulable states publish the same
         // map; skipping them saves the scheduler a wake and a full map clone.
         let modified = entry.workers_tx.send_if_modified(|current| {

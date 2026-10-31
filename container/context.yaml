@@ -38,12 +38,12 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.13-slim
+  planner_build_image_tag: 3.13.17-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.6
+  planner_runtime_image_tag: 3.13-v4.1.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@5be5c1f0
+  planner_baseline_sbom: python@d9eff629
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -60,10 +60,13 @@ dynamo:
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
-  uv_version: "0.12.0"
+  uv_version: "0.13.5"
+  go_version: "1.27.3"
 
   nats_version: v2.14.8
-  etcd_version: v3.5.34
+  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  etcd_version: v3.5.35
+  etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
   nixl_ref: v1.3.2
   nixl_ucx_ref: v1.22.0
@@ -94,8 +97,8 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
-    vllm_omni_ref: "v0.31.0rc1"
+    runtime_image_tag: v0.32.0-ubuntu2404
+    vllm_omni_ref: "v0.32.0rc1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -107,19 +110,20 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.31.0
-    runtime_image_tag: v0.31.0
-    baseline_sbom: vllm-openai-xpu@95ac8150
+    base_image_tag: v0.32.0
+    runtime_image_tag: v0.32.0
+    baseline_sbom: vllm-openai-xpu@20509fab
+    nixl_ref: v1.5.0
+    nixl_ucx_ref: v1.23.0-rc1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.31.0
+    runtime_image_tag: v0.32.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.31.0rc1"
-  # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
-  transformers_version: "5.14.1"
-  tokenizers_version: "0.22.2"
+    nixl_ref: v1.5.0
+    nixl_ucx_ref: v1.23.0-rc1
+  vllm_omni_ref: "v0.32.0rc1"
   nixl_ref: v1.4.1
   max_jobs: "10"
   enable_media_ffmpeg: "true"
@@ -143,8 +147,8 @@ sglang:
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
     # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
     # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
-    # ffmpeg is copied in. The CUDA Dynamo Rust wheel links against that same
-    # codec-limited build for frontend video decoding; XPU remains codec-free.
+    # ffmpeg is copied in. The CUDA and XPU Dynamo Rust wheels link against that
+    # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
   xpu:
     # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
@@ -177,9 +181,9 @@ trtllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.4.0rc0
+    runtime_image_tag: 1.4.0rc2
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@cab83184
+    baseline_sbom: release@93a3eaf1
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

@@ -129,12 +129,23 @@ Local model-cache stores and loads use device-to-device
 copies. CPU memory carries control messages and pointer/size descriptors; it
 does not hold KV payloads. Budget additional VRAM on both workers.
 
-The implementation requires one worker per role, tensor parallel size one and
-identical raw cache layouts. The default transport uses a same-host GPU pair
+The implementation requires one engine per role, tensor parallel size one or two,
+and identical raw cache layouts. TP2 requires a single local multiprocessing
+engine with data parallel size one and no pipeline or context parallelism.
+The default transport uses a same-host GPU pair
 with working CUDA IPC. The MNNVL profile supports hosts in the same healthy
 NVLink fabric and clique. Canonical layouts, replicated layouts, RDMA, CPU/disk payload
 pools and the versioned state-agent ingress are unsupported. Use the native
 worker event publisher and a compatible vLLM offloading/tiering API.
+
+For TP2, set `gpu_rank_devices` to the explicit CUDA device ordinal for each
+rank, such as `[0, 1]`, in the connector's `kv_connector_extra_config`. Each
+worker imports only its own bank and verifies the physical GPU UUID. The
+`gpu_bytes_to_use` budget counts both rank banks together: a 2-GiB budget
+allocates at most 1 GiB on each GPU. KVCR transfers both labeled rank parts in
+one operation, and ready inventory waits for both model workers to complete
+their stores. A TP2 compatibility suffix separates this inventory from TP1;
+the certified base domain must still identify the exact model and raw layout.
 
 Configure the GPU secondary tier with both
 `"type": "GPUKVCRSecondaryTierManager"` and

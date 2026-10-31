@@ -39,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -172,6 +173,224 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			golden.Assert(t, header+strings.Join(out, "---\n"), goldenPath)
 		})
 	}
+}
+
+const lpxSidecarImage = "example.invalid/dynamo-sidecar:test"
+
+// loadLPXInput reads an LPX testdata input DGD.
+func loadLPXInput(t *testing.T, fixture string) *v1beta1.DynamoGraphDeployment {
+	t.Helper()
+	payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
+	require.NoError(t, err)
+	dgd := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, yaml.Unmarshal(payload, dgd))
+	return dgd
+}
+
+// serveFromAgent replaces the conductor of an LPU-only "lpu" component with an
+// Agent runtime sidecar; main runs a neutral agent, and both read the model path.
+func serveFromAgent(dgd *v1beta1.DynamoGraphDeployment) {
+	component := dgd.GetComponentByName("lpu")
+	component.Roles = []v1beta1.ComponentRoleSpec{*component.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
+	agent := &component.Roles[0].PodTemplate.Spec
+	agent.Containers[0].Command = []string{"/bin/agent"}
+	agent.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_IE_MODEL_PATH", Value: "$(LPX_MODEL_PATH)"}}
+	agent.InitContainers = append(agent.InitContainers, corev1.Container{
+		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Args:         []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
+		Env:          []corev1.EnvVar{{Name: "DYN_SYSTEM_PORT", Value: "18090"}},
+		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
+		ReadinessProbe: &corev1.Probe{
+			HTTPGet:       &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)},
+			PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
+		},
+	})
+}
+
+// sidecarPullSecret grants a pull secret only to the runtime sidecar image.
+type sidecarPullSecret struct{}
+
+func (sidecarPullSecret) GetSecrets(_, image string) ([]string, error) {
+	if image != lpxSidecarImage {
+		return nil, nil
+	}
+	return []string{"sidecar-pull-secret"}, nil
+}
+
+// renderLPXServing renders dgd with the golden test's infrastructure addresses
+// and returns its cliques and the one clique that serves.
+func renderLPXServing(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) ([]*grovev1alpha1.PodCliqueTemplateSpec, *grovev1alpha1.PodCliqueTemplateSpec) {
+	t.Helper()
+	config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"}}
+	r := &graphReconciler{
+		Client: newLPXGPUClient(t), config: config, runtimeConfig: &commoncontroller.RuntimeConfig{},
+		modelRegistry: newTestDataModelRegistry(t, t.TempDir()), dockerSecretRetriever: sidecarPullSecret{},
+	}
+	child := newLPXRenderDeployment(t, dgd)
+	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
+	require.NoError(t, err)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+	var serving *grovev1alpha1.PodCliqueTemplateSpec
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Labels[dynamo.LPXServingLabel] == consts.KubeLabelValueTrue {
+			serving = clique
+		}
+	}
+	require.NotNil(t, serving)
+	return pcs.Spec.Template.Cliques, serving
+}
+
+// TestLPXAgentRuntimeSidecarRendering pins the runtime sidecar of an LPU-only
+// model, whose Agent hosts the engine: it runs after the authored init
+// containers with shared runtime env and an authored host-network readiness probe.
+func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
+	t.Log("Render an LPU-only model with graph env; its only clique, the Agent, serves")
+	dgd := loadLPXInput(t, "node-local-v3-hx-lpu-only")
+	serveFromAgent(dgd)
+	dgd.Spec.Env = []corev1.EnvVar{{Name: "GRAPH_SETTING", Value: "shared"}}
+	cliques, serving := renderLPXServing(t, dgd)
+	require.Len(t, cliques, 1)
+	require.Equal(t, "agt", serving.Name)
+
+	t.Log("The sidecar stays after the authored init container, restarts as a sidecar, and brings its pull secret")
+	pod := serving.Spec.PodSpec
+	require.True(t, pod.HostNetwork)
+	require.Len(t, pod.InitContainers, 2)
+	require.Equal(t, "prepare-lp30", pod.InitContainers[0].Name)
+	main, runtime := pod.Containers[0], pod.InitContainers[1]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+	require.Nil(t, runtime.Command)
+	require.Equal(t, ptr.To(corev1.ContainerRestartPolicyAlways), runtime.RestartPolicy)
+	require.Equal(t, []corev1.LocalObjectReference{{Name: "sidecar-pull-secret"}}, pod.ImagePullSecrets)
+
+	t.Log("The model path precedes every other binding")
+	modelPath := corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: "/nfs/node-local-v3-hx-connected"}
+	require.Equal(t, modelPath, main.Env[0])
+	require.Equal(t, modelPath, runtime.Env[0])
+
+	t.Log("The LPU-only engine keeps only its authored env, graph env, and model path")
+	require.Equal(t, []corev1.EnvVar{
+		modelPath,
+		{Name: "GRAPH_SETTING", Value: "shared"},
+		{Name: "LPU_IE_MODEL_PATH", Value: "$(LPX_MODEL_PATH)"},
+	}, main.Env)
+
+	t.Log("The sidecar keeps its runtime and graph env, including the authored system port")
+	servingHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	namespace := dgd.GetDynamoNamespaceForComponent(dgd.GetComponentByName("lpu"))
+	require.Equal(t, []corev1.EnvVar{
+		modelPath,
+		{Name: consts.DynamoComponentEnvVar, Value: "lpx"},
+		{Name: consts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+		{Name: consts.DynamoNamespaceEnvVar, Value: namespace},
+		{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash},
+		{Name: "DYN_PARENT_DGD_K8S_NAME", Value: dgd.Name},
+		{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: dgd.Namespace},
+		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+		{Name: "DYN_SYSTEM_PORT", Value: "18090"},
+		{Name: "ETCD_ENDPOINTS", Value: "etcd-address"},
+		{Name: "GRAPH_SETTING", Value: "shared"},
+		{Name: "NATS_SERVER", Value: "nats-address"},
+		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+	}, runtime.Env)
+
+	t.Log("The host-network sidecar declares no ports and keeps only its authored numeric readiness probe")
+	require.Empty(t, runtime.Ports)
+	require.Nil(t, runtime.StartupProbe)
+	require.Nil(t, runtime.LivenessProbe)
+	require.Equal(t, &corev1.Probe{
+		HTTPGet:       &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)},
+		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
+	}, runtime.ReadinessProbe)
+}
+
+// TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort pins template ownership of a
+// host-network sidecar's port and probes: authored ones that name the system port
+// render as written.
+func TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort(t *testing.T) {
+	t.Log("Author the system port with HTTP readiness and TCP liveness on the Agent runtime sidecar")
+	dgd := loadLPXInput(t, "node-local-v3-hx-lpu-only")
+	serveFromAgent(dgd)
+	authored := &dgd.GetComponentByName("lpu").Roles[0].PodTemplate.Spec.InitContainers[1]
+	ports := []corev1.ContainerPort{{Name: consts.DynamoSystemPortName, ContainerPort: 18090, Protocol: corev1.ProtocolTCP}}
+	readiness := &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString(consts.DynamoSystemPortName)}}
+	liveness := &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(consts.DynamoSystemPortName)}}
+	authored.Ports, authored.ReadinessProbe, authored.LivenessProbe = ports, readiness, liveness
+
+	t.Log("Rendering keeps the authored port and probes and adds no startup probe")
+	_, serving := renderLPXServing(t, dgd)
+	runtime := serving.Spec.PodSpec.InitContainers[1]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+	require.Equal(t, ports, runtime.Ports)
+	require.Equal(t, readiness, runtime.ReadinessProbe)
+	require.Equal(t, liveness, runtime.LivenessProbe)
+	require.Nil(t, runtime.StartupProbe)
+}
+
+// TestLPXConductorRuntimeSidecarRendering pins the runtime sidecar of a hybrid
+// model, whose Cyborg conductor hosts the engine: the model path comes first,
+// and sidecar mode keeps the serving suffix separate, as for an ordinary worker.
+// TestNativeSidecarRendering owns the rest of the sidecar-mode output.
+func TestLPXConductorRuntimeSidecarRendering(t *testing.T) {
+	t.Log("Render a hybrid model whose conductor hosts the runtime sidecar")
+	dgd := loadLPXInput(t, "node-local-v2-hybrid")
+	dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Args:         []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
+		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
+	}}
+	_, serving := renderLPXServing(t, dgd)
+
+	t.Log("The serving conductor's first init container is the sidecar")
+	runtime := serving.Spec.PodSpec.InitContainers[0]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+
+	t.Log("The model path comes first; only sidecar mode gives the sidecar the namespace and a separate serving suffix")
+	require.Equal(t, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: "/nfs/node-local-v2-connected-lpx"}, runtime.Env[0])
+	servingHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	namespace := dgd.GetDynamoNamespaceForComponent(dgd.GetComponentByName("lpu"))
+	require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: namespace})
+	require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+
+	t.Log("On the Pod network the sidecar keeps the system port and its default probes")
+	require.Equal(t, []corev1.ContainerPort{{
+		Name: consts.DynamoSystemPortName, ContainerPort: int32(consts.DynamoSystemPort), Protocol: corev1.ProtocolTCP,
+	}}, runtime.Ports)
+	require.NotNil(t, runtime.StartupProbe)
+	require.NotNil(t, runtime.LivenessProbe)
+	require.NotNil(t, runtime.ReadinessProbe)
+}
+
+// TestLPXHostNetworkConductorRuntimeSidecarRendering pins template ownership of a
+// host-network hybrid conductor's sidecar ports and probes: defaults are dropped
+// and only the authored numeric readiness probe remains.
+func TestLPXHostNetworkConductorRuntimeSidecarRendering(t *testing.T) {
+	t.Log("Render a hybrid model whose host-network conductor hosts the runtime sidecar")
+	dgd := loadLPXInput(t, "node-local-v2-hybrid")
+	conductor := &dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
+	conductor.HostNetwork = true
+	readiness := &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}}
+	conductor.InitContainers = []corev1.Container{{
+		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Args:           []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
+		Env:            []corev1.EnvVar{{Name: "DYN_SYSTEM_PORT", Value: "18090"}},
+		VolumeMounts:   []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
+		ReadinessProbe: readiness,
+	}}
+	_, serving := renderLPXServing(t, dgd)
+
+	t.Log("The sidecar declares no ports and keeps only its authored readiness probe")
+	runtime := serving.Spec.PodSpec.InitContainers[0]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+	require.Empty(t, runtime.Ports)
+	require.Nil(t, runtime.StartupProbe)
+	require.Nil(t, runtime.LivenessProbe)
+	require.Equal(t, readiness, runtime.ReadinessProbe)
 }
 
 func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
@@ -331,13 +550,13 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	for _, name := range []string{"CYBORG_BATCH_SIZE", "CYBORG_FPGA_GPI_IO_FPGA_COUNT", "CYBORG_SWA_CACHE_IDS"} {
 		leader.Spec.Containers[0].Env = append(leader.Spec.Containers[0].Env, corev1.EnvVar{
 			Name: name, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "runtime-settings"}, Key: name,
+				Name: "runtime-settings", Key: name,
 			}},
 		})
 	}
 	authoredConfig := corev1.Volume{
-		Name:         "config",
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		Name:     "config",
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
 	}
 	leader.Spec.Volumes = append(leader.Spec.Volumes, authoredConfig)
 
@@ -384,14 +603,15 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 	registry := newTestDataModelRegistry(t, t.TempDir())
 	for _, name := range []string{
 		"node-local-v2-lpu-only", "node-local-v2-hybrid", "node-local-v2-specdecode",
-		"node-local-v3-hx-lpu-only", "node-local-v3-hx-hybrid", "node-local-v3-hx-specdecode",
+		"node-local-v3-hx-lpu-only", "node-local-v3-hx-hybrid", "node-local-v3-hx-specdecode", "node-local-v3-hx-lpu-only served from the agent",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Resolve authored inputs with shared and role-specific metadata")
-			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + name + ".input.yaml")
-			require.NoError(t, err)
-			dgd := &v1beta1.DynamoGraphDeployment{}
-			require.NoError(t, yaml.Unmarshal(payload, dgd))
+			fixture, agentServed := strings.CutSuffix(name, " served from the agent")
+			dgd := loadLPXInput(t, fixture)
+			if agentServed {
+				serveFromAgent(dgd)
+			}
 			dgd.Spec.Labels = map[string]string{"shared-label": "source"}
 			dgd.Spec.Annotations = map[string]string{"shared-annotation": "source"}
 			for _, component := range lpx.Components(dgd) {
@@ -537,11 +757,11 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	require.NotEqual(t, -1, cyborgIndex)
 	cyborg := before.Spec.Template.Cliques[cyborgIndex]
 	require.EqualValues(t, 4, cyborg.Spec.Replicas)
-	require.Equal(t, ptr.To(int32(1)), cyborg.Spec.MinAvailable)
+	require.Equal(t, new(int32(1)), cyborg.Spec.MinAvailable)
 
 	t.Log("Persist explicit Cyborg capacity while preserving the group seed, configuration and graph digest")
-	dgd.Spec.Components[0].Replicas = ptr.To(int32(12))
-	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(8))
+	dgd.Spec.Components[0].Replicas = new(int32(12))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = new(int32(8))
 	workloads, plans, err = r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
@@ -580,7 +800,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	before := dgd.DeepCopy()
 	selected, err := lpx.ResolveWorkload(t.Context(), newLPXGPUClient(t), dgd, singleGroupComponents(t, dgd), registry)
 	require.NoError(t, err)
-	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, dgd)))
+	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, dgd)), dgd.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 
 	t.Log("Render one shared conductor without changing either component's Agent template")
@@ -689,7 +909,7 @@ func getResource[T any](t *testing.T, resources []client.Object, name string) T 
 
 func mustPlanSelectedLPX(t *testing.T, dgd *v1beta1.DynamoGraphDeployment, selected *lpx.Workload) *lpx.MaterializationPlan {
 	t.Helper()
-	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, dgd)))
+	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, dgd)), dgd.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	return plan
 }
@@ -1220,9 +1440,9 @@ func TestStampClientIdentity(t *testing.T) {
 	require.NoError(t, err)
 	custom := []corev1.KeyToPath{{Key: "private.key.pub", Path: "authorized_keys"}}
 	spec := &fresh.Spec.Template.Cliques[0].Spec.PodSpec
-	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected", VolumeSource: corev1.VolumeSource{
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected",
 		Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-secret"}, Items: custom}}}}}})
+			Name: "ssh-secret", Items: custom}}}}})
 	require.NoError(t, r.stampClientIdentity(ctx, dgd, fresh))
 	plain := 0
 	for _, clique := range fresh.Spec.Template.Cliques {
@@ -1254,7 +1474,7 @@ func TestRecreatedClientIdentityRollsEveryClique(t *testing.T) {
 	live := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
 
 	t.Log("The Secret is deleted while the workload runs; the next render generates new keys under the same name")
-	require.NoError(t, r.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}}))
+	require.NoError(t, r.Delete(ctx, &corev1.Secret{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}))
 	recreated := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
 
 	t.Log("Every clique template changes, so Grove rolls each Pod without replacing the PodCliqueSet")
@@ -1267,10 +1487,10 @@ func TestRecreatedClientIdentityRollsEveryClique(t *testing.T) {
 func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
 	for name, author := range map[string]func(*corev1.PodSpec){
 		"volume": func(spec *corev1.PodSpec) {
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, EmptyDir: &corev1.EmptyDirVolumeSource{}})
 		},
 		"mount": func(spec *corev1.PodSpec) {
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", EmptyDir: &corev1.EmptyDirVolumeSource{}})
 			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "authored", MountPath: identityMountPath + "/"})
 		},
 	} {
@@ -1359,7 +1579,7 @@ func newLPXGPUClient(t *testing.T) client.Client {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}, Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "gpu.nvidia.com"`}}}}},
-		&resourcev1.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Name: "decode-gpu", Namespace: "test"}, Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1}}}}}}},
+		&resourcev1.DeviceClass{Name: "gpu.nvidia.com", Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "gpu.nvidia.com"`}}}}},
+		&resourcev1.ResourceClaimTemplate{Name: "decode-gpu", Namespace: "test", Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1}}}}}}},
 	).Build()
 }

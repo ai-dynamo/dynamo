@@ -603,7 +603,7 @@ async fn discover_worker_ids(
     endpoint: &str,
 ) -> Result<Vec<WorkerId>> {
     let client = reqwest::Client::new();
-    let url = format!("{}/health", frontend_url);
+    let url = format!("{}/health?instances=true", frontend_url);
 
     println!("  Discovering workers from {}...", url);
 

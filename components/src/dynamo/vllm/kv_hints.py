@@ -364,7 +364,7 @@ def _publish_gpu_transfer_hint_capability(
         return
     if len(tiers) != 1 or dp_range[1] != 1:
         raise ValueError(
-            "Direct GPU KV transfer currently requires one TP1 GPU tier/rank"
+            "Direct GPU KV transfer requires one GPU tier per engine/DP rank"
         )
     tier = tiers[0]
     if tier.get("type") != "GPUKVCRSecondaryTierManager":
@@ -389,6 +389,28 @@ def _publish_gpu_transfer_hint_capability(
     transport = tier.get("gpu_transport", "cuda_ipc")
     if transport not in ("cuda_ipc", "mnnvl"):
         raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+    tp_size = getattr(engine_args, "tensor_parallel_size", 1)
+    if type(tp_size) is not int or tp_size not in (1, 2):
+        raise ValueError("Direct GPU KV transfer supports raw-layout TP1 or TP2")
+    if tp_size > 1:
+        if (
+            getattr(engine_args, "data_parallel_size", 1) != 1
+            or getattr(engine_args, "distributed_executor_backend", None)
+            not in (None, "mp")
+            or any(
+                getattr(engine_args, name, 1) != 1
+                for name in (
+                    "pipeline_parallel_size",
+                    "prefill_context_parallel_size",
+                    "decode_context_parallel_size",
+                )
+            )
+        ):
+            raise ValueError(
+                "Retained GPU TP2 requires a single local MP engine without DP/PP/CP"
+            )
+        layout = importlib.import_module("kvbm.vllm_integration.gpu_layout")
+        domain = layout.parallel_layout_domain(domain, tp_size)
     if transport == "mnnvl":
         tls = tier.get("ucx_tls")
         if not isinstance(tls, (list, tuple)) or tuple(tls) != (

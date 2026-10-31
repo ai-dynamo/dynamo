@@ -726,7 +726,7 @@ mod integration_tests {
         );
         let request = request();
         let expected = seed_host_prefix(&source, source_id, &request.token_ids, 3).await;
-        let (_, mut stream) =
+        let PrefillDispatch { mut stream, .. } =
             Box::pin(
                 target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
             )
@@ -956,7 +956,7 @@ mod integration_tests {
             StorageTier::GpuDirect,
         )
         .await;
-        let (_, mut stream) =
+        let PrefillDispatch { mut stream, .. } =
             Box::pin(
                 target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
             )
@@ -1028,7 +1028,7 @@ mod integration_tests {
         // The target has no native Device blocks but already retains two GPU
         // rows. Only one new row is saved: 1600ms < the fixture's 3000ms margin.
         // Incorrectly crediting all three donor rows would admit this hint.
-        let (_, mut stream) =
+        let PrefillDispatch { mut stream, .. } =
             Box::pin(
                 target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
             )

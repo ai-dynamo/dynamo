@@ -28,9 +28,14 @@ from vllm.v1.kv_offload.cpu.gpu_worker import SingleDirectionOffloadingHandler
 from . import gpu_mnnvl
 
 
-def region_path(engine_id: str) -> Path:
+def region_path(engine_id: str, *, rank: int | None = None) -> Path:
     digest = hashlib.sha256(engine_id.encode()).hexdigest()
-    return Path(tempfile.gettempdir()) / f"dynamo-gpu-kv-{os.getuid()}-{digest}"
+    directory = Path(tempfile.gettempdir()) / f"dynamo-gpu-kv-{os.getuid()}-{digest}"
+    if rank is None:
+        return directory
+    if type(rank) is not int or rank < 0:
+        raise ValueError("GPU bank rank must be a nonnegative integer")
+    return directory / f"rank-{rank}"
 
 
 def export_ipc(tensor: torch.Tensor) -> dict:
@@ -96,7 +101,9 @@ class GPUCacheRegion:
 
     gpu_transport = "cuda_ipc"
 
-    def __init__(self, engine_id: str, chunks: int, row_bytes: int):
+    def __init__(
+        self, engine_id: str, chunks: int, row_bytes: int, *, _path: Path | None = None
+    ):
         if chunks <= 0 or row_bytes <= 0:
             raise ValueError("GPU cache capacity must contain a whole positive row")
         self.tensor = torch.zeros((chunks, row_bytes), dtype=torch.int8, device="cuda")
@@ -104,7 +111,7 @@ class GPUCacheRegion:
         torch.cuda.current_stream().synchronize()
         self.shape = (chunks, row_bytes)
         self.strides = (row_bytes, 1)
-        self.path = region_path(engine_id)
+        self.path = region_path(engine_id) if _path is None else _path
         self.path.mkdir(mode=0o700)
         self.metadata = export_ipc(self.tensor)
         self._local_export_consumed = False
@@ -180,7 +187,7 @@ class GPUFabricCacheRegion:
 
     gpu_transport = "mnnvl"
 
-    def __init__(self, engine_id, chunks, row_bytes, base_domain):
+    def __init__(self, engine_id, chunks, row_bytes, base_domain, *, _path=None):
         self.shape = (chunks, row_bytes)
         self.strides = (row_bytes, 1)
         self._owner = gpu_mnnvl.FabricAllocation(
@@ -192,7 +199,7 @@ class GPUFabricCacheRegion:
         )
         self.tensor = _fabric_tensor(self._owner)
         self._closed = False
-        self.path = region_path(engine_id)
+        self.path = region_path(engine_id) if _path is None else _path
         self.path.mkdir(mode=0o700)
         self.metadata = {
             "schema": "dynamo-gpu-fabric-v1",
@@ -303,6 +310,410 @@ def import_fabric(
 
 
 _OWNED_GPU_REGIONS: dict[Path, GPUCacheRegion | GPUFabricCacheRegion] = {}
+_RETAINED_FAILED_GPU_GROUPS = []
+
+
+def _read_private_json(path):
+    directory_info = path.parent.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(directory_info.st_mode)
+        or directory_info.st_uid != os.getuid()
+        or directory_info.st_mode & 0o077
+    ):
+        raise ValueError("GPU bank metadata directory must be private and owned")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+            or not 0 < info.st_size <= 65536
+        ):
+            raise ValueError("GPU bank metadata must be a bounded private owner file")
+        raw = source.read(65537)
+    if len(raw) != info.st_size:
+        raise ValueError("GPU bank metadata changed while being read")
+    return json.loads(raw), raw
+
+
+def _same_integer_vector(value, expected):
+    return (
+        isinstance(value, list)
+        and value == list(expected)
+        and all(type(item) is int for item in value)
+    )
+
+
+def _rank_descriptor_matches(descriptor, group, entry, shape):
+    common = {"schema", "gpu_uuid", "shape", "stride"}
+    if group["gpu_transport"] == "mnnvl":
+        expected = common | {
+            "gpu_transport",
+            "engine_id",
+            "owner_pid",
+            "owner_start_ticks",
+            "fabric_domain",
+            "base_domain",
+            "compatibility_domain",
+            "logical_bytes",
+            "allocation_bytes",
+            "fabric_handle",
+        }
+        if (
+            set(descriptor) != expected
+            or descriptor["schema"] != "dynamo-gpu-fabric-v1"
+            or descriptor["gpu_transport"] != "mnnvl"
+            or descriptor["engine_id"] != group["engine_id"]
+            or type(descriptor["owner_pid"]) is not int
+            or descriptor["owner_pid"] != group["owner_pid"]
+            or type(descriptor["owner_start_ticks"]) is not int
+            or descriptor["owner_start_ticks"] != group["owner_start_ticks"]
+            or descriptor["fabric_domain"] != group["fabric_domain"]
+            or descriptor["base_domain"] != group["base_domain"]
+            or descriptor["compatibility_domain"] != group["compatibility_domain"]
+            or type(descriptor["logical_bytes"]) is not int
+            or descriptor["logical_bytes"] != shape[0] * shape[1]
+            or type(descriptor["allocation_bytes"]) is not int
+            or descriptor["allocation_bytes"] < descriptor["logical_bytes"]
+            or not isinstance(descriptor["fabric_handle"], str)
+            or len(descriptor["fabric_handle"]) > 128
+        ):
+            return False
+        if len(base64.b64decode(descriptor["fabric_handle"], validate=True)) != 64:
+            return False
+    else:
+        expected = common | {
+            "pid",
+            "offset",
+            "handle",
+            "storage_size_bytes",
+            "storage_offset_bytes",
+            "ref_handle",
+            "ref_offset",
+            "event_handle",
+            "event_sync",
+        }
+        if (
+            set(descriptor) != expected
+            or type(descriptor["schema"]) is not int
+            or descriptor["schema"] != 1
+            or type(descriptor["pid"]) is not int
+            or descriptor["pid"] != group["owner_pid"]
+        ):
+            return False
+    return (
+        descriptor["gpu_uuid"] == entry["gpu_uuid"]
+        and _same_integer_vector(descriptor["shape"], shape)
+        and _same_integer_vector(descriptor["stride"], (shape[1], 1))
+    )
+
+
+class GPUMultiRankCacheRegion:
+    """One rank-local CUDA bank per worker, with aggregate row accounting.
+
+    The facade deliberately has no Tensor or host buffer protocol. Native
+    multipart registration consumes the ordered banks, while each model rank
+    opens only its own same-GPU bank. The group becomes visible atomically
+    after every bank has published its complete descriptor.
+    """
+
+    def __init__(
+        self,
+        engine_id,
+        chunks,
+        row_bytes,
+        base_domain=None,
+        *,
+        gpu_rank_devices,
+        gpu_transport="mnnvl",
+    ):
+        if (
+            type(chunks) is not int
+            or chunks <= 0
+            or type(row_bytes) is not int
+            or row_bytes <= 0
+        ):
+            raise ValueError("GPU bank geometry requires positive integer dimensions")
+        if (
+            not isinstance(gpu_rank_devices, list)
+            or len(gpu_rank_devices) < 2
+            or any(type(device) is not int or device < 0 for device in gpu_rank_devices)
+            or len(set(gpu_rank_devices)) != len(gpu_rank_devices)
+        ):
+            raise ValueError("GPU rank devices must be an explicit unique ordinal list")
+        if any(device >= torch.cuda.device_count() for device in gpu_rank_devices):
+            raise ValueError("GPU rank device ordinal is outside the visible CUDA set")
+        if gpu_transport not in ("cuda_ipc", "mnnvl"):
+            raise ValueError("Unknown retained GPU transport")
+        self.gpu_transport = gpu_transport
+        self.world_size = len(gpu_rank_devices)
+        self.shape = (chunks, row_bytes * self.world_size)
+        self.strides = (self.shape[1], 1)
+        self.path = region_path(engine_id)
+        self.banks = []
+        self.fabric_domain = self.compatibility_domain = None
+        self._closed = False
+        self.path.mkdir(mode=0o700)
+        try:
+            entries = []
+            owner_pid = os.getpid()
+            owner_ticks = _process_start_ticks(owner_pid)
+            for rank, device in enumerate(gpu_rank_devices):
+                with torch.cuda.device(device):
+                    options = {"_path": region_path(engine_id, rank=rank)}
+                    bank = (
+                        GPUFabricCacheRegion(
+                            engine_id, chunks, row_bytes, base_domain, **options
+                        )
+                        if gpu_transport == "mnnvl"
+                        else GPUCacheRegion(engine_id, chunks, row_bytes, **options)
+                    )
+                self.banks.append(bank)
+                if gpu_transport == "mnnvl":
+                    if rank == 0:
+                        self.fabric_domain = bank.fabric_domain
+                        self.compatibility_domain = bank.compatibility_domain
+                    if (
+                        bank.fabric_domain != self.fabric_domain
+                        or bank.compatibility_domain != self.compatibility_domain
+                    ):
+                        raise ValueError("All rank banks must share one fabric/domain")
+                descriptor, raw = _read_private_json(bank.path / "ipc.json")
+                entries.append(
+                    {
+                        "rank": rank,
+                        "world_size": self.world_size,
+                        "device": device,
+                        "engine_id": engine_id,
+                        "shape": list(bank.shape),
+                        "stride": list(bank.strides),
+                        "gpu_uuid": descriptor["gpu_uuid"],
+                        "owner_pid": owner_pid,
+                        "owner_start_ticks": owner_ticks,
+                        "descriptor_sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+                )
+            if len({entry["gpu_uuid"] for entry in entries}) != self.world_size:
+                raise ValueError("Rank banks must belong to distinct physical GPUs")
+            self.metadata = {
+                "schema": "dynamo-gpu-bank-group-v1",
+                "gpu_transport": gpu_transport,
+                "engine_id": engine_id,
+                "world_size": self.world_size,
+                "shape": list(self.shape),
+                "stride": list(self.strides),
+                "owner_pid": owner_pid,
+                "owner_start_ticks": owner_ticks,
+                "base_domain": base_domain if gpu_transport == "mnnvl" else None,
+                "compatibility_domain": self.compatibility_domain,
+                "fabric_domain": self.fabric_domain,
+                "banks": entries,
+            }
+            temporary = self.path / "group.json.pending"
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as output:
+                json.dump(self.metadata, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.rename(temporary, self.path / "group.json")
+            self.banks = tuple(self.banks)
+        except Exception:
+            try:
+                self.cleanup()
+            except Exception:
+                # A failed CUDA drain must retain all remaining owners. No
+                # native registration has happened at this constructor boundary.
+                _RETAINED_FAILED_GPU_GROUPS.append(self)
+            raise
+
+    def __len__(self):
+        return self.shape[0]
+
+    def cleanup(self):
+        if self._closed:
+            return
+        (self.path / "group.json").unlink(missing_ok=True)
+        (self.path / "group.json.pending").unlink(missing_ok=True)
+        try:
+            for bank in self.banks:
+                if not bank._closed:
+                    with torch.cuda.device(bank.tensor.device):
+                        bank.cleanup()
+                if _OWNED_GPU_REGIONS.get(bank.path) is bank:
+                    del _OWNED_GPU_REGIONS[bank.path]
+            self.path.rmdir()
+        except Exception:
+            _RETAINED_FAILED_GPU_GROUPS.append(self)
+            raise
+        self._closed = True
+
+
+def _open_rank_region(
+    engine_id,
+    shape,
+    rank,
+    world_size,
+    timeout,
+    gpu_transport,
+    base_domain,
+    compatibility_domain,
+    fabric_domain,
+):
+    if (
+        type(world_size) is not int
+        or world_size < 2
+        or type(rank) is not int
+        or not 0 <= rank < world_size
+    ):
+        raise ValueError("GPU bank rank/world size is invalid")
+    if (
+        not isinstance(shape, tuple)
+        or len(shape) != 2
+        or any(type(value) is not int or value <= 0 for value in shape)
+    ):
+        raise ValueError("GPU bank shape requires two positive integer dimensions")
+    directory = region_path(engine_id)
+    path = directory / "group.json"
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "GPU cache scheduler did not publish its rank bank group"
+            )
+        time.sleep(0.005)
+    group, raw_group = _read_private_json(path)
+    expected = {
+        "schema",
+        "gpu_transport",
+        "engine_id",
+        "world_size",
+        "shape",
+        "stride",
+        "owner_pid",
+        "owner_start_ticks",
+        "base_domain",
+        "compatibility_domain",
+        "fabric_domain",
+        "banks",
+    }
+    logical_width = shape[1] * world_size
+    if (
+        not isinstance(group, dict)
+        or set(group) != expected
+        or group["schema"] != "dynamo-gpu-bank-group-v1"
+        or group["gpu_transport"] != gpu_transport
+        or group["engine_id"] != engine_id
+        or type(group["world_size"]) is not int
+        or group["world_size"] != world_size
+        or not _same_integer_vector(group["shape"], (shape[0], logical_width))
+        or not _same_integer_vector(group["stride"], (logical_width, 1))
+        or type(group["owner_pid"]) is not int
+        or group["owner_pid"] <= 0
+        or type(group["owner_start_ticks"]) is not int
+        or group["owner_start_ticks"] != _process_start_ticks(group["owner_pid"])
+        or group["base_domain"] != base_domain
+        or group["compatibility_domain"] != compatibility_domain
+        or group["fabric_domain"] != fabric_domain
+        or not isinstance(group["banks"], list)
+        or len(group["banks"]) != world_size
+    ):
+        raise ValueError("Closed GPU bank group identity or geometry differs")
+    entry_keys = {
+        "rank",
+        "world_size",
+        "device",
+        "engine_id",
+        "shape",
+        "stride",
+        "gpu_uuid",
+        "owner_pid",
+        "owner_start_ticks",
+        "descriptor_sha256",
+    }
+    descriptors = []
+    devices, gpu_uuids = set(), set()
+    for expected_rank, entry in enumerate(group["banks"]):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != entry_keys
+            or type(entry["rank"]) is not int
+            or entry["rank"] != expected_rank
+            or type(entry["world_size"]) is not int
+            or entry["world_size"] != world_size
+            or type(entry["device"]) is not int
+            or entry["device"] < 0
+            or entry["device"] in devices
+            or entry["engine_id"] != engine_id
+            or not _same_integer_vector(entry["shape"], shape)
+            or not _same_integer_vector(entry["stride"], (shape[1], 1))
+            or not isinstance(entry["gpu_uuid"], str)
+            or not entry["gpu_uuid"]
+            or entry["gpu_uuid"] in gpu_uuids
+            or type(entry["owner_pid"]) is not int
+            or entry["owner_pid"] != group["owner_pid"]
+            or type(entry["owner_start_ticks"]) is not int
+            or entry["owner_start_ticks"] != group["owner_start_ticks"]
+            or not isinstance(entry["descriptor_sha256"], str)
+            or len(entry["descriptor_sha256"]) != 64
+        ):
+            raise ValueError("Rank bank identity or local row geometry differs")
+        devices.add(entry["device"])
+        gpu_uuids.add(entry["gpu_uuid"])
+        bank_path = region_path(engine_id, rank=expected_rank)
+        owned = _OWNED_GPU_REGIONS.get(bank_path)
+        if (
+            owned is not None
+            and gpu_transport == "cuda_ipc"
+            and owned._local_export_consumed
+        ):
+            # A same-process worker has already consumed its one IPC export.
+            # Its descriptor remains bound by the published original hash.
+            descriptor = owned.metadata
+            raw_descriptor = json.dumps(descriptor).encode()
+        else:
+            descriptor, raw_descriptor = _read_private_json(bank_path / "ipc.json")
+        if (
+            not isinstance(descriptor, dict)
+            or hashlib.sha256(raw_descriptor).hexdigest() != entry["descriptor_sha256"]
+            or not _rank_descriptor_matches(descriptor, group, entry, shape)
+        ):
+            raise ValueError("Rank bank descriptor differs from its group commitment")
+        descriptors.append(descriptor)
+    if _read_private_json(path)[1] != raw_group:
+        raise ValueError("GPU bank group changed during descriptor validation")
+    device = torch.cuda.current_device()
+    gpu_uuid = (
+        gpu_mnnvl.observe_fabric(device).gpu_uuid
+        if gpu_transport == "mnnvl"
+        else str(torch.cuda.get_device_properties(device).uuid)
+    )
+    if group["banks"][rank]["gpu_uuid"] != gpu_uuid:
+        raise ValueError("Selected rank bank and worker must use the same physical GPU")
+    owned = _OWNED_GPU_REGIONS.get(region_path(engine_id, rank=rank))
+    if owned is not None:
+        if (
+            owned._closed
+            or owned.gpu_transport != gpu_transport
+            or owned.shape != shape
+            or owned.tensor.device.index != device
+        ):
+            raise ValueError(
+                "Selected local GPU bank is closed or on a different device"
+            )
+        if gpu_transport == "cuda_ipc":
+            owned.consume_local_export()
+        return owned.tensor
+    if gpu_transport == "mnnvl":
+        return import_fabric(
+            descriptors[rank],
+            engine_id,
+            shape,
+            base_domain,
+            compatibility_domain,
+            fabric_domain,
+        )
+    return import_ipc(descriptors[rank], shape)
 
 
 def open_region(
@@ -314,9 +725,27 @@ def open_region(
     base_domain=None,
     compatibility_domain=None,
     fabric_domain=None,
+    rank=None,
+    world_size=1,
 ):
     if gpu_transport not in ("cuda_ipc", "mnnvl"):
         raise ValueError("Unknown retained GPU transport")
+    if type(world_size) is not int or world_size <= 0:
+        raise ValueError("GPU bank world size must be a positive integer")
+    if world_size > 1:
+        return _open_rank_region(
+            engine_id,
+            shape,
+            rank,
+            world_size,
+            timeout,
+            gpu_transport,
+            base_domain,
+            compatibility_domain,
+            fabric_domain,
+        )
+    if rank not in (None, 0) or (rank is not None and type(rank) is not int):
+        raise ValueError("A TP1 GPU bank has only rank zero")
     directory = region_path(engine_id)
     owned = _OWNED_GPU_REGIONS.get(directory)
     if owned is not None:
@@ -448,15 +877,22 @@ class GPUCacheWorker(OffloadingWorker):
         if self.handlers is not None:
             return
         options = {}
-        if self.spec.gpu_transport == "mnnvl":
+        if self.spec.config.parallel.world_size > 1:
             options = {
-                "gpu_transport": "mnnvl",
-                "base_domain": self.spec.base_domain,
-                "compatibility_domain": self.spec.extra_config[
-                    "router_hint_transfer_domain"
-                ],
-                "fabric_domain": self.spec.fabric_domain,
+                "rank": self.spec.config.parallel.rank,
+                "world_size": self.spec.config.parallel.world_size,
             }
+        if self.spec.gpu_transport == "mnnvl":
+            options.update(
+                {
+                    "gpu_transport": "mnnvl",
+                    "base_domain": self.spec.base_domain,
+                    "compatibility_domain": self.spec.extra_config[
+                        "router_hint_transfer_domain"
+                    ],
+                    "fabric_domain": self.spec.fabric_domain,
+                }
+            )
         self.region = open_region(
             self.spec.config.engine_id,
             (self.spec.num_chunks, self.spec.row_bytes),

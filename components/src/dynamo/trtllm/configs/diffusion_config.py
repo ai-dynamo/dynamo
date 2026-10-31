@@ -104,6 +104,15 @@ class DiffusionConfig:
     dit_ring_size: int = 1
     dit_cfg_size: int = 1
 
+    def __post_init__(self) -> None:
+        # The image request model bounds `n` to 1..10 (OpenAI's documented
+        # range). The default used when a request omits `n` obeys the same rule.
+        if not 1 <= self.default_num_images_per_prompt <= 10:
+            raise ValueError(
+                "default_num_images_per_prompt must be in [1, 10], got "
+                f"{self.default_num_images_per_prompt}"
+            )
+
     @classmethod
     def from_config(cls, config: Any) -> "DiffusionConfig":
         """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
