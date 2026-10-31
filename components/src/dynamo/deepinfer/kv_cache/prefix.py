@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prefix cache over DeepInfer's block allocator, with SWA state snapshots.
+"""Prefix cache over DeepInfer's block allocator, with SWA state snapshots and
+an optional host-DRAM tier.
 
 DeepInfer keeps its allocator (refcounted blocks; pin = ref + 1). On top sit
 vLLM's chained block hashes, LRU retention and KV events. A cached prefix of K
@@ -20,6 +21,17 @@ rebuilt from the blocks.
 - Eviction: exact LRU over cached leaf blocks that no live request holds; unpin,
   free the snapshot, emit ``BlockRemoved``.
 
+Host tier (``host_bytes``): eviction demotes a GPU leaf that can still serve a
+hit (it has a snapshot or cached blocks below it) into a pinned host row
+instead of dropping it, and emits nothing: the block is still a hit. A host
+block sits only below GPU blocks or host blocks, never above a GPU block: a GPU
+block is a leaf for eviction once no child is on GPU, and a host block once it
+has no child. ``admit`` shares the GPU part of a hit and copies the host part
+into the seq's freshly allocated blocks, which the cache then pins as its own.
+A request that recomputes host blocks hands the cache its GPU copy instead.
+Host eviction (LRU over host leaves) emits ``BlockRemoved``. Snapshots default
+to host memory with the tier, and their slots grow with it.
+
 Imported lazily by rank workers: no ``dynamo._core``; torch only when the
 engine's state tensor is a torch tensor.
 """
@@ -32,6 +44,7 @@ import itertools
 import logging
 import math
 import os
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -39,6 +52,7 @@ from typing import Any, Optional
 import numpy as np
 
 from .base import PREFILL_FREE_FRACTION, Admission, CacheStats, HeldKV, KVEvent
+from .host import HostBlockPool, PinnedRows, row_nbytes
 from .noop import NoopCacheManager
 from .vllm.hashing import get_hash_fn_by_name
 from .vllm.kv_cache_utils import (
@@ -54,25 +68,40 @@ logger = logging.getLogger(__name__)
 # where sha256_cbor costs ~27 us. Dynamo hashes the event token ids itself, so
 # the value is only an opaque parent-chain id on the wire.
 _HASH_ALGO = "sha256"
+# With the host tier and snapshots on host, this share of host_bytes holds
+# snapshots (~1.4 MB each against ~29 MB of KV per 32K-token interval).
+HOST_SNAPSHOT_SHARE = 16
+STATS_LOG_INTERVAL_S = 60.0
 
 
 @dataclass(eq=False)
 class _Block:
-    """A cached full block; the cache holds one pin on ``block_id``."""
+    """A cached full block, on GPU (the cache holds one pin on ``block_id``)
+    or in a host row (``host_slot``)."""
 
     block_hash: BlockHash
+    # -1 while the block is on host.
     block_id: int
     parent: Optional[_Block]
     # Chain position: the block holds tokens [index * 128, (index + 1) * 128).
     index: int
     children: int = 0
-    # Live requests whose block table holds block_id.
+    # Children on GPU: a GPU block is a leaf for eviction without them.
+    gpu_children: int = 0
+    # Live requests whose block table holds block_id (while admit promotes a
+    # host block: the request that will).
     users: int = 0
     # Snapshot slot with the state after this block, or -1.
     snapshot: int = -1
+    # Host tier row holding the block while it is off GPU, or -1.
+    host_slot: int = -1
     last_used: int = 0
     # Priority of this block's current eviction-heap entry (None: not queued).
     heap_key: Optional[int] = None
+
+    @property
+    def on_gpu(self) -> bool:
+        return self.block_id >= 0
 
 
 @dataclass(eq=False)
@@ -86,6 +115,18 @@ class _Request:
     held: dict[BlockHash, _Block] = field(default_factory=dict)
     # Prompt positions still to snapshot, ascending.
     checkpoints: deque[int] = field(default_factory=deque)
+
+
+@dataclass
+class _Evicted:
+    """One eviction pass, applied by ``_flush``."""
+
+    # GPU blocks to unpin.
+    ids: list[int] = field(default_factory=list)
+    # Of those, (block_id, host_slot) to copy to host first.
+    stores: list[tuple[int, int]] = field(default_factory=list)
+    # External hashes of the blocks that left the cache.
+    removed: list[int] = field(default_factory=list)
 
 
 def _finished(seq: Any) -> bool:
@@ -125,24 +166,31 @@ class _SnapshotPool:
         if self.nbytes <= 0:
             raise ValueError("the prefix cache needs a model with SWA state")
         self._host = device == "host"
-        shape = (num_slots, self.nbytes)
-        if isinstance(self._states, np.ndarray):
-            self._buf = np.zeros(shape, dtype=self._states.dtype)
+        self.row_bytes = row_nbytes(self._states[0, : self.nbytes])
+        if self._host:
+            # Pinned rows in chunks, clamped to the host's free memory.
+            self._rows: Any = PinnedRows(self._states[:1, : self.nbytes], num_slots)
+            num_slots = self._rows.count
+            if not num_slots:
+                raise ValueError("no host memory left for prefix snapshots")
+        elif isinstance(self._states, np.ndarray):
+            self._buf = np.zeros((num_slots, self.nbytes), dtype=self._states.dtype)
         else:
             torch = importlib.import_module("torch")
-            if self._host:
-                self._buf = torch.empty(
-                    shape, dtype=self._states.dtype, pin_memory=True
-                )
-            else:
-                self._buf = torch.empty(
-                    shape, dtype=self._states.dtype, device=self._states.device
-                )
+            self._buf = torch.empty(
+                (num_slots, self.nbytes),
+                dtype=self._states.dtype,
+                device=self._states.device,
+            )
+        self.num_slots = num_slots
         self._free = list(range(num_slots - 1, -1, -1))
 
     @property
     def num_free(self) -> int:
         return len(self._free)
+
+    def _slot(self, slot: int) -> Any:
+        return self._rows.row(slot) if self._host else self._buf[slot]
 
     def alloc(self) -> Optional[int]:
         return self._free.pop() if self._free else None
@@ -154,15 +202,15 @@ class _SnapshotPool:
         # With DEEPINFER_PREFILL_STORE_EXTRA_STATE off (enforced at launch) this
         # is a view of the slot's first state_size_to_disk bytes.
         src = self._io.select_state_slice_to_store(state_id, pos, self._states)
-        _copy(self._buf[slot], src)
+        _copy(self._slot(slot), src)
 
     def load(self, slot: int, state_id: int, pos: int) -> None:
         if self._host:
             # DeepInfer's loader would block the thread on the pinned H2D copy.
-            _copy(self._states[state_id, : self.nbytes], self._buf[slot])
+            _copy(self._states[state_id, : self.nbytes], self._slot(slot))
         else:
             self._io.load_state_from_store_to_prefill_cache(
-                state_id, pos, self._buf[slot], self._states
+                state_id, pos, self._slot(slot), self._states
             )
 
 
@@ -175,8 +223,9 @@ class PrefixCacheManager(NoopCacheManager):
         *,
         snapshot_interval: int = 32768,
         snapshot_slots: int = 256,
-        snapshot_device: str = "gpu",
+        snapshot_device: Optional[str] = None,
         free_watermark: float = 0.05,
+        host_bytes: int = 0,
     ) -> None:
         super().__init__(engine)
         if not engine.scheduler_config.chunked_prefill:
@@ -194,15 +243,38 @@ class PrefixCacheManager(NoopCacheManager):
         )
         self._hash_fn = get_hash_fn_by_name(_HASH_ALGO)
         init_none_hash(self._hash_fn)
-        self._pool = _SnapshotPool(
-            engine.driver_worker.cache_engine, snapshot_slots, snapshot_device
-        )
+        cache_engine = engine.driver_worker.cache_engine
+        host_bytes = max(0, int(host_bytes))
+        if snapshot_device is None:
+            snapshot_device = "host" if host_bytes else "gpu"
+        if host_bytes and snapshot_device == "host":
+            # Snapshots come out of the same host budget.
+            states = cache_engine.gpu_states
+            snapshot_bytes = row_nbytes(
+                states[0, : int(cache_engine.state_size_to_disk)]
+            )
+            snapshot_slots = max(
+                snapshot_slots, host_bytes // HOST_SNAPSHOT_SHARE // snapshot_bytes
+            )
+        self._pool = _SnapshotPool(cache_engine, snapshot_slots, snapshot_device)
+        self._host: Optional[HostBlockPool] = None
+        if host_bytes:
+            if snapshot_device == "host":
+                host_bytes -= self._pool.num_slots * self._pool.row_bytes
+            self._host = HostBlockPool(
+                cache_engine.gpu_blocks,
+                max(0, host_bytes) // row_nbytes(cache_engine.gpu_blocks[0]),
+            )
+            if not self._host.capacity:
+                logger.warning("No host memory left for the prefix cache's host tier")
+                self._host = None
         self._blocks: dict[BlockHash, _Block] = {}
         # Eviction candidates: (key, tiebreak, block); stale entries are skipped.
         self._heap: list[tuple[int, int, _Block]] = []
+        self._host_heap: list[tuple[int, int, _Block]] = []
         self._tiebreak = itertools.count()
         self._clock = itertools.count(1)
-        # Cached blocks no live request holds (an upper bound on what eviction frees).
+        # GPU blocks no live request holds (an upper bound on what eviction frees).
         self._num_unused = 0
         # Keyed by seq_id (request ids can repeat across retries) and by HeldKV.
         self._requests: dict[int, _Request] = {}
@@ -212,16 +284,30 @@ class PrefixCacheManager(NoopCacheManager):
         self._events: list[KVEvent] = []
         self._query_tokens = 0
         self._hit_tokens = 0
+        # Host tier counters: hit tokens served from host, blocks copied to
+        # host, copied back, taken back from a request that recomputed them,
+        # and dropped from host.
+        self.host_hit_tokens = 0
+        self.host_stores = 0
+        self.host_loads = 0
+        self.host_rehomed = 0
+        self.host_evictions = 0
+        self._last_log = time.monotonic()
         logger.info(
             "DeepInfer prefix cache: keep=%d interval=%d snapshots=%d x %d B on %s, "
-            "free floor=%d/%d blocks",
+            "free floor=%d/%d blocks, host tier=%s",
             self.keep_tokens,
             self.snapshot_interval,
-            snapshot_slots,
-            self._pool.nbytes,
+            self._pool.num_slots,
+            self._pool.row_bytes,
             snapshot_device,
             self.floor_blocks,
             total,
+            (
+                f"{self._host.capacity} blocks ({self._host.nbytes / 2**30:.1f} GiB)"
+                if self._host is not None
+                else "off"
+            ),
         )
 
     # -- KVCacheManager -------------------------------------------------------
@@ -250,22 +336,34 @@ class PrefixCacheManager(NoopCacheManager):
             if self.engine.state_manager.get_num_free_blocks() <= slotless:
                 self._retry = req
                 return Admission(admitted=False)
+            # Held, host blocks stay put while _make_room evicts.
             for block in chain:
                 self._acquire(req, block)
-            need = -(-(num_tokens + 1) // self.block_size) - len(chain)
+            # The GPU part is shared; the host part goes into new blocks.
+            shared = next((i for i, b in enumerate(chain) if not b.on_gpu), len(chain))
+            need = -(-(num_tokens + 1) // self.block_size) - shared
             want = need + self.floor_blocks + len(scheduler.running)
             self._make_room(want, want)
             if self.engine.block_manager.get_num_free_blocks() < want or not (
-                scheduler.try_allocate_seq_with_prefix(seq, [b.block_id for b in chain])
+                scheduler.try_allocate_seq_with_prefix(
+                    seq, [b.block_id for b in chain[:shared]]
+                )
             ):
                 self._release(req)
                 self._retry = req
                 return Admission(admitted=False)
+            if shared < len(chain):
+                self._promote(chain[shared:], seq.block_table[shared : len(chain)])
+                self.host_hit_tokens += (len(chain) - shared) * self.block_size
             self._pool.load(chain[-1].snapshot, seq.state_id, hit)
             seq.num_cached_tokens = hit
             seq.cached_hit_tokens = hit
             logger.debug(
-                "Prefix hit for %s: %d of %d tokens", seq.request_id, hit, num_tokens
+                "Prefix hit for %s: %d of %d tokens (%d from host)",
+                seq.request_id,
+                hit,
+                num_tokens,
+                (len(chain) - shared) * self.block_size,
             )
         req.checkpoints = deque(self._checkpoints(hit, num_tokens))
         if req.checkpoints:
@@ -282,6 +380,7 @@ class PrefixCacheManager(NoopCacheManager):
         if len(self._requests) > len(waiting) + len(scheduler.running):
             # Seqs DeepInfer finished without finalize_seq (preempted, ignored).
             self._reap()
+        self._log_stats()
         if not self._num_unused:
             return
         head = next((s for s in waiting if not _finished(s)), None)
@@ -380,17 +479,94 @@ class PrefixCacheManager(NoopCacheManager):
         return hashes[index]
 
     def _lookup(self, req: _Request, max_blocks: int) -> list[_Block]:
-        """The longest cached chain of the prompt that ends at a snapshot."""
+        """The longest cached chain of the prompt that ends at a snapshot: GPU
+        blocks, then host blocks."""
         chain: list[_Block] = []
         best = 0
         for i in range(max_blocks):
             block = self._blocks.get(self._block_hash(req, i))
-            if block is None:
+            if block is None or (block.on_gpu and chain and not chain[-1].on_gpu):
                 break
             chain.append(block)
             if block.snapshot >= 0:
                 best = i + 1
         return chain[:best]
+
+    # -- host tier ------------------------------------------------------------
+
+    def _promote(self, blocks: list[_Block], block_ids: Any) -> None:
+        """Copy held host blocks into the seq's new GPU blocks and cache those."""
+        assert self._host is not None
+        ids = [int(i) for i in block_ids]
+        self._host.load([b.host_slot for b in blocks], ids)
+        # The cache's own reference, as for a capture.
+        self.engine.block_manager.pin_blocks(ids)
+        for block, block_id in zip(blocks, ids):
+            # The load is queued on the stream before any later store into the row.
+            self._host.release(block.host_slot)
+            block.host_slot, block.block_id, block.heap_key = -1, block_id, None
+            if block.parent is not None:
+                block.parent.gpu_children += 1
+        self.host_loads += len(blocks)
+
+    def _rehome(self, block: _Block, block_id: int) -> None:
+        """A request recomputed a host block into ``block_id``: cache that."""
+        assert self._host is not None
+        self._host.release(block.host_slot)
+        block.host_slot, block.block_id, block.heap_key = -1, block_id, None
+        self._num_unused += 1
+        if block.parent is not None:
+            block.parent.gpu_children += 1
+        self.host_rehomed += 1
+
+    def _host_slot(self, out: _Evicted) -> Optional[int]:
+        assert self._host is not None
+        slot = self._host.alloc()
+        while slot is None:
+            victim = self._pop_evictable(gpu=False)
+            if victim is None:
+                return None
+            self._evict_host(victim, out)
+            slot = self._host.alloc()
+        return slot
+
+    def _evict_host(self, block: _Block, out: _Evicted) -> None:
+        assert self._host is not None
+        del self._blocks[block.block_hash]
+        self._host.release(block.host_slot)
+        block.host_slot = -1
+        if block.snapshot >= 0:
+            self._pool.release(block.snapshot)
+            block.snapshot = -1
+        out.removed.append(_external(block))
+        self.host_evictions += 1
+        parent = block.parent
+        if parent is not None:
+            parent.children -= 1
+            self._maybe_push(parent)
+
+    def _log_stats(self) -> None:
+        now = time.monotonic()
+        if now - self._last_log < STATS_LOG_INTERVAL_S or not self._query_tokens:
+            return
+        self._last_log = now
+        on_host = self._host.capacity - self._host.num_free if self._host else 0
+        logger.info(
+            "DeepInfer prefix cache: hit rate %.3f (%d of %d prompt tokens, %d "
+            "from host), %d blocks cached on GPU, %d of %d on host, host stores "
+            "%d, loads %d, re-homed %d, evictions %d",
+            self._hit_tokens / self._query_tokens,
+            self._hit_tokens,
+            self._query_tokens,
+            self.host_hit_tokens,
+            len(self._blocks) - on_host,
+            on_host,
+            self._host.capacity if self._host else 0,
+            self.host_stores,
+            self.host_loads,
+            self.host_rehomed,
+            self.host_evictions,
+        )
 
     # -- capture --------------------------------------------------------------
 
@@ -409,6 +585,7 @@ class PrefixCacheManager(NoopCacheManager):
         table = seq.block_table
         parent: Optional[_Block] = None
         new: list[_Block] = []
+        pinned: list[int] = []
         for i in range(num):
             h = req.hashes[i]
             block = self._blocks.get(h)
@@ -418,14 +595,20 @@ class PrefixCacheManager(NoopCacheManager):
                 self._num_unused += 1
                 if parent is not None:
                     parent.children += 1
+                    parent.gpu_children += 1
                 new.append(block)
+                pinned.append(block.block_id)
+            elif not block.on_gpu:
+                self._rehome(block, int(table[i]))
+                pinned.append(block.block_id)
             # Another request may have cached the same tokens in other blocks.
             if block.block_id == table[i]:
                 self._acquire(req, block)
             parent = block
         assert parent is not None
+        if pinned:
+            self.engine.block_manager.pin_blocks(pinned)
         if new:
-            self.engine.block_manager.pin_blocks([b.block_id for b in new])
             first = new[0]
             self._events.append(
                 KVEvent(
@@ -451,15 +634,21 @@ class PrefixCacheManager(NoopCacheManager):
             return slot
         # Preempted requests may still pin snapshotted blocks.
         self._reap()
-        ids: list[int] = []
-        hashes: list[int] = []
+        out = _Evicted()
+        kept: list[_Block] = []
         while slot is None:
-            block = self._pop_evictable()
-            if block is None:
-                break
-            self._drop(block, ids, hashes)
+            # The coldest snapshots are on host; a demoted block keeps its own.
+            block = self._pop_evictable(gpu=False) if self._host else None
+            if block is not None:
+                self._evict_host(block, out)
+            else:
+                block = self._pop_evictable(gpu=True)
+                if block is None:
+                    break
+                if not self._evict_gpu(block, out, demote=False):
+                    kept.append(block)
             slot = self._pool.alloc()
-        self._flush_evicted(ids, hashes)
+        self._flush(out, kept)
         return slot
 
     # -- references -----------------------------------------------------------
@@ -468,7 +657,7 @@ class PrefixCacheManager(NoopCacheManager):
         if block.block_hash in req.held:
             return
         req.held[block.block_hash] = block
-        if block.users == 0:
+        if block.users == 0 and block.on_gpu:
             self._num_unused -= 1
         block.users += 1
 
@@ -478,7 +667,8 @@ class PrefixCacheManager(NoopCacheManager):
             block.users -= 1
             block.last_used = tick
             if block.users == 0:
-                self._num_unused += 1
+                if block.on_gpu:
+                    self._num_unused += 1
                 self._maybe_push(block)
         req.held.clear()
 
@@ -494,47 +684,87 @@ class PrefixCacheManager(NoopCacheManager):
     # -- eviction -------------------------------------------------------------
 
     def _maybe_push(self, block: _Block) -> None:
-        if block.users or block.children:
+        if block.users:
             return
-        # A leaf without a snapshot cannot serve a hit: it goes first.
-        key = block.last_used if block.snapshot >= 0 else 0
+        if block.on_gpu:
+            if block.gpu_children:
+                return
+            heap = self._heap
+        else:
+            if block.children:
+                return
+            heap = self._host_heap
+        # A leaf that cannot serve a hit (no snapshot, nothing cached below)
+        # goes first.
+        key = block.last_used if block.snapshot >= 0 or block.children else 0
         block.heap_key = key
-        heapq.heappush(self._heap, (key, next(self._tiebreak), block))
-        if len(self._heap) > 2 * len(self._blocks) + 1024:
-            self._heap = [
+        heapq.heappush(heap, (key, next(self._tiebreak), block))
+        if len(heap) > 2 * len(self._blocks) + 1024:
+            heap[:] = [
                 (b.heap_key, next(self._tiebreak), b)
                 for b in self._blocks.values()
-                if b.heap_key is not None
+                if b.heap_key is not None and (b.on_gpu == (heap is self._heap))
             ]
-            heapq.heapify(self._heap)
+            heapq.heapify(heap)
 
-    def _pop_evictable(self) -> Optional[_Block]:
-        while self._heap:
-            key, _, block = heapq.heappop(self._heap)
-            if key != block.heap_key:
+    def _pop_evictable(self, *, gpu: bool) -> Optional[_Block]:
+        heap = self._heap if gpu else self._host_heap
+        while heap:
+            key, _, block = heapq.heappop(heap)
+            if key != block.heap_key or block.on_gpu != gpu:
                 continue
             block.heap_key = None
-            if block.users == 0 and block.children == 0:
+            below = block.gpu_children if gpu else block.children
+            if block.users == 0 and below == 0:
                 return block
         return None
 
-    def _drop(self, block: _Block, ids: list[int], hashes: list[int]) -> None:
-        del self._blocks[block.block_hash]
+    def _evict_gpu(self, block: _Block, out: _Evicted, *, demote: bool = True) -> bool:
+        """Take an unheld GPU leaf off the GPU: to the host tier when it can
+        still serve a hit, else out of the cache. False (nothing changed) when
+        it can do neither: the host blocks below it need it."""
+        slot = None
+        if (
+            demote
+            and self._host is not None
+            and (block.snapshot >= 0 or block.children)
+        ):
+            slot = self._host_slot(out)
+        if slot is None and block.children:
+            return False
         self._num_unused -= 1
-        if block.snapshot >= 0:
-            self._pool.release(block.snapshot)
-            block.snapshot = -1
-        ids.append(block.block_id)
-        hashes.append(_external(block))
+        out.ids.append(block.block_id)
         parent = block.parent
         if parent is not None:
-            parent.children -= 1
+            parent.gpu_children -= 1
+        if slot is not None:
+            out.stores.append((block.block_id, slot))
+            block.block_id, block.host_slot = -1, slot
+            self.host_stores += 1
+            self._maybe_push(block)
+        else:
+            del self._blocks[block.block_hash]
+            if block.snapshot >= 0:
+                self._pool.release(block.snapshot)
+                block.snapshot = -1
+            out.removed.append(_external(block))
+            if parent is not None:
+                parent.children -= 1
+        if parent is not None:
             self._maybe_push(parent)
+        return True
 
-    def _flush_evicted(self, ids: list[int], hashes: list[int]) -> None:
-        if ids:
-            self.engine.block_manager.unpin_blocks(ids)
-            self._events.append(KVEvent(kind="removed", block_hashes=hashes))
+    def _flush(self, out: _Evicted, kept: list[_Block]) -> None:
+        if out.stores:
+            assert self._host is not None
+            # Before the blocks are freed: the copy is queued ahead of their reuse.
+            self._host.store([i for i, _ in out.stores], [s for _, s in out.stores])
+        if out.ids:
+            self.engine.block_manager.unpin_blocks(out.ids)
+        if out.removed:
+            self._events.append(KVEvent(kind="removed", block_hashes=out.removed))
+        for block in kept:
+            self._maybe_push(block)
 
     def _make_room(self, want: int, at_least: int) -> int:
         """Evict LRU blocks until ``want`` blocks are free; do nothing when even
@@ -547,13 +777,14 @@ class PrefixCacheManager(NoopCacheManager):
             self._reap()
             if free + self._num_unused < at_least:
                 return 0
-        ids: list[int] = []
-        hashes: list[int] = []
+        out = _Evicted()
+        kept: list[_Block] = []
         # Each unheld block's only reference is the cache's pin.
-        while free + len(ids) < want:
-            block = self._pop_evictable()
+        while free + len(out.ids) < want:
+            block = self._pop_evictable(gpu=True)
             if block is None:
                 break
-            self._drop(block, ids, hashes)
-        self._flush_evicted(ids, hashes)
+            if not self._evict_gpu(block, out):
+                kept.append(block)
+        self._flush(out, kept)
         return int(block_manager.get_num_free_blocks()) - free
