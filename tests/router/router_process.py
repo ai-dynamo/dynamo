@@ -2,12 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import os
+import socket
+import ssl
 import sys
+import time
 from collections.abc import Mapping
+from pathlib import Path
 
 from tests.utils.http_checks import check_http_ok
 from tests.utils.managed_process import ManagedProcess
+
+logger = logging.getLogger(__name__)
+
+_EPP_BINARY_ENV = "DYN_EPP_BINARY"
+_DEFAULT_EPP_BINARY = "/epp"
 
 
 class SlotTrackerProcess(ManagedProcess):
@@ -149,3 +159,115 @@ class FrontendRouterProcess(ManagedProcess):
 # Backward-compatible alias so existing callers that import KVRouterProcess
 # continue to work without changes.
 KVRouterProcess = FrontendRouterProcess
+
+
+def validate_loopback_kubeconfig(kubeconfig: str | os.PathLike[str]) -> Path:
+    """Require KUBECONFIG to be this test's loopback fixture, not a cluster file."""
+    raw = str(kubeconfig).strip()
+    if not raw:
+        raise RuntimeError(
+            "KUBECONFIG must point at the allocated loopback Kubernetes API fixture"
+        )
+    path = Path(raw)
+    if not path.is_file():
+        raise RuntimeError(
+            "KUBECONFIG must be an existing loopback fixture file, not a cluster default"
+        )
+    text = path.read_text(encoding="utf-8")
+    if "https://" in text:
+        raise RuntimeError("KUBECONFIG must not target a TLS or cluster Kubernetes API")
+    if (
+        "server: http://127.0.0.1:" not in text
+        and "server: http://localhost:" not in text
+    ):
+        raise RuntimeError(
+            "KUBECONFIG must target the allocated loopback Kubernetes API on 127.0.0.1"
+        )
+    return path
+
+
+def fetch_loopback_tls_cert(host: str, port: int, timeout_s: float) -> str:
+    """Read a loopback self-signed peer cert with a bounded handshake.
+
+    Uses a local SSLContext for this connection only; it does not change
+    process-global TLS settings.
+    """
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("TLS cert fetch is limited to loopback")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=timeout_s) as raw:
+        raw.settimeout(timeout_s)
+        with context.wrap_socket(raw, server_hostname="localhost") as tls:
+            der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise OSError("loopback TLS peer certificate missing")
+    return ssl.DER_cert_to_PEM_cert(der)
+
+
+def epp_loopback_tls_ready(grpc_port: int, timeout: float | None = None) -> bool:
+    """ManagedProcess readiness callback for the standard /epp TLS listener."""
+    budget = 5.0 if timeout is None else max(float(timeout), 0.1)
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        remaining = max(deadline - time.monotonic(), 0.05)
+        try:
+            fetch_loopback_tls_cert("127.0.0.1", grpc_port, min(remaining, 2.0))
+            return True
+        except OSError as exc:
+            logger.debug("EPP TLS listener not ready on %s: %s", grpc_port, exc)
+            time.sleep(0.2)
+    return False
+
+
+class RuntimeEppProcess(ManagedProcess):
+    """Thin ManagedProcess wrapper around the standard Runtime EPP binary."""
+
+    def __init__(
+        self,
+        request,
+        *,
+        binary: str | None = None,
+        grpc_port: int,
+        health_port: int,
+        extra_env: Mapping[str, str | None] | None = None,
+        timeout: float = 240,
+        kubeconfig: str | os.PathLike[str] | None = None,
+    ):
+        resolved_binary = (binary or os.environ.get(_EPP_BINARY_ENV, "")).strip() or (
+            _DEFAULT_EPP_BINARY
+        )
+        if not Path(resolved_binary).exists():
+            raise RuntimeError(
+                f"Runtime EPP binary {resolved_binary!r} is not present. "
+                f"Set {_EPP_BINARY_ENV} or install the standard /epp binary; "
+                "this test does not skip on absence."
+            )
+        if kubeconfig is not None:
+            validate_loopback_kubeconfig(kubeconfig)
+
+        env = os.environ.copy()
+        for name, value in (extra_env or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        validate_loopback_kubeconfig(env.get("KUBECONFIG", ""))
+        env["DYN_EPP_MODE"] = "dynamo"
+        env["DYN_EPP_METRICS_PORT"] = "0"
+
+        super().__init__(
+            command=[resolved_binary],
+            env=env,
+            timeout=timeout,
+            display_output=True,
+            health_check_ports=[health_port],
+            health_check_urls=[],
+            health_check_funcs=[
+                lambda remaining=None: epp_loopback_tls_ready(grpc_port, remaining)
+            ],
+            log_dir=request.node.name,
+            terminate_all_matching_process_names=False,
+            display_name="dynamo-runtime-epp",
+        )

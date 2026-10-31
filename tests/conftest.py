@@ -257,6 +257,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "framework_with_kvcr: marks deployment tests that require a KVCR-capable "
         "image and multi-host RDMA",
     )
+    config.addinivalue_line(
+        "markers",
+        "runtime_epp: marks tests that require the standard Runtime EPP binary "
+        "in a dedicated frontend test image",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():

@@ -161,6 +161,7 @@ jobs:
       - planner-copy-to-acr
       - frontend-build
       - frontend-test
+      - frontend-runtime-epp-parity
       - frontend-copy-to-acr
     if: always()
     steps:
@@ -800,6 +801,7 @@ jobs:
       artifact_retention_days: '7'
       # Include cold multi-arch compilation and the later test-image/compliance stages.
       build_timeout_minutes: 90
+      build_frontend_test_image: ${{ needs.changed-files.outputs.frontend == 'true' }}
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -1073,6 +1075,140 @@ jobs:
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_ais_image_smoke.py
+
+  frontend-runtime-epp-parity:
+    name: frontend
+    needs: [changed-files, frontend-build]
+    # Subset of frontend-build: only the frontend filter, which now includes the
+    # dedicated parity helpers. Never consumes a skipped frontend -test image.
+    if: needs.changed-files.outputs.frontend == 'true'
+    runs-on: prod-tester-amd-v2
+    timeout-minutes: 20
+    container:
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-test
+      env:
+        HOME: /home/dynamo
+        USER: dynamo
+    steps:
+      - name: Cache Qwen tokenizer snapshot
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ runner.temp }}/hf-qwen3-0.6b-c1899de289a04d
+          key: qwen3-0.6b-tokenizer-c1899de289a04d12100db370d81485cdf75e47ca
+      - name: Download Qwen tokenizer files
+        timeout-minutes: 5
+        env:
+          HF_HUB_CACHE: ${{ runner.temp }}/hf-qwen3-0.6b-c1899de289a04d
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          from huggingface_hub import hf_hub_download, snapshot_download
+
+          repo_id = "Qwen/Qwen3-0.6B"
+          revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+          allow_patterns = [
+              "config.json",
+              "generation_config.json",
+              "merges.txt",
+              "tokenizer.json",
+              "tokenizer_config.json",
+              "vocab.json",
+          ]
+          cache_dir = os.environ["HF_HUB_CACHE"]
+          snapshot_download(
+              repo_id=repo_id,
+              revision=revision,
+              allow_patterns=allow_patterns,
+              cache_dir=cache_dir,
+              token=False,
+          )
+          repo_cache = Path(cache_dir) / "models--Qwen--Qwen3-0.6B"
+          snapshot = repo_cache / "snapshots" / revision
+          refs_main = repo_cache / "refs" / "main"
+          refs_main.parent.mkdir(parents=True, exist_ok=True)
+          # Rust hf-hub 0.4.3 reads refs/main as-is. Always rewrite, including a
+          # restored hot cache, with the exact SHA and no trailing bytes.
+          refs_main.write_bytes(revision.encode("ascii"))
+          raw_ref = refs_main.read_bytes()
+          if raw_ref != revision.encode("ascii"):
+              raise AssertionError(
+                  "refs/main must be exactly the fixed SHA with no newline, space, or BOM"
+              )
+          files = []
+          for name in allow_patterns:
+              path = snapshot / name
+              if not path.is_file():
+                  raise FileNotFoundError(f"cached snapshot missing {name}")
+              snapshot_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              resolved = Path(
+                  hf_hub_download(
+                      repo_id=repo_id,
+                      filename=name,
+                      revision="main",
+                      cache_dir=cache_dir,
+                      local_files_only=True,
+                      token=False,
+                  )
+              )
+              resolved_real = resolved.resolve()
+              snapshot_real = path.resolve()
+              resolved_digest = hashlib.sha256(resolved_real.read_bytes()).hexdigest()
+              if resolved_digest != snapshot_digest:
+                  raise AssertionError(
+                      f"offline main resolve for {name} does not match the fixed snapshot"
+                  )
+              files.append(
+                  {
+                      "name": name,
+                      "sha256": snapshot_digest,
+                      "size": snapshot_real.stat().st_size,
+                      "snapshot_path": str(path),
+                      "resolved_main_path": str(resolved),
+                  }
+              )
+          manifest = {
+              "repo_id": repo_id,
+              "revision": revision,
+              "refs_main_path": str(refs_main),
+              "refs_main": raw_ref.decode("ascii"),
+              "snapshot_path": str(snapshot),
+              "files": files,
+          }
+          manifest_path = Path(cache_dir) / "qwen3-0.6b-tokenizer-manifest.json"
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          print(f"Wrote tokenizer manifest {manifest_path}")
+          PY
+      - name: Run runtime EPP Frontend parity
+        timeout-minutes: 12
+        working-directory: /workspace
+        env:
+          HF_HUB_CACHE: ${{ runner.temp }}/hf-qwen3-0.6b-c1899de289a04d
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python3 -m pytest tests/router/test_epp_frontend_parity.py \
+            tests/router/test_epp_frontend_routing_parity.py \
+            tests/router/test_epp_frontend_config_parity.py \
+            tests/router/test_epp_frontend_inputs_parity.py \
+            -n 0 \
+            -m 'pre_merge and gpu_0 and runtime_epp' \
+            --models-dir="${HF_HUB_CACHE}" \
+            --junitxml="${HF_HUB_CACHE}/epp-frontend-parity-junit.xml"
+      - name: Upload JUnit and tokenizer manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: frontend-runtime-epp-parity-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/hf-qwen3-0.6b-c1899de289a04d/epp-frontend-parity-junit.xml
+            ${{ runner.temp }}/hf-qwen3-0.6b-c1899de289a04d/qwen3-0.6b-tokenizer-manifest.json
+          if-no-files-found: warn
+          retention-days: 7
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE

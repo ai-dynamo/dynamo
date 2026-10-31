@@ -384,6 +384,7 @@ markers = [
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
     "mocker: marks tests for the mocker component",
     "router: marks tests for router component",
+    "runtime_epp: marks tests that require the standard Runtime EPP binary in a dedicated frontend test image",
     "planner: marks tests for planner component",
     "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
     "engine_ports: dynamo_dynamic_ports also allocates per-worker engine HTTP/gRPC ports, exported as DYN_ENGINE_{HTTP,GRPC}_PORT{N}",

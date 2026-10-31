@@ -172,6 +172,16 @@ on:
         required: false
         type: string
         default: ''
+      build_frontend_test_image:
+        description: |
+          Opt in to building the frontend -test image via the existing
+          Dockerfile.test test_image target. Default false keeps frontend out
+          of the generic Refresh BuildKit / Build and Push Test Image path
+          used by dev, local-dev, and compliance. PR frontend-build sets this
+          true; other callers keep the default.
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -614,7 +624,7 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && (inputs.target != 'frontend' || inputs.build_frontend_test_image) }}
         uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -624,7 +634,7 @@ jobs:
           fresh_builder: ${{ inputs.fresh_builder }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && (inputs.target != 'frontend' || inputs.build_frontend_test_image) }}
         shell: bash
         env:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
