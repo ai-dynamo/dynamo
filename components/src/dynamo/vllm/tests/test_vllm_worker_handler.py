@@ -3112,6 +3112,219 @@ class TestEmbeddingWorkerHandlerCancellation:
                 pass
 
 
+class TestEmbeddingWorkerHandlerChatInput:
+    """Chat-style (``messages``) embedding requests are rendered by vLLM's
+    renderer and the rendered prompts are encoded unchanged, one per
+    conversation."""
+
+    IMAGE_CONVERSATION = [
+        {
+            "role": "document",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+                {"type": "text", "text": "a chart"},
+            ],
+        }
+    ]
+    AUDIO_CONVERSATION = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "AAAA", "format": "wav"},
+                }
+            ],
+        }
+    ]
+
+    def _make_handler(self, custom_jinja_template=None):
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.EmbeddingWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(
+                    served_model_name="test-model",
+                    custom_jinja_template=custom_jinja_template,
+                ),
+                shutdown_event=None,
+            )
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.engine_client.model_config.multimodal_config = None
+        handler.engine_client.renderer.tokenizer = object()
+        encoded: list = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            encoded.append((prompt, pooling_params))
+            output = MagicMock()
+            output.outputs.data = torch.tensor([float(prompt["index"]), 0.5])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        return handler, encoded
+
+    def _make_context(self) -> MagicMock:
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        return context
+
+    @staticmethod
+    def _rendered(conversations):
+        # Stand-ins for vLLM's rendered engine inputs; image and audio
+        # placeholders expand to several prompt tokens each.
+        return list(conversations), [
+            {"index": i, "prompt_token_ids": list(range(10 + i))}
+            for i in range(len(conversations))
+        ]
+
+    async def _generate(self, handler, request):
+        tok_params = object()
+        with (
+            patch(
+                "vllm.entrypoints.pooling.embed.protocol.EmbeddingChatRequest.build_tok_params",
+                return_value=tok_params,
+            ),
+            patch(
+                "vllm.entrypoints.pooling.embed.protocol.EmbeddingBatchChatRequest.build_tok_params",
+                return_value=tok_params,
+            ),
+        ):
+            responses = [
+                r async for r in handler.generate(request, self._make_context())
+            ]
+        return responses, tok_params
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_conversation_is_rendered_and_encoded(self):
+        handler, encoded = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        responses, tok_params = await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": self.IMAGE_CONVERSATION,
+                "dimensions": 2,
+            },
+        )
+
+        conversations, chat_params, passed_tok_params = render.await_args.args
+        assert len(conversations) == 1
+        assert conversations[0][0]["role"] == "document"
+        assert chat_params.chat_template is None  # the model's own template
+        assert passed_tok_params is tok_params
+        # The rendered prompt reaches the engine unchanged, as an embed task.
+        assert [prompt for prompt, _ in encoded] == [
+            {"index": 0, "prompt_token_ids": list(range(10))}
+        ]
+        assert encoded[0][1].task == "embed"
+        assert encoded[0][1].dimensions == 2
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert [item["index"] for item in response["data"]] == [0]
+        assert response["data"][0]["embedding"] == mod._encode_floats_to_base64(
+            [0.0, 0.5]
+        )
+        assert response["usage"] == {"prompt_tokens": 10, "total_tokens": 10}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_batch_keeps_conversation_order(self):
+        handler, encoded = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        responses, _ = await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": [self.IMAGE_CONVERSATION, self.AUDIO_CONVERSATION],
+            },
+        )
+
+        conversations = render.await_args.args[0]
+        assert [conv[0]["role"] for conv in conversations] == ["document", "user"]
+        assert len(encoded) == 2
+        data = responses[0]["data"]
+        assert [item["index"] for item in data] == [0, 1]
+        assert data[1]["embedding"] == mod._encode_floats_to_base64([1.0, 0.5])
+        assert responses[0]["usage"]["prompt_tokens"] == 10 + 11
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_custom_jinja_template_is_used(self, tmp_path):
+        template = tmp_path / "embed.jinja"
+        template.write_text("{{ messages[0]['content'] }}")
+        handler, _ = self._make_handler(custom_jinja_template=str(template))
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": [{"role": "query", "content": "hello"}],
+            },
+        )
+
+        chat_params = render.await_args.args[1]
+        assert chat_params.chat_template == "{{ messages[0]['content'] }}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_invalid_message_is_rejected_before_encoding(self):
+        handler, encoded = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock()
+
+        with pytest.raises(mod.InvalidArgument, match="content"):
+            await self._generate(
+                handler,
+                {"model": "test-model", "messages": [{"role": "user", "content": 5}]},
+            )
+        handler.engine_client.renderer.render_chat_async.assert_not_awaited()
+        assert encoded == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("case", ["text_only_model", "unsupported_modality"])
+    async def test_unsupported_media_is_invalid_argument(self, case):
+        """vLLM's rejection reaches the client as a 400 with its message,
+        instead of a generic "Invalid request" or a 500."""
+        from vllm.exceptions import VLLMValidationError
+
+        error = {
+            # vLLM on a text-only model given media.
+            "text_only_model": ValueError("test-model is not a multimodal model"),
+            # vLLM on a model without the modality (not a ValueError).
+            "unsupported_modality": VLLMValidationError(
+                "At most 0 audio(s) may be provided in one prompt.",
+                parameter="audio",
+            ),
+        }[case]
+        handler, encoded = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
+
+        with pytest.raises(mod.InvalidArgument) as exc_info:
+            await self._generate(
+                handler,
+                {"model": "test-model", "messages": self.AUDIO_CONVERSATION},
+            )
+        assert str(error) in str(exc_info.value)
+        assert exc_info.value.__cause__ is error
+        assert encoded == []
+
+
 class TestRLAdminRouteHardening:
     """Regressions for the codex round-2 RL admin fixes."""
 
