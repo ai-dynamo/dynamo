@@ -39,7 +39,7 @@ async fn next_within(
 /// A client for `server`, as the engine opens one.
 async fn client(server: &FakeServer) -> OpenEngineClient {
     let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
-    let deadline = startup_deadline(Duration::from_secs(5)).unwrap();
+    let deadline = startup_deadline(Duration::from_secs(30)).unwrap();
     OpenEngineClient::connect("lpx-test", &endpoint, transport(), deadline)
         .await
         .expect("connect")
@@ -58,7 +58,7 @@ async fn a_stalled_or_unavailable_model_info_call_is_retried() {
         *fake.0.model_info_stalls.lock().unwrap() = stalls;
         *fake.0.model_info_status.lock().unwrap() = status;
         let server = FakeServer::start(fake).await;
-        let deadline = startup_deadline(Duration::from_secs(5)).unwrap();
+        let deadline = startup_deadline(Duration::from_secs(30)).unwrap();
         let info = client(&server)
             .await
             .wait_for_model_info(

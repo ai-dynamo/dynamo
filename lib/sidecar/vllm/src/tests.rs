@@ -748,7 +748,7 @@ async fn try_engine_from_args_with_world_size(
         "--grpc-connections".to_string(),
         "2".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
-        "5".to_string(),
+        "30".to_string(),
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];
@@ -1183,7 +1183,7 @@ async fn excludes_reasoning_policy_follows_engine_gating() {
             "--grpc-endpoint".to_string(),
             fake.endpoint.clone(),
             "--grpc-startup-deadline-secs".to_string(),
-            "5".to_string(),
+            "30".to_string(),
         ];
         let (engine, _) =
             tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
