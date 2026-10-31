@@ -68,20 +68,33 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
-├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
-│   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
-│   └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
-├── blocked_workers: FxHashSet<WorkerWithDpRank>
-└── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+├── pending: BinaryHeap<PolicyQueueEntry>                 # shared requests
+├── ready_by_worker: FxHashMap<WorkerLane, BinaryHeap<PolicyQueueEntry>>
+│   ├── Exact(7, dp_rank=0) → requests hard-pinned to that rank
+│   ├── Affinity(7, dp_rank=0) → soft requests targeting that rank
+│   └── WorkerAffinity(9) → soft requests targeting any rank of that worker
+├── blocked_workers: FxHashSet<WorkerLane>
+├── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+└── fallback_heads: BTreeSet<WorkerLaneHead>               # soft heads awaiting fallback capacity
 ```
 
 - `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
-- `ready_by_worker` contains requests pinned to a particular worker and data-parallel rank. Each worker/rank heap is removed when its last request leaves.
-- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes.
-- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` only identifies a queue pinned to one worker/rank; the actor and selector retain worker knowledge.
+- `ready_by_worker` separates hard pins from soft affinity, so a hard pin cannot
+  hide a soft request that can fall back. Each lane is removed when its last request leaves.
+- `candidate_worker_heads` tracks one highest-priority head per unblocked lane.
+  A full lane leaves this index until it is rechecked.
+- Affinity lanes wake on target capacity changes, an enqueue to the same target,
+  or the 100 ms affinity recheck while affinity backlog exists.
+- `fallback_heads` contains soft heads whose target is ineligible and whose
+  fallback workers are full. These heads are rechecked on every dispatch pass,
+  so another worker's freed capacity can admit them before later shared work.
+- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring
+  state. `WorkerLane` identifies the target and whether it is hard or soft;
+  the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
+- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest
+  indexed lane head. Healthy blocked lanes stay parked until a wake; fallback
+  heads remain eligible for a recheck on every pass.
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
