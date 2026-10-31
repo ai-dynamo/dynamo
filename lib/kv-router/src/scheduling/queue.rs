@@ -958,7 +958,7 @@ impl<
         );
         let class_index = self
             .profile
-            .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
+            .resolve_class_index(request.policy_class.as_deref());
         QueueMetadata {
             class_index,
             snapshot,
@@ -1011,7 +1011,7 @@ impl<
         if let Some(policy_class) = policy_class {
             metadata.class_index = self
                 .profile
-                .resolve_class_index_strict(&policy_class, metadata.snapshot.uncached_tokens)
+                .resolve_class_index_strict(&policy_class)
                 .ok_or_else(|| {
                     KvSchedulerError::InvalidClassificationMetadata(format!(
                         "unknown policy class {policy_class:?}"
@@ -2982,31 +2982,14 @@ mod tests {
     async fn classifiers_read_class_and_reject_thresholds() {
         let profile = policy_profile(
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: short
-  - min_tokens: 32
-    bucket: long
+default_policy_class: latency
 policy_classes:
-  - name: latency_short
-    policy_family: latency
-    cache_bucket: short
+  - name: latency
     quantum: 1
     decode_busy_threshold_frac: 0.5
-  - name: latency_long
-    policy_family: latency
-    cache_bucket: long
-    quantum: 1
-  - name: bulk_short
-    policy_family: bulk
-    cache_bucket: short
+  - name: bulk
     quantum: 1
     prefill_busy_threshold_frac: 0.25
-  - name: bulk_long
-    policy_family: bulk
-    cache_bucket: long
-    quantum: 1
 "#,
         );
         let reject = crate::scheduling::BusyThresholds {
@@ -3033,7 +3016,6 @@ policy_classes:
             prefill_busy_threshold_frac: Some(0.25),
             ..Default::default()
         };
-        // 16 uncached tokens fall in the `short` bucket.
         assert_eq!(classified.queue_thresholds(), latency);
         assert_eq!(classified.queue_thresholds_for("bulk"), Some(bulk));
         assert_eq!(classified.queue_thresholds_for("missing"), None);
@@ -3041,36 +3023,23 @@ policy_classes:
 
         classified.set_policy_class("bulk");
         assert_eq!(classified.queue_thresholds(), bulk);
+
+        // An unknown requested class reads the default class's thresholds.
+        request.policy_class = Some("unknown".to_string());
+        let (classified, _workers) =
+            queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
+        assert_eq!(classified.queue_thresholds(), latency);
     }
 
     #[tokio::test]
     async fn classifier_overrides_are_validated_before_enqueue() {
         let profile = policy_profile(
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
+default_policy_class: latency
 policy_classes:
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
+  - name: latency
     quantum: 1
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
-    quantum: 1
-  - name: bulk_cached
-    policy_family: bulk
-    cache_bucket: cached
-    quantum: 1
-  - name: bulk_uncached
-    policy_family: bulk
-    cache_bucket: uncached
-    quantum: 1
-  - name: custom_priority
+  - name: bulk
     quantum: 1
 "#,
         );
@@ -3090,28 +3059,29 @@ policy_classes:
         let metadata = queue
             .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
-        assert_eq!(
-            queue.profile.class(metadata.class_index).name,
-            "bulk_cached"
-        );
+        assert_eq!(queue.profile.class(metadata.class_index).name, "bulk");
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at, Some(due_at));
 
+        // Without a cost override the request keeps its uncached-token cost.
+        let mut class_only = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
+        class_only.set_policy_class("bulk");
+        let metadata = queue
+            .validate_classification(&mut request, class_only, ingress_at)
+            .unwrap();
+        assert_eq!(queue.profile.class(metadata.class_index).name, "bulk");
+        assert_eq!(metadata.snapshot.scheduling_cost_tokens, 16);
+        assert_eq!(metadata.due_at, None);
+
+        // An unknown override fails instead of falling back to the default class.
         let mut invalid = queue
             .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
             .0;
         invalid.set_policy_class("missing");
         assert!(matches!(
             queue.validate_classification(&mut request, invalid, ingress_at),
-            Err(KvSchedulerError::InvalidClassificationMetadata(_))
-        ));
-
-        let mut physical = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-        physical.set_policy_class("latency_cached");
-        assert!(matches!(
-            queue.validate_classification(&mut request, physical, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
@@ -3181,25 +3151,17 @@ policy_classes:
     async fn validation_recomputes_cache_eligibility_at_enqueue() {
         let profile = policy_profile(
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
+default_policy_class: standard
 policy_classes:
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
+  - name: latency
     quantum: 1
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
+  - name: standard
     quantum: 1
 "#,
         );
         let (queue, _slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 64, profile);
         let (mut request, _rx) = make_request("classified", 48);
+        request.policy_class = Some("latency".to_string());
         request
             .overlap
             .effective_cached_tokens
@@ -3209,18 +3171,17 @@ policy_classes:
         let classified = queue
             .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
             .0;
+        assert_eq!(classified.scheduling_cost_tokens(), 16);
 
         // The only cache-bearing worker disappears while the classification is
-        // pending; enqueue-time state governs, so the request buckets as
-        // uncached — exactly as an unclassified request admitted now would.
+        // pending; enqueue-time state governs the token snapshot, exactly as for an
+        // unclassified request admitted now. The class does not depend on it.
         cfg_tx.send(HashMap::new()).unwrap();
         let metadata = queue
             .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
-        assert_eq!(
-            queue.profile.class(metadata.class_index).name,
-            "latency_uncached"
-        );
+        assert_eq!(queue.profile.class(metadata.class_index).name, "latency");
+        assert_eq!(metadata.snapshot, QueueSnapshot::new(48, 0));
     }
 
     #[tokio::test]
@@ -3400,18 +3361,11 @@ policy_classes:
     async fn mixed_classes_recheck_capacity_after_each_admission() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: capped
 policy_classes:
   - name: uncapped
-    policy_family: uncapped
-    cache_bucket: all
     quantum: 1
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
 "#,
@@ -3478,14 +3432,8 @@ policy_classes:
     async fn zero_class_queue_limit_never_queues() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 0
@@ -3523,14 +3471,8 @@ policy_classes:
     async fn zero_token_queue_limit_admits_idle_workers() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     raw_isl_token_queue_limit_per_worker: 0
@@ -3559,14 +3501,8 @@ policy_classes:
     async fn zero_workers_report_no_endpoints_not_queue_rejection() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 4
@@ -3590,18 +3526,11 @@ policy_classes:
     async fn direct_release_wakes_queued_and_mixed_classes_with_full_admission_channel() {
         let mixed = policy_profile(
             r#"
-default_policy_family: queued
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: queued
 policy_classes:
   - name: direct
-    policy_family: direct
-    cache_bucket: all
     quantum: 1
   - name: queued
-    policy_family: queued
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 32
 "#,
@@ -4510,14 +4439,8 @@ policy_classes:
     async fn decode_limit_holds_new_work_until_held_kv_frees() {
         let profile = policy_profile(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: decode-bound
-    policy_family: standard
-    cache_bucket: all
     quantum: 1
     decode_busy_threshold_frac: 0.5
 "#,
@@ -4682,19 +4605,12 @@ policy_classes:
     async fn policy_classes_apply_independent_thresholds_and_preserve_backlog_order() {
         let profile = policy_profile(
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
   - name: bulk
-    policy_family: bulk
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 1024
 "#,
@@ -4756,19 +4672,12 @@ policy_classes:
     async fn arrival_drains_other_class_backlog_instead_of_bypassing() {
         let profile = policy_profile(
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 1024
   - name: bulk
-    policy_family: bulk
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
 "#,
@@ -4808,34 +4717,15 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn policy_families_and_cache_buckets_select_physical_queues() {
+    async fn class_names_select_queues_independent_of_cache_state() {
         let profile = policy_profile(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
+default_policy_class: standard
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
+  - name: standard
     quantum: 1
     prefill_busy_threshold: 0
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
+  - name: latency
     quantum: 1
     prefill_busy_threshold: 0
   - name: custom_priority
@@ -4845,6 +4735,16 @@ policy_classes:
         );
         let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
         let worker = WorkerWithDpRank::new(0, 0);
+
+        // Cache state changes a request's token snapshot and cost, never its class.
+        let (mut probe, _probe_rx) = make_request("probe", 64);
+        probe.policy_class = Some("latency".to_string());
+        let uncached = queue.default_queue_metadata(&probe, Instant::now());
+        probe.overlap.effective_cached_tokens.insert(worker, 48);
+        let cached = queue.default_queue_metadata(&probe, Instant::now());
+        assert_eq!((uncached.class_index, cached.class_index), (1, 1));
+        assert_eq!(uncached.snapshot, QueueSnapshot::new(64, 0));
+        assert_eq!(cached.snapshot, QueueSnapshot::new(64, 48));
 
         let (active, active_rx) = make_request("active", 64);
         queue.enqueue(active).await;
@@ -4862,6 +4762,7 @@ policy_classes:
         latency_uncached.policy_class = Some("latency".to_string());
         queue.enqueue(latency_uncached).await;
 
+        // Unknown and missing names use the default class, cached or not.
         let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
         unknown_cached.policy_class = Some("unknown".to_string());
         unknown_cached
@@ -4870,10 +4771,8 @@ policy_classes:
             .insert(worker, 64);
         queue.enqueue(unknown_cached).await;
 
-        let (mut ordinary_class_name, _ordinary_class_name_rx) =
-            make_request("ordinary-class-name", 64);
-        ordinary_class_name.policy_class = Some("latency_cached".to_string());
-        queue.enqueue(ordinary_class_name).await;
+        let (missing, _missing_rx) = make_request("missing", 64);
+        queue.enqueue(missing).await;
 
         let (mut custom, _custom_rx) = make_request("custom", 64);
         custom.policy_class = Some("custom_priority".to_string());
@@ -4882,10 +4781,10 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(0),
             Some(ClassQueueStats {
-                received_total: 1,
+                received_total: 3,
                 rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
+                pending_count: 2,
+                pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
             })
         );
@@ -4894,33 +4793,13 @@ policy_classes:
             Some(ClassQueueStats {
                 received_total: 2,
                 rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(2),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
+                pending_count: 2,
+                pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
             })
         );
         assert_eq!(
-            queue.class_queue_stats(3),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(4),
+            queue.class_queue_stats(2),
             Some(ClassQueueStats {
                 received_total: 1,
                 rejected_due_time_passed_total: 0,
@@ -4931,18 +4810,79 @@ policy_classes:
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn class_ttft_budget_alone_does_not_order_or_expire_queued_requests() {
+        let profile = policy_profile(
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 1
+    queue_policy: wspt
+    slo_ttft_ms: 1
+    prefill_busy_threshold_frac: 0.0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (long, mut long_rx) = make_request("long", 64);
+        assert_eq!(
+            queue.default_queue_metadata(&long, Instant::now()).due_at,
+            None
+        );
+        queue.enqueue(long).await;
+        let (short, mut short_rx) = make_request("short", 16);
+        queue.enqueue(short).await;
+        let (explicit, explicit_rx) = make_request("explicit", 64);
+        queue
+            .enqueue_with_due_at_for_test(explicit, Instant::now() + Duration::from_secs(30))
+            .await;
+        assert_eq!(queue.pending_count(), 3);
+
+        // Far past the 1 ms class budget, only the explicit deadline expires, at its own time.
+        tokio::time::advance(Duration::from_secs(29)).await;
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 3);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(matches!(
+            explicit_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        assert_eq!(queue.pending_count(), 2);
+
+        // WSPT still orders the class, not arrival plus the budget: the later, shorter
+        // request is admitted first.
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        short_rx.try_recv().unwrap().unwrap();
+        assert!(matches!(
+            long_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        slots
+            .mark_prefill_completed(&"short".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"short".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        long_rx.try_recv().unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.received_total, 4);
+        assert_eq!(stats.rejected_due_time_passed_total, 1);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn class_local_limit_rejection_is_typed_and_not_overload() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 1
@@ -4985,14 +4925,8 @@ policy_classes:
     async fn per_worker_limit_tracks_discovered_worker_count_without_evicting() {
         let profile = policy_profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 1

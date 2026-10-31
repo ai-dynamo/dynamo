@@ -792,28 +792,15 @@ impl OfflineReplayRouter {
         let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
-        let (class_index, snapshot) = match self
+        let class_index = self
             .profile
-            .direct_class_index(pending.policy_class.as_deref())
-        {
-            Some(class_index) => (class_index, None),
-            None => {
-                let snapshot = self.snapshot_for(&pending);
-                (
-                    self.profile.resolve_class_index(
-                        pending.policy_class.as_deref(),
-                        snapshot.uncached_tokens,
-                    ),
-                    Some(snapshot),
-                )
-            }
-        };
+            .resolve_class_index(pending.policy_class.as_deref());
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
+            let snapshot = self.snapshot_for(&pending);
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
@@ -1917,44 +1904,22 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_family: root
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: root
-    policy_family: root
-    cache_bucket: all
     quantum: 1
 models:
   replay-model:
-    default_policy_family: latency
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: cached
-      - min_tokens: 32
-        bucket: uncached
+    default_policy_class: latency
     policy_classes:
-      - name: latency_cached
-        policy_family: latency
-        cache_bucket: cached
+      - name: latency
         quantum: 1
         prefill_busy_threshold: 0
         request_queue_limit_per_worker: 1
-      - name: latency_uncached
-        policy_family: latency
-        cache_bucket: uncached
+      - name: interactive
         quantum: 1
         prefill_busy_threshold: 0
         request_queue_limit_per_worker: 0
-      - name: batch_cached
-        policy_family: batch
-        cache_bucket: cached
-        quantum: 4
-        prefill_busy_threshold: 1024
-      - name: batch_uncached
-        policy_family: batch
-        cache_bucket: uncached
+      - name: batch
         quantum: 4
         prefill_busy_threshold: 1024
 "#,
@@ -1969,7 +1934,7 @@ models:
         std::fs::remove_file(path).unwrap();
 
         let mut active = request(1, 1);
-        active.policy_class = Some("latency".to_string());
+        active.policy_class = Some("interactive".to_string());
         assert_eq!(
             router
                 .on_request_arrival(&active, None, 0.0)
@@ -1988,7 +1953,7 @@ models:
                 .admissions
                 .len(),
             1,
-            "the batch family should select batch_uncached and use its higher busy threshold"
+            "batch should select its own class and use its higher busy threshold"
         );
 
         let mut cached_latency = request(3, 3);
@@ -2005,76 +1970,67 @@ models:
             .unwrap();
         assert!(
             router
-                .on_request_arrival(&cached_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&cached_latency, Some(cached_hashes), 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
-            "the latency family should select latency_cached from observed cache state"
+            "latency should queue while the worker is busy"
         );
 
-        let mut ordinary_class_name = request(4, 4);
-        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        let mut fail_fast = request(4, 4);
+        fail_fast.policy_class = Some("interactive".to_string());
         let error = router
-            .on_request_arrival(&ordinary_class_name, None, 0.0)
+            .on_request_arrival(&fail_fast, None, 0.0)
             .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
-        assert_eq!(rejection.policy_class, "latency_uncached");
+        assert_eq!(rejection.policy_class, "interactive");
         assert_eq!(rejection.current, 0);
         assert_eq!(rejection.limit, 0);
 
         router.add_worker(1).unwrap();
-        let mut scaled_latency = request(5, 3);
-        scaled_latency.policy_class = Some("latency".to_string());
+        let mut uncached_latency = request(5, 5);
+        uncached_latency.policy_class = Some("latency".to_string());
         assert!(
             router
-                .on_request_arrival(&scaled_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&uncached_latency, None, 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
-            "a second discovered worker should raise the effective queue limit"
+            "an uncached request should join the same latency backlog under the raised limit"
         );
         assert_eq!(router.pending_count(), 2);
 
         router.remove_worker(1).unwrap();
-        let mut rejected_after_shrink = request(6, 3);
-        rejected_after_shrink.policy_class = Some("latency".to_string());
+        let mut root_class = request(6, 6);
+        root_class.policy_class = Some("root".to_string());
         let error = router
-            .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
+            .on_request_arrival(&root_class, None, 0.0)
             .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
+        assert_eq!(
+            rejection.policy_class, "latency",
+            "a root class name is unknown to the model profile and uses its default"
+        );
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);
         assert_eq!(router.pending_count(), 2);
     }
 
     #[test]
-    fn replay_cache_bucket_ignores_removed_worker_entries() {
+    fn replay_snapshot_ignores_removed_worker_cache() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
+  - name: standard
     quantum: 1
     prefill_busy_threshold: 0
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
-    quantum: 1
-    prefill_busy_threshold: 1024
 "#,
         )
         .unwrap();
@@ -2100,15 +2056,42 @@ policy_classes:
         router
             .on_request_arrival(&request(1, 1), None, 0.0)
             .unwrap();
-        let effects = router
-            .on_request_arrival(&target, Some(target_hashes), 0.0)
-            .unwrap();
-        assert_eq!(
-            effects.admissions.len(),
-            1,
-            "cache state from a removed worker must not select the cached queue"
+        assert!(
+            router
+                .on_request_arrival(&target, Some(target_hashes), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
         );
-        assert_eq!(router.pending_count(), 0);
+        let stats = router.pending.class_stats(0);
+        assert_eq!(
+            (stats.requests, stats.raw_isl_tokens, stats.cached_tokens),
+            (1, 64, 0),
+            "cache state from a removed worker must not reach the queued snapshot"
+        );
+
+        let cached = request(3, 3);
+        let cached_hashes = ReplayRequestHashes::from_tokens(&cached.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                2,
+                cached_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert!(
+            router
+                .on_request_arrival(&cached, Some(cached_hashes), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        let stats = router.pending.class_stats(0);
+        assert_eq!(
+            (stats.requests, stats.raw_isl_tokens, stats.cached_tokens),
+            (2, 128, 64)
+        );
     }
 
     #[test]

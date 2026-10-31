@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
@@ -46,6 +47,9 @@ pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
     pub quantum: usize,
+    /// Time-to-first-token budget in whole milliseconds, or `None` when the class sets none.
+    /// Queue ordering, deadlines, and expiry do not read it.
+    pub slo_ttft_ms: Option<NonZeroU64>,
     /// The limits this class waits on.
     pub busy_thresholds: BusyThresholds,
     pub request_queue_limit_per_worker: Option<usize>,
@@ -184,68 +188,12 @@ impl FullRankCounts {
     }
 }
 
+/// One flat set of policy classes, each selected directly by its name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolicyProfile {
     classes: Vec<PolicyClassConfig>,
-    classifier: PolicyClassifier,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum PolicyClassifier {
-    SyntheticSingle { class_index: usize },
-    FamilyBucket(FamilyBucketClassifier),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct FamilyBucketClassifier {
-    default_family_index: usize,
-    family_indices: HashMap<String, usize>,
-    explicit_class_indices: HashMap<String, usize>,
-    buckets: Vec<UncachedIslBucket>,
-    class_by_family_bucket: Vec<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UncachedIslBucket {
-    min_tokens: usize,
-}
-
-impl FamilyBucketClassifier {
-    /// Returns only selections that do not require a cache snapshot.
-    fn direct_class_index(&self, requested: Option<&str>) -> Option<usize> {
-        requested.and_then(|name| self.explicit_class_indices.get(name).copied())
-    }
-
-    /// Combines a recognized family (or the default) with the observed bucket.
-    fn class_index(&self, requested: Option<&str>, uncached_tokens: usize) -> usize {
-        if let Some(class_index) = self.direct_class_index(requested) {
-            return class_index;
-        }
-
-        let family_index = requested
-            .and_then(|name| self.family_indices.get(name).copied())
-            .unwrap_or(self.default_family_index);
-        self.class_index_for_family(family_index, uncached_tokens)
-    }
-
-    fn strict_class_index(&self, requested: &str, uncached_tokens: usize) -> Option<usize> {
-        self.explicit_class_indices
-            .get(requested)
-            .copied()
-            .or_else(|| {
-                self.family_indices
-                    .get(requested)
-                    .map(|family_index| self.class_index_for_family(*family_index, uncached_tokens))
-            })
-    }
-
-    fn class_index_for_family(&self, family_index: usize, uncached_tokens: usize) -> usize {
-        let bucket_index = self
-            .buckets
-            .partition_point(|bucket| bucket.min_tokens <= uncached_tokens)
-            .saturating_sub(1);
-        self.class_by_family_bucket[family_index * self.buckets.len() + bucket_index]
-    }
+    class_indices: HashMap<String, usize>,
+    default_class_index: usize,
 }
 
 impl PolicyProfile {
@@ -257,6 +205,7 @@ impl PolicyProfile {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
             quantum: 1,
+            slo_ttft_ms: None,
             busy_thresholds: BusyThresholds {
                 prefill_busy_threshold: None,
                 prefill_busy_threshold_frac: router_queue_threshold,
@@ -267,8 +216,9 @@ impl PolicyProfile {
             cached_token_queue_limit_per_worker: None,
         };
         Self {
+            class_indices: HashMap::from([(class.name.clone(), 0)]),
             classes: vec![class],
-            classifier: PolicyClassifier::SyntheticSingle { class_index: 0 },
+            default_class_index: 0,
         }
     }
 
@@ -277,45 +227,25 @@ impl PolicyProfile {
     }
 
     pub fn default_class(&self) -> &PolicyClassConfig {
-        &self.classes[self.resolve_class_index(None, 0)]
+        &self.classes[self.default_class_index]
     }
 
-    /// Resolves synthetic and explicit requests without observing cache state.
-    pub fn direct_class_index(&self, requested: Option<&str>) -> Option<usize> {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => Some(*class_index),
-            PolicyClassifier::FamilyBucket(classifier) => classifier.direct_class_index(requested),
-        }
-    }
-
-    /// Resolves a requested family and exact uncached ISL to a physical queue.
-    pub fn resolve_class_index(&self, requested: Option<&str>, uncached_tokens: usize) -> usize {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => *class_index,
-            PolicyClassifier::FamilyBucket(classifier) => {
-                // TODO: Add bounded observability for unknown requested policy values.
-                classifier.class_index(requested, uncached_tokens)
-            }
-        }
+    /// Resolves a requested class name to its queue. A missing or unknown name selects the
+    /// default class.
+    pub fn resolve_class_index(&self, requested: Option<&str>) -> usize {
+        // TODO: Add bounded observability for unknown requested policy values.
+        requested
+            .and_then(|name| self.resolve_class_index_strict(name))
+            .unwrap_or(self.default_class_index)
     }
 
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
     }
 
-    pub(crate) fn resolve_class_index_strict(
-        &self,
-        requested: &str,
-        uncached_tokens: usize,
-    ) -> Option<usize> {
-        match &self.classifier {
-            PolicyClassifier::SyntheticSingle { class_index } => {
-                (self.classes[*class_index].name == requested).then_some(*class_index)
-            }
-            PolicyClassifier::FamilyBucket(classifier) => {
-                classifier.strict_class_index(requested, uncached_tokens)
-            }
-        }
+    /// Resolves a configured class name, or `None` for any other name.
+    pub(crate) fn resolve_class_index_strict(&self, requested: &str) -> Option<usize> {
+        self.class_indices.get(requested).copied()
     }
 }
 
@@ -441,43 +371,44 @@ impl RouterPolicyConfig {
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
     router: Option<RouterSettings>,
-    default_policy_family: Option<String>,
+    default_policy_class: Option<String>,
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
-    uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
     worker_selection: Option<RawWorkerSelectionConfig>,
     request_classifier: Option<RawRequestClassifierConfig>,
+    #[serde(default, deserialize_with = "key_present")]
+    default_policy_family: bool,
+    #[serde(default, deserialize_with = "key_present")]
+    uncached_isl_buckets: bool,
 }
 
 impl RawRouterPolicyConfig {
     fn resolve(self) -> Result<RouterPolicyConfig, RouterPolicyConfigError> {
+        reject_removed_keys(
+            "root",
+            [
+                ("default_policy_family", self.default_policy_family),
+                ("uncached_isl_buckets", self.uncached_isl_buckets),
+            ],
+        )?;
         if let Some(router) = &self.router {
             router
                 .apply(&mut super::config::KvRouterConfig::default())
                 .map_err(RouterPolicyConfigError::Validation)?;
         }
-        let root = match (
-            self.default_policy_family,
-            self.policy_classes,
-            self.uncached_isl_buckets,
-        ) {
-            (None, None, None) => None,
-            (Some(default_policy_family), Some(policy_classes), Some(uncached_isl_buckets)) => {
-                Some(resolve_profile(
-                    RawPolicyProfile {
-                        default_policy_family,
-                        policy_classes,
-                        uncached_isl_buckets,
-                    },
-                    "root",
-                )?)
-            }
-            _ => {
+        let root = match (self.default_policy_class, self.policy_classes) {
+            (default_policy_class, Some(policy_classes)) => Some(resolve_profile(
+                default_policy_class,
+                policy_classes,
+                "root",
+            )?),
+            (Some(_), None) => {
                 return Err(RouterPolicyConfigError::Validation(
-                    "root profile must specify default_policy_family, uncached_isl_buckets, and policy_classes when any root profile field is present".to_string(),
+                    "root default_policy_class requires policy_classes".to_string(),
                 ));
             }
+            (None, None) => None,
         };
 
         let mut models = HashMap::with_capacity(self.models.len());
@@ -487,7 +418,19 @@ impl RawRouterPolicyConfig {
                     "model profile name must not be empty".to_string(),
                 ));
             }
-            let resolved = resolve_profile(profile, &format!("model {model_name:?}"))?;
+            let location = format!("model {model_name:?}");
+            reject_removed_keys(
+                &location,
+                [
+                    ("default_policy_family", profile.default_policy_family),
+                    ("uncached_isl_buckets", profile.uncached_isl_buckets),
+                ],
+            )?;
+            let resolved = resolve_profile(
+                profile.default_policy_class,
+                profile.policy_classes,
+                &location,
+            )?;
             models.insert(model_name, resolved);
         }
 
@@ -524,165 +467,112 @@ impl RawRouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPolicyProfile {
-    default_policy_family: String,
+    default_policy_class: Option<String>,
     policy_classes: Vec<RawPolicyClassConfig>,
-    uncached_isl_buckets: Vec<RawUncachedIslBucket>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawUncachedIslBucket {
-    min_tokens: usize,
-    bucket: String,
+    #[serde(default, deserialize_with = "key_present")]
+    default_policy_family: bool,
+    #[serde(default, deserialize_with = "key_present")]
+    uncached_isl_buckets: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPolicyClassConfig {
     name: String,
-    policy_family: Option<String>,
-    cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
     quantum: usize,
+    slo_ttft_ms: Option<u64>,
     prefill_busy_threshold: Option<usize>,
     prefill_busy_threshold_frac: Option<f64>,
     decode_busy_threshold_frac: Option<f64>,
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
+    #[serde(default, deserialize_with = "key_present")]
+    policy_family: bool,
+    #[serde(default, deserialize_with = "key_present")]
+    cache_bucket: bool,
+}
+
+/// Records that a key is present, whatever its value, including `null` or an empty value.
+fn key_present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+}
+
+/// Rejects keys of the removed policy-family and cache-bucket hierarchy.
+fn reject_removed_keys(
+    location: &str,
+    keys: [(&str, bool); 2],
+) -> Result<(), RouterPolicyConfigError> {
+    match keys.into_iter().find(|&(_, present)| present) {
+        Some((key, _)) => Err(RouterPolicyConfigError::Validation(format!(
+            "{location} {key} was removed; select policy classes directly by name and set \
+             default_policy_class to the default class"
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn resolve_profile(
-    profile: RawPolicyProfile,
+    default_policy_class: Option<String>,
+    raw_classes: Vec<RawPolicyClassConfig>,
     location: &str,
 ) -> Result<PolicyProfile, RouterPolicyConfigError> {
-    validate_identifier(&profile.default_policy_family, "policy family", location)?;
-    if profile.policy_classes.is_empty() {
+    if raw_classes.is_empty() {
         return Err(RouterPolicyConfigError::Validation(format!(
             "{location} policy_classes must not be empty"
         )));
     }
 
-    let resolved_buckets = resolve_uncached_isl_buckets(profile.uncached_isl_buckets, location)?;
-    let mut names = HashSet::with_capacity(profile.policy_classes.len());
-    let mut classes = Vec::with_capacity(profile.policy_classes.len());
-    let mut bindings = Vec::with_capacity(profile.policy_classes.len());
-    for raw in profile.policy_classes {
-        let resolved = resolve_policy_class(raw, &resolved_buckets.indices, location)?;
-        if !names.insert(resolved.config.name.clone()) {
+    let mut classes = Vec::with_capacity(raw_classes.len());
+    let mut class_indices = HashMap::with_capacity(raw_classes.len());
+    for raw in raw_classes {
+        let class = resolve_policy_class(raw, location)?;
+        if class_indices
+            .insert(class.name.clone(), classes.len())
+            .is_some()
+        {
             return Err(RouterPolicyConfigError::Validation(format!(
                 "{location} contains duplicate policy class {:?}",
-                resolved.config.name
+                class.name
             )));
         }
-        classes.push(resolved.config);
-        bindings.push(resolved.binding);
+        classes.push(class);
     }
 
-    let mut family_names = Vec::new();
-    let mut family_indices = HashMap::new();
-    for binding in &bindings {
-        let ClassBinding::FamilyBucket { policy_family, .. } = binding else {
-            continue;
-        };
-        if !family_indices.contains_key(policy_family) {
-            let family_index = family_names.len();
-            family_names.push(policy_family.clone());
-            family_indices.insert(policy_family.clone(), family_index);
+    let default_class_index = match default_policy_class {
+        Some(name) => class_indices.get(&name).copied().ok_or_else(|| {
+            RouterPolicyConfigError::Validation(format!(
+                "{location} default_policy_class {name:?} does not name a configured policy class"
+            ))
+        })?,
+        None if classes.len() == 1 => 0,
+        None => {
+            return Err(RouterPolicyConfigError::Validation(format!(
+                "{location} default_policy_class is required with more than one policy class"
+            )));
         }
-    }
-
-    let Some(default_family_index) = family_indices.get(&profile.default_policy_family).copied()
-    else {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} default_policy_family {:?} does not name a configured family",
-            profile.default_policy_family
-        )));
     };
-
-    let mut explicit_class_indices = HashMap::new();
-    let mut class_by_family_bucket = vec![
-        None;
-        family_names
-            .len()
-            .saturating_mul(resolved_buckets.buckets.len())
-    ];
-    for (class_index, binding) in bindings.into_iter().enumerate() {
-        match binding {
-            ClassBinding::Explicit => {
-                let class_name = &classes[class_index].name;
-                if family_indices.contains_key(class_name) {
-                    return Err(RouterPolicyConfigError::Validation(format!(
-                        "{location} explicit policy class {class_name:?} collides with a policy family"
-                    )));
-                }
-                explicit_class_indices.insert(class_name.clone(), class_index);
-            }
-            ClassBinding::FamilyBucket {
-                policy_family,
-                bucket_index,
-            } => {
-                let family_index = family_indices[&policy_family];
-                let table_index = family_index * resolved_buckets.buckets.len() + bucket_index;
-                if class_by_family_bucket[table_index]
-                    .replace(class_index)
-                    .is_some()
-                {
-                    return Err(RouterPolicyConfigError::Validation(format!(
-                        "{location} contains duplicate policy classes for family {policy_family:?} and bucket {:?}",
-                        resolved_buckets.names[bucket_index]
-                    )));
-                }
-            }
-        }
-    }
-
-    for (family_index, family_name) in family_names.iter().enumerate() {
-        for (bucket_index, bucket_name) in resolved_buckets.names.iter().enumerate() {
-            if class_by_family_bucket[family_index * resolved_buckets.buckets.len() + bucket_index]
-                .is_none()
-            {
-                return Err(RouterPolicyConfigError::Validation(format!(
-                    "{location} is missing a policy class for family {family_name:?} and bucket {bucket_name:?}"
-                )));
-            }
-        }
-    }
 
     Ok(PolicyProfile {
         classes,
-        classifier: PolicyClassifier::FamilyBucket(FamilyBucketClassifier {
-            default_family_index,
-            family_indices,
-            explicit_class_indices,
-            buckets: resolved_buckets.buckets,
-            class_by_family_bucket: class_by_family_bucket
-                .into_iter()
-                .map(|class_index| class_index.expect("validated complete policy matrix"))
-                .collect(),
-        }),
+        class_indices,
+        default_class_index,
     })
-}
-
-struct ResolvedPolicyClass {
-    config: PolicyClassConfig,
-    binding: ClassBinding,
-}
-
-enum ClassBinding {
-    Explicit,
-    FamilyBucket {
-        policy_family: String,
-        bucket_index: usize,
-    },
 }
 
 fn resolve_policy_class(
     raw: RawPolicyClassConfig,
-    bucket_indices: &HashMap<String, usize>,
     location: &str,
-) -> Result<ResolvedPolicyClass, RouterPolicyConfigError> {
+) -> Result<PolicyClassConfig, RouterPolicyConfigError> {
+    reject_removed_keys(
+        &format!("{location} policy class {:?}", raw.name),
+        [
+            ("policy_family", raw.policy_family),
+            ("cache_bucket", raw.cache_bucket),
+        ],
+    )?;
     validate_identifier(&raw.name, "policy class", location)?;
     if raw.quantum == 0 {
         return Err(RouterPolicyConfigError::Validation(format!(
@@ -710,107 +600,35 @@ fn resolve_policy_class(
             )));
         }
     }
-
-    let binding = match (raw.policy_family.as_deref(), raw.cache_bucket.as_deref()) {
-        (None, None) => ClassBinding::Explicit,
-        (Some(policy_family), Some(cache_bucket)) => {
-            validate_identifier(policy_family, "policy family", location)?;
-            validate_identifier(cache_bucket, "cache bucket", location)?;
-            let Some(bucket_index) = bucket_indices.get(cache_bucket).copied() else {
-                return Err(RouterPolicyConfigError::Validation(format!(
-                    "{location} policy class {:?} references unknown cache bucket {:?}",
-                    raw.name, cache_bucket
-                )));
-            };
-            ClassBinding::FamilyBucket {
-                policy_family: policy_family.to_string(),
-                bucket_index,
-            }
-        }
-        _ => {
-            return Err(RouterPolicyConfigError::Validation(format!(
-                "{location} policy class {:?} must specify both policy_family and cache_bucket or neither for an explicit class",
+    let slo_ttft_ms = match raw.slo_ttft_ms {
+        None => None,
+        Some(slo_ttft_ms) => Some(NonZeroU64::new(slo_ttft_ms).ok_or_else(|| {
+            RouterPolicyConfigError::Validation(format!(
+                "{location} policy class {:?} slo_ttft_ms must be greater than zero",
                 raw.name
-            )));
-        }
+            ))
+        })?),
     };
+
     if raw.prefill_busy_threshold.is_some() {
         tracing::warn!(
             policy_class = %raw.name,
             "prefill_busy_threshold is deprecated and will be removed in v1.7; use prefill_busy_threshold_frac"
         );
     }
-    Ok(ResolvedPolicyClass {
-        config: PolicyClassConfig {
-            name: raw.name,
-            queue_policy: raw.queue_policy,
-            quantum: raw.quantum,
-            busy_thresholds: BusyThresholds {
-                prefill_busy_threshold: raw.prefill_busy_threshold,
-                prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
-                decode_busy_threshold_frac: raw.decode_busy_threshold_frac,
-            },
-            request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
-            raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
-            cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
+    Ok(PolicyClassConfig {
+        name: raw.name,
+        queue_policy: raw.queue_policy,
+        quantum: raw.quantum,
+        slo_ttft_ms,
+        busy_thresholds: BusyThresholds {
+            prefill_busy_threshold: raw.prefill_busy_threshold,
+            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+            decode_busy_threshold_frac: raw.decode_busy_threshold_frac,
         },
-        binding,
-    })
-}
-
-struct ResolvedBuckets {
-    buckets: Vec<UncachedIslBucket>,
-    names: Vec<String>,
-    indices: HashMap<String, usize>,
-}
-
-fn resolve_uncached_isl_buckets(
-    raw_buckets: Vec<RawUncachedIslBucket>,
-    location: &str,
-) -> Result<ResolvedBuckets, RouterPolicyConfigError> {
-    if raw_buckets.is_empty() {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} uncached_isl_buckets must not be empty"
-        )));
-    }
-    if raw_buckets[0].min_tokens != 0 {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} uncached_isl_buckets must start at min_tokens 0"
-        )));
-    }
-    for window in raw_buckets.windows(2) {
-        if window[1].min_tokens <= window[0].min_tokens {
-            return Err(RouterPolicyConfigError::Validation(format!(
-                "{location} uncached_isl_buckets min_tokens must be strictly increasing"
-            )));
-        }
-    }
-
-    let mut bucket_names = Vec::with_capacity(raw_buckets.len());
-    let mut bucket_indices = HashMap::with_capacity(raw_buckets.len());
-    let mut buckets = Vec::with_capacity(raw_buckets.len());
-    for raw in raw_buckets {
-        validate_identifier(&raw.bucket, "cache bucket", location)?;
-        let bucket_index = bucket_names.len();
-        if bucket_indices
-            .insert(raw.bucket.clone(), bucket_index)
-            .is_some()
-        {
-            return Err(RouterPolicyConfigError::Validation(format!(
-                "{location} contains duplicate cache bucket {:?}",
-                raw.bucket
-            )));
-        }
-        bucket_names.push(raw.bucket);
-        buckets.push(UncachedIslBucket {
-            min_tokens: raw.min_tokens,
-        });
-    }
-
-    Ok(ResolvedBuckets {
-        buckets,
-        names: bucket_names,
-        indices: bucket_indices,
+        request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
+        raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
+        cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
     })
 }
 
@@ -1012,43 +830,28 @@ worker_selection:
     fn model_profile_replaces_root_and_unmatched_model_uses_root() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: root-default
-    policy_family: standard
-    cache_bucket: all
     queue_policy: wspt
     quantum: 8
     prefill_busy_threshold: 100
 models:
   exact-model:
-    default_policy_family: latency
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: cached
-      - min_tokens: 32
-        bucket: uncached
+    default_policy_class: model-direct
     policy_classes:
-      - name: model-cached
-        policy_family: latency
-        cache_bucket: cached
-        quantum: 2
-        request_queue_limit_per_worker: 0
-      - name: model-uncached
-        policy_family: latency
-        cache_bucket: uncached
+      - name: model-queued
         quantum: 4
         prefill_busy_threshold_frac: 0.0
+      - name: model-direct
+        quantum: 2
+        request_queue_limit_per_worker: 0
 "#,
         )
         .unwrap();
 
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
-        assert_eq!(exact.default_class().name, "model-cached");
+        assert_eq!(exact.default_class().name, "model-direct");
         assert_eq!(
             exact
                 .default_class()
@@ -1059,7 +862,7 @@ models:
         assert!(!exact.default_class().queueing_enabled());
         assert!(
             exact
-                .class(exact.resolve_class_index(None, usize::MAX))
+                .class(exact.resolve_class_index(Some("model-queued")))
                 .queueing_enabled()
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
@@ -1067,13 +870,13 @@ models:
             exact.default_class().request_queue_limit_per_worker,
             Some(0)
         );
-        assert_eq!(
-            exact
-                .class(exact.resolve_class_index(Some("unknown"), usize::MAX))
-                .name,
-            "model-uncached",
-            "unknown policies must use the model's default family and observed bucket"
-        );
+        for requested in [None, Some("unknown"), Some("root-default")] {
+            assert_eq!(
+                exact.class(exact.resolve_class_index(requested)).name,
+                "model-direct",
+                "{requested:?} must use the model's default class"
+            );
+        }
 
         let unmatched = config.resolve_profile(Some("other"), Some(3.0), RouterQueuePolicy::Fcfs);
         assert_eq!(unmatched.default_class().name, "root-default");
@@ -1111,14 +914,8 @@ models:
     fn decode_limit_bounds_held_kv_blocks() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: decode-bound
-    policy_family: standard
-    cache_bucket: all
     quantum: 4
     decode_busy_threshold_frac: 0.5
 "#,
@@ -1145,14 +942,8 @@ policy_classes:
 
         let invalid = RouterPolicyConfig::from_yaml(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: decode-bound
-    policy_family: standard
-    cache_bucket: all
     quantum: 4
     decode_busy_threshold_frac: -0.1
 "#,
@@ -1171,14 +962,8 @@ policy_classes:
             r#"
 models:
   exact-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
     policy_classes:
       - name: absolute
-        policy_family: standard
-        cache_bucket: all
         quantum: 4
         prefill_busy_threshold: 10
         prefill_busy_threshold_frac: 0.5
@@ -1206,235 +991,255 @@ models:
             fallback.default_class().queue_policy,
             RouterQueuePolicy::Wspt
         );
+        // The synthetic class serves every request; only its own name is a valid override.
+        assert_eq!(fallback.resolve_class_index(Some("absolute")), 0);
+        assert_eq!(
+            fallback.resolve_class_index_strict(SYNTHETIC_POLICY_CLASS),
+            Some(0)
+        );
+        assert_eq!(fallback.resolve_class_index_strict("absolute"), None);
     }
 
     #[test]
-    fn rejects_interacting_profile_errors() {
-        for yaml in [
+    fn classes_resolve_by_name_and_fall_back_to_the_default() {
+        let profile = RouterPolicyConfig::from_yaml(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
-policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: first
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-  - name: second
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 2
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: invalid-family
-    policy_family: invalid/family
-    cache_bucket: cached
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: missing-bucket
-    policy_family: standard
-    cache_bucket: absent
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: partial
-    policy_family: standard
-    quantum: 1
-"#,
-            r#"
-default_policy_family: priority
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
+default_policy_class: standard
 policy_classes:
   - name: priority
-    quantum: 1
-  - name: paired
-    policy_family: priority
-    cache_bucket: cached
-    quantum: 1
+    quantum: 800
+  - name: standard
+    quantum: 200
+  - name: batch
+    quantum: 100
 "#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 1
-    bucket: cached
-policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: cached
-policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 64
-    bucket: uncached
-  - min_tokens: 32
-    bucket: large
-policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: zero
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 0
-"#,
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-policy_classes:
-  - name: lcfs
-    policy_family: standard
-    cache_bucket: cached
-    queue_policy: lcfs
-    quantum: 1
-"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+
+        // Every configured class is its own queue, selected by its exact name.
+        for (index, name) in ["priority", "standard", "batch"].into_iter().enumerate() {
+            assert_eq!(profile.class(index).name, name);
+            assert_eq!(profile.resolve_class_index(Some(name)), index);
+            assert_eq!(profile.resolve_class_index_strict(name), Some(index));
+        }
+        // Missing and unknown names use the configured default, not the first class.
+        for requested in [None, Some(""), Some("unknown"), Some("Priority")] {
+            assert_eq!(profile.resolve_class_index(requested), 1, "{requested:?}");
+        }
+        for requested in ["", "unknown", "Priority"] {
+            assert_eq!(profile.resolve_class_index_strict(requested), None);
+        }
+
+        // One class is the default without default_policy_class, and may also name itself.
+        for default in ["", "default_policy_class: only\n"] {
+            let single = RouterPolicyConfig::from_yaml(&format!(
+                "{default}policy_classes:\n  - name: only\n    quantum: 1\n"
+            ))
+            .unwrap()
+            .resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+            assert_eq!(single.default_class().name, "only");
+            assert_eq!(single.resolve_class_index(Some("unknown")), 0);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_profiles() {
+        for (yaml, expected) in [
+            (
+                "policy_classes: []\n",
+                "root policy_classes must not be empty",
+            ),
+            (
+                "policy_classes:\n  - name: first\n    quantum: 1\n  - name: second\n    quantum: 2\n",
+                "root default_policy_class is required with more than one policy class",
+            ),
+            (
+                "default_policy_class: missing\npolicy_classes:\n  - name: only\n    quantum: 1\n",
+                "root default_policy_class \"missing\" does not name a configured policy class",
+            ),
+            (
+                "default_policy_class: only\n",
+                "root default_policy_class requires policy_classes",
+            ),
+            (
+                "default_policy_class: same\npolicy_classes:\n  - name: same\n    quantum: 1\n  - name: same\n    quantum: 2\n",
+                "root contains duplicate policy class \"same\"",
+            ),
+            (
+                "policy_classes:\n  - name: invalid/name\n    quantum: 1\n",
+                "root policy class name \"invalid/name\" must match [A-Za-z0-9_.-]+",
+            ),
+            (
+                "policy_classes:\n  - name: zero\n    quantum: 0\n",
+                "root policy class \"zero\" quantum must be greater than zero",
+            ),
+            (
+                "policy_classes:\n  - name: lcfs\n    queue_policy: lcfs\n    quantum: 1\n",
+                "root policy class \"lcfs\" queue_policy must be fcfs or wspt",
+            ),
+            (
+                "models:\n  m:\n    policy_classes:\n      - name: a\n        quantum: 1\n      - name: b\n        quantum: 1\n",
+                "model \"m\" default_policy_class is required with more than one policy class",
+            ),
+            (
+                "models:\n  m:\n    default_policy_class: absent\n    policy_classes:\n      - name: a\n        quantum: 1\n",
+                "model \"m\" default_policy_class \"absent\" does not name a configured policy class",
+            ),
+        ] {
+            let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err().to_string();
+            assert!(error.contains(expected), "{yaml}: {error}");
+        }
+    }
+
+    #[test]
+    fn removed_hierarchy_keys_are_rejected_even_when_null_or_empty() {
+        for value in ["", "null", "\"\"", "[]", "standard"] {
+            for key in ["default_policy_family", "uncached_isl_buckets"] {
+                for (yaml, location) in [
+                    (
+                        format!("{key}: {value}\npolicy_classes:\n  - name: c\n    quantum: 1\n"),
+                        "root".to_string(),
+                    ),
+                    (
+                        format!(
+                            "models:\n  m:\n    {key}: {value}\n    policy_classes:\n      - name: c\n        quantum: 1\n"
+                        ),
+                        "model \"m\"".to_string(),
+                    ),
+                ] {
+                    let error = RouterPolicyConfig::from_yaml(&yaml)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        error.contains(&format!("{location} {key} was removed")),
+                        "{yaml}: {error}"
+                    );
+                }
+            }
+            for key in ["policy_family", "cache_bucket"] {
+                for (yaml, location) in [
+                    (
+                        format!(
+                            "policy_classes:\n  - name: c\n    quantum: 1\n    {key}: {value}\n"
+                        ),
+                        "root policy class \"c\"",
+                    ),
+                    (
+                        format!(
+                            "models:\n  m:\n    policy_classes:\n      - name: c\n        quantum: 1\n        {key}: {value}\n"
+                        ),
+                        "model \"m\" policy class \"c\"",
+                    ),
+                ] {
+                    let error = RouterPolicyConfig::from_yaml(&yaml)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        error.contains(&format!("{location} {key} was removed")),
+                        "{yaml}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slo_ttft_ms_is_an_optional_positive_millisecond_budget() {
+        let slo_ttft_ms = |setting: &str| {
+            RouterPolicyConfig::from_yaml(&format!(
+                "policy_classes:\n  - name: c\n    quantum: 1\n{setting}"
+            ))
+            .map(|config| {
+                config
+                    .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+                    .default_class()
+                    .slo_ttft_ms
+            })
+        };
+
+        assert_eq!(slo_ttft_ms("").unwrap(), None);
+        assert_eq!(slo_ttft_ms("    slo_ttft_ms: null\n").unwrap(), None);
+        assert_eq!(
+            slo_ttft_ms("    slo_ttft_ms: 1\n").unwrap(),
+            NonZeroU64::new(1)
+        );
+        assert_eq!(
+            slo_ttft_ms(&format!("    slo_ttft_ms: {}\n", u64::MAX)).unwrap(),
+            NonZeroU64::new(u64::MAX)
+        );
+
+        let error = slo_ttft_ms("    slo_ttft_ms: 0\n").unwrap_err().to_string();
+        assert!(
+            error.contains("root policy class \"c\" slo_ttft_ms must be greater than zero"),
+            "{error}"
+        );
+        for malformed in [
+            "-1",
+            "1.5",
+            "\"3000\"",
+            "3000ms",
+            "18446744073709551616",
+            "[]",
         ] {
             assert!(
-                RouterPolicyConfig::from_yaml(yaml).is_err(),
-                "unexpectedly accepted {yaml}"
+                matches!(
+                    slo_ttft_ms(&format!("    slo_ttft_ms: {malformed}\n")),
+                    Err(RouterPolicyConfigError::Parse { .. })
+                ),
+                "unexpectedly accepted slo_ttft_ms {malformed}"
             );
         }
     }
 
     #[test]
-    fn documented_sample_exercises_root_model_and_unknown_class_semantics() {
+    fn documented_sample_exercises_root_and_model_profiles() {
         let config = RouterPolicyConfig::from_yaml(include_str!(
             "../../../../examples/router/policy-class-queues.yaml"
         ))
         .unwrap();
 
         let root = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
-        assert_eq!(root.classes().len(), 5);
-        assert_eq!(root.default_class().name, "cached");
+        let classes = root
+            .classes()
+            .iter()
+            .map(|class| (class.name.as_str(), class.quantum, class.slo_ttft_ms))
+            .collect::<Vec<_>>();
         assert_eq!(
-            root.class(root.resolve_class_index(Some("latency"), 0))
-                .name,
-            "latency_cached"
+            classes,
+            [
+                ("priority", 800, NonZeroU64::new(1000)),
+                ("standard", 200, NonZeroU64::new(3000)),
+            ]
         );
+        assert!(root.classes().iter().all(|class| {
+            class.queue_policy == RouterQueuePolicy::Fcfs && class.queueing_enabled()
+        }));
         assert_eq!(
-            root.class(root.resolve_class_index(Some("latency"), usize::MAX))
-                .name,
-            "latency_uncached"
+            root.class(root.resolve_class_index(Some("priority")))
+                .quantum,
+            800
         );
-        assert_eq!(
-            root.class(root.resolve_class_index(Some("unknown"), 0))
-                .name,
-            "cached"
-        );
-        assert_eq!(
-            root.class(root.resolve_class_index(None, 3071)).name,
-            "cached"
-        );
-        assert_eq!(
-            root.class(root.resolve_class_index(None, 3072)).name,
-            "uncached"
-        );
-        assert_eq!(
-            root.class(root.resolve_class_index(None, usize::MAX)).name,
-            "uncached"
-        );
-        assert_eq!(
-            root.class(root.resolve_class_index(Some("cached"), usize::MAX))
-                .name,
-            "uncached",
-            "ordinary physical class names must not bypass family and bucket classification"
-        );
-        assert_eq!(
-            root.class(root.resolve_class_index(Some("custom_priority"), usize::MAX))
-                .name,
-            "custom_priority",
-            "explicit classes intentionally bypass cache classification"
-        );
-        assert_eq!(
-            root.default_class()
-                .busy_thresholds
-                .prefill_busy_threshold_frac,
-            Some(16.0)
-        );
+        for requested in [None, Some("unknown")] {
+            assert_eq!(
+                root.class(root.resolve_class_index(requested)).name,
+                "standard"
+            );
+        }
 
         let model = config.resolve_profile(
             Some("example/large-model"),
             Some(3.0),
-            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Wspt,
         );
-        assert_eq!(model.classes().len(), 4);
-        assert_eq!(model.default_class().name, "latency_cached");
+        assert_eq!(model.classes().len(), 1);
+        assert_eq!(model.default_class().name, "standard");
+        assert_eq!(model.default_class().quantum, 1000);
         assert_eq!(
             model
-                .class(model.resolve_class_index(Some("unknown"), usize::MAX))
-                .name,
-            "latency_uncached",
-            "unknown policies must use the model's default family and bucket mapping"
-        );
-        assert_eq!(
-            model
-                .class(model.resolve_class_index(Some("batch"), 0))
-                .name,
-            "batch_cached"
-        );
-        assert!(
-            model
-                .classes()
-                .iter()
-                .all(|class| class.name != "custom_priority"),
+                .class(model.resolve_class_index(Some("priority")))
+                .quantum,
+            1000,
             "model profiles must completely replace root classes"
         );
     }

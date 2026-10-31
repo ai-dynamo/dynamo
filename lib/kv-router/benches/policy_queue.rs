@@ -28,14 +28,8 @@ fn profile() -> PolicyProfile {
         .get_or_init(|| {
             RouterPolicyConfig::from_yaml(
                 r#"
-default_policy_family: bench
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: bench
-    policy_family: bench
-    cache_bucket: all
     quantum: 1000000
 "#,
             )

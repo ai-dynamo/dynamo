@@ -488,7 +488,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router queue metrics
 
-The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, the resolved class: a missing or unknown requested class is reported as the default class.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
