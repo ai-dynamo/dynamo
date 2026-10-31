@@ -76,6 +76,7 @@ to it — edit only the canonical copy.
 - `dynamo-router-starter` — start or patch router modes and smoke-test the endpoint
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregated serving
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
+- `profile-with-nsight-operator` — profile chosen components with Nsight Systems through Nsight Operator and verify every report arrived
 
 **Recipe optimization loop** — start from
 [`agent-docs/guides/optimization/optimize-loop.md`](agent-docs/guides/optimization/optimize-loop.md),
