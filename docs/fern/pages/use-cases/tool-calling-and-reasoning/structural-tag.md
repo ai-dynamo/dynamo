@@ -287,8 +287,10 @@ choice may therefore remain unconstrained for that parser/schema combination.
 A valid JSON Schema `pattern` can use regex syntax that XGrammar rejects, and a
 rejected grammar fails the whole request. Backend compilation errors do not
 trigger Dynamo's builder fallback, so Dynamo checks `pattern` values and
-`patternProperties` keys before building the tag. The checked constructs are
-those XGrammar 0.2.7 rejects in at least one tag format:
+`patternProperties` keys before building the tag. The Python vLLM and SGLang
+preprocessors compile each regex with the installed XGrammar. The Rust
+preprocessor has no XGrammar, so it checks for the constructs XGrammar 0.2.7
+rejects in at least one tag format:
 
 - lookahead `(?=` `(?!` and lookbehind `(?<=` `(?<!`
 - backreferences `\1`–`\9` and `\k<name>`
@@ -300,20 +302,21 @@ those XGrammar 0.2.7 rejects in at least one tag format:
   with counts up to 10^15, and a quantifier followed by another quantifier
   other than one lazy `?`
 
-Under schema mode `auto`, when a tool that omits `strict` has a `pattern` with
-one of these, that `pattern` is left out of the tool's argument grammar. The
+Under schema mode `auto`, when a tool that omits `strict` has a `pattern`
+XGrammar cannot compile, that `pattern` is left out of the tool's argument grammar. The
 rest of the schema, such as `type`, `required`, and `enum`, stays enforced, and
-so do the tool-call envelope and tool name. When a `patternProperties` key has
-one, leaving it out would change which property names are allowed, so that tool
+so do the tool-call envelope and tool name. When a `patternProperties` key
+cannot compile, leaving it out would change which property names are allowed, so that tool
 is built as if it set `strict: false` and its arguments go unconstrained. A tool
 with `strict: true`, and every tool under schema mode `strict`, keeps its
 schema, and the backend reports the rejection. This also applies to the Kimi K3
 named-call tags that the deployment opt-out retains. The adjustment is logged
 at debug level.
 
-The list is measured against XGrammar 0.2.7 for valid patterns. Older versions
-reject more: 0.2.1 also rejects lookahead in the JSON format, which this check
-covers, but other differences are not checked. The JSON format of 0.2.7 accepts
+The Rust list is measured against XGrammar 0.2.7 for valid patterns. Older
+versions reject more: 0.2.1 also rejects lookahead in the JSON format, which this
+check covers, but other differences are not checked. Both checks use XGrammar's
+regex converter, the strictest path. The JSON format of 0.2.7 accepts
 lookahead (ignoring it), `(?P<name>`, `(?i)`, and possessive quantifiers, so for
 parsers that use it these patterns are left out although the backend would
 accept them.

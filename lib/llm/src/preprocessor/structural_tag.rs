@@ -185,8 +185,8 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
 }
 
 /// Name the first regex construct in `pattern` that XGrammar cannot compile in
-/// any tag format. `pattern` is ECMA-262, as JSON Schema specifies. Keep in step
-/// with `unsupported_regex_construct` in the Python frontend.
+/// any tag format. `pattern` is ECMA-262, as JSON Schema specifies. The Python
+/// frontend asks XGrammar directly; its test checks this table against it.
 ///
 /// Runs per request, so it scans bytes: every syntax character is ASCII.
 fn unsupported_regex_construct(pattern: &str) -> Option<&'static str> {

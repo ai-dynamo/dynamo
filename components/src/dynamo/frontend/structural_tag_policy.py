@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import re
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -95,91 +94,20 @@ def should_attempt_structural_tag(
 
 
 def unsupported_regex_construct(pattern: str) -> str | None:
-    """Name the first regex construct in ``pattern`` that XGrammar cannot
-    compile in any tag format. ``pattern`` is ECMA-262, as JSON Schema
-    specifies. Keep in step with the Rust preprocessor.
+    """Return XGrammar's error for ``pattern``, or ``None`` when it compiles.
+
+    Asks the installed XGrammar instead of mirroring its regex syntax, so the
+    verdict follows the version the vLLM or SGLang backend ships with. Its regex
+    converter is the strictest path any tag format takes. The Rust preprocessor
+    has no XGrammar and keeps a list of constructs instead.
     """
-    i = 0
-    in_class = False
-    # Whether the previous token can take a quantifier.
-    can_repeat = False
-    # After a quantifier: 1 while a lazy `?` may follow, 2 once it has.
-    quantified = 0
-    while i < len(pattern):
-        char = pattern[i]
-        following = pattern[i + 1 : i + 2]
-        if in_class:
-            if char == "\\":
-                i += 1
-            elif char == "]":
-                in_class = False
-            i += 1
-            continue
-        if char in "*+?{":
-            if char == "?" and quantified == 1:
-                quantified = 2
-                i += 1
-                continue
-            if quantified:
-                return "consecutive quantifiers"
-            if char == "{":
-                repetition = _REPETITION.match(pattern, i)
-                if repetition is None or not _repetition_in_range(repetition):
-                    return "malformed repetition"
-                i = repetition.end() - 1
-            if not can_repeat:
-                return "quantifier without an element"
-            can_repeat = False
-            quantified = 1
-            i += 1
-            continue
-        quantified = 0
-        can_repeat = True
-        if char == "\\":
-            if following and following in "123456789k":
-                return "backreference"
-            if following in ("b", "B"):
-                return "word boundary"
-            if following in ("p", "P"):
-                return "Unicode property escape"
-            # `\u{...}` is one escape; its braces are not a repetition.
-            escape = _UNICODE_ESCAPE.match(pattern, i)
-            i = escape.end() - 1 if escape else i + 1
-        elif char == "[":
-            if following == "]":
-                return "empty character class"
-            in_class = True
-            if following == "^":
-                i += 1
-        elif char == "(":
-            can_repeat = False
-            if following == "?":
-                group = pattern[i + 2 : i + 4]
-                if group in ("<=", "<!"):
-                    return "lookbehind"
-                if group[:1] in ("=", "!"):
-                    return "lookahead"
-                if group[:1] not in (":", "<"):
-                    return "group modifier"
-                # `(?:` opens a group; `(?<` continues with a name.
-                i += 2 if group[:1] == ":" else 1
-        elif char in "|^$":
-            can_repeat = False
-        i += 1
+    import xgrammar
+
+    try:
+        xgrammar.Grammar.from_regex(pattern)
+    except RuntimeError as error:
+        return str(error).splitlines()[0]
     return None
-
-
-# XGrammar rejects repetition counts above 10**15, which have at most 16 digits.
-# Bounding the digits here also keeps `int()` away from client-sized strings.
-_REPETITION = re.compile(r"\{(?P<min>[0-9]{1,16})(?:,(?P<max>[0-9]{0,16}))?\}")
-_MAX_REPETITION = 10**15
-_UNICODE_ESCAPE = re.compile(r"\\u\{[0-9A-Fa-f]+\}")
-
-
-def _repetition_in_range(repetition: re.Match[str]) -> bool:
-    low = int(repetition["min"])
-    high = int(repetition["max"]) if repetition["max"] else None
-    return low <= _MAX_REPETITION and (high is None or low <= high <= _MAX_REPETITION)
 
 
 _INSTANCE_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
@@ -196,9 +124,9 @@ _SUBSCHEMA_MAPS = frozenset(
 
 
 def unsupported_schema_construct(schema: Any) -> str | None:
-    """Name the first unsupported regex in ``pattern`` values or
-    ``patternProperties`` keys. Subschema maps are searched by value only, so a
-    property named ``default`` is still checked.
+    """Return XGrammar's error for the first regex in ``pattern`` values or
+    ``patternProperties`` keys it cannot compile. Subschema maps are searched by
+    value only, so a property named ``default`` is still checked.
     """
     if isinstance(schema, list):
         for item in schema:
@@ -226,8 +154,8 @@ def unsupported_schema_construct(schema: Any) -> str | None:
 
 
 def _strip_unsupported_patterns(schema: Any) -> str | None:
-    """Remove ``pattern`` values XGrammar cannot compile, in place. Returns the
-    construct of an unsupported ``patternProperties`` key, which is kept, since
+    """Remove ``pattern`` values XGrammar cannot compile, in place. Returns XGrammar's
+    error for an unsupported ``patternProperties`` key, which is kept, since
     removing it would change which property names are allowed.
     """
     if isinstance(schema, list):
@@ -288,15 +216,15 @@ def guidance_tool_schema(
     stripped = copy.deepcopy(parameters)
     if property_name_construct := _strip_unsupported_patterns(stripped):
         logger.debug(
-            "Tool %r: patternProperties uses a regex %s the grammar backend "
-            "cannot compile; not enforcing its arguments",
+            "Tool %r: the grammar backend cannot compile a patternProperties "
+            "key (%s); not enforcing its arguments",
             tool_name,
             property_name_construct,
         )
         return parameters, False
     logger.debug(
-        "Tool %r: leaving a pattern with a regex %s the grammar backend cannot "
-        "compile out of its argument grammar",
+        "Tool %r: leaving a pattern the grammar backend cannot compile (%s) "
+        "out of its argument grammar",
         tool_name,
         construct,
     )
