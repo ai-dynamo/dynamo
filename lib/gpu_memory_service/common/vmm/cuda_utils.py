@@ -67,6 +67,15 @@ def cuda_device_memory_info(device: int) -> tuple[int, int]:
         pynvml.nvmlShutdown()
 
 
+def cuda_device_total_memory(device: int) -> int:
+    """Return the total memory of a CUDA-visible device ordinal."""
+    result, cuda_device = cuda.cuDeviceGet(device)
+    cuda_check_result(result, "cuDeviceGet")
+    result, total = cuda.cuDeviceTotalMem(cuda_device)
+    cuda_check_result(result, "cuDeviceTotalMem")
+    return int(total)
+
+
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
     if result != cuda.CUresult.CUDA_SUCCESS:
         err_result, err_str = cuda.cuGetErrorString(result)
@@ -326,6 +335,9 @@ class CudaVMM(VMMDevice):
 
     def device_memory_info(self, device: int) -> tuple[int, int]:
         return cuda_device_memory_info(device)
+
+    def total_memory(self, device: int) -> int:
+        return cuda_device_total_memory(device)
 
     def get_allocation_granularity(self, device: int) -> int:
         return cumem_get_allocation_granularity(device)
