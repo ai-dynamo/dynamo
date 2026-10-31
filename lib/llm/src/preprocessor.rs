@@ -281,8 +281,8 @@ fn compact_gpt_oss_prefill(prefix: &str) -> &str {
     };
     if header.contains("to=") || body.contains("<|") {
         // Recipient-owned bodies may contain a partially consumed JSON argument.
-        // TODO: Use parser-owned continuation snapshots to bound retained seeds;
-        // replay still encodes request-sized input and retains parser state per choice.
+        // TODO: Validate argument prefixes incrementally so released bytes no longer
+        // need to remain in the shared per-request continuation body.
         return prefix;
     }
     &prefix[..header.len() + MESSAGE.len()]
@@ -5808,61 +5808,56 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
-            // TODO: Resolve model-specific prefill and guidance through the parser adapter's
-            // UnifiedRequestPolicy and parser capabilities; migrate equivalent batch/stream
-            // branches together while preserving legacy/v2 behavior.
-            let bare_guidance = *family == "gpt_oss"
-                && (tool_choice::has_explicit_guided_decoding(request)
-                    || guided_tool_constraint.installs_guided_json()
-                        && !(self.runtime_config.structural_tag.is_some()
-                            && structural_tag::uses_gpt_oss_required_array(
-                                (
-                                    self.tool_call_parser.as_deref(),
-                                    self.runtime_config.reasoning_parser.as_deref(),
-                                ),
-                                &tool_choice::convert_tool_choice(
-                                    request
-                                        .inner
-                                        .tool_choice
-                                        .as_ref()
-                                        .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
-                                ),
-                                request.inner.parallel_tool_calls,
-                            )));
+            // TODO: Replace family-specific guidance decisions with parser capabilities;
+            // migrate equivalent batch/stream branches together while preserving legacy/v2 behavior.
+            let policy = unified_parser::UnifiedRequestPolicy {
+                reasoning_disabled,
+                structured_response: Self::has_structured_response_format(request),
+                multiple_choices: request.inner.n.unwrap_or(1) > 1,
+            };
+            let prefill = policy.resolve_stream_prefill(
+                family,
+                unified_parser::StreamPrefill {
+                    starting_state: if *family == unified_parser::BEAM_UNIFIED_FAMILY
+                        && (prompt_prefill.response || self.beam_output_is_bare_guidance(request))
+                    {
+                        dynamo_parsers_v2::UnifiedParserStartingState::Response
+                    } else {
+                        prompt_prefill.unified_starting_state.unwrap_or_else(|| {
+                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                        })
+                    },
+                    prefix: prompt_prefill.prefix.clone(),
+                },
+                &guided_tool_constraint,
+                tool_choice::has_explicit_guided_decoding(request),
+                || {
+                    self.runtime_config.structural_tag.is_some()
+                        && structural_tag::uses_gpt_oss_required_array(
+                            (
+                                self.tool_call_parser.as_deref(),
+                                self.runtime_config.reasoning_parser.as_deref(),
+                            ),
+                            &tool_choice::convert_tool_choice(
+                                request
+                                    .inner
+                                    .tool_choice
+                                    .as_ref()
+                                    .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                            ),
+                            request.inner.parallel_tool_calls,
+                        )
+                },
+            );
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
-                    unified_parser::StreamPrefill {
-                        starting_state: if bare_guidance
-                            || (*family == unified_parser::BEAM_UNIFIED_FAMILY
-                                && (prompt_prefill.response
-                                    || self.beam_output_is_bare_guidance(request)))
-                        {
-                            // Assistant prefill inside Beam's final channel, or bare text
-                            // an explicit `guided_*` constraint owns (no turn grammar, so
-                            // no channel framing): the reply is visible text from its
-                            // first byte and ends on `<|return|>` or at the end of the
-                            // stream.
-                            dynamo_parsers_v2::UnifiedParserStartingState::Response
-                        } else {
-                            prompt_prefill.unified_starting_state.unwrap_or_else(|| {
-                                unified_parser::stream_prefill(family, prompt_injected_reasoning)
-                            })
-                        },
-                        prefix: if bare_guidance {
-                            None
-                        } else {
-                            prompt_prefill.prefix.clone()
-                        },
-                    },
+                    prefill,
                     family,
                     guided_tool_streaming,
-                    unified_parser::UnifiedRequestPolicy {
-                        reasoning_disabled,
-                        structured_response: Self::has_structured_response_format(request),
-                    },
+                    policy,
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -9652,17 +9647,19 @@ mod tests {
             "plain message body is irrelevant to the parser seed"
         );
 
-        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
-        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-            None,
-            Some("gpt_oss"),
-            Some(&structural_prompt),
-        );
-        assert_eq!(
-            structural_prefill.prefix.as_deref().map(str::len),
-            Some(structural_prompt.len()),
-            "marker-bearing bodies must retain their parser state"
-        );
+        for body in ["quoted marker <|ghissue|> remains structural", "partial <|"] {
+            let structural_prompt = format!("{header}{body}");
+            let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                None,
+                Some("gpt_oss"),
+                Some(&structural_prompt),
+            );
+            assert_eq!(
+                structural_prefill.prefix.as_deref().map(str::len),
+                Some(structural_prompt.len()),
+                "marker-bearing bodies must retain their parser state"
+            );
+        }
 
         let incomplete_header = "<|start|>assistant to=";
         let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
@@ -9990,33 +9987,32 @@ mod tests {
                 " to=python<|channel|>analysis",
                 "<|channel|>analysis to=python",
             ] {
-                for body in ["Hello", "quoted <|ghissue|>", "partial <|"] {
-                    let prompt = format!(
-                        "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
-                    );
-                    let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-                        None,
-                        Some("gpt_oss"),
-                        Some(&prompt),
-                    );
-                    assert_eq!(
-                        prefill.prefix.is_some(),
-                        role == "assistant",
-                        "role={role} metadata={metadata} body={body}"
-                    );
-                    assert_eq!(
-                        prefill.unified_starting_state,
-                        (role != "assistant")
-                            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
-                        "role={role} metadata={metadata}"
-                    );
-                    let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
-                    assert_eq!(
-                        prefill.unified, reasoning,
-                        "role={role} metadata={metadata}"
-                    );
-                    assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
-                }
+                let body = "Hello";
+                let prompt = format!(
+                    "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
+                );
+                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                    None,
+                    Some("gpt_oss"),
+                    Some(&prompt),
+                );
+                assert_eq!(
+                    prefill.prefix.is_some(),
+                    role == "assistant",
+                    "role={role} metadata={metadata} body={body}"
+                );
+                assert_eq!(
+                    prefill.unified_starting_state,
+                    (role != "assistant")
+                        .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                    "role={role} metadata={metadata}"
+                );
+                let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
+                assert_eq!(
+                    prefill.unified, reasoning,
+                    "role={role} metadata={metadata}"
+                );
+                assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
             }
         }
     }
