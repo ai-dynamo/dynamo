@@ -32,6 +32,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
+| [`adaptive-imbalance`](adaptive-imbalance/README.md) | Rewrite the three router weights from a background loop driven by pool-level load imbalance; opt-in, baseline behavior when the pool is even |
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
@@ -207,6 +208,7 @@ cargo test \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
+  -p dynamo-custom-policy-example-adaptive-imbalance \
   -p dynamo-custom-policy-example-catalog
 cargo build -p dynamo-custom-policy-example-epp
 ```

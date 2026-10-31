@@ -27,7 +27,12 @@ const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// Cap concurrent in-flight TLS handshakes + active gRPC streams. Prevents a
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
 /// where a single Envoy upstream typically holds <100 concurrent streams.
-const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+/// Gateways that open one connection per ext_proc stream and keep it idle
+/// (agentgateway holds idle upstream connections for ~90 s) exhaust this cap
+/// at a few requests per second, so it is configurable via
+/// `DYN_EPP_MAX_CONNECTIONS`.
+const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+const MAX_CONCURRENT_CONNECTIONS_ENV: &str = "DYN_EPP_MAX_CONNECTIONS";
 /// Propagation window after a shutdown signal before the server stops
 /// accepting new connections. The gateway stops routing to this EPP as soon
 /// as health flips to NOT_SERVING. Configurable via
@@ -418,10 +423,15 @@ async fn serve<P: crate::EndpointPicker>(
         let tls_acceptor = create_tls_acceptor()?;
         let svc = server.into_service();
         let listener = TcpListener::bind(addr).await?;
-        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+        let max_connections = parse_env(
+            MAX_CONCURRENT_CONNECTIONS_ENV,
+            DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+        )
+        .max(1);
+        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
         tracing::info!(
             %addr,
-            max_connections = MAX_CONCURRENT_CONNECTIONS,
+            max_connections,
             "Listening for ext_proc connections (TLS)"
         );
 

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-custom-policy-example-adaptive-imbalance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Adaptive imbalance worker-selection policy example for Dynamo"
+
+[dependencies]
+dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+serde.workspace = true
+arc-swap = "1.9.1"
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+serde_yaml = "0.9.34"

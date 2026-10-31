@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+worker_selection:
+  aggregated: adaptive
+  instances:
+    - name: adaptive
+      type: adaptive-imbalance
+      parameters:
+        # baseline: the same four values as today; omit any of them to inherit the router configuration
+        overlap_score_credit: 1.0
+        prefill_load_scale: 1.0
+        decode_active_request_weight: 0.0
+        router_temperature: 0.0
+        interval_ms: 250
+        smoothing: 0.3
+        sigmoid_midpoint: 0.5
+        sigmoid_slope: 10
+        gain: 4.0
+        dwell_cycles: 4
+        stale_after_ms: 5000
+        enter_threshold: 0.6
+        exit_threshold: 0.4
