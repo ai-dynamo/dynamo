@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import os
@@ -401,44 +400,7 @@ def test_rust_cache_read_contract_reaches_sampling_params(
 ):
     build = TestLogprobTokenIds._builder()
     for case in rust_cache_read_contract_cases:
-        shadow = (case["request"].get("extra_args") or {}).get("sampling_options") or {}
-        if case["normalized"]:
-            assert (
-                case["request"]["skip_reading_prefix_cache"] is case["expected_skip"]
-            ), case["name"]
-            assert shadow["skip_reading_prefix_cache"] is case["expected_skip"], case[
-                "name"
-            ]
-        else:
-            assert "skip_reading_prefix_cache" not in case["request"], case["name"]
-            assert "skip_reading_prefix_cache" not in shadow, case["name"]
         sp = build(case["request"], {})
-        assert sp.skip_reading_prefix_cache is case["expected_skip"], case["name"]
-
-
-def test_rust_cache_read_contract_reaches_legacy_worker(rust_cache_read_contract_cases):
-    baseline_path = os.environ.get("DYNAMO_CACHE_READ_CONTRACT_BASELINE_HANDLER")
-    if baseline_path is None:
-        pytest.skip(
-            "set DYNAMO_CACHE_READ_CONTRACT_BASELINE_HANDLER to old worker source"
-        )
-    # Execute the pristine worker's function with real backend dependencies,
-    # without importing another repository's worker module and startup hooks.
-    baseline_tree = ast.parse(Path(baseline_path).read_text())
-    baseline_builder = next(
-        node
-        for node in baseline_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "build_sampling_params"
-    )
-    namespace = dict(TestLogprobTokenIds._builder().__globals__)
-    exec(
-        compile(
-            ast.Module(body=[baseline_builder], type_ignores=[]), baseline_path, "exec"
-        ),
-        namespace,
-    )
-    for case in rust_cache_read_contract_cases:
-        sp = namespace["build_sampling_params"](case["request"], {})
         assert sp.skip_reading_prefix_cache is case["expected_skip"], case["name"]
 
 

@@ -2480,7 +2480,7 @@ mod tests {
             }
 
             let mut best_worker = None;
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _config| {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let load = request.worker_load_for(worker);
                 let potential_prefill_tokens = if request.track_prefill_tokens {
                     load.active_prefill_tokens
