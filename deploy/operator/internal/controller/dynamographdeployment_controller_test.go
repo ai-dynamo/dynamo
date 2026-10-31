@@ -671,6 +671,83 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 	}
 }
 
+func TestDGDScalingAdaptersReconciler_ReconcileUnlessWaitingForCheckpoint(t *testing.T) {
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	createErr := fmt.Errorf("injected create failure")
+
+	tests := []struct {
+		name          string
+		result        ReconcileResult
+		failCreate    bool
+		expectAdapter bool
+	}{
+		{
+			name:   "skips adapters while pending on a checkpoint",
+			result: ReconcileResult{State: v1beta1.DGDStatePending, Reason: reasonWaitingForCheckpoint},
+		},
+		{
+			name:          "reconciles adapters for other pending reasons",
+			result:        ReconcileResult{State: v1beta1.DGDStatePending, Reason: "some_other_reason"},
+			expectAdapter: true,
+		},
+		{
+			name:          "reconciles adapters for a failed result with the checkpoint reason",
+			result:        ReconcileResult{State: v1beta1.DGDStateFailed, Reason: reasonWaitingForCheckpoint},
+			expectAdapter: true,
+		},
+		{
+			name:       "wraps adapter reconciliation errors",
+			result:     ReconcileResult{State: v1beta1.DGDStateSuccessful},
+			failCreate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with one scaling-adapter component and a fake client")
+			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+				Name:      "test-dgd",
+				Namespace: "default",
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {ScalingAdapter: &v1alpha1.ScalingAdapter{Enabled: true}},
+					},
+				},
+			})
+			clientBuilder := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(dgd)
+			if tt.failCreate {
+				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+						return createErr
+					},
+				})
+			}
+			fakeClient := clientBuilder.Build()
+			ctx := context.Background()
+
+			t.Log("Reconcile scaling adapters unless the result waits for a checkpoint")
+			err := newDGDScalingAdaptersReconciler(fakeClient, events.NewFakeRecorder(10)).
+				ReconcileUnlessWaitingForCheckpoint(ctx, dgd, tt.result)
+			if tt.failCreate {
+				t.Log("Verify the create failure is wrapped")
+				require.ErrorIs(t, err, createErr)
+				require.True(t, strings.HasPrefix(err.Error(), "failed to reconcile scaling adapters: "), err.Error())
+				return
+			}
+			require.NoError(t, err)
+
+			t.Log("Verify whether the adapter was created")
+			adapterList := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
+			require.NoError(t, fakeClient.List(ctx, adapterList, client.InNamespace("default")))
+			if tt.expectAdapter {
+				require.Len(t, adapterList.Items, 1)
+			} else {
+				require.Empty(t, adapterList.Items)
+			}
+		})
+	}
+}
+
 func TestGenerateAdapterName(t *testing.T) {
 	t.Run("preserves valid existing name format", func(t *testing.T) {
 		assert.Equal(t, "my-dgd-myservice", generateAdapterName("my-dgd", "MyService"))
