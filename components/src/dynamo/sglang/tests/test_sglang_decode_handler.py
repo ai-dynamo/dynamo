@@ -761,6 +761,61 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
     }
 
 
+@pytest.mark.parametrize(
+    "output_flat,streaming", [(False, False), (True, False), (True, True)]
+)
+def test_engine_generate_output_flat_logprobs_preserves_unary_mode(
+    monkeypatch, output_flat, streaming
+):
+    if not hasattr(GenerateReqInput, "return_flat_raw_output_top_logprobs"):
+        pytest.skip("installed SGLang does not support output-flat logprobs")
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    native = build_native_generate_request(
+        {
+            "stream": streaming,
+            "return_logprob": True,
+            "top_logprobs_num": 2,
+            "return_flat_raw_output_top_logprobs": output_flat,
+        },
+        input_ids=[1, 2],
+        request_id="request",
+        priority=None,
+    )
+    if output_flat and streaming:
+        with pytest.raises(ValueError, match="does not support stream=True"):
+            native.normalize_batch_and_arguments()
+    else:
+        native.normalize_batch_and_arguments()
+        assert native.stream is (not output_flat)
+        assert native.return_flat_raw_output_top_logprobs is output_flat
+
+
+@pytest.mark.parametrize("prompt_flat", [False, True])
+def test_engine_generate_prefill_output_flat_keeps_streaming(monkeypatch, prompt_flat):
+    if not hasattr(GenerateReqInput, "return_flat_raw_output_top_logprobs"):
+        pytest.skip("installed SGLang does not support output-flat logprobs")
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    native = build_native_generate_request(
+        {
+            "stream": False,
+            "return_logprob": True,
+            "top_logprobs_num": 2,
+            "return_flat_raw_output_top_logprobs": True,
+            "return_flat_raw_top_logprobs": prompt_flat,
+            "return_flat_raw_top_logprobs_b64": True,
+        },
+        input_ids=[1, 2],
+        request_id="request",
+        priority=None,
+        is_prefill=True,
+        sampling_overrides={"n": 1, "max_new_tokens": 1},
+    )
+    native.normalize_batch_and_arguments()
+    assert native.stream is True
+    assert native.return_flat_raw_output_top_logprobs is False
+    assert native.return_flat_raw_top_logprobs_b64 is prompt_flat
+
+
 def test_native_generate_rejects_salt_without_engine_support(monkeypatch):
     monkeypatch.delitem(GenerateReqInput.__dataclass_fields__, "cache_salt")
     kwargs = {"input_ids": [1], "request_id": "request", "priority": None}

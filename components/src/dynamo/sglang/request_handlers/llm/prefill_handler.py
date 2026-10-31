@@ -214,6 +214,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 request_id=sglang_request_id,
                 priority=priority_kwargs.get("priority"),
                 sampling_overrides={"n": 1, "max_new_tokens": 1},
+                is_prefill=True,
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,

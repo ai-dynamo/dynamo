@@ -64,6 +64,7 @@ def build_native_generate_request(
     request_id: str,
     priority: int | None,
     sampling_overrides: Mapping[str, Any] | None = None,
+    is_prefill: bool = False,
     bootstrap_host: str | None = None,
     bootstrap_port: int | None = None,
     bootstrap_room: int | None = None,
@@ -115,7 +116,15 @@ def build_native_generate_request(
         payload["cache_salt"] = salt
     payload["input_ids"] = input_ids
     payload["rid"] = request_id
-    payload["stream"] = True
+    if is_prefill and payload.get("return_flat_raw_output_top_logprobs"):
+        # Prefill must remain incremental so decode can rendezvous for KV transfer.
+        payload.pop("return_flat_raw_output_top_logprobs")
+        if not payload.get("return_flat_raw_top_logprobs"):
+            payload.pop("return_flat_raw_top_logprobs_b64", None)
+    # Output-flat logprobs are only emitted on SGLang's unary response.
+    # Keep ordinary requests incremental, even for unary frontend clients.
+    if not payload.get("return_flat_raw_output_top_logprobs"):
+        payload["stream"] = True
     if priority is None:
         payload.pop("priority", None)
     else:
