@@ -48,7 +48,7 @@ mypy==1.18.2
 # For NATS object store verification in router tests
 nats-py==2.12.0
 # Router benchmark tests import graph synthesis during whole-tree collection.
-networkx
+networkx==3.6.1
 # Shared test and benchmark data processing; accept the runtime's compatible NumPy.
 numpy>=1.26,<3
 openai==2.32.0  # for Fault Tolerance migration tests
