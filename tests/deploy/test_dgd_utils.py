@@ -4,6 +4,8 @@
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
 import asyncio
+import socket
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -246,6 +248,95 @@ def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
             port_forward=original_port_forward,
             request_sender=request_sender,
         )
+
+
+def kr8s_port_forward(local_port: int) -> kr8s.portforward.PortForward:
+    """Return a real kr8s forward that binds ``local_port`` without API calls."""
+    port_forward = kr8s.portforward.PortForward(
+        SimpleNamespace(ready_pods=None), remote_port=8000, local_port=0
+    )
+    # kr8s resolves local_port=0 with a connect-only probe before it binds.
+    port_forward._find_available_port = lambda: local_port  # type: ignore[method-assign]
+    return port_forward
+
+
+def unused_local_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def head_probe(ready_port: int) -> MagicMock:
+    def head(url, timeout):
+        if url == f"http://localhost:{ready_port}/":
+            return MagicMock(status_code=404)
+        raise requests.ConnectionError(f"Connection refused: {url}")
+
+    return MagicMock(side_effect=head)
+
+
+def short_backoff(monkeypatch) -> None:
+    """Cap backoff sleeps but keep real time for forward threads to bind."""
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        "tests.deploy.dgd_utils.time.sleep", lambda s: real_sleep(min(s, 0.1))
+    )
+
+
+def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) -> None:
+    deployment = managed_deployment(tmp_path)
+    short_backoff(monkeypatch)
+    # A bound, non-listening socket passes kr8s's connect probe but makes its
+    # later bind fail with EADDRINUSE, as in the CI teardown failure.
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        held_port = holder.getsockname()[1]
+        ready_port = unused_local_port()
+        colliding = kr8s_port_forward(held_port)
+        replacement = kr8s_port_forward(ready_port)
+        pod = SimpleNamespace(
+            name="frontend-pod",
+            portforward=MagicMock(side_effect=[colliding, replacement]),
+        )
+        monkeypatch.setattr(
+            "tests.deploy.dgd_utils.requests.head", head_probe(ready_port)
+        )
+
+        try:
+            result = deployment.port_forward(pod, 8000)
+        finally:
+            replacement.stop()
+
+    assert result is replacement
+    assert deployment._active_port_forwards == [replacement]
+    assert pod.portforward.call_count == 2
+
+
+def test_port_forward_replaces_unreachable_forward_with_new_object(
+    monkeypatch, tmp_path
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    short_backoff(monkeypatch)
+    unreachable_port = unused_local_port()
+    ready_port = unused_local_port()
+    unreachable = kr8s_port_forward(unreachable_port)
+    replacement = kr8s_port_forward(ready_port)
+    pod = SimpleNamespace(
+        name="frontend-pod",
+        portforward=MagicMock(side_effect=[unreachable, replacement]),
+    )
+    monkeypatch.setattr("tests.deploy.dgd_utils.requests.head", head_probe(ready_port))
+
+    try:
+        result = deployment.port_forward(pod, 8000)
+    finally:
+        replacement.stop()
+
+    assert result is replacement
+    assert unreachable.servers == []
+    assert deployment._active_port_forwards == [replacement]
+    for call in pod.portforward.call_args_list:
+        assert call.kwargs["local_port"] == 0
 
 
 async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> None:

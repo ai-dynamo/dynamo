@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1780,65 +1781,120 @@ class ManagedDeployment:
             await asyncio.sleep(1)
 
     def port_forward(
-        self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
+        self,
+        pod: Pod,
+        remote_port: int,
+        max_connection_attempts: int = 3,
+        max_port_forwards: int = 3,
     ):
         """Attempt to connect to a pod and return the port-forward object on success.
 
-        Note: Port forwards run in background threads. When pods are terminated,
-        the async cleanup may fail, which is expected and can be safely ignored.
+        kr8s picks a random local port by checking only that nothing accepts
+        connections on it, and binds it later. A socket that holds the port
+        without listening passes that check, so the bind can fail with
+        EADDRINUSE. Each forward therefore runs in a thread owned here, which
+        logs that failure instead of leaving it to escape as an unhandled
+        thread exception. A forward whose thread exits, or that never answers,
+        is stopped and replaced by a new forward on a new random port; a
+        stopped forward is never restarted on its old port.
         """
         try:
-            # Create port forward - this runs in a background thread
-            # Use 127.0.0.1 (localhost) instead of 0.0.0.0 to prevent port conflicts
-            port_forward = pod.portforward(
-                remote_port=remote_port,
-                local_port=0,  # Auto-assign an available port
-                address="127.0.0.1",  # Use localhost for better isolation and conflict prevention
-            )
-            port_forward.start()
+            for forward_attempt in range(1, max_port_forwards + 1):
+                # Use 127.0.0.1 (localhost) instead of 0.0.0.0 to prevent port conflicts
+                port_forward = pod.portforward(
+                    remote_port=remote_port,
+                    local_port=0,  # kr8s picks a random available port
+                    address="127.0.0.1",
+                )
 
-            # Try to connect with exponential backoff
-            backoff_delay = 0.5  # Start with 500ms
+                def run_forever(port_forward=port_forward):
+                    try:
+                        port_forward.run_forever()
+                    except Exception as e:
+                        # Not re-raised: an exception that leaves this thread is
+                        # reported by pytest as an unhandled thread exception.
+                        self._logger.warning(
+                            "Port forward to pod %s on local port %s stopped: %r",
+                            pod.name,
+                            port_forward.local_port,
+                            e,
+                        )
 
-            for attempt in range(max_connection_attempts):
-                time.sleep(backoff_delay)
-                backoff_delay = min(
-                    backoff_delay * 1.5, 5.0
-                )  # Double delay, max 5 seconds
+                thread = threading.Thread(
+                    target=run_forever,
+                    name=f"port-forward-{pod.name}",
+                    daemon=True,
+                )
+                thread.start()
 
-                # Check if port is assigned
-                if port_forward.local_port == 0:
-                    self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
-                    )
-                    continue
+                # Try to connect with exponential backoff
+                backoff_delay = 0.5  # Start with 500ms
 
-                # Try to connect to the port forwarded service
-                test_url = f"http://localhost:{port_forward.local_port}/"
-                try:
-                    # Send HEAD request to test connection
-                    response = requests.head(test_url, timeout=5)
+                for attempt in range(max_connection_attempts):
+                    time.sleep(backoff_delay)
+                    backoff_delay = min(backoff_delay * 1.5, 5.0)
+
+                    if not thread.is_alive():
+                        break
+
+                    # Check if port is assigned
+                    if port_forward.local_port == 0:
+                        self._logger.debug(
+                            "Port not yet assigned for pod %s (attempt %d/%d)",
+                            pod.name,
+                            attempt + 1,
+                            max_connection_attempts,
+                        )
+                        continue
+
+                    # Try to connect to the port forwarded service
+                    test_url = f"http://localhost:{port_forward.local_port}/"
+                    try:
+                        # Send HEAD request to test connection
+                        response = requests.head(test_url, timeout=5)
+                    except (requests.ConnectionError, requests.Timeout) as e:
+                        self._logger.warning(
+                            "Connection test failed for pod %s (attempt %d/%d): %s",
+                            pod.name,
+                            attempt + 1,
+                            max_connection_attempts,
+                            e,
+                        )
+                        continue
                     if response.status_code in (200, 404):  # 404 is acceptable
                         self._active_port_forwards.append(port_forward)
                         return port_forward
-                except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
+                        "Connection test for pod %s returned HTTP %s (attempt %d/%d)",
+                        pod.name,
+                        response.status_code,
+                        attempt + 1,
+                        max_connection_attempts,
                     )
 
-            # All attempts failed
+                self._logger.warning(
+                    "Port forward %d/%d on local port %s failed for pod %s",
+                    forward_attempt,
+                    max_port_forwards,
+                    port_forward.local_port,
+                    pod.name,
+                )
+                # A forward whose bind failed has no servers, so stop() is a no-op.
+                try:
+                    port_forward.stop()
+                except Exception as e:
+                    self._logger.debug("Error stopping port forward: %s", e)
+
             self._logger.warning(
-                f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
+                "Port forward failed after %d forwards for pod %s",
+                max_port_forwards,
+                pod.name,
             )
-            try:
-                port_forward.stop()
-            except Exception as e:
-                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
             self._logger.warning(
-                f"Failed to create port forward for pod {pod.name}: {e}"
+                "Failed to create port forward for pod %s: %s", pod.name, e
             )
             return None
 
