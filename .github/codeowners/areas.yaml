@@ -571,6 +571,14 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: Cargo.lock
+  owners:
+  - ops
+  - runtime
+- glob: Cargo.toml
+  owners:
+  - ops
+  - runtime
 - glob: .github/review-prompts/README.md
   owners:
   - ops
