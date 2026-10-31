@@ -81,7 +81,7 @@ spec:
             # Requires OpenEngine node-local discovery and KV events (NVIDIA/TensorRT-LLM#19440)
             # and the grpc.health.v1 service used by the probes below (NVIDIA/TensorRT-LLM#20437,
             # nightlies from 2026-10-27).
-            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
             # The liveness service fails only on a fatal engine error. The inference service tracks the executor.
             startupProbe:
               grpc:
@@ -155,7 +155,7 @@ spec:
         spec:
           containers:
           - name: main
-            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
             # No probes: sshd is the only process here. The leader waits for it, then
             # launches and supervises this node's ranks through mpirun.
             resources:
