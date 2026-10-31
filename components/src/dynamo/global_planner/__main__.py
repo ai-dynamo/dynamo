@@ -81,6 +81,7 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
         max_total_gpus=config.max_total_gpus,
         min_total_gpus=config.min_total_gpus,
         intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
+        priority_config=config.priority,
     )
 
     logger.info("Serving endpoints...")
