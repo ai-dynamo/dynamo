@@ -21,7 +21,11 @@ from typing import Optional
 
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.global_planner.orchestrator import Orchestrator
-from dynamo.global_planner.priority import PriorityConfig, PriorityResolver
+from dynamo.global_planner.priority import (
+    PriorityConfig,
+    PriorityContext,
+    PriorityResolver,
+)
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
@@ -204,6 +208,12 @@ class ScaleRequestHandler:
                 blocking=request.blocking,
                 deployment_name=request.graph_deployment_name,
                 caller_name=request.caller_namespace,
+                # predicted_load is caller-supplied and optional; a missing or
+                # malformed payload degrades to "no signal", which makes every
+                # condition fail to match rather than failing the request.
+                priority_context=PriorityContext.from_predicted_load(
+                    request.predicted_load
+                ),
             )
             yield {
                 "status": outcome.status.value,
