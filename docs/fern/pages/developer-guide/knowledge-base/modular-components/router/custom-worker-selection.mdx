@@ -456,6 +456,19 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
+`cache.prefix_cache_read_allowed()` reports the frontend's normalized request decision:
+`Some(false)` forbids prefix reuse, `Some(true)` permits reads, and `None` keeps the
+legacy estimate. Permission does not prove a cache hit. Raw device, host, disk and
+shared-cache observations remain available; scorers must give them no credit when
+reads are forbidden. The host also omits KV fetch sources for such a request.
+
+The aggregated token-based Python vLLM path publishes a capability for a typed
+internal cache-read control. The frontend normalizes prompt-logprob and explicit
+cache controls once, and the worker applies that decision. Precision requires a
+capable worker pool; mixed or legacy pools retain their existing translation and
+estimates. Multimodal, disaggregated and native Generate requests keep their existing
+handling. Model-default sampling policies are not inferred by this control.
+
 `BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
@@ -484,6 +497,9 @@ impl WorkerScorer for UncoveredPromptScorer {
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
             let cached = candidate.cache().map_or(0.0, |cache| {
+                if cache.prefix_cache_read_allowed() == Some(false) {
+                    return 0.0;
+                }
                 cache.device_overlap_blocks()
                     + cache.host_overlap_blocks()
                     + cache.disk_overlap_blocks()

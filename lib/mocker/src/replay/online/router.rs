@@ -353,6 +353,7 @@ impl KvReplayRouter {
         let response = self
             .scheduler
             .schedule_request(ScheduleRequest {
+                prefix_cache_read_allowed: None,
                 mode: ScheduleMode::Tracked {
                     request_id: uuid.to_string(),
                 },

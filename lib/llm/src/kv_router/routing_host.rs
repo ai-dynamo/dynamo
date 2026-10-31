@@ -50,6 +50,7 @@ use crate::{
 
 mod builder;
 mod builtin;
+mod cache_read;
 mod cancellation;
 mod kv;
 mod kv_selection;
@@ -746,12 +747,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
+        let phase = request.phase();
+        self.normalize_prefix_cache_read_control(&mut request, phase);
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request.phase();
             return self
                 .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
                 .await
@@ -759,7 +761,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase = request.phase();
         if is_query_only {
             let phase_label = phase.to_string();
             let _route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);

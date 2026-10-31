@@ -2991,6 +2991,7 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::Tracked {
                 request_id: request_id.to_string(),
             },

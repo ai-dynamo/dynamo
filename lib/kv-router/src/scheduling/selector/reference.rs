@@ -365,10 +365,14 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
-            + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
-            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
-            + shared_overlap_blocks;
+        let overlap_credit_blocks = if context.request.prefix_cache_read_allowed == Some(false) {
+            0.0
+        } else {
+            effective_overlap_score_credit * device_overlap_blocks
+                + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
+                + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
+                + shared_overlap_blocks
+        };
         let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
@@ -812,6 +816,7 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1216,6 +1221,7 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1275,6 +1281,7 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1352,6 +1359,7 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
+                prefix_cache_read_allowed: None,
                 mode: ScheduleMode::QueryOnly {
                     request_id: Some("test".into()),
                 },
@@ -1427,6 +1435,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1498,6 +1507,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1585,6 +1595,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1663,6 +1674,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1965,6 +1977,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -2070,6 +2083,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },

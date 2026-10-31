@@ -252,6 +252,12 @@ def test_lora_discovery_publishes_engine_generate_capability(
         assert worker_arg == expected_worker_type
         assert tower_lora_arg is True
     assert register_model.await_args.kwargs["runtime_config"] is runtime_config
+    if expected_worker_type == mod.WorkerType.Aggregated:
+        runtime_config.set_engine_specific.assert_called_once_with(
+            "supports_prefix_cache_read_control", "true"
+        )
+    else:
+        runtime_config.set_engine_specific.assert_not_called()
 
 
 @pytest.mark.asyncio

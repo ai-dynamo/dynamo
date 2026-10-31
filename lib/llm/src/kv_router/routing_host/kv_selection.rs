@@ -98,6 +98,7 @@ struct BestMatchArgs<'a> {
     policy_class: Option<String>,
     session_context: Option<dynamo_kv_router::SessionContext>,
     expected_output_tokens: Option<u32>,
+    prefix_cache_read_allowed: Option<bool>,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -128,6 +129,7 @@ impl RoutingHost {
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
+                args.prefix_cache_read_allowed,
             )
             .await?;
         match admitted.outcome {
@@ -183,6 +185,10 @@ impl RoutingHost {
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
+        let prefix_cache_read_allowed = (phase == RequestPhase::Aggregated)
+            .then_some(request.skip_reading_prefix_cache)
+            .flatten()
+            .map(|skip| !skip);
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
@@ -289,6 +295,7 @@ impl RoutingHost {
                     policy_class,
                     session_context,
                     expected_output_tokens,
+                    prefix_cache_read_allowed,
                     affinity_target: affinity_target
                         .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
                     pinned_worker: None,
@@ -357,6 +364,7 @@ impl RoutingHost {
             policy_class,
             session_context,
             expected_output_tokens,
+            prefix_cache_read_allowed,
             affinity_target: None,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,

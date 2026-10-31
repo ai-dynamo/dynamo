@@ -70,6 +70,7 @@ from .args import (
 )
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
+from .cache_read_control import publish_prefix_cache_read_control_capability
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -949,6 +950,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_prefix_cache_read_control_capability(
+        runtime_config, model_input, model_type, worker_type
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

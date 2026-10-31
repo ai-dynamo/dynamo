@@ -399,6 +399,8 @@ impl SessionContext {
 
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
+    /// Frontend-normalized permission; None retains legacy cache-credit estimates.
+    pub prefix_cache_read_allowed: Option<bool>,
     pub mode: ScheduleMode,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub block_hashes: Option<Vec<LocalBlockHash>>,
@@ -430,6 +432,8 @@ pub struct ScheduleRequest {
 /// scheduler owns this request and its sender. Dropping the caller's selection
 /// future closes that receiver, but cannot retract the request from the actor.
 pub struct SchedulingRequest {
+    /// Frontend-normalized permission; None retains legacy cache-credit estimates.
+    pub prefix_cache_read_allowed: Option<bool>,
     // Request identity and payload.
     pub mode: ScheduleMode,
     pub token_seq: Option<Vec<SequenceHash>>,
@@ -498,6 +502,9 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_cached_tokens(&self) -> usize {
+        if self.request.prefix_cache_read_allowed == Some(false) {
+            return 0;
+        }
         match self.eligibility.pinned_worker() {
             Some(worker) => self
                 .eligibility
@@ -540,6 +547,10 @@ impl SchedulingRequest {
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        if self.prefix_cache_read_allowed == Some(false) {
+            return 0;
+        }
+
         self.overlap
             .effective_cached_tokens
             .get(&worker)
@@ -569,6 +580,10 @@ impl SchedulingRequest {
     }
 
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
+        if self.prefix_cache_read_allowed == Some(false) {
+            return 0.0;
+        }
+
         self.overlap
             .effective_overlap_blocks
             .get(&worker)
@@ -651,6 +666,7 @@ mod tests {
         );
 
         SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -705,6 +721,25 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn queue_cost_ignores_unreadable_prefix_but_preserves_raw_state() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let workers = HashMap::from([(7, crate::test_utils::SimpleWorkerConfig::default())]);
+        let mut request = request_with_decode_load(65, None, 0, 0, worker);
+        request.overlap.effective_cached_tokens.insert(worker, 64);
+        request.overlap.effective_overlap_blocks.insert(worker, 4.0);
+        request.overlap.tier_overlap_blocks.device.insert(worker, 4);
+        assert_eq!(
+            SchedulingContext::new(&request, &workers).best_effective_prefill_tokens(),
+            1
+        );
+        request.prefix_cache_read_allowed = Some(false);
+        let context = SchedulingContext::new(&request, &workers);
+        assert_eq!(context.best_cached_tokens(), 0);
+        assert_eq!(context.best_effective_prefill_tokens(), 65);
+        assert_eq!(request.raw_cached_tokens_for(worker, 16), 64);
     }
 
     #[test]

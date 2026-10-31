@@ -463,6 +463,12 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub output_options: OutputOptions,
 
+    /// Frontend-resolved prefix-cache read decision for capable workers.
+    /// `None` leaves engine/model defaults and legacy request translation intact.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reading_prefix_cache: Option<bool>,
+
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
@@ -1212,6 +1218,21 @@ mod tests {
 
         let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
+    #[test]
+    fn prefix_cache_read_control_preserves_omission_and_explicit_false() {
+        let mut request = request_with_tokens(vec![1]);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("skip_reading_prefix_cache").is_none());
+        let decoded: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.skip_reading_prefix_cache, None);
+
+        request.skip_reading_prefix_cache = Some(false);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["skip_reading_prefix_cache"], false);
+        let decoded: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.skip_reading_prefix_cache, Some(false));
     }
 
     #[test]

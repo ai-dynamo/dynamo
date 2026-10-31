@@ -3638,6 +3638,21 @@ mod ownership_tests {
     }
 
     #[test]
+    fn prefix_cache_read_capability_preserves_card_cache_identity() {
+        let legacy = ModelDeploymentCard::with_name_only("model");
+        for value in [serde_json::json!(false), serde_json::json!(true)] {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert("supports_prefix_cache_read_control".to_string(), value);
+            let decoded: ModelDeploymentCard =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(legacy.mdcsum(), decoded.mdcsum());
+            assert_eq!(legacy.local_dir(), decoded.local_dir());
+        }
+    }
+
+    #[test]
     fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
         use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 

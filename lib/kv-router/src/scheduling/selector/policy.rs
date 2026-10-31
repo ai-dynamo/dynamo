@@ -479,6 +479,10 @@ fn push_transfer_target<C: WorkerConfigLike>(
     worker: WorkerWithDpRank,
     config: &C,
 ) {
+    if request.prefix_cache_read_allowed == Some(false) {
+        targets.push(None);
+        return;
+    }
     let target = config.kv_transfer_keys().target();
     targets.push(target.map(|target| (target, request.transfer_local_prefix_blocks_for(worker))));
 }

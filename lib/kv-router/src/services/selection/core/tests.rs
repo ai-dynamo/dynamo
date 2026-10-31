@@ -244,6 +244,7 @@ fn lease_operation<'a>(
     track_active_blocks: bool,
 ) -> SelectionOperation<'a> {
     SelectionOperation {
+        prefix_cache_read_allowed: None,
         key: default_key(),
         prompt,
         router_config_override: None,

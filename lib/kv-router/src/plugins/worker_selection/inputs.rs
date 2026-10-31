@@ -212,6 +212,7 @@ impl BitOr for WorkerInputs {
 
 /// Request-wide facts borrowed once for all cache views in a selection.
 pub(crate) struct CacheSnapshot<'a> {
+    pub(crate) prefix_cache_read_allowed: Option<bool>,
     pub(crate) shared_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
 }
@@ -223,6 +224,7 @@ pub(crate) struct WorkerInputRows {
     // Index-aligned with `rows`. The rows outlive the worker map, so they carry each rank's
     // capacity; the rank itself is already in the row.
     capacities: Vec<WorkerCapacity>,
+    prefix_cache_read_allowed: Option<bool>,
     shared_hits: Option<SharedCacheHits>,
     has_tier_matches: bool,
 }
@@ -239,6 +241,7 @@ impl WorkerInputRows {
             inputs,
             rows,
             capacities,
+            prefix_cache_read_allowed: cache_snapshot.prefix_cache_read_allowed,
             shared_hits: if inputs.contains(WorkerInputs::CACHE) {
                 cache_snapshot.shared_hits.cloned()
             } else {
@@ -254,6 +257,7 @@ impl WorkerInputRows {
             inputs: WorkerInputs::NONE,
             rows: Vec::new(),
             capacities: Vec::new(),
+            prefix_cache_read_allowed: None,
             shared_hits: None,
             has_tier_matches: false,
         }
@@ -262,6 +266,7 @@ impl WorkerInputRows {
     /// Lend the rows as a view restricted to the declared inputs.
     pub(crate) fn read<R>(&self, read: impl FnOnce(WorkerCandidates<'_>) -> R) -> R {
         let cache_snapshot = CacheSnapshot {
+            prefix_cache_read_allowed: self.prefix_cache_read_allowed,
             shared_hits: self.shared_hits.as_ref(),
             has_tier_matches: self.has_tier_matches,
         };
@@ -294,6 +299,12 @@ pub(crate) struct WorkerCacheData {
     pub(crate) host_overlap_blocks: f64,
     pub(crate) disk_overlap_blocks: f64,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<WorkerCacheData>() == 40);
+    assert!(std::mem::size_of::<CacheSnapshot<'static>>() == 16);
+};
 
 /// Borrowed worker overlaps and shared-cache facts from one lookup snapshot.
 /// Available only to components that declare [`WorkerInputs::CACHE`].
@@ -516,6 +527,14 @@ impl ScoredWorkerCandidate {
 }
 
 impl<'a> WorkerCacheInput<'a> {
+    /// The frontend's request-wide cache-read decision. Some(false) denies all
+    /// prefix reuse; Some(true) permits reads without proving a cache hit. None
+    /// retains the router's legacy estimate when no normalized decision exists.
+    /// This immutable selection snapshot does not change raw overlap accessors.
+    pub fn prefix_cache_read_allowed(self) -> Option<bool> {
+        self.snapshot.prefix_cache_read_allowed
+    }
+
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
     /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.

@@ -231,6 +231,9 @@ impl<'a> MaterializedSelectionInput<'a> {
         workers: &HashMap<WorkerId, C>,
         scope: impl FnOnce() -> KvTransferScope,
     ) -> Option<&KvTransferSourceSummary> {
+        if self.request.prefix_cache_read_allowed == Some(false) {
+            return None;
+        }
         let candidates = self.request.kv_transfer_candidates.as_ref()?;
         Some(
             self.kv_transfer_sources
@@ -346,6 +349,7 @@ impl<'a> MaterializedSelectionInput<'a> {
 /// Request-wide cache facts shared by every row built from `request`.
 fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
     CacheSnapshot {
+        prefix_cache_read_allowed: request.prefix_cache_read_allowed,
         shared_hits: request.shared_cache_hits.as_ref(),
         has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
             || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
@@ -863,6 +867,7 @@ mod test_support {
 
     pub(super) fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
