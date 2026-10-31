@@ -362,7 +362,9 @@ jobs:
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
-        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        # Datadog attempt-to-fix runs repeat tracked tests 20 times. Give CPU
+        # stages at least 90 minutes for those retries; keep normal budgets.
+        timeout-minutes: ${{ contains(github.event.head_commit.message, 'DD_') && inputs.cpu_only_test_timeout_minutes < 90 && 90 || inputs.cpu_only_test_timeout_minutes }}
         shell: bash
         env:
           PYTEST_MARKS: ${{ inputs.cpu_only_test_markers }}
