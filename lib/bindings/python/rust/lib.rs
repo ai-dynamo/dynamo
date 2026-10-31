@@ -424,6 +424,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::pool_relay::PoolRelay>()?;
+    m.add_class::<llm::kv::MooncakeClient>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
