@@ -336,13 +336,13 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_ROUTER_QUEUE_THRESHOLD`
 </ParamField>
 
-<ParamField path="--router-queue-policy" type="string" default="fcfs">
+<ParamField path="--router-queue-policy" type="string" default="edf">
   **Deprecated; removal in v1.7.** Set `policy_classes[].queue_policy` in `--router-policy-config`.
 
-  Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
-  TTFT.
+  Queue scheduling policy. `edf` dispatches the earliest due time first, then keeps arrival order;
+  `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average TTFT.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>wspt</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>edf</Badge> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>wspt</Badge></span>
 
   Environment variable: `DYN_ROUTER_QUEUE_POLICY`
 </ParamField>

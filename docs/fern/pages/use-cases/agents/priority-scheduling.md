@@ -36,7 +36,7 @@ Priority can affect three different layers. They are configured separately.
 | Layer | What It Controls | Required Configuration | Deep Details |
 |-------|------------------|------------------------|--------------|
 | Frontend API | The user-facing request schema and priority polarity. | Send `priority` for soft router and engine priority, or `strict_priority` for a router-only pending tier. | [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#agent-hints) |
-| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing. | [`--router-queue-threshold`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior), [`--router-queue-policy`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior) |
+| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing, `--router-queue-threshold` set to a value that actually causes queueing, and an `fcfs` or `wspt` queue policy. | [`--router-queue-threshold`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior), [`--router-queue-policy`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior) |
 | Backend engine | Which admitted request the engine schedules first. | Backend-specific priority scheduling flag, such as vLLM `--scheduling-policy priority` or SGLang `--enable-priority-scheduling`. | [vLLM priority scheduling](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#priority-scheduling), [SGLang priority scheduling](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling) |
 | KV cache policy | Which cached blocks are retained or evicted first under memory pressure. | Backend-specific cache priority configuration, such as SGLang `--radix-eviction-policy priority`. | [SGLang priority-based KV cache eviction](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-based-kv-cache-eviction) |
 
@@ -46,15 +46,17 @@ These layers are additive. `strict_priority` does not propagate to backend engin
 
 The router queue only matters when requests are held before dispatch. If a request can be routed immediately, there is no pending queue to reorder and the priority hint will not change TTFT at the router layer.
 
-`--router-queue-threshold` controls when the router starts holding requests. A request waits in the router queue while every eligible worker is above the configured threshold. The queue drains when capacity is available, and higher-priority requests are selected according to the queue key:
+`--router-queue-threshold` controls when the router starts holding requests. A request waits in the router queue while every eligible worker is above the configured threshold. The queue drains when capacity is available.
+
+The default `edf` queue policy dispatches the earliest due time first, then keeps arrival order, and ignores `priority` and `strict_priority`. To let these hints reorder the router queue, set the class's `queue_policy` to `fcfs` or `wspt` (or `--router-queue-policy` for the default class). Those policies select requests according to the queue key:
 
 ```text
 (strict_priority, due_at, configured_policy_key)
 ```
 
-The strict tier is compared first. Within that tier, every request with an internal `due_at` is scheduled ahead of every request without one (an unset due time sorts last) before FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) applies its configured policy key. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
+The strict tier is compared first. Within that tier, every request with a request classifier's `due_at` is scheduled ahead of every request without one (an unset due time sorts last) before FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) applies its configured policy key. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
 
-The default policy is `fcfs`, which uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
+The `fcfs` policy uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
 
 For the flag-level semantics, default value, and backend caveats, see [Router Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior).
 

@@ -1,19 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::time::Instant;
 
 use ordered_float::OrderedFloat;
-use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
-use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::WorkerPlacement;
-use crate::protocols::WorkerWithDpRank;
+use super::policy_config::{PolicyClassConfig, PolicyProfile, SloTtftOutOfRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -37,12 +35,35 @@ impl QueueSnapshot {
     }
 }
 
+/// Queue inputs resolved once, after the request's final policy class is known.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct QueueMetadata {
-    pub(crate) class_index: usize,
-    pub(crate) snapshot: QueueSnapshot,
-    pub(crate) due_at: Option<Instant>,
-    pub(crate) arrival_offset_secs: f64,
+pub struct QueueMetadata {
+    pub class_index: usize,
+    pub snapshot: QueueSnapshot,
+    /// Trusted absolute deadline. It takes precedence over the class due time, and it is the
+    /// only due time the queue indexes for expiry.
+    pub due_at: Option<Instant>,
+    /// Router ingress plus the class TTFT budget, from
+    /// [`PolicyClassConfig::slo_ttft_due_at`]. Only EDF classes order by it; it never expires.
+    pub class_due_at: Option<Instant>,
+    /// Seconds from the queue's arrival origin to router ingress. FCFS and LCFS order by it.
+    pub arrival_offset_secs: f64,
+}
+
+impl QueueMetadata {
+    /// Sets `class_due_at` from `class`, counted from `ingress_at`, unless an explicit
+    /// deadline takes precedence; the class budget is then not evaluated at all.
+    pub fn resolve_class_due_at(
+        &mut self,
+        class: &PolicyClassConfig,
+        ingress_at: Instant,
+    ) -> Result<(), SloTtftOutOfRange> {
+        self.class_due_at = match self.due_at {
+            Some(_) => None,
+            None => class.slo_ttft_due_at(ingress_at)?,
+        };
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,40 +103,53 @@ pub struct PolicyQueueStats {
     pub cached_tokens: usize,
 }
 
+/// Immutable dispatch order of one queued entry; `Greater` dispatches first.
+///
+/// Entries are only compared within one class, so each class discipline sets just the
+/// fields it orders by. EDF sets the due time (explicit, else class) and leaves strict
+/// priority and the policy score at zero: earliest due time first, absent last, then
+/// enqueue order. FCFS/LCFS/WSPT keep their order: within one strict tier, entries with an
+/// explicit deadline go earliest-due-first ahead of every entry without one, before the
+/// policy score applies (DEP #13891); class due times never enter their order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueuePriority {
-    strict_priority: u32,
-    due_time_key: u64,
+struct QueueOrder {
+    due_at: Option<Instant>,
     policy_score: OrderedFloat<f64>,
+    enqueue_seq: u64,
+    strict_priority: u32,
 }
 
-const NO_DUE_TIME: u64 = u64::MAX;
+impl Ord for QueueOrder {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        #[cfg(test)]
+        tests::count_order_comparison();
+        self.strict_priority
+            .cmp(&other.strict_priority)
+            .then_with(|| cmp_due_at(other.due_at, self.due_at))
+            .then_with(|| self.policy_score.cmp(&other.policy_score))
+            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
+    }
+}
 
-// Within one strict tier, deadline-bearing entries order earliest-due-first
-// ahead of every non-deadline entry, before the FCFS/LCFS/WSPT policy score
-// applies: a request that must finish by a wall-clock time cannot trade its
-// slot for cache affinity, so EDF deliberately preempts the cost-aware score
-// (DEP #13891). Entries without a deadline tie at NO_DUE_TIME and fall through
-// to the policy score unchanged.
+impl PartialOrd for QueueOrder {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Orders due times earliest first, with an absent due time after every finite one.
 #[inline]
-fn cmp_queue_order(
-    lhs_priority: QueuePriority,
-    lhs_enqueue_seq: u64,
-    rhs_priority: QueuePriority,
-    rhs_enqueue_seq: u64,
-) -> Ordering {
-    lhs_priority
-        .strict_priority
-        .cmp(&rhs_priority.strict_priority)
-        .then_with(|| rhs_priority.due_time_key.cmp(&lhs_priority.due_time_key))
-        .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
-        .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
+fn cmp_due_at(lhs: Option<Instant>, rhs: Option<Instant>) -> Ordering {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => lhs.cmp(&rhs),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
-// `uncached_tokens` is derived, so drop it from queued entries: with the
-// deadline key in `QueuePriority` the header would otherwise cross 64 bytes,
-// and the policy_queue drain benchmarks (near-empty payloads, header-bound
-// heap sifts) regress 50-150% when an entry spans two cache lines.
+// `uncached_tokens` is derived, so queued entries do not store it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueueEntrySnapshot {
     raw_isl_tokens: usize,
@@ -150,11 +184,15 @@ impl From<QueueEntrySnapshot> for QueueSnapshot {
 }
 
 pub struct PolicyQueueEntry<T> {
+    order: QueueOrder,
     class_index: usize,
-    priority: QueuePriority,
-    enqueue_seq: u64,
     snapshot: QueueEntrySnapshot,
-    payload: T,
+    due_at: Option<Instant>,
+    /// Whether `due_at` is an explicit deadline, indexed for expiry.
+    expires: bool,
+    /// Boxed because class trees shift entries within a node on every insert and removal;
+    /// an inline payload would make each shift move it.
+    payload: Box<T>,
 }
 
 impl<T> PolicyQueueEntry<T> {
@@ -166,8 +204,14 @@ impl<T> PolicyQueueEntry<T> {
         self.snapshot.into()
     }
 
-    fn due_time_key(&self) -> Option<u64> {
-        (self.priority.due_time_key != NO_DUE_TIME).then_some(self.priority.due_time_key)
+    /// The due time fixed at enqueue: the explicit deadline, else router ingress plus the
+    /// class TTFT budget, else `None`.
+    pub fn due_at(&self) -> Option<Instant> {
+        self.due_at
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.due_at.filter(|_| self.expires)
     }
 
     pub fn payload(&self) -> &T {
@@ -179,7 +223,7 @@ impl<T> PolicyQueueEntry<T> {
     }
 
     pub fn into_payload(self) -> T {
-        self.payload
+        *self.payload
     }
 }
 
@@ -187,18 +231,13 @@ impl<T> Eq for PolicyQueueEntry<T> {}
 
 impl<T> PartialEq for PolicyQueueEntry<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.enqueue_seq == other.enqueue_seq
+        self.order == other.order
     }
 }
 
 impl<T> Ord for PolicyQueueEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        cmp_queue_order(
-            self.priority,
-            self.enqueue_seq,
-            other.priority,
-            other.enqueue_seq,
-        )
+        self.order.cmp(&other.order)
     }
 }
 
@@ -208,269 +247,56 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DispatchCandidate {
-    placement: WorkerPlacement,
-    cost: usize,
+/// Lets a class queue find an entry by its order alone; entries compare only by it.
+impl<T> Borrow<QueueOrder> for PolicyQueueEntry<T> {
+    fn borrow(&self) -> &QueueOrder {
+        &self.order
+    }
 }
 
+/// Locates one queued entry: its class and dispatch order. Enqueue sequences are never
+/// reused, so once the entry leaves the queue its handle matches nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerLaneHead {
-    worker: WorkerWithDpRank,
-    priority: QueuePriority,
-    enqueue_seq: u64,
+pub struct QueueEntryHandle {
+    class_index: usize,
+    order: QueueOrder,
 }
 
-impl WorkerLaneHead {
-    fn new<T>(worker: WorkerWithDpRank, entry: &PolicyQueueEntry<T>) -> Self {
-        Self {
-            worker,
-            priority: entry.priority,
-            enqueue_seq: entry.enqueue_seq,
-        }
-    }
-}
-
-impl Ord for WorkerLaneHead {
-    fn cmp(&self, other: &Self) -> Ordering {
-        cmp_queue_order(
-            self.priority,
-            self.enqueue_seq,
-            other.priority,
-            other.enqueue_seq,
-        )
-        .then_with(|| self.worker.cmp(&other.worker))
-    }
-}
-
-impl PartialOrd for WorkerLaneHead {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
+// One ordered tree, not a heap or hash map, so inserting, dispatching, and removing a known
+// entry each cost worst-case O(log n) with no rebuild or deferred cleanup.
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    pending: BinaryHeap<PolicyQueueEntry<T>>,
+    /// Every queued entry of the class in one dispatch order, whatever worker constraints
+    /// its payload carries; the last entry dispatches first.
+    pending: BTreeSet<PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
-    ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
-    blocked_workers: FxHashSet<WorkerWithDpRank>,
-    candidate_worker_heads: BTreeSet<WorkerLaneHead>,
-    needs_blocked_worker_recheck: bool,
 }
 
 impl<T> PolicyClassQueue<T> {
     fn ready_is_empty(&self) -> bool {
-        self.pending.is_empty() && self.ready_by_worker.is_empty()
+        self.pending.is_empty()
     }
 
-    fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
-        self.pending
-            .iter()
-            .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
-    }
-
-    fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
-        match placement {
-            WorkerPlacement::Any => self.pending.push(entry),
-            WorkerPlacement::Exact(worker) => {
-                let ready = self.ready_by_worker.entry(worker).or_default();
-                let old_head = (!self.blocked_workers.contains(&worker))
-                    .then(|| ready.peek().map(|entry| WorkerLaneHead::new(worker, entry)))
-                    .flatten();
-                ready.push(entry);
-                if !self.blocked_workers.contains(&worker) {
-                    let new_head = WorkerLaneHead::new(
-                        worker,
-                        ready.peek().expect("worker lane was just populated"),
-                    );
-                    if old_head != Some(new_head) {
-                        if let Some(old_head) = old_head {
-                            let removed = self.candidate_worker_heads.remove(&old_head);
-                            debug_assert!(removed);
-                        }
-                        self.candidate_worker_heads.insert(new_head);
-                    }
-                }
-            }
-        }
-    }
-
+    /// The scheduling cost of the class head, if `is_dispatchable` accepts it. Only the head
+    /// is checked: a blocked head holds every later entry of its class until it can
+    /// dispatch or leaves the queue.
     #[inline]
-    fn next_dispatchable(
-        &mut self,
+    fn dispatchable_head_cost(
+        &self,
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
-    ) -> Option<DispatchCandidate> {
-        if self.ready_by_worker.is_empty() {
-            debug_assert!(
-                self.blocked_workers.is_empty(),
-                "blocked workers must have a ready lane"
-            );
-            return self
-                .pending
-                .peek()
-                .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
-                .map(|entry| DispatchCandidate {
-                    placement: WorkerPlacement::Any,
-                    cost: entry.snapshot.scheduling_cost_tokens,
-                });
-        }
-
-        self.next_dispatchable_worker(class_index, is_dispatchable)
-    }
-
-    #[inline(never)]
-    fn next_dispatchable_worker(
-        &mut self,
-        class_index: usize,
-        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
-    ) -> Option<DispatchCandidate> {
-        if self.needs_blocked_worker_recheck {
-            self.needs_blocked_worker_recheck = false;
-            // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
-            // Re-peeking here also observes head changes from intervening `push_ready` calls.
-            let Self {
-                config,
-                ready_by_worker,
-                blocked_workers,
-                candidate_worker_heads,
-                ..
-            } = self;
-            blocked_workers.retain(|worker| {
-                let ready = ready_by_worker
-                    .get(worker)
-                    .expect("blocked worker lane vanished");
-                let head = ready.peek().expect("blocked worker lane is empty");
-                if is_dispatchable(class_index, config, head.payload()) {
-                    candidate_worker_heads.insert(WorkerLaneHead::new(*worker, head));
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        let shared = self
-            .pending
-            .peek()
+    ) -> Option<usize> {
+        self.pending
+            .last()
             .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
-            .map(|entry| {
-                (
-                    entry.priority,
-                    entry.enqueue_seq,
-                    entry.snapshot.scheduling_cost_tokens,
-                )
-            });
-
-        loop {
-            let Some(head) = self.candidate_worker_heads.last().copied() else {
-                return shared.map(|(_, _, cost)| DispatchCandidate {
-                    placement: WorkerPlacement::Any,
-                    cost,
-                });
-            };
-            let dispatchable = {
-                let ready = self
-                    .ready_by_worker
-                    .get(&head.worker)
-                    .expect("indexed worker lane vanished");
-                is_dispatchable(
-                    class_index,
-                    &self.config,
-                    ready
-                        .peek()
-                        .expect("indexed worker lane is empty")
-                        .payload(),
-                )
-            };
-            if !dispatchable {
-                let removed = self.candidate_worker_heads.pop_last();
-                debug_assert_eq!(removed, Some(head));
-                self.blocked_workers.insert(head.worker);
-                continue;
-            }
-
-            let exact_cost = self.ready_by_worker[&head.worker]
-                .peek()
-                .expect("indexed worker lane is empty")
-                .snapshot
-                .scheduling_cost_tokens;
-            return match shared {
-                Some((priority, enqueue_seq, cost))
-                    if cmp_queue_order(priority, enqueue_seq, head.priority, head.enqueue_seq)
-                        == Ordering::Greater =>
-                {
-                    Some(DispatchCandidate {
-                        placement: WorkerPlacement::Any,
-                        cost,
-                    })
-                }
-                _ => Some(DispatchCandidate {
-                    placement: WorkerPlacement::Exact(head.worker),
-                    cost: exact_cost,
-                }),
-            };
-        }
+            .map(|entry| entry.snapshot.scheduling_cost_tokens)
     }
 
-    fn pop_lane(&mut self, placement: WorkerPlacement) -> PolicyQueueEntry<T> {
-        match placement {
-            WorkerPlacement::Any => self.pending.pop().expect("policy class front vanished"),
-            WorkerPlacement::Exact(worker) => {
-                let ready = self
-                    .ready_by_worker
-                    .get_mut(&worker)
-                    .expect("queue admission worker lane vanished");
-                debug_assert!(!self.blocked_workers.contains(&worker));
-                let head = WorkerLaneHead::new(
-                    worker,
-                    ready.peek().expect("queue admission worker head vanished"),
-                );
-                let removed = self.candidate_worker_heads.remove(&head);
-                debug_assert!(removed);
-                let entry = ready.pop().expect("queue admission worker head vanished");
-                let next_head = ready.peek().map(|entry| WorkerLaneHead::new(worker, entry));
-                if let Some(next_head) = next_head {
-                    self.candidate_worker_heads.insert(next_head);
-                } else {
-                    self.ready_by_worker.remove(&worker);
-                }
-                entry
-            }
-        }
-    }
-
-    fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
-        if self.blocked_workers.remove(&worker) {
-            let ready = self
-                .ready_by_worker
-                .get(&worker)
-                .expect("blocked worker lane vanished");
-            self.candidate_worker_heads.insert(WorkerLaneHead::new(
-                worker,
-                ready.peek().expect("blocked worker lane is empty"),
-            ));
-        }
-    }
-
-    fn recheck_all_workers(&mut self) {
-        self.needs_blocked_worker_recheck = true;
-    }
-
-    fn rebuild_worker_heads(&mut self) {
-        self.candidate_worker_heads.clear();
-        self.blocked_workers
-            .retain(|worker| self.ready_by_worker.contains_key(worker));
-        for (&worker, ready) in &self.ready_by_worker {
-            if !self.blocked_workers.contains(&worker) {
-                self.candidate_worker_heads.insert(WorkerLaneHead::new(
-                    worker,
-                    ready.peek().expect("worker lane is empty"),
-                ));
-            }
-        }
+    /// Removes the entry with `order`. Returns the entry and whether it was the class head.
+    fn remove(&mut self, order: &QueueOrder) -> Option<(PolicyQueueEntry<T>, bool)> {
+        let was_head = self.pending.last().is_some_and(|head| head.order == *order);
+        self.pending.take(order).map(|entry| (entry, was_head))
     }
 }
 
@@ -480,9 +306,10 @@ pub struct PolicyQueue<T> {
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
-    due_entries: BTreeSet<(u64, u64)>,
-    deadline_origin: Instant,
-    candidates: Vec<Option<DispatchCandidate>>,
+    /// Explicit deadlines, earliest first, for expiry. Class due times never enter it.
+    deadlines: BTreeMap<(Instant, u64), QueueEntryHandle>,
+    /// Per class, the cost of its dispatchable head during one `pop_next` call.
+    head_costs: Vec<Option<usize>>,
 }
 
 impl<T> PolicyQueue<T> {
@@ -495,11 +322,7 @@ impl<T> PolicyQueue<T> {
                 .cloned()
                 .map(|config| PolicyClassQueue {
                     config,
-                    pending: BinaryHeap::new(),
-                    ready_by_worker: FxHashMap::default(),
-                    blocked_workers: FxHashSet::default(),
-                    candidate_worker_heads: BTreeSet::new(),
-                    needs_blocked_worker_recheck: false,
+                    pending: BTreeSet::new(),
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                 })
@@ -508,9 +331,8 @@ impl<T> PolicyQueue<T> {
             carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
-            due_entries: BTreeSet::new(),
-            deadline_origin: Instant::now(),
-            candidates: vec![None; class_count],
+            deadlines: BTreeMap::new(),
+            head_costs: vec![None; class_count],
         }
     }
 
@@ -529,19 +351,15 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().enumerate().any(|(class_index, class)| {
             class
                 .pending
-                .peek()
+                .last()
                 .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
-                || class.ready_by_worker.values().any(|ready| {
-                    ready
-                        .peek()
-                        .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
-                })
         })
     }
 
     pub(crate) fn next_due_at(&self) -> Option<Instant> {
-        let &(due_time_key, _) = self.due_entries.first()?;
-        Some(self.deadline_origin + std::time::Duration::from_nanos(due_time_key))
+        self.deadlines
+            .first_key_value()
+            .map(|(&(due_at, _), _)| due_at)
     }
 
     pub fn class_count(&self) -> usize {
@@ -556,41 +374,35 @@ impl<T> PolicyQueue<T> {
         self.classes[class_index].stats
     }
 
-    pub(crate) fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
-        for class in &mut self.classes {
-            class.recheck_worker(worker);
-        }
-    }
-
-    /// Reconsider blocked worker lanes after host-owned capacity or eligibility changes.
-    ///
-    /// Call before draining with `pop_next`; request priorities and queue ordering
-    /// remain unchanged. The next drain checks each lane's current availability.
-    pub fn recheck_all_workers(&mut self) {
-        for class in &mut self.classes {
-            class.recheck_all_workers();
-        }
-    }
-
     pub fn has_backlog(&self, class_index: usize) -> bool {
         !self.classes[class_index].ready_is_empty()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
-        self.classes.iter().flat_map(PolicyClassQueue::entries)
+        self.classes.iter().flat_map(|class| class.pending.iter())
     }
 
-    /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
-    /// accounting while preserving each retained entry's scheduling key.
+    /// Bulk removal of every queued entry whose payload fails `keep`, with its accounting.
+    /// It inspects every entry, then removes each match as [`Self::remove`] does:
+    /// O(n + k log n) for k removals. Cancel one request with its handle instead.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-        for class_index in 0..self.classes.len() {
-            drop(self.take_if_in_class(class_index, |payload| !keep(payload)));
+        let mut removals = Vec::new();
+        for (class_index, class) in self.classes.iter().enumerate() {
+            for entry in class.pending.iter().filter(|entry| !keep(entry.payload())) {
+                removals.push(QueueEntryHandle {
+                    class_index,
+                    order: entry.order,
+                });
+            }
+        }
+        for handle in removals {
+            let removed = self.remove(handle);
+            debug_assert!(removed.is_some());
         }
     }
 
+    /// Enqueues without a deadline or class due time, so EDF classes keep enqueue order.
     #[allow(clippy::too_many_arguments)]
-    /// Applies class-local, worker-scaled limits against pre-add counters, then
-    /// captures the immutable scheduling key and accounting snapshot.
     pub fn enqueue(
         &mut self,
         class_index: usize,
@@ -599,177 +411,100 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        placement: WorkerPlacement,
         payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
+    ) -> Result<QueueEntryHandle, (QueueRejection, T)> {
         self.enqueue_with_due_at(
             QueueMetadata {
                 class_index,
                 snapshot,
                 due_at: None,
+                class_due_at: None,
                 arrival_offset_secs,
             },
             worker_count,
             priority_jump,
             strict_priority,
-            placement,
             payload,
         )
     }
 
-    pub(crate) fn enqueue_with_due_at(
+    /// Applies class-local, worker-scaled limits against pre-add counters, then
+    /// captures the immutable dispatch order and accounting snapshot. The returned handle
+    /// removes this entry while it is queued.
+    pub fn enqueue_with_due_at(
         &mut self,
         metadata: QueueMetadata,
         worker_count: usize,
         priority_jump: f64,
         strict_priority: u32,
-        placement: WorkerPlacement,
         payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
-        let QueueMetadata {
-            class_index,
-            snapshot,
-            due_at,
-            arrival_offset_secs,
-        } = metadata;
-        if due_at.is_some() && self.due_entries.is_empty() {
-            self.deadline_origin = Instant::now();
-        }
-        let due_time_key = due_at.map_or(NO_DUE_TIME, |due_at| {
-            due_at
-                .saturating_duration_since(self.deadline_origin)
-                .as_nanos()
-                .min((NO_DUE_TIME - 1) as u128) as u64
-        });
+    ) -> Result<QueueEntryHandle, (QueueRejection, T)> {
+        let class_index = metadata.class_index;
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
         }
 
+        let enqueue_seq = self.next_enqueue_seq;
+        self.next_enqueue_seq = enqueue_seq
+            .checked_add(1)
+            .expect("policy queue enqueue sequence exhausted");
         let entry = make_entry(
-            class_index,
-            snapshot,
-            arrival_offset_secs,
+            metadata,
+            class.config.queue_policy,
             priority_jump,
             strict_priority,
-            due_time_key,
-            class.config.queue_policy,
-            self.next_enqueue_seq,
+            enqueue_seq,
             payload,
         );
-        if due_time_key != NO_DUE_TIME {
-            self.due_entries
-                .insert((due_time_key, self.next_enqueue_seq));
+        let handle = QueueEntryHandle {
+            class_index,
+            order: entry.order,
+        };
+        if let Some(due_at) = entry.deadline() {
+            self.deadlines.insert((due_at, enqueue_seq), handle);
         }
-        self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
-        add_stats(&mut class.stats, snapshot);
-        class.push_ready(placement, entry);
+        add_stats(&mut class.stats, metadata.snapshot);
+        let inserted = class.pending.insert(entry);
+        debug_assert!(inserted);
         self.pending_count += 1;
-        Ok(())
+        Ok(handle)
     }
 
-    pub(crate) fn take_if_in_class(
-        &mut self,
-        class_index: usize,
-        mut predicate: impl FnMut(&T) -> bool,
-    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
-        self.take_if_entry_in_class(class_index, |entry| predicate(entry.payload()))
+    /// Removes the queued entry `handle` names, with its accounting and deadline, in
+    /// O(log n). Returns the entry and whether it headed its class, or `None` once the
+    /// entry has left the queue. A removed entry spends no DRR credit.
+    pub fn remove(&mut self, handle: QueueEntryHandle) -> Option<(PolicyQueueEntry<T>, bool)> {
+        let (entry, was_head) = self.remove_located(handle)?;
+        remove_deadline(&mut self.deadlines, &entry);
+        Some((entry, was_head))
     }
 
-    /// Removes and returns every entry whose deadline is at or before `now`.
-    ///
-    /// Cost: one full scan of all queued entries plus a heap rebuild of each
-    /// class that lost an entry, per timer fire. Acceptable while deadlines are
-    /// rare; once every request carries a due time (the classifier PR), this
-    /// needs a seq-to-lane index or expiry-on-pop to avoid O(N) per fire under
-    /// a standing backlog.
-    pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
-        if self.due_entries.is_empty() {
-            return Vec::new();
-        }
-        let now_key = now
-            .saturating_duration_since(self.deadline_origin)
-            .as_nanos()
-            .min((NO_DUE_TIME - 1) as u128) as u64;
-        let expired_sequences: FxHashSet<u64> = self
-            .due_entries
-            .range(..=(now_key, u64::MAX))
-            .map(|(_, enqueue_seq)| *enqueue_seq)
-            .collect();
-        if expired_sequences.is_empty() {
-            return Vec::new();
-        }
-        let mut expired = Vec::new();
-        for class_index in 0..self.classes.len() {
-            expired.extend(
-                self.take_if_entry_in_class(class_index, |entry| {
-                    expired_sequences.contains(&entry.enqueue_seq)
-                })
-                .0,
-            );
-        }
-        expired
-    }
-
-    fn take_if_entry_in_class(
-        &mut self,
-        class_index: usize,
-        mut predicate: impl FnMut(&PolicyQueueEntry<T>) -> bool,
-    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
-        let class = &mut self.classes[class_index];
-        let remove_sequences: FxHashSet<u64> = class
-            .entries()
-            .filter(|entry| predicate(entry))
-            .map(|entry| entry.enqueue_seq)
-            .collect();
-        if remove_sequences.is_empty() {
-            return (Vec::new(), false);
-        }
-
-        let removed_ready_head = class
-            .pending
-            .peek()
-            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
-            || class.ready_by_worker.values().any(|ready| {
-                ready
-                    .peek()
-                    .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
-            });
-
-        let mut removed = Vec::new();
-        let mut retained = Vec::with_capacity(class.pending.len());
-        for entry in class.pending.drain() {
-            if remove_sequences.contains(&entry.enqueue_seq) {
-                removed.push(entry);
-            } else {
-                retained.push(entry);
-            }
-        }
-        class.pending = BinaryHeap::from(retained);
-
-        class.ready_by_worker.retain(|_, ready| {
-            let mut retained = Vec::with_capacity(ready.len());
-            for entry in ready.drain() {
-                if remove_sequences.contains(&entry.enqueue_seq) {
-                    removed.push(entry);
-                } else {
-                    retained.push(entry);
-                }
-            }
-            *ready = BinaryHeap::from(retained);
-            !ready.is_empty()
-        });
-        class.rebuild_worker_heads();
-
-        for entry in &removed {
-            subtract_stats(&mut class.stats, entry.snapshot());
-            self.pending_count -= 1;
-            remove_due_time(&mut self.due_entries, entry);
-        }
+    fn remove_located(&mut self, handle: QueueEntryHandle) -> Option<(PolicyQueueEntry<T>, bool)> {
+        let class = self.classes.get_mut(handle.class_index)?;
+        let (entry, was_head) = class.remove(&handle.order)?;
+        subtract_stats(&mut class.stats, entry.snapshot());
+        self.pending_count -= 1;
         if class.ready_is_empty() {
             class.deficit = 0;
         }
-        (removed, removed_ready_head)
+        Some((entry, was_head))
+    }
+
+    /// Removes and returns every entry whose explicit deadline is at or before `now`,
+    /// earliest first, in O(k log n) for k expired entries. Class due times never expire.
+    pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
+        let mut expired = Vec::new();
+        while let Some(deadline) = self.deadlines.first_entry()
+            && deadline.key().0 <= now
+        {
+            let handle = deadline.remove();
+            let (entry, _) = self
+                .remove_located(handle)
+                .expect("deadline index outlived its entry");
+            expired.push(entry);
+        }
+        expired
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -786,17 +521,17 @@ impl<T> PolicyQueue<T> {
         }
 
         let class_count = self.classes.len();
-        self.candidates.fill(None);
+        self.head_costs.fill(None);
         let carried_class = self.carry_class.take();
         if let Some(class_index) = carried_class {
             let class = &mut self.classes[class_index];
-            let candidate = class.next_dispatchable(class_index, &mut is_dispatchable);
-            if let Some(candidate) = candidate
-                && candidate.cost <= class.deficit
+            let cost = class.dispatchable_head_cost(class_index, &mut is_dispatchable);
+            if let Some(cost) = cost
+                && cost <= class.deficit
             {
-                return Some(self.pop_candidate(class_index, candidate));
+                return Some(self.pop_head(class_index));
             }
-            self.candidates[class_index] = candidate;
+            self.head_costs[class_index] = cost;
             if class.ready_is_empty() {
                 class.deficit = 0;
             }
@@ -807,27 +542,27 @@ impl<T> PolicyQueue<T> {
             // cannot become a permanent scheduling preference.
             let class_index = (self.round_cursor + offset) % class_count;
             let class = &mut self.classes[class_index];
-            let candidate = if carried_class == Some(class_index) {
-                self.candidates[class_index]
+            let cost = if carried_class == Some(class_index) {
+                self.head_costs[class_index]
             } else {
-                class.next_dispatchable(class_index, &mut is_dispatchable)
+                class.dispatchable_head_cost(class_index, &mut is_dispatchable)
             };
-            let Some(candidate) = candidate else {
+            let Some(cost) = cost else {
                 if class.ready_is_empty() {
                     class.deficit = 0;
                 }
                 continue;
             };
-            self.candidates[class_index] = Some(candidate);
-            if candidate.cost <= class.deficit {
+            self.head_costs[class_index] = Some(cost);
+            if cost <= class.deficit {
                 // Quantum is granted per ring round, not per request. Spend
                 // carried credit before granting this class another quantum.
-                return Some(self.pop_candidate(class_index, candidate));
+                return Some(self.pop_head(class_index));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
-            if candidate.cost <= class.deficit {
+            if cost <= class.deficit {
                 // The normal single-round visit made this head affordable.
-                return Some(self.pop_candidate(class_index, candidate));
+                return Some(self.pop_head(class_index));
             }
         }
 
@@ -836,19 +571,19 @@ impl<T> PolicyQueue<T> {
         // for requests much larger than their class quantum. If every head was
         // blocked, `min()` returns `None` without changing any deficit.
         let rounds = self
-            .candidates
+            .head_costs
             .iter()
             .enumerate()
-            .filter_map(|(class_index, candidate)| {
-                let candidate = candidate.as_ref()?;
+            .filter_map(|(class_index, cost)| {
+                let cost = (*cost)?;
                 let class = &self.classes[class_index];
-                let missing = candidate.cost.saturating_sub(class.deficit);
+                let missing = cost.saturating_sub(class.deficit);
                 Some(missing.div_ceil(class.config.quantum))
             })
             .min()?;
 
-        for (class_index, candidate) in self.candidates.iter().enumerate() {
-            if candidate.is_none() {
+        for (class_index, cost) in self.head_costs.iter().enumerate() {
+            if cost.is_none() {
                 continue;
             }
             let class = &mut self.classes[class_index];
@@ -862,10 +597,10 @@ impl<T> PolicyQueue<T> {
         for offset in 0..class_count {
             let class_index = (self.round_cursor + offset) % class_count;
             let class = &self.classes[class_index];
-            if let Some(candidate) = self.candidates[class_index]
-                && candidate.cost <= class.deficit
+            if let Some(cost) = self.head_costs[class_index]
+                && cost <= class.deficit
             {
-                return Some(self.pop_candidate(class_index, candidate));
+                return Some(self.pop_head(class_index));
             }
         }
 
@@ -873,28 +608,24 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
-        self.classes.into_iter().flat_map(|class| {
-            class
-                .pending
-                .into_iter()
-                .chain(class.ready_by_worker.into_values().flatten())
-        })
+        self.classes
+            .into_iter()
+            .flat_map(|class| class.pending.into_iter())
     }
 
-    fn pop_candidate(
-        &mut self,
-        class_index: usize,
-        candidate: DispatchCandidate,
-    ) -> PolicyQueueEntry<T> {
+    fn pop_head(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
         self.round_cursor = (class_index + 1) % self.classes.len();
         let class = &mut self.classes[class_index];
-        let entry = class.pop_lane(candidate.placement);
+        let entry = class
+            .pending
+            .pop_last()
+            .expect("policy class head vanished");
         class.deficit = class
             .deficit
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot());
         self.pending_count -= 1;
-        remove_due_time(&mut self.due_entries, &entry);
+        remove_deadline(&mut self.deadlines, &entry);
         if class.ready_is_empty() {
             class.deficit = 0;
         } else {
@@ -904,52 +635,59 @@ impl<T> PolicyQueue<T> {
     }
 }
 
-fn remove_due_time<T>(due_entries: &mut BTreeSet<(u64, u64)>, entry: &PolicyQueueEntry<T>) {
-    if let Some(due_time_key) = entry.due_time_key() {
-        let removed = due_entries.remove(&(due_time_key, entry.enqueue_seq));
-        debug_assert!(removed);
+fn remove_deadline<T>(
+    deadlines: &mut BTreeMap<(Instant, u64), QueueEntryHandle>,
+    entry: &PolicyQueueEntry<T>,
+) {
+    if let Some(due_at) = entry.deadline() {
+        let removed = deadlines.remove(&(due_at, entry.order.enqueue_seq));
+        debug_assert!(removed.is_some());
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn make_entry<T>(
-    class_index: usize,
-    snapshot: QueueSnapshot,
-    arrival_offset_secs: f64,
+    metadata: QueueMetadata,
+    queue_policy: RouterQueuePolicy,
     priority_jump: f64,
     strict_priority: u32,
-    due_time_key: u64,
-    queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
-    let policy_score =
-        queue_policy_score(queue_policy, snapshot, arrival_offset_secs, priority_jump);
-    PolicyQueueEntry {
+    let QueueMetadata {
         class_index,
-        priority: QueuePriority {
-            strict_priority,
-            due_time_key,
-            policy_score: OrderedFloat(policy_score),
-        },
+        snapshot,
+        due_at,
+        class_due_at,
+        arrival_offset_secs,
+    } = metadata;
+    let resolved_due_at = due_at.or(class_due_at);
+    let scored = |policy_score: f64| QueueOrder {
+        due_at,
+        policy_score: OrderedFloat(policy_score),
         enqueue_seq,
-        snapshot: snapshot.into(),
-        payload,
-    }
-}
-
-fn queue_policy_score(
-    queue_policy: RouterQueuePolicy,
-    snapshot: QueueSnapshot,
-    arrival_offset_secs: f64,
-    priority_jump: f64,
-) -> f64 {
-    match queue_policy {
-        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+        strict_priority,
+    };
+    let order = match queue_policy {
+        // Strict priority and priority jumps never reorder EDF.
+        RouterQueuePolicy::Edf => QueueOrder {
+            due_at: resolved_due_at,
+            policy_score: OrderedFloat(0.0),
+            enqueue_seq,
+            strict_priority: 0,
+        },
+        RouterQueuePolicy::Fcfs => scored(priority_jump.max(0.0) - arrival_offset_secs.max(0.0)),
         RouterQueuePolicy::Wspt => {
-            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
+            scored((1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64)
         }
-        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
+        RouterQueuePolicy::Lcfs => scored(priority_jump.max(0.0) + arrival_offset_secs.max(0.0)),
+    };
+    PolicyQueueEntry {
+        order,
+        class_index,
+        snapshot: snapshot.into(),
+        due_at: resolved_due_at,
+        expires: due_at.is_some(),
+        payload: Box::new(payload),
     }
 }
 
@@ -1001,13 +739,90 @@ fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
     use super::*;
     use crate::scheduling::RouterPolicyConfig;
+
+    thread_local! {
+        static ORDER_COMPARISONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn count_order_comparison() {
+        ORDER_COMPARISONS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// Runs `operation` and returns how many dispatch orders it compared.
+    fn order_comparisons(operation: impl FnOnce()) -> u64 {
+        ORDER_COMPARISONS.with(|count| count.set(0));
+        operation();
+        ORDER_COMPARISONS.with(Cell::get)
+    }
 
     fn profile(yaml: &str) -> PolicyProfile {
         RouterPolicyConfig::from_yaml(yaml)
             .unwrap()
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    fn edf_profile() -> PolicyProfile {
+        profile(
+            r#"
+policy_classes:
+  - name: edf
+    quantum: 1000
+"#,
+        )
+    }
+
+    fn timed(cost: usize, due_at: Option<Instant>, class_due_at: Option<Instant>) -> QueueMetadata {
+        QueueMetadata {
+            class_index: 0,
+            snapshot: QueueSnapshot::new(cost, 0),
+            due_at,
+            class_due_at,
+            arrival_offset_secs: 0.0,
+        }
+    }
+
+    fn push<T>(
+        queue: &mut PolicyQueue<T>,
+        metadata: QueueMetadata,
+        payload: T,
+    ) -> QueueEntryHandle {
+        queue
+            .enqueue_with_due_at(metadata, 1, 0.0, 0, payload)
+            .unwrap_or_else(|(rejection, _)| panic!("{rejection}"))
+    }
+
+    fn drain_payloads<T>(queue: &mut PolicyQueue<T>) -> Vec<T> {
+        std::iter::from_fn(|| queue.pop_next(|_, _, _| true))
+            .map(PolicyQueueEntry::into_payload)
+            .collect()
+    }
+
+    /// Every index holds exactly the queued entries: no tombstones or duplicates.
+    fn assert_indexes_match_entries<T>(queue: &PolicyQueue<T>) {
+        let mut queued = 0;
+        let mut deadlines = 0;
+        for class in &queue.classes {
+            for entry in &class.pending {
+                queued += 1;
+                deadlines += usize::from(entry.deadline().is_some());
+            }
+            assert_eq!(class.stats.requests, class.pending.len());
+        }
+        assert_eq!(queue.pending_count(), queued);
+        assert_eq!(queue.deadlines.len(), deadlines);
+        for (&(due_at, enqueue_seq), handle) in &queue.deadlines {
+            assert_eq!(handle.order.enqueue_seq, enqueue_seq);
+            let entry = queue.classes[handle.class_index]
+                .pending
+                .get(&handle.order)
+                .expect("deadline index names a queued entry");
+            assert_eq!(entry.deadline(), Some(due_at));
+        }
     }
 
     fn admission_profile() -> PolicyProfile {
@@ -1022,11 +837,16 @@ policy_classes:
     }
 
     #[test]
-    fn queue_entry_stays_compact() {
-        // One cache line per header: the drain benchmarks are header-bound and
-        // regress heavily past 64 bytes (see QueueEntrySnapshot).
-        assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
-        assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
+    fn queue_order_and_entries_stay_compact() {
+        // Class trees compare orders and shift entries within a node on every insert and
+        // removal, so growth here costs every queue operation. A boxed payload keeps the
+        // entry size independent of the payload size.
+        assert_eq!(std::mem::size_of::<QueueOrder>(), 40);
+        assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 104);
+        assert_eq!(
+            std::mem::size_of::<PolicyQueueEntry<[u8; 832]>>(),
+            std::mem::size_of::<PolicyQueueEntry<()>>()
+        );
     }
 
     #[test]
@@ -1042,40 +862,13 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(8, 4),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "first",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "first")
             .unwrap();
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(100, 100),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "overshoot",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(100, 100), 1.0, 0.0, 0, "overshoot")
             .unwrap();
         let (rejection, payload) = queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(1, 0),
-                2.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "rejected",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(1, 0), 2.0, 0.0, 0, "rejected")
             .unwrap_err();
         assert_eq!(payload, "rejected");
         assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
@@ -1095,12 +888,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(20)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "later-due",
             )
             .unwrap();
@@ -1110,12 +903,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(10)),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "earlier-due",
             )
             .unwrap();
@@ -1128,7 +921,7 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "earlier-due"
         );
-        assert_eq!(queue.due_entries.len(), 1);
+        assert_eq!(queue.deadlines.len(), 1);
         assert_eq!(
             queue.next_due_at(),
             Some(now + std::time::Duration::from_secs(20))
@@ -1137,7 +930,7 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "later-due"
         );
-        assert!(queue.due_entries.is_empty());
+        assert!(queue.deadlines.is_empty());
         assert_eq!(queue.next_due_at(), None);
     }
 
@@ -1151,12 +944,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at + std::time::Duration::from_nanos(1)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
                 "later-due-better-fcfs",
             )
             .unwrap();
@@ -1166,12 +959,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
                 "earlier-due-worse-fcfs",
             )
             .unwrap();
@@ -1187,16 +980,7 @@ policy_classes:
         let mut queue = PolicyQueue::new(&admission_profile());
         let due_at = Instant::now() + std::time::Duration::from_secs(10);
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "no-deadline",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "no-deadline")
             .unwrap();
         queue
             .enqueue_with_due_at(
@@ -1204,27 +988,26 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 2,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
                 "deadline",
             )
             .unwrap();
 
         assert_eq!(queue.next_due_at(), Some(due_at));
         queue.retain(|payload| *payload != "deadline");
-        assert!(queue.due_entries.is_empty());
+        assert!(queue.deadlines.is_empty());
         assert_eq!(queue.next_due_at(), None);
         assert_eq!(queue.pending_count(), 1);
     }
 
     #[test]
-    fn deadline_timer_removes_an_expired_blocked_worker_lane() {
+    fn deadline_timer_removes_an_expired_blocked_head() {
         let mut queue = PolicyQueue::new(&admission_profile());
-        let worker = WorkerWithDpRank::new(7, 0);
         let due_at = Instant::now() + std::time::Duration::from_secs(1);
         queue
             .enqueue_with_due_at(
@@ -1232,18 +1015,17 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Exact(worker),
                 "blocked",
             )
             .unwrap();
 
         assert!(queue.pop_next(|_, _, _| false).is_none());
-        assert!(queue.classes[0].blocked_workers.contains(&worker));
         assert_eq!(queue.next_due_at(), Some(due_at));
 
         let expired = queue.take_expired(due_at);
@@ -1255,7 +1037,7 @@ policy_classes:
         assert_eq!(queue.next_due_at(), None);
         assert!(
             queue
-                .pop_next(|_, _, _| panic!("expired lane revisited"))
+                .pop_next(|_, _, _| panic!("expired head revisited"))
                 .is_none()
         );
     }
@@ -1270,12 +1052,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(20)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
                 0.0,
                 10,
-                WorkerPlacement::Any,
                 "high-priority-later-due",
             )
             .unwrap();
@@ -1285,12 +1067,12 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(10)),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "low-priority-earlier-due",
             )
             .unwrap();
@@ -1307,16 +1089,7 @@ policy_classes:
         let mut snapshot = QueueSnapshot::new(100, 0);
         snapshot.scheduling_cost_tokens = 7;
         queue
-            .enqueue(
-                0,
-                1,
-                snapshot,
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "idle-arrival",
-            )
+            .enqueue(0, 1, snapshot, 0.0, 0.0, 0, "idle-arrival")
             .unwrap();
         queue
             .enqueue(
@@ -1326,7 +1099,6 @@ policy_classes:
                 1.0,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "following-arrival",
             )
             .unwrap();
@@ -1348,28 +1120,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(8, 4),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "keep",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "keep")
             .unwrap();
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(16, 6),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "remove",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(16, 6), 1.0, 0.0, 0, "remove")
             .unwrap();
 
         queue.retain(|payload| *payload != "remove");
@@ -1385,91 +1139,64 @@ policy_classes:
     }
 
     #[test]
-    fn blocked_worker_lane_does_not_block_another_lane() {
-        let mut queue = PolicyQueue::new(&admission_profile());
-        for (worker, payload) in [(1, "blocked"), (2, "ready")] {
+    fn blocked_head_holds_later_entries_of_its_class_only() {
+        // Worker constraints travel in the payload, which only `is_dispatchable` reads; each
+        // class keeps one order. The labels name the constraint each request would carry.
+        let mut queue = PolicyQueue::new(&profile(
+            r#"
+default_policy_class: agents
+policy_classes:
+  - name: agents
+    quantum: 10
+  - name: batch
+    quantum: 10
+"#,
+        ));
+        for (class_index, payload) in [
+            (0, "pinned-to-busy-worker"),
+            (0, "pinned-to-idle-worker"),
+            (0, "unpinned"),
+            (1, "batch"),
+        ] {
             queue
                 .enqueue(
-                    0,
+                    class_index,
                     2,
                     QueueSnapshot::new(1, 0),
-                    worker as f64,
+                    0.0,
                     0.0,
                     0,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
                     payload,
                 )
                 .unwrap();
         }
+        let is_dispatchable =
+            |_: usize, _: &PolicyClassConfig, payload: &&str| *payload != "pinned-to-busy-worker";
 
-        let candidate = queue
-            .pop_next(|_, _, payload| *payload != "blocked")
-            .unwrap();
-        assert_eq!(candidate.into_payload(), "ready");
-        assert_eq!(queue.pending_count(), 1);
-    }
-
-    #[test]
-    fn worker_update_rechecks_only_that_blocked_lane() {
-        let mut queue = PolicyQueue::new(&admission_profile());
-        let worker_1 = WorkerWithDpRank::new(1, 0);
-        let worker_2 = WorkerWithDpRank::new(2, 0);
-        for (worker, payload) in [(worker_1, "worker-1"), (worker_2, "worker-2")] {
-            queue
-                .enqueue(
-                    0,
-                    2,
-                    QueueSnapshot::new(1, 0),
-                    worker.worker_id as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Exact(worker),
-                    payload,
-                )
-                .unwrap();
-        }
-
-        assert!(queue.pop_next(|_, _, _| false).is_none());
-        queue.recheck_worker(worker_1);
+        // The blocked head holds the entries behind it, even those an idle worker could take
+        // now, while DRR still serves the other class.
         assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "worker-1"
+            queue.pop_next(is_dispatchable).unwrap().into_payload(),
+            "batch"
         );
-        assert!(queue.pop_next(|_, _, _| true).is_none());
-        queue.recheck_worker(worker_2);
+        assert!(queue.pop_next(is_dispatchable).is_none());
+        assert_eq!(queue.pending_count(), 3);
+
+        // No recheck call: the next drain reads the head again and keeps the class order.
         assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "worker-2"
+            drain_payloads(&mut queue),
+            ["pinned-to-busy-worker", "pinned-to-idle-worker", "unpinned"]
         );
     }
 
     #[test]
-    fn exact_lane_index_tracks_a_new_higher_priority_head() {
+    fn fcfs_priority_jump_moves_a_later_entry_to_the_head() {
         let mut queue = PolicyQueue::new(&admission_profile());
-        let worker = WorkerWithDpRank::new(1, 0);
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Exact(worker),
-                "old",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "old")
             .unwrap();
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                10.0,
-                0,
-                WorkerPlacement::Exact(worker),
-                "boosted",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 10.0, 0, "boosted")
             .unwrap();
 
         assert_eq!(
@@ -1483,138 +1210,75 @@ policy_classes:
     }
 
     #[test]
-    fn exact_lane_head_index_checks_each_blocked_lane_once() {
-        const LANES: usize = 10_000;
+    fn blocked_head_holds_its_class_and_each_pop_checks_only_the_head() {
+        const REQUESTS: usize = 10_000;
         let mut queue = PolicyQueue::new(&admission_profile());
-        for lane in 0..LANES {
+        for request in 0..REQUESTS {
             queue
                 .enqueue(
                     0,
-                    LANES,
+                    REQUESTS,
                     QueueSnapshot::new(1, 0),
-                    lane as f64,
+                    request as f64,
                     0.0,
                     0,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
-                    lane,
+                    request,
                 )
                 .unwrap();
         }
 
+        // Even requests wait for busy workers. No odd request passes the blocked head: the
+        // class stops there and checks nothing else.
         let mut checks = 0;
-        let mut popped = 0;
-        while queue
-            .pop_next(|_, _, lane| {
-                checks += 1;
-                !lane.is_multiple_of(2)
-            })
-            .is_some()
-        {
-            popped += 1;
-        }
-
-        assert_eq!(popped, LANES / 2);
-        assert_eq!(checks, LANES);
-        assert_eq!(queue.pending_count(), LANES / 2);
-    }
-
-    #[test]
-    fn global_recheck_dispatches_workers_as_they_become_available() {
-        let mut queue = PolicyQueue::new(&admission_profile());
-        for lane in 0..3 {
-            queue
-                .enqueue(
-                    0,
-                    3,
-                    QueueSnapshot::new(1, 0),
-                    lane as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane, 0)),
-                    lane,
-                )
-                .unwrap();
-        }
-
-        assert!(queue.pop_next(|_, _, _| false).is_none());
-
-        let mut available = [false, true, false];
-        queue.recheck_all_workers();
-        let entry = queue
-            .pop_next(|_, _, lane| available[*lane as usize])
-            .expect("newly available worker should dispatch");
-        assert_eq!(entry.into_payload(), 1);
         assert!(
             queue
-                .pop_next(|_, _, lane| available[*lane as usize])
+                .pop_next(|_, _, request| {
+                    checks += 1;
+                    !request.is_multiple_of(2)
+                })
                 .is_none()
         );
+        assert_eq!(checks, 1);
+        assert_eq!(queue.pending_count(), REQUESTS);
 
-        available[2] = true;
-        queue.recheck_all_workers();
-        let entry = queue
-            .pop_next(|_, _, lane| available[*lane as usize])
-            .expect("later worker availability should dispatch on the next recheck");
-        assert_eq!(entry.into_payload(), 2);
-        assert_eq!(queue.pending_count(), 1);
+        // Once every worker has room, each pop checks only the head it dispatches.
+        let mut checks = 0;
+        let mut dispatched = Vec::with_capacity(REQUESTS);
+        while let Some(entry) = queue.pop_next(|_, _, _| {
+            checks += 1;
+            true
+        }) {
+            dispatched.push(entry.into_payload());
+        }
+        assert_eq!(checks, REQUESTS);
+        assert!(dispatched.into_iter().eq(0..REQUESTS));
     }
 
     #[test]
-    fn global_recheck_preserves_priority_for_multiple_available_workers() {
+    fn retain_removing_a_blocked_head_exposes_the_next_entry() {
         let mut queue = PolicyQueue::new(&admission_profile());
-        for (worker, strict_priority, payload) in [(1, 0, "low"), (2, 1, "high")] {
+        for (arrival_offset_secs, payload) in [(0.0, "remove"), (1.0, "keep")] {
             queue
                 .enqueue(
                     0,
                     2,
                     QueueSnapshot::new(1, 0),
+                    arrival_offset_secs,
                     0.0,
-                    0.0,
-                    strict_priority,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                    0,
                     payload,
                 )
                 .unwrap();
         }
+        let is_dispatchable =
+            |_: usize, _: &PolicyClassConfig, payload: &&str| *payload != "remove";
 
-        assert!(queue.pop_next(|_, _, _| false).is_none());
-
-        queue.recheck_all_workers();
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "high"
-        );
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "low"
-        );
-    }
-
-    #[test]
-    fn pending_global_recheck_survives_retain_removing_blocked_lane() {
-        let mut queue = PolicyQueue::new(&admission_profile());
-        for (worker, payload) in [(1, "remove"), (2, "keep")] {
-            queue
-                .enqueue(
-                    0,
-                    2,
-                    QueueSnapshot::new(1, 0),
-                    0.0,
-                    0.0,
-                    0,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
-                    payload,
-                )
-                .unwrap();
-        }
-
-        assert!(queue.pop_next(|_, _, _| false).is_none());
-        queue.recheck_all_workers();
+        assert!(queue.pop_next(is_dispatchable).is_none());
         queue.retain(|payload| *payload == "keep");
 
         assert_eq!(queue.pending_count(), 1);
         assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            queue.pop_next(is_dispatchable).unwrap().into_payload(),
             "keep"
         );
         assert_eq!(queue.pending_count(), 0);
@@ -1641,28 +1305,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(11, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "raw-queued",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(11, 0), 0.0, 0.0, 0, "raw-queued")
             .unwrap();
         let (raw_rejection, _) = queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "raw-rejected",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "raw-rejected")
             .unwrap_err();
         assert_eq!(raw_rejection.limit_kind, QueueLimitKind::RawIslTokens);
         assert_eq!(raw_rejection.current, 11);
@@ -1677,7 +1323,6 @@ policy_classes:
                 2.0,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "raw-after-growth",
             )
             .unwrap();
@@ -1689,7 +1334,6 @@ policy_classes:
                 3.0,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "raw-at-grown-cap",
             )
             .unwrap_err();
@@ -1697,16 +1341,7 @@ policy_classes:
         assert_eq!(grown_rejection.limit, 20);
 
         queue
-            .enqueue(
-                1,
-                2,
-                QueueSnapshot::new(8, 6),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "cached-queued",
-            )
+            .enqueue(1, 2, QueueSnapshot::new(8, 6), 0.0, 0.0, 0, "cached-queued")
             .unwrap();
         let (cached_rejection, _) = queue
             .enqueue(
@@ -1716,7 +1351,6 @@ policy_classes:
                 1.0,
                 0.0,
                 0,
-                WorkerPlacement::Any,
                 "cached-rejected",
             )
             .unwrap_err();
@@ -1725,31 +1359,13 @@ policy_classes:
         assert_eq!(cached_rejection.limit, 5);
 
         let (zero_rejection, _) = queue
-            .enqueue(
-                2,
-                4,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "zero",
-            )
+            .enqueue(2, 4, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "zero")
             .unwrap_err();
         assert_eq!(zero_rejection.limit_kind, QueueLimitKind::Requests);
         assert_eq!(zero_rejection.limit, 0);
 
         let (no_workers_rejection, _) = queue
-            .enqueue(
-                3,
-                0,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "no-workers",
-            )
+            .enqueue(3, 0, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "no-workers")
             .unwrap_err();
         assert_eq!(no_workers_rejection.current, 0);
         assert_eq!(no_workers_rejection.limit, 0);
@@ -1767,16 +1383,7 @@ policy_classes:
             usize::MAX
         )));
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "queued",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "queued")
             .unwrap();
     }
 
@@ -1795,52 +1402,16 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(50, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "fcfs-long",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "fcfs-long")
             .unwrap();
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "fcfs-short",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "fcfs-short")
             .unwrap();
         queue
-            .enqueue(
-                1,
-                1,
-                QueueSnapshot::new(50, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "wspt-long",
-            )
+            .enqueue(1, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "wspt-long")
             .unwrap();
         queue
-            .enqueue(
-                1,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "wspt-short",
-            )
+            .enqueue(1, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
             .unwrap();
 
         let first = queue.pop_next(|_, _, _| true).unwrap();
@@ -1863,28 +1434,10 @@ policy_classes:
         ));
         for index in 0..6 {
             queue
-                .enqueue(
-                    0,
-                    1,
-                    QueueSnapshot::new(1, 0),
-                    index as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Any,
-                    "slow",
-                )
+                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "slow")
                 .unwrap();
             queue
-                .enqueue(
-                    1,
-                    1,
-                    QueueSnapshot::new(1, 0),
-                    index as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Any,
-                    "fast",
-                )
+                .enqueue(1, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "fast")
                 .unwrap();
         }
 
@@ -1901,7 +1454,7 @@ policy_classes:
     }
 
     #[test]
-    fn drr_carry_uses_next_dispatchable_lane() {
+    fn drr_carry_waits_for_a_dispatchable_head() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
 default_policy_class: agents
@@ -1913,16 +1466,7 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(5, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "agents-first",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(5, 0), 0.0, 0.0, 0, "agents-first")
             .unwrap();
         queue
             .enqueue(
@@ -1932,33 +1476,14 @@ policy_classes:
                 1.0,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
                 "agents-blocked",
             )
             .unwrap();
         queue
-            .enqueue(
-                0,
-                2,
-                QueueSnapshot::new(10, 0),
-                2.0,
-                0.0,
-                0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
-                "agents-ready",
-            )
+            .enqueue(0, 2, QueueSnapshot::new(10, 0), 2.0, 0.0, 0, "agents-ready")
             .unwrap();
         queue
-            .enqueue(
-                1,
-                2,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "batch",
-            )
+            .enqueue(1, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "batch")
             .unwrap();
 
         let is_dispatchable =
@@ -1968,11 +1493,19 @@ policy_classes:
             "agents-first"
         );
         assert_eq!(queue.classes[0].deficit, 5);
+        // The carried class's blocked head holds its credit and every entry behind it.
         assert_eq!(
             queue.pop_next(is_dispatchable).unwrap().into_payload(),
             "batch"
         );
         assert_eq!(queue.classes[0].deficit, 5);
+        assert!(queue.pop_next(is_dispatchable).is_none());
+        // The retained credit pays for the head once it can dispatch.
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "agents-blocked"
+        );
+        assert_eq!(queue.classes[0].deficit, 4);
     }
 
     #[test]
@@ -1989,16 +1522,7 @@ policy_classes:
         ));
         for index in 0..20 {
             queue
-                .enqueue(
-                    0,
-                    1,
-                    QueueSnapshot::new(1, 0),
-                    index as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Any,
-                    "one",
-                )
+                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "one")
                 .unwrap();
         }
         for index in 0..60 {
@@ -2010,7 +1534,6 @@ policy_classes:
                     index as f64,
                     0.0,
                     0,
-                    WorkerPlacement::Any,
                     "three",
                 )
                 .unwrap();
@@ -2045,31 +1568,13 @@ policy_classes:
         for round in 0..5 {
             for cost in [300, 500] {
                 queue
-                    .enqueue(
-                        0,
-                        1,
-                        QueueSnapshot::new(cost, 0),
-                        round as f64,
-                        0.0,
-                        0,
-                        WorkerPlacement::Any,
-                        (),
-                    )
+                    .enqueue(0, 1, QueueSnapshot::new(cost, 0), round as f64, 0.0, 0, ())
                     .unwrap();
             }
         }
         for (round, cost) in [200, 200, 200, 150].into_iter().enumerate() {
             queue
-                .enqueue(
-                    1,
-                    1,
-                    QueueSnapshot::new(cost, 0),
-                    round as f64,
-                    0.0,
-                    0,
-                    WorkerPlacement::Any,
-                    (),
-                )
+                .enqueue(1, 1, QueueSnapshot::new(cost, 0), round as f64, 0.0, 0, ())
                 .unwrap();
         }
 
@@ -2104,28 +1609,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(100, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "first",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "first")
             .unwrap();
         queue
-            .enqueue(
-                1,
-                1,
-                QueueSnapshot::new(100, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "second",
-            )
+            .enqueue(1, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "second")
             .unwrap();
 
         for _ in 0..10_000 {
@@ -2148,28 +1635,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(
-                0,
-                1,
-                QueueSnapshot::new(101, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "large",
-            )
+            .enqueue(0, 1, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, "large")
             .unwrap();
         queue
-            .enqueue(
-                1,
-                1,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                WorkerPlacement::Any,
-                "blocked",
-            )
+            .enqueue(1, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "blocked")
             .unwrap();
 
         let popped = queue
@@ -2177,5 +1646,454 @@ policy_classes:
             .expect("oversized request should make bounded progress");
         assert_eq!(popped.into_payload(), "large");
         assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn edf_orders_by_resolved_due_time_then_enqueue_order() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        assert_eq!(queue.class_config(0).queue_policy, RouterQueuePolicy::Edf);
+        let now = Instant::now();
+        let at = |secs| Some(now + Duration::from_secs(secs));
+        for (due_at, class_due_at, priority_jump, strict_priority, cost, payload) in [
+            (None, None, 10.0, 5, 1, "undated-boosted"),
+            (None, at(20), 0.0, 0, 50, "class-20"),
+            (at(10), at(30), 0.0, 0, 50, "explicit-10-over-class-30"),
+            (None, at(20), 3.0, 9, 1, "class-20-later"),
+            (at(40), at(5), 0.0, 0, 1, "explicit-40-over-class-5"),
+            (None, None, 0.0, 0, 1, "undated"),
+        ] {
+            queue
+                .enqueue_with_due_at(
+                    QueueMetadata {
+                        arrival_offset_secs: 100.0 - queue.pending_count() as f64,
+                        ..timed(cost, due_at, class_due_at)
+                    },
+                    1,
+                    priority_jump,
+                    strict_priority,
+                    payload,
+                )
+                .unwrap();
+        }
+
+        let dispatched = std::iter::from_fn(|| queue.pop_next(|_, _, _| true))
+            .map(|entry| (entry.due_at(), entry.into_payload()))
+            .collect::<Vec<_>>();
+        // An explicit deadline wins whether it is earlier or later than the class due
+        // time; strict priority, priority jumps, cost, and arrival offsets never reorder.
+        assert_eq!(
+            dispatched,
+            [
+                (at(10), "explicit-10-over-class-30"),
+                (at(20), "class-20"),
+                (at(20), "class-20-later"),
+                (at(40), "explicit-40-over-class-5"),
+                (None, "undated-boosted"),
+                (None, "undated"),
+            ]
+        );
+    }
+
+    #[test]
+    fn edf_without_due_times_is_fifo_for_any_modifier_or_cost() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        for (index, (priority_jump, strict_priority, cost)) in
+            [(0.0, 0, 100), (50.0, 0, 1), (0.0, 7, 1), (3.0, 2, 5000)]
+                .into_iter()
+                .enumerate()
+        {
+            queue
+                .enqueue(
+                    0,
+                    1,
+                    QueueSnapshot::new(cost, 0),
+                    10.0 - index as f64,
+                    priority_jump,
+                    strict_priority,
+                    index,
+                )
+                .unwrap();
+        }
+        assert_eq!(drain_payloads(&mut queue), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn edf_orders_pinned_and_unpinned_entries_in_one_class_order() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let now = Instant::now();
+        // The labels name the worker each request would carry a pin for; the queue never
+        // reads it.
+        for (class_due_secs, payload) in [
+            (30, "shared-30"),
+            (10, "w1-10"),
+            (20, "w2-20"),
+            (5, "shared-5"),
+            (20, "w1-20"),
+            (20, "shared-20"),
+            (15, "w2-15"),
+        ] {
+            push(
+                &mut queue,
+                timed(1, None, Some(now + Duration::from_secs(class_due_secs))),
+                payload,
+            );
+        }
+        assert_indexes_match_entries(&queue);
+        // Equal due times dispatch in enqueue order, whatever worker each request targets.
+        assert_eq!(
+            drain_payloads(&mut queue),
+            [
+                "shared-5",
+                "w1-10",
+                "w2-15",
+                "w2-20",
+                "w1-20",
+                "shared-20",
+                "shared-30"
+            ]
+        );
+    }
+
+    #[test]
+    fn wspt_orders_class_due_times_by_score_and_keeps_explicit_deadlines_first() {
+        let mut queue = PolicyQueue::new(&profile(
+            r#"
+policy_classes:
+  - name: wspt
+    queue_policy: wspt
+    quantum: 1000
+"#,
+        ));
+        let now = Instant::now();
+        let at = |secs| Some(now + Duration::from_secs(secs));
+        for (cost, due_at, class_due_at, strict_priority, payload) in [
+            (100, None, at(1), 0, "long-early-class-due"),
+            (1, None, at(60), 0, "short-late-class-due"),
+            (200, at(30), at(90), 0, "long-explicit-deadline"),
+            (50, None, at(120), 1, "strict-tier"),
+        ] {
+            queue
+                .enqueue_with_due_at(
+                    timed(cost, due_at, class_due_at),
+                    1,
+                    0.0,
+                    strict_priority,
+                    payload,
+                )
+                .unwrap();
+        }
+
+        // The class due time is kept on the entry but never outranks the WSPT score.
+        let dispatched = std::iter::from_fn(|| queue.pop_next(|_, _, _| true))
+            .map(|entry| (entry.due_at(), entry.into_payload()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dispatched,
+            [
+                (at(120), "strict-tier"),
+                (at(30), "long-explicit-deadline"),
+                (at(60), "short-late-class-due"),
+                (at(1), "long-early-class-due"),
+            ]
+        );
+    }
+
+    #[test]
+    fn fcfs_and_lcfs_ignore_class_due_times() {
+        let now = Instant::now();
+        for (policy, expected) in [
+            (
+                RouterQueuePolicy::Fcfs,
+                ["explicit-deadline", "first-arrival", "second-arrival"],
+            ),
+            (
+                RouterQueuePolicy::Lcfs,
+                ["explicit-deadline", "second-arrival", "first-arrival"],
+            ),
+        ] {
+            let mut queue = PolicyQueue::new(&PolicyProfile::synthetic(None, policy));
+            for (arrival_offset_secs, due_at, class_due_secs, payload) in [
+                (0.0, None, 60, "first-arrival"),
+                (1.0, None, 1, "second-arrival"),
+                (
+                    2.0,
+                    Some(now + Duration::from_secs(100)),
+                    0,
+                    "explicit-deadline",
+                ),
+            ] {
+                push(
+                    &mut queue,
+                    QueueMetadata {
+                        arrival_offset_secs,
+                        ..timed(1, due_at, Some(now + Duration::from_secs(class_due_secs)))
+                    },
+                    payload,
+                );
+            }
+            assert_eq!(drain_payloads(&mut queue), expected, "{policy}");
+        }
+    }
+
+    #[test]
+    fn past_and_far_future_due_times_stay_exact_and_ahead_of_absent() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let now = Instant::now();
+        let ago = |millis| now.checked_sub(Duration::from_millis(millis));
+        let century = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+        push(&mut queue, timed(1, None, ago(1)), "past-1ms");
+        push(&mut queue, timed(1, None, ago(2)), "past-2ms");
+        // An explicit deadline enters and leaves the deadline index, which then empties.
+        let explicit = push(
+            &mut queue,
+            timed(1, Some(now + Duration::from_secs(5)), None),
+            "explicit",
+        );
+        assert_eq!(queue.next_due_at(), Some(now + Duration::from_secs(5)));
+        assert_eq!(queue.remove(explicit).unwrap().0.into_payload(), "explicit");
+        assert_eq!(queue.next_due_at(), None);
+        push(&mut queue, timed(1, None, ago(3)), "past-3ms");
+        push(&mut queue, timed(1, None, None), "absent");
+        push(
+            &mut queue,
+            timed(1, None, Some(now + century + Duration::from_nanos(1))),
+            "far-later",
+        );
+        push(&mut queue, timed(1, None, Some(now + century)), "far");
+
+        // Class due times never enter the deadline index, even once they have passed.
+        assert_eq!(queue.next_due_at(), None);
+        assert!(queue.take_expired(now + century * 2).is_empty());
+        assert_indexes_match_entries(&queue);
+        assert_eq!(
+            drain_payloads(&mut queue),
+            [
+                "past-3ms",
+                "past-2ms",
+                "past-1ms",
+                "far",
+                "far-later",
+                "absent"
+            ]
+        );
+    }
+
+    #[test]
+    fn handles_remove_first_middle_and_last_entries() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let mut handles = Vec::new();
+        for ((raw, cached), payload) in [
+            ((10, 1), "entry-0"),
+            ((20, 2), "entry-1"),
+            ((30, 3), "entry-2"),
+            ((40, 4), "entry-3"),
+            ((50, 5), "entry-4"),
+            ((60, 6), "entry-5"),
+        ] {
+            handles.push(
+                queue
+                    .enqueue_with_due_at(
+                        QueueMetadata {
+                            snapshot: QueueSnapshot::new(raw, cached),
+                            ..timed(1, None, None)
+                        },
+                        1,
+                        0.0,
+                        0,
+                        payload,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        for (handle, payload, was_head) in [
+            (handles[2], "entry-2", false),
+            (handles[0], "entry-0", true),
+            (handles[5], "entry-5", false),
+        ] {
+            let (entry, removed_head) = queue.remove(handle).unwrap();
+            assert_eq!((entry.into_payload(), removed_head), (payload, was_head));
+            assert_indexes_match_entries(&queue);
+        }
+        assert_eq!(queue.pending_count(), 3);
+        assert_eq!(
+            queue.class_stats(0),
+            PolicyQueueStats {
+                requests: 3,
+                raw_isl_tokens: 110,
+                cached_tokens: 11,
+            }
+        );
+        // Removing again finds nothing and changes nothing.
+        for handle in [handles[2], handles[0], handles[5]] {
+            assert!(queue.remove(handle).is_none());
+        }
+        assert_eq!(queue.pending_count(), 3);
+
+        assert_eq!(
+            drain_payloads(&mut queue),
+            ["entry-1", "entry-3", "entry-4"]
+        );
+        assert!(
+            handles
+                .into_iter()
+                .all(|handle| queue.remove(handle).is_none())
+        );
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+        assert_indexes_match_entries(&queue);
+    }
+
+    #[test]
+    fn cancelling_a_blocked_head_exposes_its_successor() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let head = push(&mut queue, timed(1, None, None), "blocked");
+        push(&mut queue, timed(1, None, None), "next");
+        let tail = push(&mut queue, timed(1, None, None), "tail");
+        let is_dispatchable =
+            |_: usize, _: &PolicyClassConfig, payload: &&str| *payload != "blocked";
+
+        assert!(queue.pop_next(is_dispatchable).is_none());
+
+        let (removed, was_head) = queue.remove(tail).unwrap();
+        assert_eq!((removed.into_payload(), was_head), ("tail", false));
+        let (removed, was_head) = queue.remove(head).unwrap();
+        assert_eq!((removed.into_payload(), was_head), ("blocked", true));
+        assert_indexes_match_entries(&queue);
+
+        // No capacity notification: the successor is checked on the next drain.
+        assert_eq!(
+            queue.pop_next(is_dispatchable).unwrap().into_payload(),
+            "next"
+        );
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn cancelled_entries_spend_no_drr_credit() {
+        let mut queue = PolicyQueue::new(&profile(
+            r#"
+policy_classes:
+  - name: drr
+    quantum: 10
+"#,
+        ));
+        push(&mut queue, timed(7, None, None), "first");
+        let cancelled = push(&mut queue, timed(5, None, None), "cancelled");
+        push(&mut queue, timed(1, None, None), "last");
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "first"
+        );
+        assert_eq!(queue.classes[0].deficit, 3);
+        queue.remove(cancelled).unwrap();
+        assert_eq!(queue.classes[0].deficit, 3);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "last"
+        );
+        assert_eq!(queue.classes[0].deficit, 0);
+
+        // Cancelling the last queued entry empties the class and resets its credit.
+        push(&mut queue, timed(4, None, None), "paid");
+        let remaining = push(&mut queue, timed(1, None, None), "remaining");
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "paid"
+        );
+        assert_eq!(queue.classes[0].deficit, 6);
+        queue.remove(remaining).unwrap();
+        assert_eq!(queue.classes[0].deficit, 0);
+        assert!(queue.pop_next(|_, _, _| true).is_none());
+    }
+
+    #[test]
+    fn expiry_takes_only_explicit_deadlines_from_the_deadline_index() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let now = Instant::now();
+        let at = |millis| Some(now + Duration::from_millis(millis));
+        let first = push(&mut queue, timed(1, at(1000), None), "explicit-1s");
+        push(&mut queue, timed(1, at(2000), None), "explicit-2s");
+        push(&mut queue, timed(1, None, at(500)), "class-500ms");
+        let last = push(&mut queue, timed(1, at(3000), None), "explicit-3s");
+        assert_eq!(queue.next_due_at(), at(1000));
+
+        let expired = queue
+            .take_expired(now + Duration::from_millis(2000))
+            .into_iter()
+            .map(PolicyQueueEntry::into_payload)
+            .collect::<Vec<_>>();
+        assert_eq!(expired, ["explicit-1s", "explicit-2s"]);
+        assert_eq!(queue.next_due_at(), at(3000));
+        assert_indexes_match_entries(&queue);
+        assert!(queue.remove(first).is_none());
+
+        assert_eq!(queue.remove(last).unwrap().0.into_payload(), "explicit-3s");
+        assert_eq!(queue.next_due_at(), None);
+        assert_indexes_match_entries(&queue);
+        // A class due time that has passed still dispatches.
+        assert_eq!(drain_payloads(&mut queue), ["class-500ms"]);
+    }
+
+    #[test]
+    fn single_entry_operations_compare_logarithmically_many_orders() {
+        let now = Instant::now();
+        let mut previous = None;
+        for exponent in [8_u32, 12, 16] {
+            let size = 1_usize << exponent;
+            let mut queue = PolicyQueue::new(&edf_profile());
+            let mut handles = Vec::with_capacity(size);
+            for index in 0..size {
+                let due_at = now + Duration::from_millis((index * 7919 % size) as u64);
+                let explicit = index.is_multiple_of(3);
+                handles.push(push(
+                    &mut queue,
+                    timed(1, explicit.then_some(due_at), Some(due_at)),
+                    index,
+                ));
+            }
+
+            let bound = 12 * (u64::from(exponent) + 1);
+            let insert = order_comparisons(|| {
+                push(
+                    &mut queue,
+                    timed(1, None, Some(now + Duration::from_millis(size as u64 / 2))),
+                    size,
+                );
+            });
+            let cancel_middle = order_comparisons(|| {
+                queue.remove(handles[size / 2]).unwrap();
+            });
+            let cancel_neighbor = order_comparisons(|| {
+                queue.remove(handles[size / 2 + 1]).unwrap();
+            });
+            let pop = order_comparisons(|| {
+                queue.pop_next(|_, _, _| true).unwrap();
+            });
+            let expire = order_comparisons(|| {
+                let deadline = queue.next_due_at().unwrap();
+                assert_eq!(queue.take_expired(deadline).len(), 1);
+            });
+            for (operation, comparisons) in [
+                ("insert", insert),
+                ("cancel middle", cancel_middle),
+                ("cancel neighbor", cancel_neighbor),
+                ("pop", pop),
+                ("expire", expire),
+            ] {
+                assert!(
+                    comparisons <= bound,
+                    "{operation} compared {comparisons} orders in a queue of {size}"
+                );
+            }
+            assert_indexes_match_entries(&queue);
+
+            let total = insert + cancel_middle + cancel_neighbor + pop + expire;
+            if let Some(previous) = previous {
+                // 256 times more entries cost a bounded number of extra tree levels.
+                assert!(total <= previous * 3, "{previous} -> {total}");
+            }
+            previous = Some(total.max(1));
+        }
     }
 }

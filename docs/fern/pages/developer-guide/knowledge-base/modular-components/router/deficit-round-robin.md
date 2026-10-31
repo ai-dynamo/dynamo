@@ -7,13 +7,13 @@ subtitle: Weighted arbitration across router policy classes
 
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
 across dispatchable policy classes. DRR determines which class can
-dispatch next; the configured FCFS or WSPT policy determines request order
-within that class's shared and exact-worker lanes.
+dispatch next; the class's queue policy, EDF by default, determines request
+order within that class's queue.
 
 This separation provides:
 
 - Weighted service across policy classes with different request sizes.
-- Independent within-class ordering, exact-worker lanes, and strict-priority tiers.
+- Independent within-class ordering and strict-priority tiers.
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
 
@@ -40,9 +40,8 @@ amounts of credit.
 
 The scheduler maintains the following state for each class:
 
-- A shared pending heap for requests that can use any eligible worker.
-- One pending heap per exact-worker target, ordered by the same strict priority
-  and FCFS or WSPT policy.
+- One pending queue, ordered by the class's queue policy. Requests pinned to an
+  exact worker wait in the same queue; the pin stays on the request.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -52,12 +51,12 @@ the configured class order from becoming a permanent preference.
 
 ## Selecting the Next Request
 
-For each class in cursor order, the scheduler selects a class candidate by
-comparing the dispatchable shared-heap head with the dispatchable head of each
-exact-worker lane. It then applies DRR to that candidate:
+For each class in cursor order, the scheduler takes the head of the class
+queue as the class candidate when that head can dispatch. It then applies DRR
+to that candidate:
 
 1. If the class is empty, reset its deficit to zero.
-2. If none of its lane heads can currently dispatch, retain its deficit but add no credit.
+2. If its head cannot currently dispatch, retain its deficit but add no credit.
 3. If existing deficit covers the selected candidate's cost, dispatch it without adding another quantum.
 4. Otherwise, add one quantum and dispatch if the candidate is now affordable.
 5. If the candidate remains unaffordable, continue to the next class.
@@ -132,18 +131,19 @@ unbounded burst while preserving work they had already earned.
 
 ## Dispatchability and Head-of-Line Behavior
 
-A shared head is dispatchable when its eligible workers are not all above the
-class busy threshold. An exact-worker lane head is checked against its target
-worker. If no eligible endpoint remains, the candidate proceeds to worker
+A head is dispatchable when its eligible workers are not all above the class
+busy threshold. A head pinned to an exact worker is checked against that worker
+only. If no eligible endpoint remains, the candidate proceeds to worker
 selection so the router can return the appropriate error instead of parking it
 indefinitely. Eligibility continues to enforce exact pins, worker allow-lists,
-DP-rank bounds, taints, and overload filtering.
+DP-rank bounds, taints, and overload filtering; a pinned request is never
+routed to another worker.
 
-Head-of-line blocking is lane-local. The shared heap does not search past a
-blocked shared head, and an exact-worker lane does not search past its own
-blocked head. A blocked exact-worker lane does not prevent another exact-worker
-lane, or a dispatchable shared head, from competing for the class. FCFS/WSPT
-ordering is not bypassed within any individual lane.
+Head-of-line blocking is class-wide. The scheduler does not search past a
+blocked head, so a head that waits for a busy worker, such as a request pinned
+to a full worker, also holds every later request in its class, including
+requests that another worker could serve now. Other classes keep competing
+under DRR, and the class's queue policy is never bypassed.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
@@ -157,18 +157,15 @@ One arbitration call performs:
 2. One linear calculation for bulk virtual rounds when required.
 3. At most one final ring scan.
 
-For `C` configured classes and `L` exact-worker lane heads that must be
-inspected or rechecked, arbitration is `O(C + L log L)` in the worst case,
-regardless of request cost or quantum. Candidate exact-worker heads are tree
-indexed, so ordinary selections do not need to rescan every ready lane; a
-worker-state recheck can visit the affected blocked lanes and pay the tree
-update factor. The queue actor calls arbitration repeatedly while work remains
-dispatchable, but each individual selection is bounded and continuation
+Arbitration checks at most one head per class. For `C` configured classes and
+`n` queued requests, it is `O(C log n)` in the worst case, regardless of request
+cost or quantum. The queue actor calls arbitration repeatedly while work
+remains dispatchable, but each individual selection is bounded and continuation
 draining remains local to the actor.
 
 With only the synthetic no-YAML `default` class, the ring contains one class.
-DRR reduces to single-class arbitration, but exact-worker requests still use
-their separate lanes.
+DRR reduces to single-class arbitration over one queue that holds every
+request, pinned or not.
 
 ## Configuration
 
@@ -181,11 +178,9 @@ default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -195,8 +190,9 @@ backlogged, `priority` is visited first, its next requests cost 300 and 500
 tokens, and `standard`'s next request costs 200. One round dispatches both
 `priority` requests for 800 credit and the `standard` request for 200: an
 80/20 split of charged cost, but a 2:1 split of requests. When `standard` has no
-dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` does not
-affect this order.
+dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` orders
+requests within each EDF class; it does not give a class with a shorter budget
+a larger share.
 
 Use larger quantum ratios only when the corresponding classes should receive
 larger shares of uncached-token service. For the complete policy-class schema,
@@ -224,12 +220,10 @@ tokens and generates one output token. Save the following configuration as
 default_policy_class: regular
 policy_classes:
   - name: premium
-    queue_policy: fcfs
     quantum: 512
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024
   - name: regular
-    queue_policy: fcfs
     quantum: 128
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024

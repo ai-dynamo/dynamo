@@ -1082,7 +1082,20 @@ def test_default_policy_flags_do_not_warn(monkeypatch):
         KvRouterArgGroup().add_arguments(parser)
         config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
         assert config.kv_router_kwargs()["overlap_score_credit"] == 1.0
+        assert config.kv_router_kwargs()["router_queue_policy"] == "edf"
     assert not recorded
+
+
+def test_router_queue_policy_accepts_edf_fcfs_and_wspt_only(monkeypatch):
+    monkeypatch.delenv("DYN_ROUTER_QUEUE_POLICY", raising=False)
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    for policy in ("edf", "fcfs", "wspt"):
+        with pytest.warns(FutureWarning, match="--router-queue-policy is deprecated"):
+            args = parser.parse_args(["--router-queue-policy", policy])
+        assert args.router_queue_policy == policy
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--router-queue-policy", "lcfs"])
 
 
 def test_load_aware_migration_preserves_router_tracking():

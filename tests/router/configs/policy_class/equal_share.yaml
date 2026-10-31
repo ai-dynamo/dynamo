@@ -9,12 +9,10 @@ default_policy_class: regular
 # sequences fill the Mocker; at 2,048 active tokens, later requests queue.
 policy_classes:
   - name: premium
-    queue_policy: fcfs
     quantum: 512
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024
   - name: regular
-    queue_policy: fcfs
     quantum: 512
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024

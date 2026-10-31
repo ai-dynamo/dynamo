@@ -77,19 +77,24 @@ its configuration even if the endpoint is unchanged.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
-- `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
+- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. With `fcfs` or `wspt`, `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the policy; the default `edf` policy ignores both. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `edf` (default), `fcfs`, or `wspt`.
 - `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
+`edf`, the default, orders by earliest due time: a request classifier's explicit deadline, else
+router ingress plus the class's `slo_ttft_ms`. A request with neither sorts after every request
+with a due time, and equal or absent due times keep enqueue order. Strict priority and priority
+jumps do not reorder `edf`.
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
 `scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. Both the CLI and policy-class
-YAML accept only `fcfs` and `wspt`.
+YAML accept `edf`, `fcfs`, and `wspt`.
 
-For each policy, the complete pending-queue key is
-`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+For `fcfs` and `wspt`, the complete pending-queue key is
+`(strict_priority, due_at, policy_key)`, where `due_at` is only a classifier's explicit deadline.
+Higher strict tiers always win; see
 [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
 ordering applies within a tier.
 
@@ -257,11 +262,9 @@ default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -275,7 +278,6 @@ class is the default and `default_policy_class` can be omitted:
 policy_classes:
   - name: standard
     quantum: 1000
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -288,10 +290,11 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
-lane, along with its busy thresholds, queue limits, quantum, deficit, and
-counters. Arbitration compares the shared head with the currently dispatchable
-exact-worker lane heads. Absolute and fractional busy thresholds use OR
+Each class owns one queue ordered by its policy, along with its busy thresholds,
+queue limits, quantum, deficit, and counters. Requests pinned to an exact worker
+wait in that queue too. Arbitration considers only the class's head, so a head
+that waits for a busy worker also holds the requests behind it in that class.
+Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
 `decode_busy_threshold_frac` also marks a worker busy when the KV
@@ -323,12 +326,16 @@ bulk-credit behavior, see
 
 Class names must be unique within a profile and use metric-safe identifiers
 (`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in uncached
-input tokens. `queue_policy` is `fcfs`, the default, or `wspt`. `slo_ttft_ms` is
-an optional time-to-first-token budget in whole milliseconds and must be a
-positive integer: leaving it unset means the class has no budget, and `0` is
-rejected. Currently the router only validates and stores `slo_ttft_ms`. It
-does not set request deadlines, reorder queues, or expire queued requests based
-on it.
+input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`.
+`slo_ttft_ms` is an optional time-to-first-token budget in whole milliseconds
+and must be a positive integer: leaving it unset means the class has no budget,
+and `0` is rejected. An `edf` class orders each request by its router ingress
+time plus `slo_ttft_ms`, unless a request classifier sets an explicit deadline.
+The budget counts from when the request entered the router, so classification
+and queue waits spend it, and a later capacity recheck or cache refresh does
+not restart it. `fcfs` and `wspt` classes do not order by it. A request whose
+class budget has passed is not rejected and can still be dispatched; only a
+classifier's explicit deadline expires queued requests.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
@@ -667,7 +674,7 @@ The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`
 
 Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--ais-*` config; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
-Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
+Use `wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use `fcfs` when you want to minimize tail TTFT with priority bumps. The default `edf` dispatches each class's earliest due time first.
 
 ## Runtime Policy Updates
 

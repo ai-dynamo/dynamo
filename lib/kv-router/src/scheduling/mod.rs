@@ -12,7 +12,6 @@ pub mod policy_config;
 pub mod policy_queue;
 pub mod prefill_load;
 pub mod queue;
-mod queue_admission;
 pub mod request_classifier;
 pub mod selector;
 
@@ -31,16 +30,16 @@ pub use overlap_refresh::{
 };
 pub use policy_config::{
     BusyThresholds, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider, RouterPolicyConfig,
-    RouterPolicyConfigError,
+    RouterPolicyConfigError, SloTtftOutOfRange,
 };
 pub use policy_queue::{
-    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
+    PolicyQueue, PolicyQueueEntry, QueueEntryHandle, QueueLimitKind, QueueMetadata, QueueRejection,
+    QueueSnapshot,
 };
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use queue_admission::WorkerPlacement;
 pub use request_classifier::RequestLifecycle;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
