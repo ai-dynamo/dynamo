@@ -23,7 +23,7 @@ pub use dynamo_router_protocol::mm::{
 /// check capability, role compatibility, and source endpoint presence without
 /// allocating. `source_control_endpoint` is optional because targets only need
 /// to consume hints, while sources must provide an endpoint.
-pub use crate::scheduling::protocols::{
+pub use dynamo_scheduler::protocols::{
     KvHintTransferWorkerMetadata, KvTransferEnforcement, PotentialLoad, RouterEventSink,
     RouterRequest, RouterResponse, RoutingConstraints, SelectionLogFields, WorkerConfigLike,
     WorkerSelectionResult,

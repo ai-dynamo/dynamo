@@ -7,45 +7,43 @@
 
 use std::{cell::OnceCell, collections::HashMap};
 
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 use std::cell::Cell;
 
 mod derive;
 #[cfg(test)]
 mod policy_tests;
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 mod reference;
 
 pub use derive::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference::DefaultWorkerSelector;
 
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-#[cfg(any(test, feature = "bench"))]
-use crate::plugins::worker_selection::DefaultWorkerPicker;
-pub use crate::plugins::worker_selection::{
+// TODO(v1.7): Remove these compatibility re-exports; use dynamo_worker_selection instead.
+#[cfg(any(test, feature = "testing", feature = "bench"))]
+use dynamo_worker_selection::DefaultWorkerPicker;
+pub use dynamo_worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
     WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 use reference::{DefaultWorkerScorer, pick_default_worker};
 
 use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
-use crate::plugins::worker_selection::{
+use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInputRows,
     WorkerTransferInput,
-};
-use crate::plugins::worker_selection::{
-    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
     SelectionFailure, WorkerSelectionPolicy,
 };
+use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{
@@ -250,7 +248,7 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
     /// The reference selector counts the rows it scores here; a policy counts its own.
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     max_raw_cached_tokens: Cell<Option<usize>>,
 }
 
@@ -268,7 +266,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             block_size,
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
         }
     }
@@ -391,7 +389,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     }
 
     /// Count a row the reference selector scored toward the best eligible cached prefix.
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     #[inline(always)]
     pub(super) fn track_kept(&self, row: &CandidateData) {
         if let Some(current_max) = self.max_raw_cached_tokens.get() {
@@ -400,7 +398,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     pub(super) fn max_raw_cached_tokens(&self) -> Option<usize> {
         self.max_raw_cached_tokens.get()
     }
@@ -786,7 +784,7 @@ fn select_with_policy<C: WorkerConfigLike>(
     prepared: Option<PreparedCandidates>,
     trace: Option<SelectionTraceSpec>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     if let Some((config, picker)) = policy.reference_parts() {
         return select_reference(policy.worker_label(), config, picker, input);
     }
@@ -828,10 +826,10 @@ fn select_with_policy<C: WorkerConfigLike>(
 }
 
 /// Select with the reference scorer and picker, which read the request directly.
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 fn select_reference<C: WorkerConfigLike>(
     worker_type: &'static str,
-    kv_router_config: &crate::plugins::worker_selection::SelectionConfig,
+    kv_router_config: &dynamo_worker_selection::SelectionConfig,
     picker: &DefaultWorkerPicker,
     input: WorkerSelectionInput<'_, C>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
@@ -887,7 +885,7 @@ mod test_support {
     use rustc_hash::FxHashMap;
 
     use super::*;
-    use crate::scheduling::{OverlapSignals, ScheduleMode};
+    use crate::{OverlapSignals, ScheduleMode};
 
     #[derive(Clone, Default)]
     pub(super) struct TaintedWorkerConfig {
@@ -950,13 +948,13 @@ mod test_support {
 
     pub(super) fn worker_loads_with_active_decode(
         decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
-    ) -> FxHashMap<WorkerWithDpRank, crate::sequences::WorkerLoadProjection> {
+    ) -> FxHashMap<WorkerWithDpRank, dynamo_slot_tracker::WorkerLoadProjection> {
         decode_blocks
             .into_iter()
             .map(|(worker, active_decode_blocks)| {
                 (
                     worker,
-                    crate::sequences::WorkerLoadProjection {
+                    dynamo_slot_tracker::WorkerLoadProjection {
                         active_decode_blocks,
                         ..Default::default()
                     },
@@ -975,7 +973,7 @@ mod cache_reuse_tests {
     #[test]
     fn tracked_requests_report_raw_cache_reuse() {
         let mut request = base_request(128);
-        request.mode = crate::scheduling::ScheduleMode::Tracked {
+        request.mode = crate::ScheduleMode::Tracked {
             request_id: "test".into(),
         };
         let first = WorkerWithDpRank::from_worker_id(1);
@@ -1017,7 +1015,7 @@ mod cache_reuse_tests {
     #[test]
     fn query_only_requests_skip_cache_reuse_tracking() {
         let mut request = base_request(128);
-        request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
+        request.mode = crate::ScheduleMode::QueryOnly { request_id: None };
         let worker = WorkerWithDpRank::from_worker_id(1);
         request.overlap.effective_cached_tokens.insert(worker, 96);
         request.overlap.tier_overlap_blocks.device.insert(worker, 6);
@@ -1073,7 +1071,7 @@ mod cache_reuse_tests {
     fn cache_reuse_tracking_excludes_out_of_range_dp_rank() {
         let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
         let mut request = base_request(128);
-        request.mode = crate::scheduling::ScheduleMode::Tracked {
+        request.mode = crate::ScheduleMode::Tracked {
             request_id: "test".into(),
         };
         let invalid_rank = WorkerWithDpRank::new(1, 1);

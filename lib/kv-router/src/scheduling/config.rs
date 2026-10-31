@@ -31,7 +31,7 @@ use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
 
-pub use super::router_config::{RouterConfigOverride, RouterPrefillLoadModel};
+pub use dynamo_scheduler::config::{RouterConfigOverride, RouterPrefillLoadModel};
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -1350,7 +1350,7 @@ impl From<&KvRouterConfig> for ConditionalDisaggConfig {
     }
 }
 
-impl From<&KvRouterConfig> for super::router_config::CacheHitWeights {
+impl From<&KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights {
     fn from(config: &KvRouterConfig) -> Self {
         Self {
             host: config.host_cache_hit_weight,
@@ -1359,7 +1359,7 @@ impl From<&KvRouterConfig> for super::router_config::CacheHitWeights {
     }
 }
 
-impl From<&KvRouterConfig> for super::router_config::RouterConfig {
+impl From<&KvRouterConfig> for dynamo_scheduler::config::RouterConfig {
     /// The kernel's slice of the flat config. Profiles resolve lazily by model name through
     /// the policy file this config loaded, so a bad file surfaces when its first partition
     /// is created, exactly where `policy_profile` fails today.
@@ -1374,7 +1374,7 @@ impl From<&KvRouterConfig> for super::router_config::RouterConfig {
             queue_recheck_interval: config.router_queue_recheck_interval(),
             profiles: std::sync::Arc::new(move |model: Option<&str>| {
                 source.policy_profile(model).map_err(|error| {
-                    super::router_config::RouterConfigError::Validation(error.to_string())
+                    dynamo_scheduler::config::RouterConfigError::Validation(error.to_string())
                 })
             }),
         }
@@ -1383,6 +1383,7 @@ impl From<&KvRouterConfig> for super::router_config::RouterConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::tracking_hash::tracking_hash_context;
     #[test]
     fn router_settings_override_legacy_values_once_and_preserve_process_fields() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
@@ -1791,7 +1792,7 @@ mod tests {
     #[test]
     fn context_aware_tracking_matches_public_legacy_api() {
         let config = KvRouterConfig::default();
-        let context = TrackingHashContext::from_config(&config).unwrap();
+        let context = tracking_hash_context(&config).unwrap();
         let tokens: Vec<u32> = (0..8).collect();
 
         let legacy = config.compute_seq_hashes_for_tracking(

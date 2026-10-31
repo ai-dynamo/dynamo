@@ -29,7 +29,7 @@ use crate::scheduling::selector::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
-use crate::{TrackingHashContext, TrackingHashScope};
+use crate::{TrackingHashContext, TrackingHashScope, tracking_hash_context};
 use tempfile::NamedTempFile;
 
 fn test_config() -> crate::config::KvRouterConfig {
@@ -175,7 +175,7 @@ fn normalize_with(
 
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     normalize_with(request, &context, true).expect("normalize prompt")
 }
 
@@ -661,7 +661,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
     };
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     let request: PromptRequest = serde_json::from_value(serde_json::json!({
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
         "cache_salt": "tenant-a"
@@ -688,7 +688,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
 #[test]
 fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
     let config = test_config();
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     let request: PromptRequest = serde_json::from_value(serde_json::json!({
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
     }))
@@ -715,7 +715,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
     };
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     let request: PromptRequest = serde_json::from_value(serde_json::json!({
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
         "cache_salt": "tenant-a"
@@ -762,7 +762,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
     };
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     let request: PromptRequest = serde_json::from_value(serde_json::json!({
         "block_hashes": [11, 29],
         "sequence_hashes": [-1, 7],
@@ -802,7 +802,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
 #[test]
 fn randomized_reservation_uses_canonical_complete_block_count() {
     let config = test_config();
-    let context = TrackingHashContext::from_config(&config).unwrap();
+    let context = tracking_hash_context(&config).unwrap();
     let cases = [
         (Vec::new(), false, 0),
         (vec![1, 2, 3], false, 0),

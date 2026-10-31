@@ -1,6 +1,6 @@
-# lib/kv-router/src/scheduling
+# lib/router/scheduler
 
-Scheduling decides whether a request can run now, which worker should receive it, and how its load is recorded while it runs.
+The scheduler kernel (`dynamo-scheduler`) decides whether a request can run now, which worker should receive it, and how its load is recorded while it runs. The queue actor and `LocalScheduler` live here; `PolicyQueue` and the request classifier are the `dynamo-admission` stage's, and the composed router (`lib/kv-router`) builds the policy profile from its YAML policy file.
 
 ## Queue hierarchy
 

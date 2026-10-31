@@ -4,11 +4,11 @@
 //! The kernel's implementation of the classifier's [`WorkerView`] over the rows worker
 //! selection builds, so admission reads the same columns a filter or scorer would.
 
-use crate::plugins::request_classifier::{WorkerCacheView, WorkerLoadView, WorkerView};
-use crate::plugins::worker_selection::{WorkerCandidate, WorkerInfo, WorkerInputRows};
+use dynamo_admission::classifier::{WorkerCacheView, WorkerLoadView, WorkerView};
+use dynamo_worker_selection::{WorkerCandidate, WorkerInfo, WorkerInputRows};
 
 /// Rows built for one classification, read through the classifier's view.
-pub(crate) struct ClassifierRows(pub(crate) WorkerInputRows);
+pub struct ClassifierRows(pub WorkerInputRows);
 
 impl ClassifierRows {
     fn with_row<R>(&self, row: usize, read: impl FnOnce(WorkerCandidate<'_>) -> R) -> Option<R> {

@@ -4,7 +4,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
@@ -40,7 +39,7 @@ pub enum RouterPolicyConfigError {
 
 /// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
 /// past them, and rejects the request when no eligible worker remains.
-pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync + 'static>;
+pub use dynamo_scheduler::types::RejectThresholdsProvider;
 
 pub use dynamo_slot_tracker::busy::BusyRanksExt;
 pub use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};

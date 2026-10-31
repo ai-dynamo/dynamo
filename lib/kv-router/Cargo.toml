@@ -16,18 +16,19 @@ readme = "README.md"
 default = []
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
 runtime-protocols = ["dep:dynamo-runtime"]
-bench = ["dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
 profile = ["dynamo-kv-indexer/profile"]
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:dynamo-zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq", "dep:dynamo-zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
+testing = ["dynamo-scheduler/testing", "dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
 
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-admission = { workspace = true }
+dynamo-scheduler = { workspace = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
@@ -91,6 +92,7 @@ dynamo-slot-tracker = { workspace = true, features = ["testing"] }
 dynamo-session-affinity = { workspace = true, features = ["testing"] }
 dynamo-worker-selection = { workspace = true, features = ["testing"] }
 dynamo-admission = { workspace = true, features = ["testing"] }
+dynamo-scheduler = { workspace = true, features = ["testing"] }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rstest = "0.18.2"

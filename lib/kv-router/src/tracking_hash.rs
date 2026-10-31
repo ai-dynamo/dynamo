@@ -79,11 +79,9 @@ pub fn tracking_hash_config(config: &KvRouterConfig) -> Result<TrackingHashConfi
     }
 }
 
-impl TrackingHashContext {
-    /// The context for a flat configuration; see [`tracking_hash_config`].
-    pub fn from_config(config: &KvRouterConfig) -> Result<Self> {
-        Ok(Self::new(tracking_hash_config(config)?))
-    }
+/// The tracking-hash context for a flat configuration; see [`tracking_hash_config`].
+pub fn tracking_hash_context(config: &KvRouterConfig) -> Result<TrackingHashContext> {
+    Ok(TrackingHashContext::new(tracking_hash_config(config)?))
 }
 
 #[cfg(test)]
@@ -110,7 +108,7 @@ mod tests {
     fn key_loading_rejects_missing_and_malformed_files_without_exposing_bytes() {
         let (_short_file, short_config) = keyed_config("2026-01", &[7; KEY_SIZE - 1]);
         assert!(
-            TrackingHashContext::from_config(&short_config)
+            tracking_hash_context(&short_config)
                 .unwrap_err()
                 .to_string()
                 .contains("exactly 32 raw bytes")
@@ -118,7 +116,7 @@ mod tests {
 
         let (_long_file, long_config) = keyed_config("2026-01", &[8; KEY_SIZE + 1]);
         assert!(
-            TrackingHashContext::from_config(&long_config)
+            tracking_hash_context(&long_config)
                 .unwrap_err()
                 .to_string()
                 .contains("exactly 32 raw bytes")
@@ -130,7 +128,7 @@ mod tests {
             router_tracking_key_id: Some("2026-01".to_string()),
             ..Default::default()
         };
-        let missing_error = TrackingHashContext::from_config(&missing_config)
+        let missing_error = tracking_hash_context(&missing_config)
             .unwrap_err()
             .to_string();
         assert!(missing_error.contains("failed to read router tracking key file"));
@@ -143,17 +141,14 @@ mod tests {
             router_tracking_key_id: Some("2026-01".to_string()),
             ..Default::default()
         };
-        let unreadable_error = TrackingHashContext::from_config(&unreadable_config)
+        let unreadable_error = tracking_hash_context(&unreadable_config)
             .unwrap_err()
             .to_string();
         assert!(unreadable_error.contains("failed to read router tracking key file"));
         assert!(!unreadable_error.contains(&unreadable_dir.path().display().to_string()));
 
         let (_key_file, valid_config) = keyed_config("2026-01", &[0xab; KEY_SIZE]);
-        let debug = format!(
-            "{:?}",
-            TrackingHashContext::from_config(&valid_config).unwrap()
-        );
+        let debug = format!("{:?}", tracking_hash_context(&valid_config).unwrap());
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("171"));
     }
@@ -163,9 +158,7 @@ mod tests {
         let assert_rejected_by_both = |config: &KvRouterConfig, expected: &str| {
             assert_eq!(config.validate_config().unwrap_err(), expected);
             assert_eq!(
-                TrackingHashContext::from_config(config)
-                    .unwrap_err()
-                    .to_string(),
+                tracking_hash_context(config).unwrap_err().to_string(),
                 expected
             );
         };
@@ -196,6 +189,6 @@ mod tests {
 
         let (_key_file, keyed) = keyed_config("2026-01", &[1; KEY_SIZE]);
         assert!(keyed.validate_config().is_ok());
-        assert!(TrackingHashContext::from_config(&keyed).is_ok());
+        assert!(tracking_hash_context(&keyed).is_ok());
     }
 }

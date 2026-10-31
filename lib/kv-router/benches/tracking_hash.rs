@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_router::{
-    RoutingPartitionRef, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    RoutingPartitionRef, TrackingHashAlgorithm, TrackingHashScope, tracking_hash_context,
 };
 use tempfile::NamedTempFile;
 
@@ -77,8 +77,8 @@ fn benchmark_blake3_sequence_hashes(
 fn tracking_hash(c: &mut Criterion) {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&BENCHMARK_KEY).unwrap();
-    let public_context = TrackingHashContext::from_config(&KvRouterConfig::default()).unwrap();
-    let keyed_context = TrackingHashContext::from_config(&KvRouterConfig {
+    let public_context = tracking_hash_context(&KvRouterConfig::default()).unwrap();
+    let keyed_context = tracking_hash_context(&KvRouterConfig {
         router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("benchmark".to_string()),

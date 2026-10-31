@@ -7,13 +7,51 @@
 //! event sink hosts implement. Kernel-owned per SPLIT_V2 section 4 rows 40-41.
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
-use crate::protocols::{BlockExtraInfo, DpRank, RouterEvent, WorkerId, WorkerWithDpRank};
 use dynamo_tokens::Token;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::LazyLock;
+
+// Wire vocabulary the kernel reads, re-exported from the owning stages.
+pub use dynamo_kv_events::event::{
+    KV_EVENT_SUBJECT, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheEvents,
+    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+pub use dynamo_kv_events::placement::{Placement, PlacementEvent, PlacementOwner};
+pub use dynamo_kv_hashing::routing::{
+    BlockHashOptions, MM_PAD_HASH_MASK, MM_PAD_SHIFT_VALUE, TokensWithHashes, XXH3_SEED,
+    complete_block_count, compute_block_hash, compute_block_hash_for_seq,
+    compute_block_hash_for_seq_with_seed, compute_next_seq_hash, compute_seq_hash_for_block,
+    compute_seq_hash_for_tokens_with_seeds, hash_mm_identifier, pad_value_for_mm_hash,
+};
+pub use dynamo_kv_indexer::overlap::OverlapScores;
+pub use dynamo_kv_indexer::residency::{
+    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError, ResidencyRoutingSnapshot,
+    ResolvedRouterHintSource,
+};
+pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+pub use dynamo_router_protocol::load::{ActiveLoad, SchedulerGroup, SchedulerLoad};
+pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+pub use dynamo_router_protocol::mm::{
+    BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,
+};
+pub use dynamo_router_protocol::residency::{
+    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
+    UnsupportedResidencyDomain, WireResidencyDomain,
+};
+pub use dynamo_router_protocol::worker::{
+    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+};
+pub use dynamo_slot_tracker::wire::{
+    ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
+    ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
+    PrefillEventData, PrefillLoadHint,
+};
+pub use dynamo_worker_selection::{
+    SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SharedCacheHits,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KvHintTransferWorkerMetadata<'a> {
@@ -255,7 +293,7 @@ pub enum RouterResponse {
         overlap_blocks: u32,
     },
     QueueRejected {
-        rejection: crate::scheduling::QueueRejection,
+        rejection: dynamo_admission::queue::QueueRejection,
     },
     PrefillMarked {
         success: bool,
@@ -305,7 +343,7 @@ pub struct WorkerSelectionResult {
     pub kv_transfer_source: Option<KvTransferSourceChoice>,
 
     /// Fields for the routing task's "Selected worker" log line. Set by
-    /// [`crate::WorkerSelectionPolicy`]; `None` from selectors that do not log
+    /// [`crate::selector::WorkerSelectionPolicy`]; `None` from selectors that do not log
     /// their selection.
     pub log_fields: Option<SelectionLogFields>,
 }

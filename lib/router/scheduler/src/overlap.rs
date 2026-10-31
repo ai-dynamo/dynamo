@@ -3,11 +3,11 @@
 
 use std::collections::HashSet;
 
-use super::router_config::CacheHitWeights;
-use crate::indexer::TieredMatchDetails;
+use super::config::CacheHitWeights;
 use crate::protocols::{
     DpRank, SharedCacheHits, StorageTier, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use dynamo_kv_indexer::TieredMatchDetails;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
@@ -373,9 +373,9 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::indexer::{LowerTierMatchDetails, MatchDetails};
     use crate::protocols::{OverlapScores, SharedCacheHits, WorkerWithDpRank};
     use crate::test_utils::SimpleWorkerConfig;
+    use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails};
 
     #[test]
     fn converts_weighted_and_raw_tier_overlap_once() {

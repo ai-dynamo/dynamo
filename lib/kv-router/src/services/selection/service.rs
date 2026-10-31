@@ -18,7 +18,7 @@ use crate::services::common::replica_sync::{
 };
 use crate::services::common::replication::AffinityBindingEvent;
 use crate::services::indexer::backend::IndexerPolicy;
-use crate::tracking_hash::TrackingHashContext;
+use crate::tracking_hash::tracking_hash_context;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
 use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
@@ -208,7 +208,7 @@ impl SelectionServiceBuilder {
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
                 .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
-        let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
+        let tracking_hash = Arc::new(tracking_hash_context(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_config(
             &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
         )?;

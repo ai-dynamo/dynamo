@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+description = "Dynamo router scheduler kernel: runs the routing stages atomically for one request"
+
+[features]
+default = []
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
+bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+
+[dependencies]
+dynamo-admission = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-tokens = { workspace = true }
+dynamo-worker-selection = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = "1.9.1"
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+crossbeam-queue = "0.3"
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+fastrand = "2"
+futures-util = { workspace = true }
+http = { workspace = true }
+ordered-float = { workspace = true }
+parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+dynamo-kv-indexer = { workspace = true, features = ["testing"] }
+dynamo-slot-tracker = { workspace = true, features = ["testing"] }
+dynamo-session-affinity = { workspace = true, features = ["testing"] }
+dynamo-worker-selection = { workspace = true, features = ["testing"] }
+dynamo-admission = { workspace = true, features = ["testing"] }
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
+rstest = "0.18.2"
+rstest_reuse = "0.7.0"
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

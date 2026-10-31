@@ -23,6 +23,7 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+    tracking_hash_context,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -262,7 +263,7 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
-        let tracking_hash = TrackingHashContext::from_config(&config)?;
+        let tracking_hash = tracking_hash_context(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);

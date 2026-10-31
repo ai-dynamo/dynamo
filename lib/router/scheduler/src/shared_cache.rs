@@ -8,9 +8,8 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use crate::indexer::KvRouterError;
 use crate::protocols::SharedCacheHits;
-use crate::session_prefix_index::SessionPrefixIndexer;
+use dynamo_kv_indexer::{KvRouterError, SessionPrefixIndexer};
 
 /// Trait for querying an external shared KV cache pool.
 ///

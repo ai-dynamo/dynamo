@@ -12,17 +12,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::classifier_rows::ClassifierRows;
-#[cfg(test)]
-use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
-use super::policy_config::{PolicyProfile, RejectThresholdsProvider};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::request_classifier::{RequestClassifierRuntime, RequestLifecycle};
 use super::selector::{WorkerInputs, WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
@@ -30,18 +26,24 @@ use super::types::{
     ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
-use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{
     LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::sequences::topology::WorkerDpRange;
-use crate::sequences::{
+use crate::selector::WorkerCapacityExt;
+use crate::types::RejectThresholdsProvider;
+use dynamo_admission::PolicyProfile;
+#[cfg(test)]
+use dynamo_admission::RouterQueuePolicy;
+use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
+use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_slot_tracker::topology::WorkerDpRange;
+use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::WorkerCapacity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -315,7 +317,7 @@ where
     }
 
     /// Apply published topology before a subsequent catalog mutation can replace it.
-    pub(crate) fn apply_published_worker_configs(&self) {
+    pub fn apply_published_worker_configs(&self) {
         if !self.monitor_worker_configs {
             return;
         }
@@ -366,8 +368,7 @@ where
     /// Schedule a request and return an armed handle for its booking: dropping
     /// the handle frees the booking, `commit` hands it to a longer-lived owner.
     /// The handle is `None` unless the mode is `TrackedWithLifecycle`.
-    #[cfg(any(test, feature = "standalone-selection"))]
-    pub(crate) async fn schedule_request_with_booking(
+    pub async fn schedule_request_with_booking(
         &self,
         request: ScheduleRequest,
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
@@ -549,7 +550,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::SharedCacheHits>,
+        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_with_block_hashes(
             maybe_request_id,
@@ -596,7 +597,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::SharedCacheHits>,
+        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_with_policy_class_and_block_hashes(
             maybe_request_id,
@@ -641,7 +642,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::SharedCacheHits>,
+        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
         self.schedule_request(ScheduleRequest {
@@ -778,7 +779,7 @@ where
 
     /// Complete owner cleanup after a successful release (including a stale
     /// booking's `NoChange`), then notify pending admission before returning.
-    pub(crate) async fn free_if_booking_with_cleanup(
+    pub async fn free_if_booking_with_cleanup(
         &self,
         booking: &SchedulerBookingDescriptor,
         cleanup: impl FnOnce(),
@@ -981,13 +982,14 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::*;
-    use crate::plugins::request_classifier::WorkerView;
+    use crate::PrefillLoadEstimator;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-    use crate::scheduling::request_classifier::ClassifyFuture;
-    use crate::scheduling::selector::DefaultWorkerSelector;
-    use crate::scheduling::{BusyThresholds, PrefillLoadEstimator};
-    use crate::sequences::SequenceSubscriber;
+    use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use dynamo_admission::classifier::ClassifyFuture;
+    use dynamo_admission::classifier::WorkerView;
+    use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::busy::BusyThresholds;
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,

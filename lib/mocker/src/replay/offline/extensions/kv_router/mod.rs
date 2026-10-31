@@ -36,6 +36,7 @@ use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
     SessionContext, SessionPrefixIndexer, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    tracking_hash_context,
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
@@ -797,7 +798,7 @@ impl OfflineReplayRouter {
             config.validate().map_err(anyhow::Error::msg)?;
             indexer.session_prefix_index = Some(SessionPrefixIndexer::new());
         }
-        let tracking_hash = TrackingHashContext::from_config(&config)?;
+        let tracking_hash = tracking_hash_context(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);

@@ -4,9 +4,9 @@
 //! Drive `WorkerSelectionPolicy` through the kernel's `WorkerSelector` with a scheduling
 //! request, worker configs, and eligibility: the stage and its adapter together.
 
-use crate::plugins::worker_selection::WorkerInputView;
+use crate::SessionContext;
 use crate::protocols::WorkerWithDpRank;
-use crate::scheduling::SessionContext;
+use dynamo_worker_selection::WorkerInputView;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -17,10 +17,10 @@ use rustc_hash::FxHashMap;
 use super::DefaultWorkerSelector;
 use super::test_support::*;
 use super::{CandidatePreparerExt, WorkerSelectionInput, WorkerSelector};
-use crate::plugins::worker_selection::*;
+use crate::WorkerSelectionInputTrigger;
 use crate::protocols::WorkerConfigLike;
-use crate::scheduling::WorkerSelectionInputTrigger;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest};
+use crate::types::{KvSchedulerError, SchedulingRequest};
+use dynamo_worker_selection::*;
 
 fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
     selector.uses_exclusive_affinity_target()
@@ -490,9 +490,9 @@ fn worker_info_reaches_every_component_without_declaration() {
 
 #[test]
 fn prepared_candidates_select_like_rows_built_at_selection() {
+    use crate::ScheduleMode;
     use crate::kv_hints::KvTransferCandidates;
     use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
-    use crate::scheduling::ScheduleMode;
 
     struct Worker {
         dp_size: u32,
@@ -1065,7 +1065,7 @@ fn best_eligible_cache_reuse_skips_filtered_workers() {
         (1, TaintedWorkerConfig::default()),
     ]);
     let mut request = base_request(128);
-    request.mode = crate::scheduling::ScheduleMode::Tracked {
+    request.mode = crate::ScheduleMode::Tracked {
         request_id: "test".into(),
     };
     request

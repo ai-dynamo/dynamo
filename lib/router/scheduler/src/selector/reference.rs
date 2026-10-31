@@ -3,7 +3,7 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(test, feature = "testing", feature = "bench"))]
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -12,13 +12,13 @@ use super::{
     CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionContext, WorkerSelectionInput,
     WorkerSelector, select_reference, source_prefix_blocks,
 };
+use crate::filter::RoutingEligibility;
 use crate::kv_hints::KvTransferScope;
-use crate::plugins::worker_selection::DefaultWorkerPicker;
-use crate::plugins::worker_selection::SelectionConfig;
-use crate::plugins::worker_selection::WorkerTransferInput;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest};
+use crate::types::{KvSchedulerError, SchedulingRequest};
+use dynamo_worker_selection::DefaultWorkerPicker;
+use dynamo_worker_selection::SelectionConfig;
+use dynamo_worker_selection::WorkerTransferInput;
 
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
@@ -59,12 +59,12 @@ impl std::fmt::Debug for DefaultWorkerSelector {
 
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
-        #[cfg(any(test, feature = "bench"))]
+        #[cfg(any(test, feature = "testing", feature = "bench"))]
         let deterministic_rng = self.picker.rng().cloned();
         Self::from_parts(
             self.kv_router_config.clone(),
             self.worker_type,
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
             deterministic_rng,
         )
     }
@@ -75,12 +75,12 @@ impl DefaultWorkerSelector {
         Self::from_parts(
             kv_router_config.unwrap_or_default(),
             worker_type,
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
             None,
         )
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
     pub fn new_seeded(
         kv_router_config: Option<SelectionConfig>,
         worker_type: &'static str,
@@ -96,10 +96,12 @@ impl DefaultWorkerSelector {
     fn from_parts(
         kv_router_config: SelectionConfig,
         worker_type: &'static str,
-        #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
+        #[cfg(any(test, feature = "testing", feature = "bench"))] deterministic_rng: Option<
+            Arc<Mutex<fastrand::Rng>>,
+        >,
     ) -> Self {
         let picker = DefaultWorkerPicker::with_rng(
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
             deterministic_rng,
         );
         Self {
@@ -142,8 +144,8 @@ fn selection_weights(
             .and_then(|config| config.shared_cache_multiplier)
             .or(kv_router_config.shared_cache_multiplier)
             .unwrap_or(match kv_router_config.shared_cache_type {
-                crate::plugins::worker_selection::SharedCacheType::None => 0.0,
-                crate::plugins::worker_selection::SharedCacheType::Hicache => 0.5,
+                dynamo_worker_selection::SharedCacheType::None => 0.0,
+                dynamo_worker_selection::SharedCacheType::Hicache => 0.5,
             }),
     }
 }
@@ -510,7 +512,7 @@ mod tests {
     use super::*;
     use crate::config::RouterConfigOverride;
     use crate::protocols::SharedCacheHits;
-    use crate::scheduling::{OverlapSignals, ScheduleMode};
+    use crate::{OverlapSignals, ScheduleMode};
 
     fn worker_logit(
         selector: &DefaultWorkerSelector,
@@ -549,14 +551,14 @@ mod tests {
         let mut request = base_request(64);
         request.worker_loads.insert(
             WorkerWithDpRank::from_worker_id(0),
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_prefill_tokens: 7,
                 ..Default::default()
             },
         );
         request.worker_loads.insert(
             WorkerWithDpRank::from_worker_id(1),
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_prefill_tokens: 11,
                 ..Default::default()
             },
@@ -600,7 +602,7 @@ mod tests {
         let mut request = base_request(0);
         request.worker_loads = (0..3)
             .map(|id| {
-                let load = crate::sequences::WorkerLoadProjection {
+                let load = dynamo_slot_tracker::WorkerLoadProjection {
                     active_prefill_tokens: if id == 2 { 1616 } else { 1600 },
                     active_decode_blocks: if id == 2 { 0 } else { 50 },
                     ..Default::default()
@@ -807,7 +809,7 @@ mod tests {
             .insert(warm_worker, 2);
         request.worker_loads.insert(
             warm_worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_decode_blocks: 1,
                 ..Default::default()
             },
@@ -1401,7 +1403,7 @@ mod tests {
         let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 2);
 
-        let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
+        let mut tier_overlap_blocks = crate::TierOverlapBlocks::default();
         tier_overlap_blocks.device.insert(worker0, 2);
 
         #[allow(clippy::single_range_in_vec_init)]
@@ -1478,7 +1480,7 @@ mod tests {
         let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 32);
 
-        let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
+        let mut tier_overlap_blocks = crate::TierOverlapBlocks::default();
         tier_overlap_blocks.device.insert(worker0, 2);
 
         let config = SelectionConfig {
@@ -1567,7 +1569,7 @@ mod tests {
             .insert(warm_worker, 64);
         request.worker_loads.insert(
             warm_worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_decode_blocks: 5,
                 ..Default::default()
             },
@@ -1622,7 +1624,7 @@ mod tests {
         request.overlap.tier_overlap_blocks.device.insert(worker, 6);
         request.worker_loads.insert(
             worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
                 active_requests: 0,
@@ -1649,7 +1651,7 @@ mod tests {
         let mut request = base_request(0);
         request.worker_loads.insert(
             worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_decode_blocks: 100,
                 active_requests: 4,
                 ..Default::default()
@@ -1685,7 +1687,7 @@ mod tests {
         request.overlap.tier_overlap_blocks.device.insert(worker, 3);
         request.worker_loads.insert(
             worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_decode_blocks: 10,
                 ..Default::default()
             },
@@ -1725,7 +1727,7 @@ mod tests {
             .insert(warm_worker, 64);
         request.worker_loads.insert(
             warm_worker,
-            crate::sequences::WorkerLoadProjection {
+            dynamo_slot_tracker::WorkerLoadProjection {
                 active_prefill_tokens: 48,
                 ..Default::default()
             },

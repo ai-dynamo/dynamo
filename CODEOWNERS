@@ -81,6 +81,7 @@
 /lib/kv-router/tests/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/admission/                                                                                  @ai-dynamo/dynamo-router-codeowners
+/lib/router/scheduler/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/router/kv-indexer/                                                                                 @ai-dynamo/dynamo-router-codeowners
 /lib/router/slot-tracker/                                                                               @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                                             @ai-dynamo/dynamo-router-codeowners

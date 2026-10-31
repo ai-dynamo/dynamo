@@ -88,9 +88,8 @@ fn core_with(
     worker_type: WorkerType,
     affinity: Option<SessionAffinityConfig>,
 ) -> SelectionCore {
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
+    let tracking_hash =
+        Arc::new(tracking_hash_context(&config).expect("valid tracking hash configuration"));
     let indexer_policy =
         IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
             .expect("indexer policy");

@@ -6,9 +6,9 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerInfo, WorkerLoadInput};
 use crate::protocols::{WorkerConfigLike, WorkerWithDpRank};
-use crate::sequences::WorkerLoadProjection;
+use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::{WorkerCapacity, WorkerInfo, WorkerLoadInput};
 
 /// Reads a worker's advertised capacity from its runtime config.
 pub trait WorkerCapacityExt {

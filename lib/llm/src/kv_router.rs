@@ -41,6 +41,7 @@ use dynamo_kv_router::{
         PromptView, Selected, SelectionAdmission, SelectionError, SelectionOperation,
         SelectionOutcome, SelectionRun, SessionBinding,
     },
+    tracking_hash_context,
 };
 use dynamo_runtime::{
     CancellationToken,
@@ -750,7 +751,7 @@ impl KvRouter {
         } else {
             None
         };
-        let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
+        let tracking_hash = tracking_hash_context(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
         let kv_event_source_requirement = KvEventSourceRequirement::derive(

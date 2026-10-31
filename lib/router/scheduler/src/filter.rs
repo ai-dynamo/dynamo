@@ -3,11 +3,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::policy_config::FullRankCounts;
 use super::types::KvSchedulerError;
 use crate::protocols::{
     DpRank, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use dynamo_slot_tracker::busy::FullRankCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkerEligibilityError {
@@ -495,9 +495,9 @@ mod tests {
 
     #[test]
     fn full_rank_counts_skip_a_worker_only_when_every_rank_is_full() {
-        use super::super::policy_config::BusyThresholds;
-        use crate::plugins::worker_selection::WorkerCapacity;
-        use crate::sequences::WorkerLoadProjection;
+        use dynamo_slot_tracker::WorkerLoadProjection;
+        use dynamo_slot_tracker::busy::BusyThresholds;
+        use dynamo_worker_selection::WorkerCapacity;
 
         let constraints = RoutingConstraints::default();
         let config = TestWorkerConfig {

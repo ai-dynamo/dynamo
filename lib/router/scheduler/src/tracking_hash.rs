@@ -20,7 +20,7 @@ use crate::protocols::{
     compute_seq_hash_for_block, compute_seq_hash_for_tokens_with_seeds,
 };
 
-pub(crate) const KEY_SIZE: usize = 32;
+pub const KEY_SIZE: usize = 32;
 
 const KEYED_XXH3_V1_DOMAIN: &[u8] = b"dynamo.router.tracking-hash/keyed-xxh3-v1\0";
 

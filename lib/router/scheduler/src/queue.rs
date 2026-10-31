@@ -15,20 +15,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::capacity::CapacityUpdates;
-#[cfg(test)]
-use super::config::RouterQueuePolicy;
 use super::filter::{RoutingEligibility, worker_config_for_rank};
 use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
-use super::policy_config::{
-    BusyThresholds, FullRankCounts, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider,
-};
-use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
-use super::queue_admission::WorkerPlacement;
-use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
 use super::selector::{
     CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs, WorkerLoadInputExt,
     WorkerSelectionInput, WorkerSelector, worker_input_rows,
@@ -38,20 +30,25 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
-use crate::plugins::worker_selection::{
-    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
-};
-use crate::plugins::worker_selection::{
-    WorkerCapacity, WorkerCapacityExt, WorkerInputRows, WorkerLoadInput,
-};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
-use crate::sequences::{
+use crate::selector::WorkerCapacityExt;
+use crate::types::RejectThresholdsProvider;
+#[cfg(test)]
+use dynamo_admission::RouterQueuePolicy;
+use dynamo_admission::classifier::{ClassificationOverrides, ClassifyRequest};
+use dynamo_admission::placement::WorkerPlacement;
+use dynamo_admission::queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use dynamo_admission::{PolicyClassConfig, PolicyProfile};
+use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
+use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
+use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
+use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
 
 // The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
 pub use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
@@ -413,6 +410,14 @@ pub struct SchedulerCleanupAck {
     response: Result<(), SequenceError>,
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl SchedulerCleanupAck {
+    /// The cleanup outcome, for tests that assert on acknowledgement.
+    pub fn response(&self) -> &Result<(), SequenceError> {
+        &self.response
+    }
+}
+
 impl SchedulerCleanupAck {
     pub async fn wait(self) -> Result<(), SequenceError> {
         self.response
@@ -504,7 +509,7 @@ impl Drop for BookingHandle {
 }
 
 /// Single-owner cleanup lease for one scheduler-tracked request.
-pub(crate) struct RequestLifecycleLease {
+pub struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
     transfer: Option<Arc<AdmissionLifecycleTransfer>>,
@@ -648,6 +653,22 @@ impl<
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 > SchedulerQueue<P, C, Sel, RF>
 {
+    /// The policy profile this queue admits under, for tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn profile(&self) -> &PolicyProfile {
+        &self.profile
+    }
+
+    /// Hold every admission permit until the returned guard drops, for tests that prove
+    /// capacity progress needs no space in the command channel.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_admission_permits(&self) -> impl Drop + '_ {
+        self.admission_tx
+            .reserve_many(self.admission_tx.max_capacity())
+            .await
+            .expect("admission channel open")
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -890,7 +911,7 @@ impl<
         .await
     }
 
-    pub(crate) async fn enqueue_admitted_with_block_hashes_and_lease(
+    pub async fn enqueue_admitted_with_block_hashes_and_lease(
         &self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
@@ -957,7 +978,7 @@ impl<
     /// `request.isl_tokens` — the routing-token basis the queue's bucketing, limits, and DRR
     /// cost already use — so a pass-through classifier is behavior-identical to no
     /// classifier.
-    pub(crate) fn build_classify_request(
+    pub fn build_classify_request(
         &self,
         request: &SchedulingRequest,
         ingress_at: Instant,
@@ -1062,7 +1083,7 @@ impl<
         }
     }
 
-    fn validate_classification(
+    pub fn validate_classification(
         &self,
         request: &mut SchedulingRequest,
         classified_request: ClassifyRequest,
@@ -1196,7 +1217,7 @@ impl<
     }
 
     /// Notify pending admission after the authoritative mutation is complete.
-    pub(crate) fn capacity_changed(&self, worker: Option<WorkerWithDpRank>) {
+    pub fn capacity_changed(&self, worker: Option<WorkerWithDpRank>) {
         if let Some(updates) = &self.capacity_updates {
             updates.record(worker);
         }
@@ -2275,28 +2296,44 @@ impl<
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
+
     use std::time::Duration;
 
     use async_trait::async_trait;
+
     use rustc_hash::FxHashMap;
+
     use tokio::sync::{Barrier, watch};
 
     use super::*;
+
+    use crate::OverlapSignals;
+
+    use crate::classifier_rows::ClassifierRows;
+
     use crate::kv_hints::KvTransferCandidates;
-    use crate::plugins::request_classifier::WorkerView;
+
     use crate::protocols::{
         ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
-    use crate::scheduling::OverlapSignals;
-    use crate::scheduling::classifier_rows::ClassifierRows;
-    use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
-    use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
-    use crate::sequences::topology::WorkerDpRange;
-    use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
+
+    use crate::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+
+    use crate::types::{KvSchedulerError, ScheduleMode};
+
+    use crate::RefreshedOverlap;
+
+    use dynamo_admission::classifier::WorkerView;
+
+    use dynamo_slot_tracker::topology::WorkerDpRange;
+
+    use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SequencePublisher};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -2320,23 +2357,6 @@ mod tests {
     type SchedulingResponseReceiver =
         tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
 
-    #[test]
-    fn admission_lifecycle_cleanup_upgrades_to_the_exact_booking() {
-        let transfer = AdmissionLifecycleTransfer::new("retryable-request".to_string());
-        transfer.arm_pending();
-        let booking = SchedulerBookingDescriptor {
-            request_id: "retryable-request".to_string(),
-            worker: WorkerWithDpRank::new(7, 3),
-            attempt_id: AttemptId::for_testing(41),
-        };
-        transfer.arm_booking(booking.clone());
-
-        let Some(AdmissionLifecycleCleanup::Booking(cleanup)) = transfer.cleanup_target() else {
-            panic!("admitted cleanup must carry the exact booking");
-        };
-        assert_eq!(cleanup, booking);
-    }
-
     fn book_directly(
         slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         request_id: &str,
@@ -2344,7 +2364,7 @@ mod tests {
         let worker = WorkerWithDpRank::new(0, 0);
         let attempt_id = slots
             .add_request_admitted(
-                crate::sequences::SequenceRequest {
+                dynamo_slot_tracker::SequenceRequest {
                     request_id: request_id.to_string(),
                     token_sequence: None,
                     track_prefill_tokens: true,
@@ -2376,44 +2396,6 @@ mod tests {
         .expect("booking was freed");
     }
 
-    /// The handle frees its booking exactly when it is dropped armed; `commit`
-    /// hands the booking over untouched and `release` frees it with an ack.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn booking_handle_frees_only_while_armed() {
-        let (queue, slots) = make_queue(1, 16, 512, Some(0.0));
-
-        let armed = book_directly(&slots, "armed");
-        drop(queue.booking_handle(armed.clone()));
-        wait_freed(&slots, &armed).await;
-
-        let committed = book_directly(&slots, "committed");
-        let handle = queue.booking_handle(committed.clone());
-        let request_id_ptr = handle.booking.request_id.as_ptr();
-        let descriptor = handle.commit();
-        assert_eq!(descriptor, committed);
-        assert_eq!(descriptor.request_id.as_ptr(), request_id_ptr);
-
-        // Explicit release is immediate. The following actor barrier also
-        // proves commit did not enqueue deferred cleanup for its booking.
-        let released = book_directly(&slots, "released");
-        queue
-            .booking_handle(released.clone())
-            .release()
-            .await
-            .expect("acknowledged release");
-        queue.update().await;
-        assert!(
-            !slots.has_booking(&released),
-            "release frees before it returns"
-        );
-        assert!(
-            slots.has_booking(&committed),
-            "a committed handle leaves the booking to its new owner"
-        );
-        slots.free(&committed.request_id, decay_now()).unwrap();
-        slots.assert_completely_drained(decay_now());
-    }
-
     struct DropResponseOnLoadPublisher {
         response_rx: Arc<StdMutex<Option<SchedulingResponseReceiver>>>,
     }
@@ -2423,7 +2405,7 @@ mod tests {
             Ok(())
         }
 
-        fn publish_scheduler_load(&self, _load: crate::sequences::SchedulerLoadSnapshot) {
+        fn publish_scheduler_load(&self, _load: dynamo_slot_tracker::SchedulerLoadSnapshot) {
             self.response_rx.lock().unwrap().take();
         }
 
@@ -2431,7 +2413,7 @@ mod tests {
             &self,
             _: &WorkerWithDpRank,
             _: &str,
-            _: crate::sequences::LocalWorkerLoad,
+            _: dynamo_slot_tracker::LocalWorkerLoad,
         ) {
         }
     }
@@ -2638,12 +2620,6 @@ mod tests {
         (queue, slots, cfg_tx)
     }
 
-    fn policy_profile(yaml: &str) -> PolicyProfile {
-        RouterPolicyConfig::from_yaml(yaml)
-            .unwrap()
-            .resolve_profile(None, None, crate::config::RouterQueuePolicy::Fcfs)
-    }
-
     #[allow(clippy::type_complexity)]
     fn make_queue_with_profile(
         num_workers: usize,
@@ -2741,7 +2717,7 @@ mod tests {
     ) {
         slots.set_worker_capacities(configs.iter().map(|(&id, cfg)| {
             (
-                crate::sequences::topology::WorkerDpRange::new(
+                dynamo_slot_tracker::topology::WorkerDpRange::new(
                     id,
                     cfg.data_parallel_start_rank(),
                     cfg.data_parallel_size(),
@@ -2966,7 +2942,7 @@ mod tests {
         let queue = Arc::new(SchedulerQueue::new_with_capacity(
             Arc::clone(&slots),
             cfg_rx,
-            PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
+            PolicyProfile::synthetic(threshold_frac, dynamo_admission::RouterQueuePolicy::Fcfs),
             block_size,
             DefaultWorkerSelector::new(None, "test"),
             None,
@@ -2985,9 +2961,7 @@ mod tests {
         isl_tokens: usize,
     ) -> (
         SchedulingRequest,
-        tokio::sync::oneshot::Receiver<
-            Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>,
-        >,
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, crate::types::KvSchedulerError>>,
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
@@ -3018,9 +2992,275 @@ mod tests {
         (req, rx)
     }
 
+    // The caller drives this actor directly. Its hints are separate from the
+    // idle actor spawned by make_queue, so tests control notification ordering.
+    fn actor_for_test<Sel: WorkerSelector<SimpleWorkerConfig>>(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>,
+        slots: &Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        selector: Sel,
+    ) -> SchedulerQueueActor<NoopSequencePublisher, SimpleWorkerConfig, Sel, NoopOverlapScoresRefresh>
+    {
+        SchedulerQueueActor {
+            pending: PolicyQueue::new(&queue.profile),
+            cleanup: Arc::clone(&queue.cleanup),
+            capacity_updates: None,
+            capacity_workers: FxHashSet::default(),
+            profile: Arc::clone(&queue.profile),
+            pending_count: Arc::clone(&queue.pending_count),
+            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
+            class_counters: Arc::clone(&queue.class_counters),
+            slots: Arc::clone(slots),
+            workers_with_configs: queue.workers_with_configs.clone(),
+            workers_generation: Arc::clone(&queue.workers_generation),
+            candidate_preparer: Arc::clone(&queue.candidate_preparer),
+            turn: 0,
+            turn_prepared: None,
+            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            full_ranks: FullRankCounts::default(),
+            block_size: 16,
+            selector,
+            prefill_load_estimator: None,
+            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
+            overlap_refresh_after: None,
+            overloaded_worker_provider: None,
+            available_worker_provider: None,
+            non_max_overlap_selection_observer: Arc::clone(
+                &queue.non_max_overlap_selection_observer,
+            ),
+            selection_trace: Arc::clone(&queue.selection_trace),
+            reject_thresholds: queue.reject_thresholds.clone(),
+        }
+    }
+
+    struct CountingPreparedPolicy {
+        inner: dynamo_worker_selection::WorkerSelectionPolicy,
+        prepared_selections: Arc<AtomicUsize>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for CountingPreparedPolicy {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerSelector::<SimpleWorkerConfig>::required_worker_inputs(&self.inner)
+        }
+
+        fn select_worker(
+            &self,
+            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            self.inner.select_worker(input)
+        }
+
+        fn candidate_preparer(&self) -> Option<CandidatePreparer> {
+            WorkerSelector::<SimpleWorkerConfig>::candidate_preparer(&self.inner)
+        }
+
+        fn select_worker_prepared(
+            &self,
+            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+            prepared: Option<PreparedCandidates>,
+            trace: Option<SelectionTraceSpec>,
+        ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+            if prepared.is_some() {
+                self.prepared_selections.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner.select_worker_prepared(input, prepared, trace)
+        }
+    }
+
+    /// Picks the least-loaded worker; ties go to the lowest worker.
+    struct LeastLoaded;
+
+    impl dynamo_worker_selection::WorkerPicker for LeastLoaded {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::LOAD
+        }
+
+        fn pick(
+            &mut self,
+            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            input: dynamo_worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
+            let (candidates, loads) = (input.candidates(), input.load().unwrap());
+            Ok((0..candidates.len())
+                .min_by_key(|&i| {
+                    let load = loads[i].active_requests() + loads[i].active_prefill_tokens();
+                    (load, candidates[i].worker())
+                })
+                .unwrap())
+        }
+    }
+
+    fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
+        CountingPreparedPolicy {
+            inner: dynamo_worker_selection::WorkerSelectionPolicy::new(
+                dynamo_worker_selection::SelectionConfig::default(),
+                "test",
+                vec![],
+                Box::new(LeastLoaded),
+            ),
+            prepared_selections: Arc::clone(prepared_selections),
+        }
+    }
+
+    /// Two workers behind a counting policy, with availability, overload, and reject
+    /// thresholds the test can change.
+    struct PreparedQueue {
+        queue:
+            Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>>,
+        slots: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        cfg_tx: watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+        available: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
+        overloaded: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
+        reject: Arc<StdMutex<BusyThresholds>>,
+        prepared_selections: Arc<AtomicUsize>,
+    }
+
+    impl PreparedQueue {
+        fn prepared_selections(&self) -> usize {
+            self.prepared_selections.load(Ordering::Relaxed)
+        }
+    }
+
+    fn make_prepared_queue() -> PreparedQueue {
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            (0..2).map(|id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "test",
+        ));
+        let configs = (0..2)
+            .map(|id| {
+                let config = SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                };
+                (id, config)
+            })
+            .collect();
+        let (cfg_tx, cfg_rx) = watch::channel(configs);
+        set_worker_capacities_from_configs(&slots, &cfg_rx.borrow());
+        let available = Arc::new(StdMutex::new(None));
+        let available_provider: WorkerAvailabilityProvider = {
+            let available = Arc::clone(&available);
+            Arc::new(move |_| available.lock().unwrap().clone())
+        };
+        let overloaded = Arc::new(StdMutex::new(None));
+        let overloaded_provider: OverloadedWorkerProvider = {
+            let overloaded = Arc::clone(&overloaded);
+            Arc::new(move || overloaded.lock().unwrap().clone())
+        };
+        let reject = Arc::new(StdMutex::new(BusyThresholds::default()));
+        let reject_provider: RejectThresholdsProvider = {
+            let reject = Arc::clone(&reject);
+            Arc::new(move || *reject.lock().unwrap())
+        };
+        let prepared_selections = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+            16,
+            counting_policy(&prepared_selections),
+            None,
+            None,
+            Some(overloaded_provider),
+            Some(available_provider),
+            Some(reject_provider),
+        ));
+        PreparedQueue {
+            queue,
+            slots,
+            cfg_tx,
+            available,
+            overloaded,
+            reject,
+            prepared_selections,
+        }
+    }
+
+    /// Enqueue with rows prepared earlier, as if the caller were slow to send.
+    async fn enqueue_prepared(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>,
+        request: SchedulingRequest,
+        prepared: Option<Box<PreparedAdmission>>,
+    ) {
+        let queue_metadata = queue.default_queue_metadata(&request, Instant::now());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue
+            .admission_tx
+            .send(AdmissionCommand::Enqueue {
+                request,
+                attempt_tx: None,
+                block_hashes: None,
+                prepared,
+                queue_metadata,
+                lease: None,
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        ack_rx.await.unwrap();
+    }
+
+    #[test]
+    fn admission_lifecycle_cleanup_upgrades_to_the_exact_booking() {
+        let transfer = AdmissionLifecycleTransfer::new("retryable-request".to_string());
+        transfer.arm_pending();
+        let booking = SchedulerBookingDescriptor {
+            request_id: "retryable-request".to_string(),
+            worker: WorkerWithDpRank::new(7, 3),
+            attempt_id: AttemptId::for_testing(41),
+        };
+        transfer.arm_booking(booking.clone());
+
+        let Some(AdmissionLifecycleCleanup::Booking(cleanup)) = transfer.cleanup_target() else {
+            panic!("admitted cleanup must carry the exact booking");
+        };
+        assert_eq!(cleanup, booking);
+    }
+
+    /// The handle frees its booking exactly when it is dropped armed; `commit`
+    /// hands the booking over untouched and `release` frees it with an ack.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn booking_handle_frees_only_while_armed() {
+        let (queue, slots) = make_queue(1, 16, 512, Some(0.0));
+
+        let armed = book_directly(&slots, "armed");
+        drop(queue.booking_handle(armed.clone()));
+        wait_freed(&slots, &armed).await;
+
+        let committed = book_directly(&slots, "committed");
+        let handle = queue.booking_handle(committed.clone());
+        let request_id_ptr = handle.booking.request_id.as_ptr();
+        let descriptor = handle.commit();
+        assert_eq!(descriptor, committed);
+        assert_eq!(descriptor.request_id.as_ptr(), request_id_ptr);
+
+        // Explicit release is immediate. The following actor barrier also
+        // proves commit did not enqueue deferred cleanup for its booking.
+        let released = book_directly(&slots, "released");
+        queue
+            .booking_handle(released.clone())
+            .release()
+            .await
+            .expect("acknowledged release");
+        queue.update().await;
+        assert!(
+            !slots.has_booking(&released),
+            "release frees before it returns"
+        );
+        assert!(
+            slots.has_booking(&committed),
+            "a committed handle leaves the booking to its new owner"
+        );
+        slots.free(&committed.request_id, decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -3040,7 +3280,7 @@ mod tests {
             }
         }
 
-        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let profile = PolicyProfile::synthetic(None, dynamo_admission::RouterQueuePolicy::Fcfs);
         let (queue, _slots) = make_queue_with_profile(1, 64, 256, profile);
         let pin = WorkerWithDpRank::new(0, 0);
         for hashes in [None, Some(vec![]), Some(vec![11, 7, 11])] {
@@ -3066,7 +3306,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
     async fn classifier_input_projection_benchmark() {
-        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
         use std::hint::black_box;
         use std::task::Context;
         use std::time::Instant as WallClock;
@@ -3097,7 +3337,7 @@ mod tests {
             .unwrap();
         assert!(retained > 0 && retained <= 1024);
         assert!(hashes.unwrap_or(0) <= 62_500);
-        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let profile = PolicyProfile::synthetic(None, dynamo_admission::RouterQueuePolicy::Fcfs);
         let (queue, _slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
         let sources: Vec<_> = (0..retained)
             .map(|i| {
@@ -3151,153 +3391,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classifiers_read_class_and_reject_thresholds() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: short
-  - min_tokens: 32
-    bucket: long
-policy_classes:
-  - name: latency_short
-    policy_family: latency
-    cache_bucket: short
-    quantum: 1
-    decode_busy_threshold_frac: 0.5
-  - name: latency_long
-    policy_family: latency
-    cache_bucket: long
-    quantum: 1
-  - name: bulk_short
-    policy_family: bulk
-    cache_bucket: short
-    quantum: 1
-    prefill_busy_threshold_frac: 0.25
-  - name: bulk_long
-    policy_family: bulk
-    cache_bucket: long
-    quantum: 1
-"#,
-        );
-        let reject = crate::scheduling::BusyThresholds {
-            prefill_busy_threshold_frac: Some(1.0),
-            ..Default::default()
-        };
-        let (queue, _slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
-            1,
-            16,
-            64,
-            profile,
-            Some(Arc::new(move || reject)),
-        );
-        let (mut request, _rx) = make_request("classified", 16);
-        request.policy_class = Some("latency".to_string());
-        let (mut classified, _workers) =
-            queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
-
-        let latency = crate::scheduling::BusyThresholds {
-            decode_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        };
-        let bulk = crate::scheduling::BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.25),
-            ..Default::default()
-        };
-        // 16 uncached tokens fall in the `short` bucket.
-        assert_eq!(classified.queue_thresholds(), latency);
-        assert_eq!(classified.queue_thresholds_for("bulk"), Some(bulk));
-        assert_eq!(classified.queue_thresholds_for("missing"), None);
-        assert_eq!(classified.reject_thresholds(), reject);
-
-        classified.set_policy_class("bulk");
-        assert_eq!(classified.queue_thresholds(), bulk);
-    }
-
-    #[tokio::test]
-    async fn classifier_overrides_are_validated_before_enqueue() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
-policy_classes:
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
-    quantum: 1
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
-    quantum: 1
-  - name: bulk_cached
-    policy_family: bulk
-    cache_bucket: cached
-    quantum: 1
-  - name: bulk_uncached
-    policy_family: bulk
-    cache_bucket: uncached
-    quantum: 1
-  - name: custom_priority
-    quantum: 1
-"#,
-        );
-        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
-        let (mut request, _rx) = make_request("classified", 16);
-        request.policy_class = Some("latency".to_string());
-        let ingress_at = Instant::now();
-        let due_at = ingress_at + Duration::from_secs(20);
-        let mut classified = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-        assert_eq!(classified.ingress_at(), ingress_at);
-        classified.set_policy_class("bulk");
-        classified.set_due_at(due_at);
-        classified.set_scheduling_cost_tokens(7);
-
-        let metadata = queue
-            .validate_classification(&mut request, classified, ingress_at)
-            .unwrap();
-        assert_eq!(
-            queue.profile.class(metadata.class_index).name,
-            "bulk_cached"
-        );
-        assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
-        assert_eq!(metadata.due_at, Some(due_at));
-
-        let mut invalid = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-        invalid.set_policy_class("missing");
-        assert!(matches!(
-            queue.validate_classification(&mut request, invalid, ingress_at),
-            Err(KvSchedulerError::InvalidClassificationMetadata(_))
-        ));
-
-        let mut physical = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-        physical.set_policy_class("latency_cached");
-        assert!(matches!(
-            queue.validate_classification(&mut request, physical, ingress_at),
-            Err(KvSchedulerError::InvalidClassificationMetadata(_))
-        ));
-
-        let mut zero_cost = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-        zero_cost.set_scheduling_cost_tokens(0);
-        assert!(matches!(
-            queue.validate_classification(&mut request, zero_cost, ingress_at),
-            Err(KvSchedulerError::InvalidClassificationMetadata(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn classifier_targets_preserve_pins_and_caller_eligibility() {
         let (queue, _slots) = make_queue(2, 16, 64, None);
         let (mut request, _rx) = make_request("targeted", 48);
@@ -3347,52 +3440,6 @@ policy_classes:
         // The selector still applies the allowlist after a classifier supplies a target.
         let result = queue.select_without_admission(request).await.unwrap();
         assert_eq!(result.response.best_worker, pin);
-    }
-
-    #[tokio::test]
-    async fn validation_recomputes_cache_eligibility_at_enqueue() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
-policy_classes:
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
-    quantum: 1
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
-    quantum: 1
-"#,
-        );
-        let (queue, _slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 64, profile);
-        let (mut request, _rx) = make_request("classified", 48);
-        request
-            .overlap
-            .effective_cached_tokens
-            .insert(WorkerWithDpRank::new(0, 0), 32);
-
-        let ingress_at = Instant::now();
-        let classified = queue
-            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
-            .0;
-
-        // The only cache-bearing worker disappears while the classification is
-        // pending; enqueue-time state governs, so the request buckets as
-        // uncached — exactly as an unclassified request admitted now would.
-        cfg_tx.send(HashMap::new()).unwrap();
-        let metadata = queue
-            .validate_classification(&mut request, classified, ingress_at)
-            .unwrap();
-        assert_eq!(
-            queue.profile.class(metadata.class_index).name,
-            "latency_uncached"
-        );
     }
 
     #[tokio::test]
@@ -3567,489 +3614,6 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         slots.assert_completely_drained(decay_now());
-    }
-
-    #[tokio::test]
-    async fn mixed_classes_recheck_capacity_after_each_admission() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: uncapped
-    policy_family: uncapped
-    cache_bucket: all
-    quantum: 1
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-"#,
-        );
-        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
-        let worker = WorkerWithDpRank::new(0, 0);
-        let (mut active, active_rx) = make_request("active", 64);
-        active.policy_class = Some("uncapped".into());
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (mut first, mut first_rx) = make_request("first", 64);
-        first.pinned_worker = Some(worker);
-        queue.enqueue(first).await;
-        let (second, mut second_rx) = make_request("second", 64);
-        queue.enqueue(second).await;
-        assert_eq!(queue.pending_count(), 2);
-
-        // The uncapped class can still run while the capped class waits.
-        let (mut uncapped, uncapped_rx) = make_request("uncapped", 64);
-        uncapped.policy_class = Some("uncapped".into());
-        queue.enqueue(uncapped).await;
-        assert_eq!(uncapped_rx.await.unwrap().unwrap().best_worker, worker);
-        assert_eq!(queue.pending_count(), 2);
-        assert!(matches!(
-            first_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert!(matches!(
-            second_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-
-        for id in ["active", "uncapped"] {
-            slots
-                .mark_prefill_completed(&id.to_string(), decay_now())
-                .unwrap();
-            slots.free(&id.to_string(), decay_now()).unwrap();
-        }
-        queue.update().await;
-        assert_eq!(first_rx.try_recv().unwrap().unwrap().best_worker, worker);
-        // Reusing the pre-admission snapshot would also admit the second request.
-        assert!(matches!(
-            second_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert_eq!(queue.pending_count(), 1);
-
-        slots
-            .mark_prefill_completed(&"first".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"first".to_string(), decay_now()).unwrap();
-        queue.update().await;
-        assert_eq!(second_rx.try_recv().unwrap().unwrap().best_worker, worker);
-        assert_eq!(queue.pending_count(), 0);
-        slots
-            .mark_prefill_completed(&"second".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"second".to_string(), decay_now()).unwrap();
-        slots.assert_completely_drained(decay_now());
-    }
-
-    #[tokio::test]
-    async fn zero_class_queue_limit_never_queues() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-    request_queue_limit_per_worker: 0
-"#,
-        );
-        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
-
-        // An idle worker admits a zero-limit request directly, bypassing the
-        // policy queue.
-        let (admitted, admitted_rx) = make_request("admitted-idle", 64);
-        queue.enqueue(admitted).await;
-        admitted_rx.await.unwrap().unwrap();
-        assert_eq!(queue.pending_count(), 0);
-
-        // With every worker busy the request would have to queue, so the zero
-        // limit rejects it instead of parking it.
-        let (rejected, rejected_rx) = make_request("rejected-busy", 64);
-        queue.enqueue(rejected).await;
-        assert!(matches!(
-            rejected_rx.await.unwrap(),
-            Err(KvSchedulerError::QueueRejected(_))
-        ));
-        assert_eq!(queue.pending_count(), 0);
-
-        slots
-            .mark_prefill_completed(&"admitted-idle".to_string(), decay_now())
-            .unwrap();
-        slots
-            .free(&"admitted-idle".to_string(), decay_now())
-            .unwrap();
-        slots.assert_completely_drained(decay_now());
-    }
-
-    #[tokio::test]
-    async fn zero_token_queue_limit_admits_idle_workers() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-    raw_isl_token_queue_limit_per_worker: 0
-"#,
-        );
-        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
-
-        // A zero token limit means the class can never hold a queued entry, so
-        // an idle worker must still admit directly instead of tripping the
-        // limit-zero rejection.
-        let (admitted, admitted_rx) = make_request("admitted-idle-token-limit", 64);
-        queue.enqueue(admitted).await;
-        admitted_rx.await.unwrap().unwrap();
-        assert_eq!(queue.pending_count(), 0);
-
-        let (rejected, rejected_rx) = make_request("rejected-busy-token-limit", 64);
-        queue.enqueue(rejected).await;
-        assert!(matches!(
-            rejected_rx.await.unwrap(),
-            Err(KvSchedulerError::QueueRejected(_))
-        ));
-        assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn zero_workers_report_no_endpoints_not_queue_rejection() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-    request_queue_limit_per_worker: 4
-"#,
-        );
-        let (queue, _slots) = make_queue_with_profile(0, 16, 64, profile);
-
-        // With zero discovered workers every per-worker limit scales to zero;
-        // the request must surface the real condition instead of a
-        // `QueueRejected { limit: 0 }`.
-        let (request, response_rx) = make_request("no-workers", 64);
-        queue.enqueue(request).await;
-        assert!(matches!(
-            response_rx.await.unwrap(),
-            Err(KvSchedulerError::NoEndpoints)
-        ));
-        assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn direct_release_wakes_queued_and_mixed_classes_with_full_admission_channel() {
-        let mixed = policy_profile(
-            r#"
-default_policy_family: queued
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: direct
-    policy_family: direct
-    cache_bucket: all
-    quantum: 1
-  - name: queued
-    policy_family: queued
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 32
-"#,
-        );
-        for profile in [
-            PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Fcfs),
-            mixed,
-        ] {
-            for overflow in [false, true] {
-                let (queue, slots) = make_queue_with_profile(1, 16, 64, profile.clone());
-                let (mut active, active_rx) = make_request("active", 64);
-                // In the mixed profile, capacity released by a direct class
-                // must wake requests waiting in the queued class.
-                active.policy_class = Some("direct".into());
-                let (attempt_tx, attempt_rx) = oneshot::channel();
-                queue
-                    .enqueue_admitted_with_block_hashes_and_lease(
-                        active,
-                        None,
-                        None,
-                        Some(attempt_tx),
-                        None,
-                        Instant::now(),
-                    )
-                    .await;
-                let worker = active_rx.await.unwrap().unwrap().best_worker;
-                let booking = SchedulerBookingDescriptor {
-                    request_id: "active".into(),
-                    worker,
-                    attempt_id: attempt_rx.await.unwrap(),
-                };
-                let (mut queued, queued_rx) = make_request("queued", 64);
-                queued.pinned_worker = Some(worker);
-                queue.enqueue(queued).await;
-                assert_eq!(queue.pending_count(), 1);
-
-                // Hold every admission permit. Capacity progress must not need
-                // space in the command channel, or a periodic update task.
-                let permits = queue
-                    .admission_tx
-                    .reserve_many(queue.admission_tx.max_capacity())
-                    .await
-                    .unwrap();
-                let released = queue.booking_cleanup().enqueue_acknowledged(booking);
-                assert!(released.response.is_ok());
-                assert_eq!(slots.active_tokens(Instant::now())[&worker], 0);
-                if overflow {
-                    for _ in 0..300 {
-                        queue.capacity_changed(Some(worker));
-                    }
-                }
-                let response = tokio::time::timeout(Duration::from_secs(1), queued_rx)
-                    .await
-                    .expect("capacity wake must drain without command permits")
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(response.best_worker, worker);
-                assert_eq!(queue.pending_count(), 0);
-                drop(permits);
-                slots.free(&"queued".to_owned(), Instant::now()).unwrap();
-                queue.update().await;
-                slots.assert_completely_drained(Instant::now());
-            }
-        }
-    }
-
-    // The caller drives this actor directly. Its hints are separate from the
-    // idle actor spawned by make_queue, so tests control notification ordering.
-    fn actor_for_test<Sel: WorkerSelector<SimpleWorkerConfig>>(
-        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>,
-        slots: &Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-        selector: Sel,
-    ) -> SchedulerQueueActor<NoopSequencePublisher, SimpleWorkerConfig, Sel, NoopOverlapScoresRefresh>
-    {
-        SchedulerQueueActor {
-            pending: PolicyQueue::new(&queue.profile),
-            cleanup: Arc::clone(&queue.cleanup),
-            capacity_updates: None,
-            capacity_workers: FxHashSet::default(),
-            profile: Arc::clone(&queue.profile),
-            pending_count: Arc::clone(&queue.pending_count),
-            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
-            class_counters: Arc::clone(&queue.class_counters),
-            slots: Arc::clone(slots),
-            workers_with_configs: queue.workers_with_configs.clone(),
-            workers_generation: Arc::clone(&queue.workers_generation),
-            candidate_preparer: Arc::clone(&queue.candidate_preparer),
-            turn: 0,
-            turn_prepared: None,
-            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
-            full_ranks: FullRankCounts::default(),
-            block_size: 16,
-            selector,
-            prefill_load_estimator: None,
-            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
-            overlap_refresh_after: None,
-            overloaded_worker_provider: None,
-            available_worker_provider: None,
-            non_max_overlap_selection_observer: Arc::clone(
-                &queue.non_max_overlap_selection_observer,
-            ),
-            selection_trace: Arc::clone(&queue.selection_trace),
-            reject_thresholds: queue.reject_thresholds.clone(),
-        }
-    }
-
-    struct CountingPreparedPolicy {
-        inner: crate::WorkerSelectionPolicy,
-        prepared_selections: Arc<AtomicUsize>,
-    }
-
-    impl WorkerSelector<SimpleWorkerConfig> for CountingPreparedPolicy {
-        fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerSelector::<SimpleWorkerConfig>::required_worker_inputs(&self.inner)
-        }
-
-        fn select_worker(
-            &self,
-            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
-        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-            self.inner.select_worker(input)
-        }
-
-        fn candidate_preparer(&self) -> Option<CandidatePreparer> {
-            WorkerSelector::<SimpleWorkerConfig>::candidate_preparer(&self.inner)
-        }
-
-        fn select_worker_prepared(
-            &self,
-            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
-            prepared: Option<PreparedCandidates>,
-            trace: Option<SelectionTraceSpec>,
-        ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-            if prepared.is_some() {
-                self.prepared_selections.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner.select_worker_prepared(input, prepared, trace)
-        }
-    }
-
-    /// Picks the least-loaded worker; ties go to the lowest worker.
-    struct LeastLoaded;
-
-    impl crate::WorkerPicker for LeastLoaded {
-        fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerInputs::LOAD
-        }
-
-        fn pick(
-            &mut self,
-            _context: &crate::WorkerSelectionContext<'_>,
-            input: crate::WorkerInputView<'_>,
-        ) -> Result<usize, crate::WorkerSelectionPolicyError> {
-            let (candidates, loads) = (input.candidates(), input.load().unwrap());
-            Ok((0..candidates.len())
-                .min_by_key(|&i| {
-                    let load = loads[i].active_requests() + loads[i].active_prefill_tokens();
-                    (load, candidates[i].worker())
-                })
-                .unwrap())
-        }
-    }
-
-    fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
-        CountingPreparedPolicy {
-            inner: crate::WorkerSelectionPolicy::new(
-                crate::plugins::worker_selection::SelectionConfig::default(),
-                "test",
-                vec![],
-                Box::new(LeastLoaded),
-            ),
-            prepared_selections: Arc::clone(prepared_selections),
-        }
-    }
-
-    /// Two workers behind a counting policy, with availability, overload, and reject
-    /// thresholds the test can change.
-    struct PreparedQueue {
-        queue:
-            Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>>,
-        slots: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-        cfg_tx: watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
-        available: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
-        overloaded: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
-        reject: Arc<StdMutex<BusyThresholds>>,
-        prepared_selections: Arc<AtomicUsize>,
-    }
-
-    impl PreparedQueue {
-        fn prepared_selections(&self) -> usize {
-            self.prepared_selections.load(Ordering::Relaxed)
-        }
-    }
-
-    fn make_prepared_queue() -> PreparedQueue {
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            16,
-            (0..2).map(|id| (id, (0, 1))).collect(),
-            false,
-            0,
-            "test",
-        ));
-        let configs = (0..2)
-            .map(|id| {
-                let config = SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(64),
-                    ..Default::default()
-                };
-                (id, config)
-            })
-            .collect();
-        let (cfg_tx, cfg_rx) = watch::channel(configs);
-        set_worker_capacities_from_configs(&slots, &cfg_rx.borrow());
-        let available = Arc::new(StdMutex::new(None));
-        let available_provider: WorkerAvailabilityProvider = {
-            let available = Arc::clone(&available);
-            Arc::new(move |_| available.lock().unwrap().clone())
-        };
-        let overloaded = Arc::new(StdMutex::new(None));
-        let overloaded_provider: OverloadedWorkerProvider = {
-            let overloaded = Arc::clone(&overloaded);
-            Arc::new(move || overloaded.lock().unwrap().clone())
-        };
-        let reject = Arc::new(StdMutex::new(BusyThresholds::default()));
-        let reject_provider: RejectThresholdsProvider = {
-            let reject = Arc::clone(&reject);
-            Arc::new(move || *reject.lock().unwrap())
-        };
-        let prepared_selections = Arc::new(AtomicUsize::new(0));
-        let queue = Arc::new(SchedulerQueue::new(
-            Arc::clone(&slots),
-            cfg_rx,
-            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
-            16,
-            counting_policy(&prepared_selections),
-            None,
-            None,
-            Some(overloaded_provider),
-            Some(available_provider),
-            Some(reject_provider),
-        ));
-        PreparedQueue {
-            queue,
-            slots,
-            cfg_tx,
-            available,
-            overloaded,
-            reject,
-            prepared_selections,
-        }
-    }
-
-    /// Enqueue with rows prepared earlier, as if the caller were slow to send.
-    async fn enqueue_prepared(
-        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>,
-        request: SchedulingRequest,
-        prepared: Option<Box<PreparedAdmission>>,
-    ) {
-        let queue_metadata = queue.default_queue_metadata(&request, Instant::now());
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue
-            .admission_tx
-            .send(AdmissionCommand::Enqueue {
-                request,
-                attempt_tx: None,
-                block_hashes: None,
-                prepared,
-                queue_metadata,
-                lease: None,
-                ack_tx,
-            })
-            .await
-            .unwrap();
-        ack_rx.await.unwrap();
     }
 
     #[tokio::test]
@@ -4769,7 +4333,7 @@ policy_classes:
             16,
             1_000_000,
             profile,
-            Some(Arc::new(|| crate::scheduling::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
                 decode_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -4843,7 +4407,7 @@ policy_classes:
             16,
             100,
             profile,
-            Some(Arc::new(|| crate::scheduling::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
                 prefill_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -4856,7 +4420,7 @@ policy_classes:
         };
         cfg_tx.send(HashMap::from([(0, worker_config)])).unwrap();
         slots
-            .reconcile_workers([crate::sequences::topology::WorkerDpRange::new(0, 0, 2)])
+            .reconcile_workers([dynamo_slot_tracker::topology::WorkerDpRange::new(0, 0, 2)])
             .unwrap();
         set_worker_capacities_from_configs(&slots, &cfg_tx.borrow());
         let rank0 = WorkerWithDpRank::new(0, 0);
@@ -4889,7 +4453,7 @@ policy_classes:
 
     #[tokio::test]
     async fn reject_thresholds_follow_the_live_provider_on_prefill_tokens() {
-        let live = Arc::new(Mutex::new(crate::scheduling::BusyThresholds {
+        let live = Arc::new(Mutex::new(dynamo_slot_tracker::busy::BusyThresholds {
             prefill_busy_threshold_frac: Some(0.5),
             ..Default::default()
         }));
@@ -4928,64 +4492,11 @@ policy_classes:
         slots.free(&"free".to_string(), decay_now()).unwrap();
 
         // Lifting the thresholds through the live provider takes effect at the next selection.
-        *live.lock() = crate::scheduling::BusyThresholds::default();
+        *live.lock() = dynamo_slot_tracker::busy::BusyThresholds::default();
         let (mut again, again_rx) = make_request("again", 16);
         again.pinned_worker = Some(first);
         queue.enqueue(again).await;
         assert_eq!(again_rx.await.unwrap().unwrap().best_worker, first);
-    }
-
-    #[tokio::test]
-    async fn decode_limit_holds_new_work_until_held_kv_frees() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: decode-bound
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-    decode_busy_threshold_frac: 0.5
-"#,
-        );
-        let (queue, slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 1_000_000, profile);
-        cfg_tx
-            .send(HashMap::from([(
-                0,
-                SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(1_000_000),
-                    total_kv_blocks: Some(8),
-                    ..Default::default()
-                },
-            )]))
-            .unwrap();
-
-        // A decoding request holds 6 of the worker's 8 KV blocks; its prefill load is gone.
-        let (mut held, held_rx) = make_request("held", 96);
-        held.token_seq = Some((0..6).collect());
-        queue.enqueue(held).await;
-        held_rx.await.unwrap().unwrap();
-        slots
-            .mark_prefill_completed(&"held".to_string(), decay_now())
-            .unwrap();
-
-        let (next, mut next_rx) = make_request("next", 16);
-        queue.enqueue(next).await;
-        queue.update().await;
-        assert!(
-            next_rx.try_recv().is_err(),
-            "held KV above the decode limit must keep new work queued"
-        );
-
-        slots.free(&"held".to_string(), decay_now()).unwrap();
-        queue.update().await;
-        next_rx
-            .await
-            .unwrap()
-            .expect("freed KV must release the queued request");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5105,366 +4616,6 @@ policy_classes:
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn policy_classes_apply_independent_thresholds_and_preserve_backlog_order() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: latency
-    policy_family: latency
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: bulk
-    policy_family: bulk
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 1024
-"#,
-        );
-        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
-
-        let (mut active, active_rx) = make_request("active", 64);
-        active.policy_class = Some("latency".to_string());
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (mut bulk, bulk_rx) = make_request("bulk", 64);
-        bulk.policy_class = Some("bulk".to_string());
-        queue.enqueue(bulk).await;
-        bulk_rx.await.unwrap().unwrap();
-
-        let (mut queued_first, mut queued_first_rx) = make_request("queued-first", 64);
-        queued_first.policy_class = Some("latency".to_string());
-        queue.enqueue(queued_first).await;
-        assert_eq!(queue.pending_count(), 1);
-
-        for request_id in ["active", "bulk"] {
-            slots
-                .mark_prefill_completed(&request_id.to_string(), decay_now())
-                .unwrap();
-            slots.free(&request_id.to_string(), decay_now()).unwrap();
-        }
-
-        let (mut queued_second, mut queued_second_rx) = make_request("queued-second", 64);
-        queued_second.policy_class = Some("latency".to_string());
-        queue.enqueue(queued_second).await;
-        assert_eq!(
-            queue.pending_count(),
-            1,
-            "enqueue should admit the existing head before the new arrival"
-        );
-        queued_first_rx
-            .try_recv()
-            .expect("first queued request should be admitted")
-            .expect("first queued request failed");
-        assert!(
-            queued_second_rx.try_recv().is_err(),
-            "second request should remain behind the admitted head"
-        );
-
-        slots
-            .mark_prefill_completed(&"queued-first".to_string(), decay_now())
-            .unwrap();
-        slots
-            .free(&"queued-first".to_string(), decay_now())
-            .unwrap();
-        queue.update().await;
-        queued_second_rx.await.unwrap().unwrap();
-    }
-
-    // No-bypass ordering per DEP #13891: freed capacity goes to the queued
-    // head, never to the arriving request.
-    #[tokio::test]
-    async fn arrival_drains_other_class_backlog_instead_of_bypassing() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: latency
-    policy_family: latency
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 1024
-  - name: bulk
-    policy_family: bulk
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-"#,
-        );
-        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
-
-        let (mut active, active_rx) = make_request("active", 64);
-        active.policy_class = Some("latency".to_string());
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        // The bulk class sees the worker as busy, so its request parks.
-        let (mut bulk_head, mut bulk_head_rx) = make_request("bulk-head", 64);
-        bulk_head.policy_class = Some("bulk".to_string());
-        queue.enqueue(bulk_head).await;
-        assert_eq!(queue.pending_count(), 1);
-
-        // Free the worker without emitting a capacity update; the parked head
-        // stays queued until something drains.
-        slots
-            .mark_prefill_completed(&"active".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"active".to_string(), decay_now()).unwrap();
-        assert_eq!(queue.pending_count(), 1);
-
-        // A latency arrival must not bypass the bulk backlog: its enqueue-turn
-        // drain admits the parked bulk head alongside the arrival itself.
-        let (mut arrival, arrival_rx) = make_request("latency-arrival", 64);
-        arrival.policy_class = Some("latency".to_string());
-        queue.enqueue(arrival).await;
-        assert_eq!(queue.pending_count(), 0);
-        bulk_head_rx
-            .try_recv()
-            .expect("parked bulk head should drain on the arrival's turn")
-            .expect("bulk head failed");
-        arrival_rx.await.unwrap().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn policy_families_and_cache_buckets_select_physical_queues() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
-policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
-    quantum: 1
-    prefill_busy_threshold: 0
-  - name: custom_priority
-    quantum: 1
-    prefill_busy_threshold: 0
-"#,
-        );
-        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
-        let worker = WorkerWithDpRank::new(0, 0);
-
-        let (active, active_rx) = make_request("active", 64);
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (mut latency_cached, _latency_cached_rx) = make_request("latency-cached", 64);
-        latency_cached.policy_class = Some("latency".to_string());
-        latency_cached
-            .overlap
-            .effective_cached_tokens
-            .insert(worker, 64);
-        queue.enqueue(latency_cached).await;
-
-        let (mut latency_uncached, _latency_uncached_rx) = make_request("latency-uncached", 64);
-        latency_uncached.policy_class = Some("latency".to_string());
-        queue.enqueue(latency_uncached).await;
-
-        let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
-        unknown_cached.policy_class = Some("unknown".to_string());
-        unknown_cached
-            .overlap
-            .effective_cached_tokens
-            .insert(worker, 64);
-        queue.enqueue(unknown_cached).await;
-
-        let (mut ordinary_class_name, _ordinary_class_name_rx) =
-            make_request("ordinary-class-name", 64);
-        ordinary_class_name.policy_class = Some("latency_cached".to_string());
-        queue.enqueue(ordinary_class_name).await;
-
-        let (mut custom, _custom_rx) = make_request("custom", 64);
-        custom.policy_class = Some("custom_priority".to_string());
-        queue.enqueue(custom).await;
-
-        assert_eq!(
-            queue.class_queue_stats(0),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 64,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(1),
-            Some(ClassQueueStats {
-                received_total: 2,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(2),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 64,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(3),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-        assert_eq!(
-            queue.class_queue_stats(4),
-            Some(ClassQueueStats {
-                received_total: 1,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn class_local_limit_rejection_is_typed_and_not_overload() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-    request_queue_limit_per_worker: 1
-"#,
-        );
-        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
-
-        let (active, active_rx) = make_request("active", 64);
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (queued, _queued_rx) = make_request("queued", 64);
-        queue.enqueue(queued).await;
-
-        let (rejected, rejected_rx) = make_request("rejected", 64);
-        queue.enqueue(rejected).await;
-        let error = rejected_rx.await.unwrap().unwrap_err();
-        let KvSchedulerError::QueueRejected(rejection) = &error else {
-            panic!("expected queue rejection, got {error:?}");
-        };
-        assert_eq!(rejection.policy_class, "capped");
-        assert_eq!(rejection.limit_kind, super::super::QueueLimitKind::Requests);
-        assert_eq!(rejection.current, 1);
-        assert_eq!(rejection.limit, 1);
-        assert!(!error.is_overload());
-
-        assert_eq!(
-            queue.class_queue_stats(0),
-            Some(ClassQueueStats {
-                received_total: 3,
-                rejected_due_time_passed_total: 0,
-                pending_count: 1,
-                pending_isl_tokens: 64,
-                pending_cached_tokens: 0,
-            })
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn per_worker_limit_tracks_discovered_worker_count_without_evicting() {
-        let profile = policy_profile(
-            r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: capped
-    policy_family: capped
-    cache_bucket: all
-    quantum: 1
-    prefill_busy_threshold: 0
-    request_queue_limit_per_worker: 1
-"#,
-        );
-        let (queue, _slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 64, profile);
-
-        let (active, active_rx) = make_request("active", 64);
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (first, mut first_rx) = make_request("first", 64);
-        queue.enqueue(first).await;
-
-        cfg_tx.send_modify(|configs| {
-            configs.insert(
-                1,
-                SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(64),
-                    ..Default::default()
-                },
-            );
-        });
-        let (second, _second_rx) = make_request("second", 64);
-        queue.enqueue(second).await;
-        first_rx
-            .try_recv()
-            .expect("new worker capacity should admit the existing head")
-            .expect("first queued request failed");
-        assert_eq!(queue.pending_count(), 1);
-
-        cfg_tx.send_modify(|configs| {
-            configs.remove(&1);
-        });
-        let (rejected, rejected_rx) = make_request("rejected", 64);
-        queue.enqueue(rejected).await;
-        let error = rejected_rx.await.unwrap().unwrap_err();
-        let KvSchedulerError::QueueRejected(rejection) = error else {
-            panic!("expected queue rejection, got {error:?}");
-        };
-        assert_eq!(rejection.current, 1);
-        assert_eq!(rejection.limit, 1);
-        assert_eq!(queue.pending_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -5596,10 +4747,7 @@ policy_classes:
         queue.enqueue(req_fail).await;
         let resp = rx_fail.await.expect("oneshot dropped");
         assert!(
-            matches!(
-                resp,
-                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
-            ),
+            matches!(resp, Err(crate::types::KvSchedulerError::NoEndpoints)),
             "expected NoEndpoints before worker updates, got {resp:?}"
         );
 

@@ -16,6 +16,7 @@ members = [
     "lib/router/admission",
     "lib/router/kv-indexer",
     "lib/router/protocol",
+    "lib/router/scheduler",
     "lib/router/session-affinity",
     "lib/router/slot-tracker",
     "lib/router/worker-selection",
@@ -95,6 +96,7 @@ dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
 dynamo-router-protocol = { path = "lib/router/protocol", version = "1.7.0" }
+dynamo-scheduler = { path = "lib/router/scheduler", version = "1.7.0" }
 dynamo-session-affinity = { path = "lib/router/session-affinity", version = "1.7.0" }
 dynamo-slot-tracker = { path = "lib/router/slot-tracker", version = "1.7.0" }
 dynamo-worker-selection = { path = "lib/router/worker-selection", version = "1.7.0" }

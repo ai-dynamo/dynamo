@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use super::config::RouterQueuePolicy;
-use super::types::SchedulingContext;
 use crate::protocols::WorkerConfigLike;
+use dynamo_scheduler::types::SchedulingContext;
 use ordered_float::OrderedFloat;
 /// Pluggable scheduling policy that determines queue ordering.
 /// Monomorphized for zero-cost inlining on the hot comparison path.

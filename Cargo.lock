@@ -2703,6 +2703,7 @@ dependencies = [
  "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-scheduler",
  "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "dynamo-tokens",
@@ -3160,6 +3161,44 @@ dependencies = [
  "validator",
  "velo",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-scheduler"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "blake3",
+ "crossbeam-queue",
+ "dashmap",
+ "derive_builder",
+ "dynamo-admission",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
+ "dynamo-router-protocol",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
+ "dynamo-tokens",
+ "dynamo-worker-selection",
+ "fastrand",
+ "futures-util",
+ "http 1.4.1",
+ "ordered-float 4.6.0",
+ "parking_lot",
+ "rmp-serde",
+ "rstest 0.18.2",
+ "rstest_reuse",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

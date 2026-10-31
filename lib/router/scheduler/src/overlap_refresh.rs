@@ -26,10 +26,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::router_config::CacheHitWeights;
-use crate::indexer::{LowerTierQueryOptions, TieredMatchProvider};
+use super::config::CacheHitWeights;
 use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::LocalBlockHash;
+use dynamo_kv_indexer::{LowerTierQueryOptions, TieredMatchProvider};
 
 use super::overlap::{OverlapAnalysis, OverlapSignals};
 
@@ -223,9 +223,9 @@ impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
+    use crate::OverlapSignals;
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
-    use crate::scheduling::OverlapSignals;
+    use dynamo_kv_indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
     use std::{
         collections::HashMap,
         sync::{

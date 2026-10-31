@@ -51,7 +51,7 @@ use crate::services::common::replication::{
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
 use crate::services::indexer::registry::IndexRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
-use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use crate::tracking_hash::{TrackingHashContext, TrackingHashScope, tracking_hash_context};
 
 mod hint;
 mod operation;
@@ -389,7 +389,7 @@ impl SelectionCore {
         kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        let tracking_hash = Arc::new(TrackingHashContext::from_config(&kv_router_config)?);
+        let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_config(
             &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
         )?;

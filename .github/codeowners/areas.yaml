@@ -67,6 +67,7 @@ areas:
   - lib/router/admission/
   - lib/router/kv-indexer/
   - lib/router/protocol/
+  - lib/router/scheduler/
   - lib/router/session-affinity/
   - lib/router/slot-tracker/
   - lib/router/worker-selection/

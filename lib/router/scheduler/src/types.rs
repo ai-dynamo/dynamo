@@ -18,8 +18,8 @@ use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::policy_queue::QueueRejection;
-use crate::sequences::WorkerLoadProjection;
+use dynamo_admission::queue::QueueRejection;
+use dynamo_slot_tracker::WorkerLoadProjection;
 
 pub use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
@@ -35,7 +35,12 @@ pub type OverloadedWorkerProvider =
 pub type WorkerAvailabilityProvider =
     Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
-pub use crate::plugins::worker_selection::WorkerSelectionPolicyError;
+pub use dynamo_worker_selection::WorkerSelectionPolicyError;
+
+/// Supplies the busy thresholds the gate applies when it checks whether a worker has room,
+/// re-read on every check so a host can retune them without rebuilding the scheduler.
+pub type RejectThresholdsProvider =
+    std::sync::Arc<dyn Fn() -> dynamo_slot_tracker::busy::BusyThresholds + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -48,7 +53,6 @@ pub struct TierOverlapBlocks {
 }
 
 /// Downstream matches must include a wildcard arm because this enum is non-exhaustive.
-#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
@@ -82,7 +86,7 @@ pub enum KvSchedulerError {
     RequestClassifierPanicked(String),
 
     #[error("request classifier failed: {0}")]
-    RequestClassifierFailed(Arc<super::ClassifierError>),
+    RequestClassifierFailed(Arc<dynamo_admission::classifier::ClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateClassificationRequestId(String),
@@ -514,9 +518,9 @@ impl SchedulingRequest {
     }
 }
 
-impl From<super::request_classifier::ClassificationError> for KvSchedulerError {
-    fn from(error: super::request_classifier::ClassificationError) -> Self {
-        use super::request_classifier::ClassificationError;
+impl From<dynamo_admission::classifier::ClassificationError> for KvSchedulerError {
+    fn from(error: dynamo_admission::classifier::ClassificationError) -> Self {
+        use dynamo_admission::classifier::ClassificationError;
         match error {
             ClassificationError::Panicked(message) => Self::RequestClassifierPanicked(message),
             ClassificationError::Failed(error) => Self::RequestClassifierFailed(error),

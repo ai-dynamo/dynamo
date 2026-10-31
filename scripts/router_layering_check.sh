@@ -48,6 +48,7 @@ TABLE=(
   "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
   "dynamo-worker-selection | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
   "dynamo-admission | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
+  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
   "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
 
