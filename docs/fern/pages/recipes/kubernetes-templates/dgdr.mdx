@@ -76,8 +76,8 @@ kubectl apply -f rapid.yaml -n ${NAMESPACE}
     <Code src="../../../../../examples/deployments/dgdr/generated-dgd-override.yaml" title="generated-dgd-override.yaml" language="yaml" maxLines={0} />
   </Accordion>
   <Accordion title="model-cache.yaml · Load weights from a shared PVC">
-    Mounts a pre-populated model cache into the profiling job and generated workers. Replace the
-    snapshot placeholder and create the PVC before applying the request.
+    Mounts a pre-populated model cache into the profiling job and generated workers. Set the
+    backend runtime image and create the PVC before applying the request.
 
     <Code src="../../../../../examples/deployments/dgdr/model-cache.yaml" title="model-cache.yaml" language="yaml" maxLines={0} />
   </Accordion>

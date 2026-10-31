@@ -347,7 +347,7 @@ mod tests {
         use dynamo_runtime::{
             DistributedRuntime, Runtime,
             distributed::DistributedConfig,
-            pipeline::{PushRouter, RouterMode},
+            pipeline::{PushRouter, PushRouterOptions, RouterMode},
         };
         use sha2::{Digest, Sha256};
 
@@ -466,12 +466,16 @@ mod tests {
                 .build()
                 .unwrap();
             let router =
-                PushRouter::<PreprocessedRequest, LLMEngineOutput>::from_client_with_state(
+                PushRouter::<PreprocessedRequest, LLMEngineOutput>::from_client_with_options(
                     client.clone(),
                     RouterMode::DeviceAwareWeighted,
-                    None,
-                    Some(indexer),
-                    Some(Arc::new(preprocessed_multimodal_cache_keys)),
+                    PushRouterOptions {
+                        multimodal_cache_indexer: Some(indexer),
+                        multimodal_cache_key_extractor: Some(Arc::new(
+                            preprocessed_multimodal_cache_keys,
+                        )),
+                        ..Default::default()
+                    },
                 )
                 .await
                 .unwrap()

@@ -11,6 +11,7 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 import argparse
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -57,6 +58,39 @@ def create_config() -> DynamoVllmConfig:
     # rules still tolerate its absence, matching a config built by hand.
     config.engine_args = SimpleNamespace(enable_lora=False)
     return config
+
+
+def test_artifact_router_profile_accepts_cli_and_environment(monkeypatch):
+    monkeypatch.setenv("DYNAMO_ARTIFACT_ROUTER_PROFILE", "[[3, 8, 2]]")
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+    assert parser.parse_args([]).artifact_router_profile == "[[3, 8, 2]]"
+    assert (
+        parser.parse_args(
+            ["--artifact-router-profile", "[[9, 16, 2]]"]
+        ).artifact_router_profile
+        == "[[9, 16, 2]]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_artifact_router_profile_fails_before_metadata_fetch(monkeypatch):
+    from dynamo.vllm import args
+
+    config = SimpleNamespace(model="ngc://example/model", artifact_router_profile="bad")
+    engine_args = SimpleNamespace(model="ngc://example/model", served_model_name=None)
+    fetch = AsyncMock(return_value="/tmp/model")
+    monkeypatch.setattr(
+        args, "_parse_cli_args", Mock(return_value=(config, engine_args))
+    )
+    monkeypatch.setattr(args, "needs_local_model_path", Mock(return_value=True))
+    monkeypatch.setattr(args, "fetch_model", fetch)
+    monkeypatch.setattr(args, "_build_config", Mock())
+
+    with pytest.raises(ValueError, match="invalid --artifact-router-profile"):
+        await args.parse_args_with_model_fetch([])
+
+    fetch.assert_not_awaited()
 
 
 def write_benchmark_points(tmp_path):
@@ -809,3 +843,57 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+class TestFreezeGcAfterInit:
+    """--freeze-gc-after-init is opt-in and rejected where it cannot run."""
+
+    def test_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", raising=False)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is False
+        assert parser.parse_args(["--freeze-gc-after-init"]).freeze_gc_after_init
+        assert DynamoVllmConfig.freeze_gc_after_init is False
+
+    def test_env_enables(self, monkeypatch):
+        monkeypatch.setenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", "true")
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is True
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.PREFILL,
+        ],
+    )
+    def test_registering_roles_accepted(self, mode):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = mode
+        config._validate_freeze_gc_after_init()
+
+    def test_encode_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            config._validate_freeze_gc_after_init()
+
+    def test_headless_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_freeze_gc_after_init()
+
+    def test_disabled_skips_checks(self):
+        config = create_config()
+        config.headless = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        config._validate_freeze_gc_after_init()

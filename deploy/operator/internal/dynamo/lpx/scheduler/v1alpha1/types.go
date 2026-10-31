@@ -727,7 +727,6 @@ func (in *LPUPipelineRequestStatus) DeepCopy() *LPUPipelineRequestStatus {
 type MaterializationScope struct {
 	CompilerSnapshotDigest   string                      `json:"compilerSnapshotDigest"`
 	CyborgPodCliqueRef       *PodCliqueReference         `json:"cyborgPodCliqueRef,omitempty"`
-	DynamoGraphDeploymentRef ObjectReference             `json:"dynamoGraphDeploymentRef"`
 	PodCliqueScalingGroupRef *PodCliqueScalingGroupScope `json:"podCliqueScalingGroupRef,omitempty"`
 	PodCliqueSetRef          ObjectReference             `json:"podCliqueSetRef"`
 	PodCliqueSetReplicaIndex int64                       `json:"podCliqueSetReplicaIndex"`
@@ -738,7 +737,6 @@ func (in *MaterializationScope) DeepCopyInto(out *MaterializationScope) {
 	if in.CyborgPodCliqueRef != nil {
 		out.CyborgPodCliqueRef = in.CyborgPodCliqueRef.DeepCopy()
 	}
-	in.DynamoGraphDeploymentRef.DeepCopyInto(&out.DynamoGraphDeploymentRef)
 	if in.PodCliqueScalingGroupRef != nil {
 		out.PodCliqueScalingGroupRef = in.PodCliqueScalingGroupRef.DeepCopy()
 	}

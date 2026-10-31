@@ -11,7 +11,10 @@
 mod default;
 mod thunderagent;
 mod two_tier_cost_fn;
-pub use default::{DefaultWorkerSelector, default_factory, default_policy};
+pub use default::{
+    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
+    startup_policy_parameters,
+};
 
 /// Registry containing the required default only, without an optional policy catalog.
 pub fn default_registry() -> RouterPluginRegistry {

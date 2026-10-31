@@ -39,8 +39,26 @@ types re-exported from the crate root.
 
 - `metrics`: Prometheus metrics for router internals
 - `runtime-protocols`: integration points with `dynamo-runtime`
-- `standalone-indexer`: standalone indexer service support
+- `standalone-indexer`: standalone indexer, overlap, and shared-cache services
+  (`services::indexer`, `services::overlap`, `services::shared_cache`)
+- `standalone-selection`: standalone worker-selection service
+  (`services::selection`); implies `standalone-indexer`
+- `standalone-slot-tracker`: standalone slot-tracker service
+  (`services::slot_tracker`)
 - `bench`: internal benchmarking helpers
+- `profile`: keeps hot indexer functions un-inlined for profiling
+- `testing`: test-only hooks consumed by dependent crates' tests; never enable in release
+
+## Testing the Standalone Services
+
+The `services/` modules are feature-gated and are not compiled by default, so
+a plain `cargo test -p dynamo-kv-router` silently skips their code and tests.
+Enable the corresponding feature when working on them:
+
+```bash
+cargo test -p dynamo-kv-router --features standalone-selection,standalone-slot-tracker
+cargo clippy -p dynamo-kv-router --all-targets --features standalone-selection,standalone-slot-tracker
+```
 
 ## Further Reading
 

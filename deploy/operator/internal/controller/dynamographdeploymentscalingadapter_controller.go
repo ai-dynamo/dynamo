@@ -210,10 +210,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) findAdaptersForDGD(ctx c
 			continue
 		}
 		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      adapterList.Items[i].Name,
-				Namespace: adapterList.Items[i].Namespace,
-			},
+			Name:      adapterList.Items[i].Name,
+			Namespace: adapterList.Items[i].Namespace,
 		})
 	}
 

@@ -18,12 +18,14 @@ pytest.importorskip(
 
 import dynamo.planner.simulation.load_predictor as load_predictor
 from dynamo.planner.simulation.load_predictor import (
+    LOAD_PREDICTOR_PRESETS,
     Window,
     _entry_label,
-    _internal_preset,
     build_windows_from_trace_paths,
     complete_predictor_preset,
+    distinct_predictor_candidates,
     evaluate_preset,
+    internal_preset,
     predictor_fields,
     sweep_load_predictor,
     window_loss,
@@ -72,7 +74,7 @@ def test_static_and_disabled_trigger_paths() -> None:
 
 
 def test_predictor_search_values_decode_with_family_defaults() -> None:
-    assert _internal_preset("prophet_w20_log1p") == {
+    assert internal_preset("prophet_w20_log1p") == {
         "family": "prophet",
         "log1p": True,
         "prophet_window_size": 20,
@@ -81,7 +83,7 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
         "r": 10.0,
         "min_points": 5,
     }
-    internal = _internal_preset(
+    internal = internal_preset(
         {
             "load_predictor": "kalman",
             "load_predictor_log1p": True,
@@ -94,7 +96,7 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
     assert internal["min_points"] == 5
 
     with pytest.raises(ValueError, match="load_predictor must be one of"):
-        _internal_preset({"load_predictor": "bogus"})
+        internal_preset({"load_predictor": "bogus"})
 
 
 def test_every_named_predictor_preset_covers_every_knob() -> None:
@@ -122,6 +124,23 @@ def test_predictor_fields_emit_only_selected_family() -> None:
     }
     assert _entry_label("prophet_w20_raw", 0) == "prophet_w20_raw"
     assert _entry_label({"load_predictor": "kalman"}, 3) == "custom_3"
+
+
+def test_distinct_predictor_candidates_label_complete_and_deduplicate() -> None:
+    defaults = distinct_predictor_candidates(list(LOAD_PREDICTOR_PRESETS))
+    assert [label for label, _ in defaults] == list(LOAD_PREDICTOR_PRESETS)
+    assert all(
+        mapping == complete_predictor_preset(label) for label, mapping in defaults
+    )
+
+    # The Kalman knobs of an ARIMA entry do not change the predictor, so the
+    # mapping repeats ``arima_raw`` and is dropped; the first label is kept.
+    arima = dict(complete_predictor_preset("arima_raw"), kalman_r=1.0)
+    kalman = {"load_predictor": "kalman", "kalman_r": 2.0}
+    candidates = distinct_predictor_candidates(["arima_raw", arima, kalman, kalman])
+    assert [label for label, _ in candidates] == ["arima_raw", "custom_2"]
+    assert candidates[1][1] == complete_predictor_preset(kalman)
+    assert internal_preset(candidates[1][1]) == internal_preset(kalman)
 
 
 class _LastValuePredictor:

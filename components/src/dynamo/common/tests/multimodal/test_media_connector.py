@@ -3,7 +3,7 @@
 
 """Unit tests for DynamoMediaConnector and its ImageLoader integration."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
@@ -48,6 +48,41 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
 
     assert exc_info.value is client_error
     parent_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetch", ["fetch_audio_async", "fetch_video_async"])
+async def test_connector_rejects_remote_urls_when_disabled(fetch, monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    parent_load = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url_async", parent_load)
+    connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        await getattr(connector, fetch)("https://example.com/media")
+
+    parent_load.assert_not_awaited()
+
+
+def test_connector_sync_load_rejects_remote_urls_when_disabled(monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    parent_load = MagicMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url", parent_load)
+    connector = object.__new__(connector_class)
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        connector.load_from_url("https://example.com/a.wav", MagicMock())
+
+    parent_load.assert_not_called()
 
 
 class TestImageLoaderCache:

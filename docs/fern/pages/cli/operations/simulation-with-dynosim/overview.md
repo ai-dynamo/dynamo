@@ -73,7 +73,7 @@ decode work should take for supported model/backend/GPU combinations.
 | Sweep topology and router choices under SLA/GPU constraints | [Sweep DynoSim Configurations](dynosim-sweeps.mdx) |
 | Run live Mocker workers on Kubernetes | [Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) |
 | Run live Mocker workers locally | [Simulate a Local Deployment](mocker-live-simulation.mdx) |
-| Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](../../../kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx) |
+| Study Planner scaling decisions against a trace | [Simulate Planner Decisions with AISimulate](../../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx) |
 | Generate a deployable Kubernetes config from model/SLA intent | [Auto Deployment](../../../kubernetes/auto-deployment/overview.mdx) |
 
 DynoSim narrows the search space; it does not replace real-hardware validation. Use it to move quickly, find promising candidates, and understand failure modes before spending cluster time.

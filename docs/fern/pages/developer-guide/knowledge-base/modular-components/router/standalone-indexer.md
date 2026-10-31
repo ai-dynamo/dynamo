@@ -132,6 +132,7 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
 | `--access-log` | (none) | Write one JSON access-log record per request to this file |
 | `--trace-id-header` | `x-trace-id` | Request header copied into each access-log record's `trace_id` field |
+| `DYN_ZMQ_IO_THREADS` | `4` | Environment variable: I/O threads per shared ZMQ context; KV-event and replay sockets share contexts of up to 1023 sockets each, the libzmq limit |
 | `--access-log-local-time` | disabled | Use local time for access-log timestamps instead of UTC |
 
 ### Shared Startup Gate
