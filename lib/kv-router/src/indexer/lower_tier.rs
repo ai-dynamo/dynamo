@@ -1866,6 +1866,7 @@ mod tests {
                 worker_id: 7,
                 state_source: None,
                 session_id: None,
+                shared_cache_eligible: false,
                 storage_tier: StorageTier::Device,
                 residency_domain: WireResidencyDomain::default(),
                 event: crate::protocols::KvCacheEvent {

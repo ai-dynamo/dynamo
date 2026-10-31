@@ -554,6 +554,7 @@ impl PositionalIndexer {
                     worker_id: worker.worker_id,
                     state_source: None,
                     session_id: None,
+                    shared_cache_eligible: false,
                     storage_tier: crate::protocols::StorageTier::Device,
                     residency_domain: crate::protocols::WireResidencyDomain::explicit(
                         crate::protocols::ResidencyDomain::Worker,
