@@ -17,7 +17,7 @@
 //! into frames, and hands inbound frames back to the core. [`server`]
 //! serves the frames to subscribing peers as routes on the replica's API
 //! router, and [`dialer`] subscribes to each peer and applies what it
-//! sends. The built-in ZMQ mesh (`--replica-sync-port`) is a separate
+//! sends. The built-in ZMQ mesh (`--replica-sync-transport zmq`) is a separate
 //! transport the core runs itself; a replica uses one or the other.
 //!
 //! [`ActiveSequenceEvent`]: dynamo_kv_router::protocols::ActiveSequenceEvent

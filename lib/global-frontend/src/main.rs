@@ -5,10 +5,11 @@
 //!
 //! `--selection-core` selects through the embedded router core instead of
 //! the Global Router's own selectors, with each pool as one of the core's
-//! workers and every `--router-policy` as one of its plugins. With `--peer`,
-//! the core shares its requests in flight and session pins with the other
-//! Global Frontends, over one of two transports. The gRPC `ReplicaSync`
-//! stream is served on the API port itself, and peers are the other
+//! workers and every `--router-policy` as one of its plugins. With
+//! `--replica-sync`, the core shares its requests in flight and session
+//! pins with the other Global Frontends (`--peer`) over one of two
+//! transports. `--replica-sync-transport grpc`, the default, serves the
+//! `ReplicaSync` stream on the API port itself, and peers are the other
 //! frontends' API addresses:
 //!
 //! ```bash
@@ -16,13 +17,12 @@
 //!     --router-policy affinity --region ohio \
 //!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000 \
 //!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051 \
-//!     --peer http://10.42.1.5:8000
+//!     --replica-sync --peer http://10.42.1.5:8000
 //! ```
 //!
-//! The core's own ZMQ mesh publishes on a port of its own instead, with
-//! `--replica-sync-port 5600 --peer tcp://10.42.1.5:5600`. A frontend uses
-//! one transport or the other: `tcp://` peers need `--replica-sync-port`,
-//! and `http://` peers refuse it.
+//! `--replica-sync-transport zmq` uses the core's own ZMQ mesh, which
+//! publishes on a port of its own: `--replica-sync-port 5600 --peer
+//! tcp://10.42.1.5:5600`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -59,6 +59,17 @@ enum RouterPolicy {
     /// for a pool with much more room (see `--headroom-factor`). Reads each
     /// pool's load from its Relay (`--pool-relay`).
     Affinity,
+}
+
+/// How the replicas reach each other with `--replica-sync`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ReplicaSyncTransport {
+    /// The gRPC `ReplicaSync` stream, served on the API port and dialed at
+    /// each peer's API address, `http://host:port`.
+    Grpc,
+    /// The router core's own ZMQ mesh, published on `--replica-sync-port`
+    /// and dialed at each peer's, `tcp://host:port`.
+    Zmq,
 }
 
 #[derive(Parser)]
@@ -104,24 +115,27 @@ struct Args {
     /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
-    /// `--selection-core`: publish this replica's requests in flight and
-    /// session pins over the core's own mesh on this port, for `tcp://`
-    /// peers. Without it, `http://` peers subscribe on the API port.
-    #[arg(long)]
+    /// Share this replica's requests in flight and session pins with the
+    /// other Global Frontends. Needs `--selection-core`.
+    #[arg(long, requires = "selection_core")]
+    replica_sync: bool,
+    #[arg(long, value_enum, default_value_t = ReplicaSyncTransport::Grpc, requires = "replica_sync")]
+    replica_sync_transport: ReplicaSyncTransport,
+    /// `--replica-sync-transport zmq`: the port this replica publishes on.
+    #[arg(long, requires = "replica_sync")]
     replica_sync_port: Option<u16>,
-    /// `--selection-core`: another Global Frontend to share requests in
-    /// flight and session pins with. `http://host:port` is its API address,
-    /// subscribed to over gRPC; `tcp://host:port` is its
-    /// `--replica-sync-port` endpoint, subscribed to over the core's mesh.
-    /// Repeat the flag for each peer; every peer must use one scheme.
-    #[arg(long = "peer", value_parser = parse_peer)]
+    /// `--replica-sync`: another Global Frontend to share requests in
+    /// flight and session pins with, as the transport dials it: its API
+    /// address `http://host:port` over gRPC, or its `--replica-sync-port`
+    /// endpoint `tcp://host:port` over ZMQ. Repeat the flag for each peer.
+    #[arg(long = "peer", value_parser = parse_peer, requires = "replica_sync")]
     peers: Vec<Peer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Peer {
-    /// A `--replica-sync-port` endpoint of the core's mesh.
-    Mesh(String),
+    /// A `--replica-sync-port` endpoint of the core's ZMQ mesh.
+    Zmq(String),
     /// An API address the gRPC stream is served on.
     Grpc(Url),
 }
@@ -172,7 +186,7 @@ fn parse_peer(value: &str) -> Result<Peer, String> {
         Some((host, port))
             if !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0) =>
         {
-            Ok(Peer::Mesh(value.to_owned()))
+            Ok(Peer::Zmq(value.to_owned()))
         }
         _ => Err(format!("expected tcp://host:port, got {value}")),
     }
@@ -216,40 +230,50 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
 }
 
 fn replica_transport(args: &Args) -> Result<Option<ReplicaTransport>> {
-    let mut mesh = Vec::new();
-    let mut grpc = Vec::new();
-    for peer in &args.peers {
-        match peer {
-            Peer::Mesh(endpoint) => mesh.push(endpoint.clone()),
-            Peer::Grpc(url) => grpc.push(url.clone()),
+    if !args.replica_sync {
+        return Ok(None);
+    }
+    let transport = match args.replica_sync_transport {
+        ReplicaSyncTransport::Grpc => {
+            if args.replica_sync_port.is_some() {
+                bail!(
+                    "--replica-sync-port is the ZMQ mesh's port; \
+                     the gRPC transport serves on the API port"
+                );
+            }
+            let peers = args
+                .peers
+                .iter()
+                .map(|peer| match peer {
+                    Peer::Grpc(url) => Ok(url.clone()),
+                    Peer::Zmq(endpoint) => bail!(
+                        "--peer {endpoint} is a ZMQ endpoint; the gRPC transport dials \
+                         each peer's API address, http://host:port"
+                    ),
+                })
+                .collect::<Result<_>>()?;
+            ReplicaTransport::Grpc(GrpcReplicaSync { peers })
         }
-    }
-    if !mesh.is_empty() && !grpc.is_empty() {
-        bail!("--peer takes either tcp:// or http:// peers, not both: one transport per replica");
-    }
-    if !args.peers.is_empty() && !args.selection_core {
-        bail!("--peer needs --selection-core");
-    }
-    match args.replica_sync_port {
-        Some(_) if !args.selection_core => {
-            bail!("--replica-sync-port needs --selection-core")
+        ReplicaSyncTransport::Zmq => {
+            let port = args.replica_sync_port.context(
+                "--replica-sync-transport zmq needs --replica-sync-port, \
+                 the port this replica publishes on",
+            )?;
+            let peers = args
+                .peers
+                .iter()
+                .map(|peer| match peer {
+                    Peer::Zmq(endpoint) => Ok(endpoint.clone()),
+                    Peer::Grpc(url) => bail!(
+                        "--peer {url} is an API address; the ZMQ transport dials \
+                         each peer's --replica-sync-port, tcp://host:port"
+                    ),
+                })
+                .collect::<Result<_>>()?;
+            ReplicaTransport::Mesh(ReplicaSync { port, peers })
         }
-        Some(_) if !grpc.is_empty() => bail!(
-            "--replica-sync-port is the mesh's port; http:// peers use the gRPC transport, \
-             which serves on the API port. Drop --replica-sync-port or give tcp:// peers"
-        ),
-        Some(port) => Ok(Some(ReplicaTransport::Mesh(ReplicaSync {
-            port,
-            peers: mesh,
-        }))),
-        None if !mesh.is_empty() => {
-            bail!("tcp:// peers need --replica-sync-port, the port this replica publishes on")
-        }
-        None if !grpc.is_empty() => Ok(Some(ReplicaTransport::Grpc(GrpcReplicaSync {
-            peers: grpc,
-        }))),
-        None => Ok(None),
-    }
+    };
+    Ok(Some(transport))
 }
 
 /// Starts following each pool's Relay and measuring each region's round
@@ -467,28 +491,64 @@ mod tests {
         replica_transport(&args)
     }
 
+    const SYNC: [&str; 2] = ["--selection-core", "--replica-sync"];
+
     #[test]
-    fn selection_defaults_to_current_and_the_core_takes_mesh_peers() {
+    fn the_core_and_replica_sync_are_off_unless_asked_for() {
         let args = Args::try_parse_from(["global-frontend", POOL]).unwrap();
         assert!(!args.selection_core);
+        assert!(!args.replica_sync);
         assert_eq!(replica_transport(&args).unwrap(), None);
+        assert_eq!(transport(&["--selection-core"]).unwrap(), None);
+    }
 
-        let args = Args::try_parse_from([
-            "global-frontend",
-            POOL,
-            "--selection",
-            "core",
+    #[test]
+    fn grpc_is_the_default_transport_and_dials_api_addresses() {
+        let peers = [
+            "--peer",
+            "http://10.0.0.2:8000",
+            "--peer",
+            "http://gf-b:8000",
+        ];
+        let expected = Some(ReplicaTransport::Grpc(GrpcReplicaSync {
+            peers: vec![
+                "http://10.0.0.2:8000".parse().unwrap(),
+                "http://gf-b:8000".parse().unwrap(),
+            ],
+        }));
+        assert_eq!(
+            transport(&[&SYNC[..], &peers[..]].concat()).unwrap(),
+            expected
+        );
+        let explicit = [&SYNC[..], &["--replica-sync-transport", "grpc"], &peers[..]].concat();
+        assert_eq!(transport(&explicit).unwrap(), expected);
+        // Served from startup, with or without peers.
+        assert_eq!(
+            transport(&SYNC).unwrap(),
+            Some(ReplicaTransport::Grpc(GrpcReplicaSync {
+                peers: Vec::new()
+            }))
+        );
+        // gRPC serves on the API port and dials API addresses.
+        let with_port = [&SYNC[..], &["--replica-sync-port", "5600"]].concat();
+        assert!(transport(&with_port).is_err());
+        let zmq_peer = [&SYNC[..], &["--peer", "tcp://10.0.0.2:5600"]].concat();
+        assert!(transport(&zmq_peer).is_err());
+    }
+
+    #[test]
+    fn zmq_publishes_on_its_own_port_and_dials_tcp_endpoints() {
+        let zmq = [&SYNC[..], &["--replica-sync-transport", "zmq"]].concat();
+        let peers = [
             "--replica-sync-port",
             "5600",
             "--peer",
             "tcp://10.0.0.2:5600",
             "--peer",
             "tcp://10.0.0.3:5600",
-        ])
-        .unwrap();
-        assert!(args.selection_core);
+        ];
         assert_eq!(
-            replica_transport(&args).unwrap(),
+            transport(&[&zmq[..], &peers[..]].concat()).unwrap(),
             Some(ReplicaTransport::Mesh(ReplicaSync {
                 port: 5600,
                 peers: vec![
@@ -497,73 +557,37 @@ mod tests {
                 ],
             }))
         );
-        // The mesh publishes on its own port whether or not it has peers yet.
+        // The mesh publishes on its port whether or not it has peers yet.
         assert_eq!(
-            transport(&["--selection-core", "--replica-sync-port", "5600"]).unwrap(),
+            transport(&[&zmq[..], &["--replica-sync-port", "5600"]].concat()).unwrap(),
             Some(ReplicaTransport::Mesh(ReplicaSync {
                 port: 5600,
                 peers: Vec::new(),
             }))
         );
+        assert!(transport(&zmq).is_err());
+        let api_peer = [&zmq[..], &peers[..2], &["--peer", "http://10.0.0.3:8000"]].concat();
+        assert!(transport(&api_peer).is_err());
     }
 
     #[test]
-    fn http_peers_select_the_grpc_transport_on_the_api_port() {
-        let core = ["--selection-core"];
-        let peers = [
-            "--peer",
-            "http://10.0.0.2:8000",
-            "--peer",
-            "http://gf-b:8000",
-        ];
-        assert_eq!(
-            transport(&[&core[..], &peers[..]].concat()).unwrap(),
-            Some(ReplicaTransport::Grpc(GrpcReplicaSync {
-                peers: vec![
-                    "http://10.0.0.2:8000".parse().unwrap(),
-                    "http://gf-b:8000".parse().unwrap(),
-                ],
-            }))
-        );
-        let with_port = [&core[..], &peers[..], &["--replica-sync-port", "5600"]].concat();
-        assert!(transport(&with_port).is_err());
-    }
-
-    #[test]
-    fn peers_need_the_core_and_one_transport() {
-        assert!(transport(&["--peer", "http://10.0.0.2:8000"]).is_err());
-        assert!(
-            transport(&[
-                "--peer",
-                "tcp://10.0.0.2:5600",
-                "--replica-sync-port",
-                "5600"
-            ])
-            .is_err()
-        );
-        assert!(transport(&["--replica-sync-port", "5600"]).is_err());
-        // A tcp:// peer needs the port this replica publishes on.
-        assert!(transport(&["--selection-core", "--peer", "tcp://10.0.0.2:5600"]).is_err());
-        assert!(
-            transport(&[
-                "--selection",
-                "core",
-                "--replica-sync-port",
-                "5600",
-                "--peer",
-                "tcp://10.0.0.2:5600",
-                "--peer",
-                "http://10.0.0.3:8000",
-            ])
-            .is_err()
-        );
+    fn replica_sync_needs_the_core_and_its_flags_need_replica_sync() {
+        for rejected in [
+            &["--replica-sync"][..],
+            &["--selection-core", "--replica-sync-transport", "zmq"],
+            &["--selection-core", "--replica-sync-port", "5600"],
+            &["--selection-core", "--peer", "http://10.0.0.2:8000"],
+            &["--peer", "http://10.0.0.2:8000"],
+        ] {
+            assert!(transport(rejected).is_err(), "{rejected:?}");
+        }
     }
 
     #[test]
     fn parses_peers_of_either_scheme() {
         assert_eq!(
             parse_peer("tcp://peer:5600"),
-            Ok(Peer::Mesh("tcp://peer:5600".to_owned()))
+            Ok(Peer::Zmq("tcp://peer:5600".to_owned()))
         );
         assert_eq!(
             parse_peer("http://peer:8000"),

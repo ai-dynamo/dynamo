@@ -205,14 +205,7 @@ impl CoreSelector {
             .context("register the pool selection policies")?;
         let mut builder =
             SelectionServiceBuilder::new(config(&policy)?, WorkerType::Aggregated, registry)
-                .indexer_threads(1)
-                .host(SelectionHost {
-                    replication: HostReplication {
-                        request_leases: Some(Arc::new(ReservationLeases)),
-                        ..HostReplication::default()
-                    },
-                    ..SelectionHost::default()
-                });
+                .indexer_threads(1);
         let affinity = matches!(policy, CorePolicy::Affinity(_));
         if let CorePolicy::Affinity(affinity) = &policy {
             // Soft: the binding follows the pool picked, as the current pin
@@ -223,6 +216,9 @@ impl CoreSelector {
         }
         let mut grpc = None;
         match transport {
+            // Peers' bookings arrive over the mesh with nothing here to end
+            // one whose peer is lost, so the core keeps its age-based expiry
+            // for every booking.
             Some(ReplicaTransport::Mesh(sync)) => {
                 builder = builder.replica_sync(sync.port, sync.peers);
             }
@@ -249,7 +245,15 @@ impl CoreSelector {
                 }
                 grpc = Some(GrpcTransport { hub, cancel });
             }
-            None => {}
+            None => {
+                builder = builder.host(SelectionHost {
+                    replication: HostReplication {
+                        request_leases: Some(Arc::new(ReservationLeases)),
+                        ..HostReplication::default()
+                    },
+                    ..SelectionHost::default()
+                });
+            }
         }
         let service = Arc::new(builder.build().await.context("build the router core")?);
         if let Some(GrpcTransport { hub, .. }) = &grpc {
@@ -568,8 +572,9 @@ fn config(policy: &CorePolicy) -> Result<KvRouterConfig> {
 /// The host owns each booking's lifetime: a booking lasts as long as its
 /// [`Reservation`], which the frontend holds until the response ends or the
 /// client leaves, never a fixed age. Supplying this to the core turns its
-/// age-based expiry off. Nothing is mirrored from peers here, so there is
-/// nothing to observe.
+/// age-based expiry off, so the mesh never gets it. It observes nothing:
+/// without peers nothing is mirrored, and over gRPC a mirrored booking
+/// whose free is lost stays until #17670 reconciles them.
 struct ReservationLeases;
 
 impl ReplicaRequestLeaseObserver for ReservationLeases {

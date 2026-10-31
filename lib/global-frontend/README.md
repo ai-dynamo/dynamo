@@ -109,23 +109,30 @@ for each family.
 
 ## Replica sync
 
-With `--selection core`, each Global Frontend's embedded router core books
+With `--selection-core`, each Global Frontend's embedded router core books
 requests on pools and, under `--router-policy affinity`, pins sessions to them.
-Replicas share those bookings and pins so every frontend sees every frontend's
-requests in flight (DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639),
-companion [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)). Two
-transports carry them; a frontend uses one or the other, and `--peer` names
-the other frontends.
+With `--replica-sync`, replicas share those bookings and pins so every frontend
+sees every frontend's requests in flight (DEP [#17639](https://github.com/ai-dynamo/dynamo/issues/17639),
+companion [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)).
+`--replica-sync-transport` picks one of two transports, and `--peer` names the
+other frontends as that transport dials them.
 
-| Flags | Transport |
-|-------|-----------|
-| `--peer http://host:port` | The gRPC `ReplicaSync` stream, served on this frontend's API port (`--port`) beside the OpenAI routes. Each peer is another frontend's API address. No extra port. |
-| `--replica-sync-port N --peer tcp://host:port` | The router core's own ZMQ mesh. This frontend publishes on port `N`; each peer is another frontend's `--replica-sync-port` endpoint. |
+| `--replica-sync-transport` | Peers | Transport |
+|----------------------------|-------|-----------|
+| `grpc` (default) | `--peer http://host:port` | The gRPC `ReplicaSync` stream, served on this frontend's API port (`--port`) beside the OpenAI routes. Each peer is another frontend's API address. No extra port. |
+| `zmq` | `--replica-sync-port N --peer tcp://host:port` | The router core's own ZMQ mesh. This frontend publishes on port `N`; each peer is another frontend's `--replica-sync-port` endpoint. |
 
-Rules: every `--peer` must use the same scheme; `tcp://` peers need
-`--replica-sync-port`; `http://` peers refuse it, since the gRPC stream serves
-on the API port; any of these flags needs `--selection core`; `https://` peers
-are refused until the stream carries TLS.
+Rules: `--replica-sync` needs `--selection-core`; `--replica-sync-transport`,
+`--replica-sync-port` and `--peer` need `--replica-sync`; `zmq` needs
+`--replica-sync-port` and `tcp://` peers; `grpc` refuses both, since it serves
+on the API port and dials API addresses; `https://` peers are refused until the
+stream carries TLS.
+
+Over `zmq`, the core keeps its own age-based expiry (five minutes) for every
+booking, since nothing here ends a peer's booking if that peer is lost. A
+request that streams for longer stops counting toward its pool's load once it
+expires. Over `grpc`, and without replica sync, a booking lasts exactly as long
+as its request.
 
 The gRPC contract is the `ReplicaSync` service in
 `lib/global-common/proto/replica_sync.proto`, package
