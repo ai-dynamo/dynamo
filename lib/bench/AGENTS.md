@@ -9,6 +9,8 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
 - `kv_router/{mooncake,active_sequences,approximate_lru}_bench` — kv-router microbenchmarks.
 - `claude_trace_export` — converts local Claude sessions into canonical Dynamo
   request traces for direct replay.
+- `codex_trace_export` — converts local Codex rollouts into canonical Dynamo
+  request traces for direct replay.
 - `request_trace_to_mooncake` — opt-in export of Dynamo request traces to
   Mooncake replay JSONL.
 - `request_trace_to_satf` — opt-in export of Dynamo request traces to SATF 2.0.

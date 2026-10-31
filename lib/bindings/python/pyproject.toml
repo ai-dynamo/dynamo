@@ -16,7 +16,7 @@
 
 [project]
 name = "ai-dynamo-runtime"
-version = "1.6.0"
+version = "1.7.0"
 description = "Dynamo Inference Framework Runtime"
 readme = "README.md"
 authors = [
@@ -24,7 +24,7 @@ authors = [
 ]
 license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.10.6,<=2.13.5",
     "uvloop>=0.21.0",
@@ -36,7 +36,6 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",

@@ -180,5 +180,49 @@ class TestFlushRunsDuringK8sOutage(_PendingTestBase):
         self.assertEqual(power_agent._pending_acquisition, set())
 
 
+class TestPersistenceRetriesAreOutsideTheCycleFold(_PendingTestBase):
+    """A queued persistence-only retry leaves the cycle's enforcement boolean
+    True (DEP #14767).
+
+    Each retry concerns a durable record whose hardware write and in-memory
+    ownership ALREADY succeeded, so live enforcement is correct and only a
+    RESTARTED agent would notice. Folding a failed state-volume write into
+    readiness would take the pod NotReady while every cap is live and correct.
+    Those failures already log and are visible in the `_pending_*` set sizes.
+    """
+
+    def _agent(self):
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent = object.__new__(PowerAgent)
+        agent._core_v1 = core_v1
+        agent.node_name = "node-under-test"
+        agent.k8s_namespace = None
+        agent.device_count = 1
+        actuator = MagicMock()
+        actuator.device_count.return_value = 1
+        agent._actuator = actuator
+        agent.metrics = MagicMock()
+        agent._reconcile_gpu = MagicMock(return_value=True)
+        return agent
+
+    def test_pending_acquisition_retry_failure_keeps_the_cycle_true(self):
+        power_agent._previously_managed.add("GPU-A")
+        power_agent._pending_acquisition.add("GPU-A")
+        self.persist.side_effect = OSError("state volume unwritable")
+
+        self.assertIs(self._agent().reconcile_once(), True)
+        # Still queued for the next cycle — the failure is not lost, it is just
+        # not a readiness signal.
+        self.assertIn("GPU-A", power_agent._pending_acquisition)
+
+    def test_pending_retirement_retry_failure_keeps_the_cycle_true(self):
+        power_agent._pending_retirement.add("GPU-B")
+        self.persist.side_effect = OSError("state volume unwritable")
+
+        self.assertIs(self._agent().reconcile_once(), True)
+        self.assertIn("GPU-B", power_agent._pending_retirement)
+
+
 if __name__ == "__main__":
     unittest.main()

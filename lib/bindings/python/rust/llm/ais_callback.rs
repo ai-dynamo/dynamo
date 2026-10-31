@@ -138,10 +138,24 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = config
-        .speculation
-        .as_ref()
-        .map_or(config.nextn, |spec| spec.num_speculative_tokens());
+    let nextn = match config.speculation.as_ref() {
+        None => config.nextn,
+        Some(spec) if spec.kind == "ngram" => spec
+            .params
+            .get("num_speculative_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|depth| u32::try_from(depth).ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "ngram num_speculative_tokens must be a nonnegative u32",
+                )
+            })?,
+        Some(_) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Router/Mocker supports only ngram speculation or legacy nextn",
+            ));
+        }
+    };
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;

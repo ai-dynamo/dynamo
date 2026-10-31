@@ -1,0 +1,539 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/current-worker-hash-v2: $var:worker-hash
+    nvidia.com/dynamo-operator-origin-version: $var:operator-version
+    nvidia.com/workload-provider: grove
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  name: workers
+  namespace: upgrade-latest-sglang-1-5
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: sglang
+  components:
+  - name: SglangPrefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+          name: main
+    replicas: 2
+    type: prefill
+  - name: SglangDecode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+          name: main
+    replicas: 2
+    type: decode
+status:
+  components:
+    SglangDecode:
+      componentKind: PodClique
+      componentNames:
+      - workers-0-sglangdecode
+      gpusPerEngine: 0
+      gpusPerReplica: 0
+      replicas: 0
+      servedModelName: Qwen/Qwen3-0.6B
+      updatedReplicas: 0
+    SglangPrefill:
+      componentKind: PodClique
+      componentNames:
+      - workers-0-sglangprefill
+      gpusPerEngine: 0
+      gpusPerReplica: 0
+      replicas: 0
+      servedModelName: Qwen/Qwen3-0.6B
+      updatedReplicas: 0
+  conditions:
+  - lastTransitionTime: $ignore
+    message: 'Resources not ready: workers: SglangPrefill: resource not found; SglangDecode:
+      resource not found'
+    observedGeneration: 1
+    reason: some_resources_are_not_ready
+    status: 'False'
+    type: Ready
+  observedGeneration: 1
+  state: pending
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: abee375791409ee6d258ccf94163eb1d9828791df9df24a609c9ab1b6fbdc57e
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: workers-sglangdecode
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: system
+    port: 9090
+    protocol: TCP
+    targetPort: system
+  selector:
+    nvidia.com/dynamo-component: SglangDecode
+    nvidia.com/dynamo-component-type: decode
+    nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 5310ec462b5c461baf52e3a11e6befde55733e587927645bd41dc8ef4594f84a
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: workers-sglangprefill
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: system
+    port: 9090
+    protocol: TCP
+    targetPort: system
+  selector:
+    nvidia.com/dynamo-component: SglangPrefill
+    nvidia.com/dynamo-component-type: prefill
+    nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $var:pcs-spec-hash
+  creationTimestamp: $ignore
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: workers
+  name: workers
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeAnyOrder
+    cliques:
+    - annotations:
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-component: SglangPrefill
+        nvidia.com/dynamo-component-type: prefill
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-workers
+        nvidia.com/dynamo-sub-component-type: prefill
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-sglangprefill
+      name: sglangprefill
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            command:
+            - python3
+            - -m
+            - dynamo.sglang
+            env:
+            - name: DYN_COMPONENT
+              value: prefill
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: '20380'
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: 'true'
+            - name: DYN_NAMESPACE
+              value: upgrade-latest-sglang-1-5-workers
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: $var:worker-hash
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: workers
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: upgrade-latest-sglang-1-5
+            - name: DYN_SYSTEM_ENABLED
+              value: 'true'
+            - name: DYN_SYSTEM_PORT
+              value: '9090'
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: n
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: '19090'
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources: {}
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          serviceAccountName: workers-k8s-service-discovery
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 2
+        roleName: sglangprefill
+    - annotations:
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-component: SglangDecode
+        nvidia.com/dynamo-component-type: decode
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-workers
+        nvidia.com/dynamo-sub-component-type: decode
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-sglangdecode
+      name: sglangdecode
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - decode
+            command:
+            - python3
+            - -m
+            - dynamo.sglang
+            env:
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: '20380'
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: 'true'
+            - name: DYN_NAMESPACE
+              value: upgrade-latest-sglang-1-5-workers
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: $var:worker-hash
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: workers
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: upgrade-latest-sglang-1-5
+            - name: DYN_SYSTEM_ENABLED
+              value: 'true'
+            - name: DYN_SYSTEM_PORT
+              value: '9090'
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: n
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: '19090'
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources: {}
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          serviceAccountName: workers-k8s-service-discovery
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 2
+        roleName: sglangdecode
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    terminationDelay: 15m0s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 0d454cc8266ac38ed6453ee2ef3cf6d9dd237faebc63af22f67ca911e106796c
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-role
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamoworkermetadatas
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 6e909e418ae4b3e9619fad88030a2ee28c428c10be445fd98da5ae14d45a20f1
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-binding
+  namespace: upgrade-latest-sglang-1-5
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workers-k8s-service-discovery-role
+subjects:
+- kind: ServiceAccount
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-sglang-1-5

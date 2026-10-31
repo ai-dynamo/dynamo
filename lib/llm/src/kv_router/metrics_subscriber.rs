@@ -29,6 +29,10 @@ use crate::{
 };
 
 const MAX_PENDING_ACTIVE_LOADS: usize = 100_000;
+/// Every direct-ZMQ source task pushes into this mailbox. Sharding by worker spreads those
+/// producers over independent locks while keeping per-worker merging and ordering. The
+/// consumer scans the shards for each load, so keep the count small.
+const ACTIVE_LOAD_SHARDS: usize = 16;
 
 pub(crate) struct KvMetricsSubscriber {
     inner: KvMetricsSubscriberInner,
@@ -48,7 +52,6 @@ struct PendingActiveLoads {
     capacity: usize,
     order: VecDeque<WorkerWithDpRank>,
     values: HashMap<WorkerWithDpRank, ActiveLoad>,
-    fault: Option<DirectKvMetricsFault>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
@@ -85,7 +88,6 @@ impl PendingActiveLoads {
             capacity,
             order: VecDeque::new(),
             values: HashMap::new(),
-            fault: None,
         }
     }
 
@@ -114,26 +116,60 @@ impl PendingActiveLoads {
             return PushOutcome::Full;
         }
 
-        let should_wake = self.values.is_empty() && self.fault.is_none();
+        let should_wake = self.values.is_empty();
         self.order.push_back(worker);
         self.values.insert(worker, load);
         PushOutcome::Accepted { should_wake }
     }
 
-    fn push_fault(&mut self, fault: DirectKvMetricsFault) {
-        self.order.clear();
-        self.values.clear();
-        self.fault = Some(fault);
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
     }
 
-    fn pop(&mut self) -> Option<Result<ActiveLoad>> {
-        if let Some(fault) = self.fault.take() {
-            return Some(Err(fault.into()));
-        }
+    fn clear(&mut self) {
+        self.order.clear();
+        self.values.clear();
+    }
+
+    fn pop(&mut self) -> Option<ActiveLoad> {
         let worker = self.order.pop_front()?;
-        Some(Ok(self.values.remove(&worker).expect(
-            "active-load order and values must stay synchronized",
-        )))
+        Some(
+            self.values
+                .remove(&worker)
+                .expect("active-load order and values must stay synchronized"),
+        )
+    }
+}
+
+/// One mailbox shard, aligned so neighboring shard locks never share a cache line.
+#[repr(align(128))]
+struct ActiveLoadShard(Mutex<PendingActiveLoads>);
+
+struct ActiveLoadMailbox {
+    shards: Box<[ActiveLoadShard]>,
+    fault: Mutex<Option<DirectKvMetricsFault>>,
+}
+
+impl ActiveLoadMailbox {
+    fn new(capacity: usize, shards: usize) -> Self {
+        assert!(shards > 0, "active-load mailbox needs at least one shard");
+        let shard_capacity = capacity.div_ceil(shards);
+        Self {
+            shards: (0..shards)
+                .map(|_| ActiveLoadShard(Mutex::new(PendingActiveLoads::new(shard_capacity))))
+                .collect(),
+            fault: Mutex::new(None),
+        }
+    }
+
+    /// Every update for one worker rank maps to the same shard.
+    fn shard_index(&self, worker_id: u64, dp_rank: u32) -> usize {
+        let hash = (worker_id ^ (u64::from(dp_rank) << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (hash >> 32) as usize % self.shards.len()
+    }
+
+    fn shard(&self, worker_id: u64, dp_rank: u32) -> &Mutex<PendingActiveLoads> {
+        &self.shards[self.shard_index(worker_id, dp_rank)].0
     }
 }
 
@@ -146,7 +182,7 @@ enum PushOutcome {
 #[derive(Clone)]
 struct ActiveLoadSender {
     wake_tx: mpsc::Sender<()>,
-    pending: Arc<Mutex<PendingActiveLoads>>,
+    mailbox: Arc<ActiveLoadMailbox>,
 }
 
 impl ActiveLoadSender {
@@ -157,7 +193,7 @@ impl ActiveLoadSender {
 
         let worker_id = load.worker_id;
         let dp_rank = load.dp_rank;
-        let outcome = self.pending.lock().push(load);
+        let outcome = self.mailbox.shard(worker_id, dp_rank).lock().push(load);
         match outcome {
             PushOutcome::Accepted { should_wake: false } => Ok(()),
             PushOutcome::Full => {
@@ -181,7 +217,20 @@ impl ActiveLoadSender {
         if self.wake_tx.is_closed() {
             anyhow::bail!("direct-ZMQ KV metrics consumer closed");
         }
-        self.pending.lock().push_fault(fault);
+        {
+            // Hold every shard until the fault is recorded, so no load lands between clearing
+            // and recording, and `try_pop` sees the fault before any later load.
+            let mut shards: Vec<_> = self
+                .mailbox
+                .shards
+                .iter()
+                .map(|shard| shard.0.lock())
+                .collect();
+            for pending in &mut shards {
+                pending.clear();
+            }
+            *self.mailbox.fault.lock() = Some(fault);
+        }
         match self.wake_tx.try_send(()) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(())) => {
@@ -193,33 +242,66 @@ impl ActiveLoadSender {
 
 struct ActiveLoadReceiver {
     wake_rx: mpsc::Receiver<()>,
-    pending: Arc<Mutex<PendingActiveLoads>>,
+    mailbox: Arc<ActiveLoadMailbox>,
+    next_shard: usize,
 }
 
 impl ActiveLoadReceiver {
     async fn recv(&mut self) -> Option<Result<ActiveLoad>> {
         loop {
-            if let Some(load) = self.pending.lock().pop() {
+            if let Some(load) = self.try_pop() {
                 return Some(load);
             }
+            // A shard that becomes non-empty after the scan above sends a wake.
             self.wake_rx.recv().await?;
         }
+    }
+
+    /// Return a pending fault first, then one load, visiting shards round-robin.
+    fn try_pop(&mut self) -> Option<Result<ActiveLoad>> {
+        let shards = self.mailbox.shards.len();
+        for offset in 0..shards {
+            let index = (self.next_shard + offset) % shards;
+            let mut pending = self.mailbox.shards[index].0.lock();
+            if pending.is_empty() {
+                continue;
+            }
+            // `send_fault` records its fault while holding every shard, so a load found
+            // here while a fault is pending was sent after that fault.
+            if let Some(fault) = self.mailbox.fault.lock().take() {
+                return Some(Err(fault.into()));
+            }
+            self.next_shard = (index + 1) % shards;
+            return pending.pop().map(Ok);
+        }
+        self.mailbox
+            .fault
+            .lock()
+            .take()
+            .map(|fault| Err(fault.into()))
     }
 }
 
 fn active_load_mailbox() -> (ActiveLoadSender, ActiveLoadReceiver) {
-    active_load_mailbox_with_capacity(MAX_PENDING_ACTIVE_LOADS)
+    active_load_mailbox_with(MAX_PENDING_ACTIVE_LOADS, ACTIVE_LOAD_SHARDS)
 }
 
-fn active_load_mailbox_with_capacity(capacity: usize) -> (ActiveLoadSender, ActiveLoadReceiver) {
+fn active_load_mailbox_with(
+    capacity: usize,
+    shards: usize,
+) -> (ActiveLoadSender, ActiveLoadReceiver) {
     let (wake_tx, wake_rx) = mpsc::channel(1);
-    let pending = Arc::new(Mutex::new(PendingActiveLoads::new(capacity)));
+    let mailbox = Arc::new(ActiveLoadMailbox::new(capacity, shards));
     (
         ActiveLoadSender {
             wake_tx,
-            pending: pending.clone(),
+            mailbox: mailbox.clone(),
         },
-        ActiveLoadReceiver { wake_rx, pending },
+        ActiveLoadReceiver {
+            wake_rx,
+            mailbox,
+            next_shard: 0,
+        },
     )
 }
 
@@ -347,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_metrics_mailbox_merges_partial_updates_in_key_order() {
-        let (sender, mut receiver) = active_load_mailbox_with_capacity(4);
+        let (sender, mut receiver) = active_load_mailbox_with(4, 1);
 
         sender.send(load(1, 0, Some(7), None, None)).unwrap();
         sender.send(load(2, 0, None, None, Some(9))).unwrap();
@@ -377,12 +459,12 @@ mod tests {
     #[tokio::test]
     async fn direct_metrics_mailbox_bounds_distinct_keys_and_drains_on_close() {
         let (default_sender, _receiver) = active_load_mailbox();
-        assert_eq!(
-            default_sender.pending.lock().capacity,
-            MAX_PENDING_ACTIVE_LOADS
-        );
+        assert_eq!(default_sender.mailbox.shards.len(), ACTIVE_LOAD_SHARDS);
+        assert!(default_sender.mailbox.shards.iter().all(|shard| {
+            shard.0.lock().capacity == MAX_PENDING_ACTIVE_LOADS.div_ceil(ACTIVE_LOAD_SHARDS)
+        }));
 
-        let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
+        let (sender, mut receiver) = active_load_mailbox_with(1, 1);
 
         sender.send(load(1, 0, Some(7), None, None)).unwrap();
         sender.send(load(1, 0, None, None, Some(8))).unwrap();
@@ -403,7 +485,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn direct_metrics_mailbox_wakes_a_waiter_and_reports_receiver_close() {
-        let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
+        let (sender, mut receiver) = active_load_mailbox_with(1, 1);
         let waiter = tokio::spawn(async move {
             let load = receiver.recv().await;
             (load, receiver)
@@ -423,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_metrics_fault_discards_stale_loads_before_later_updates() {
-        let (sender, mut receiver) = active_load_mailbox_with_capacity(4);
+        let (sender, mut receiver) = active_load_mailbox_with(4, 1);
 
         sender.send(load(1, 0, None, None, Some(3))).unwrap();
         sender
@@ -451,6 +533,137 @@ mod tests {
             Some(DirectKvMetricsFault::DiscoveryReset)
         );
         assert_eq!(fault_for_event(FanInEvent::SourceStarted), None);
+    }
+
+    #[tokio::test]
+    async fn direct_metrics_sharded_mailbox_merges_per_key_and_orders_faults() {
+        let (sender, mut receiver) = active_load_mailbox_with(64, 8);
+        let used_shards: HashSet<_> = (0..16)
+            .map(|worker_id| sender.mailbox.shard_index(worker_id, 0))
+            .collect();
+        assert!(used_shards.len() > 1, "test keys must span several shards");
+
+        for worker_id in 0..16 {
+            sender
+                .send(load(worker_id, 0, Some(worker_id), None, None))
+                .unwrap();
+            sender
+                .send(load(worker_id, 0, None, None, Some(worker_id + 100)))
+                .unwrap();
+        }
+        let mut merged = HashMap::new();
+        for _ in 0..16 {
+            let update = receiver.recv().await.unwrap().unwrap();
+            assert!(merged.insert(update.worker_id, update).is_none());
+        }
+        for worker_id in 0..16 {
+            assert_eq!(
+                merged[&worker_id],
+                load(worker_id, 0, Some(worker_id), None, Some(worker_id + 100))
+            );
+        }
+
+        for worker_id in 0..16 {
+            sender
+                .send(load(worker_id, 1, None, None, Some(1)))
+                .unwrap();
+        }
+        sender
+            .send_fault(DirectKvMetricsFault::Disconnected)
+            .unwrap();
+        sender.send(load(7, 1, None, None, Some(2))).unwrap();
+        let error = receiver.recv().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("transport disconnected"));
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap(),
+            load(7, 1, None, None, Some(2))
+        );
+        assert!(receiver.try_pop().is_none());
+    }
+
+    #[test]
+    fn direct_metrics_fault_precedes_later_loads_under_concurrency() {
+        const UPDATES: u64 = 100_000;
+
+        let (sender, mut receiver) = active_load_mailbox();
+        let producer = std::thread::spawn(move || {
+            for value in 1..=UPDATES {
+                sender
+                    .send_fault(DirectKvMetricsFault::Disconnected)
+                    .unwrap();
+                sender.send(load(1, 0, None, None, Some(value))).unwrap();
+            }
+        });
+
+        // Every load is sent after a fault, so a fault must arrive before each load.
+        let mut fault_seen = false;
+        let mut last_value = 0;
+        while last_value < UPDATES {
+            match receiver.try_pop() {
+                Some(Err(_)) => fault_seen = true,
+                Some(Ok(update)) => {
+                    let value = update.kv_used_blocks.unwrap();
+                    assert!(fault_seen, "load {value} arrived before its fault");
+                    assert!(value > last_value);
+                    fault_seen = false;
+                    last_value = value;
+                }
+                None => std::hint::spin_loop(),
+            }
+        }
+        producer.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn direct_metrics_sharded_mailbox_delivers_latest_values_under_concurrency() {
+        const PRODUCERS: u64 = 32;
+        const KEYS_PER_PRODUCER: u64 = 8;
+        const UPDATES: u64 = 1000;
+
+        let (sender, mut receiver) = active_load_mailbox();
+        let consumer = tokio::spawn(async move {
+            let mut latest = HashMap::new();
+            while let Some(update) = receiver.recv().await {
+                let update = update.unwrap();
+                let value = update.kv_used_blocks.unwrap();
+                let previous = latest.insert(update.worker_id, value);
+                assert!(
+                    previous.is_none_or(|previous| previous < value),
+                    "worker {} went from {previous:?} to {value}",
+                    update.worker_id
+                );
+            }
+            latest
+        });
+        let producers: Vec<_> = (0..PRODUCERS)
+            .map(|producer| {
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    for value in 1..=UPDATES {
+                        for key in 0..KEYS_PER_PRODUCER {
+                            let worker_id = producer * KEYS_PER_PRODUCER + key;
+                            sender
+                                .send(load(worker_id, 0, None, None, Some(value)))
+                                .unwrap();
+                        }
+                        if value % 64 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                })
+            })
+            .collect();
+        drop(sender);
+        for producer in producers {
+            producer.await.unwrap();
+        }
+
+        let latest = tokio::time::timeout(Duration::from_secs(30), consumer)
+            .await
+            .expect("consumer must drain after all senders close")
+            .unwrap();
+        assert_eq!(latest.len() as u64, PRODUCERS * KEYS_PER_PRODUCER);
+        assert!(latest.values().all(|&value| value == UPDATES));
     }
 
     #[tokio::test]

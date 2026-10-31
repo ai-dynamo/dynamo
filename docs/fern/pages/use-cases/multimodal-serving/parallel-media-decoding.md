@@ -80,6 +80,22 @@ process. Dynamo backend runtime images include `libturbojpeg`; custom images
 must provide `libturbojpeg.so.0`. If the library is unavailable, Dynamo logs a
 one-time warning and falls back to `image::ImageReader`.
 
+### NIXL Progress Thread
+
+For each worker set with frontend decoding, the frontend creates up to two NIXL
+agents: one for chat requests and one for completions requests. The progress
+thread of each agent sleeps for at most `DYN_MM_NIXL_PROGRESS_DELAY_US`
+microseconds (default `1000`, range `0` to `1000000`), rounded up to whole
+milliseconds, and wakes early on UCX events.
+
+When the frontend and the backend worker cannot share memory or use RDMA (for
+example, the frontend runs in its own pod with no RDMA device), UCX falls back
+to TCP. Over TCP, some UCX events do not wake the thread, so a read can wait up
+to the full delay. In a same-host TCP test with UCX 1.22, the default delay
+added about 0.7 ms to each 3 MiB read and 3 ms to each 12 MiB read. Larger
+values make each wait longer. Set `DYN_MM_NIXL_PROGRESS_DELAY_US=0` on the
+frontend process to trade one CPU core for each NIXL agent for that latency.
+
 ## Requirements and Limitations
 
 - The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0` image installs

@@ -19,7 +19,7 @@ provider: skt
 model:
   name: A.X-K2
   hf_id: skt/A.X-K2-NVFP4
-  precision: NVFP4 weights, FP8 KV cache
+  precision: NVFP4 weights and FP8 KV cache (B200) or FP8 weights and BF16 KV cache (H200)
 status: experimental
 targets:
 - id: vllm-agg-b200
@@ -73,8 +73,53 @@ targets:
     summary: 'C=16, chat 15%: 61.97 output toks/sec/GPU, 83 mean toks/sec/user, 3.879 s p50 TTFT. Historical
       synthetic EAGLE3 AL=2.12 run; 1755/1765 successful requests, 10 failed, 32 warmup requests. Predates
       the published NVCR runtime update.'
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 32
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1@sha256:2aa1db2002f58d2a821f27908ef0e25e86b7c14b154249f7c68626c1c43dbccd
+  topology: aggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - expert-parallelism
+  - eagle3
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: W1 10240 shared-prefix + 6144 unique input, 1024 output; c16/32/64/128, 512/1024/1024/2048 requests with distinct input seeds; fresh workers, cache retained within sweep
+  deploy:
+    asset: recipes/ax-k2/vllm/agg-h200/deploy-generic.yaml
+  expected_performance:
+    available: true
+    summary: 'W1 c16/32/64/128 TTFT p50: 655.40/652.25/678.50/707.32 ms; TPOT p50: 16.87/22.27/31.64/46.99 ms. One measured sweep with the pinned image and no source patches.'
+- id: vllm-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 32
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1@sha256:2aa1db2002f58d2a821f27908ef0e25e86b7c14b154249f7c68626c1c43dbccd
+  topology: disaggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - expert-parallelism
+  - eagle3
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: W1 10240 shared-prefix + 6144 unique input, 1024 output; c16/32/64/128, 512/1024/1024/2048 requests with distinct input seeds; fresh workers, cache retained within sweep
+  deploy:
+    asset: recipes/ax-k2/vllm/disagg-h200/deploy-generic.yaml
+  expected_performance:
+    available: true
+    summary: 'W1 c16/32/64/128 TTFT p50: 817.80/902.83/1629.23/28194.28 ms; TPOT p50: 17.09/20.27/26.55/34.22 ms. One measured BF16 2P2D sweep with the pinned image.'
 related_benchmarks: []
 maintainer: Vanshil Shah
 gaps:
 - Published C16 short-trace results predate the published NVCR runtime; no measurements for this image.
-- Disaggregated C16 run had 10 failed requests out of 1765; warmup differed between topologies.
