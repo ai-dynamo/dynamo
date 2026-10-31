@@ -748,10 +748,9 @@ fn transfer_source_lookup_deadline_does_not_wait_for_busy_blocking_pool() {
             release_rx.recv().unwrap();
         });
         entered_rx.await.unwrap();
-        let prompt = PromptRequest {
-            token_ids: Some((1..=8).collect()),
-            ..Default::default()
-        };
+        // Invalid hash input must not be evaluated on the async caller or by
+        // the queued job after its deadline has already elapsed.
+        let prompt = PromptRequest::default();
         let mut query = transfer_query(&prompt);
         query.deadline = Instant::now() + Duration::from_millis(20);
         let result = tokio::time::timeout(

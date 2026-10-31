@@ -24,6 +24,7 @@ use crate::indexer::{
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
     LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
+    WorkerWithDpRank,
 };
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
@@ -165,6 +166,31 @@ impl LowerTierIndexers {
         sequence: &[LocalBlockHash],
     ) -> Option<KvTransferCandidates> {
         self.transfer_candidates_for_tier(StorageTier::GpuDirect, sequence)
+    }
+
+    /// Count only the admitted target's retained prefix, without enumerating donors.
+    pub(crate) fn gpu_direct_prefix_for_worker(
+        &self,
+        sequence: &[LocalBlockHash],
+        worker: WorkerWithDpRank,
+    ) -> Option<usize> {
+        let Some(indexer) = self.get(StorageTier::GpuDirect) else {
+            return Some(0);
+        };
+        let snapshot = self.routing_snapshot.load_full();
+        let continuations = FxHashMap::from_iter([(worker, LowerTierContinuation::from_root(0))]);
+        // Retaining hint extensions would enumerate all root owners even with
+        // this single-worker continuation. This query needs only its hit count.
+        let matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                false,
+                &snapshot,
+            );
+        let blocks = matches.hits.get(&worker).copied().unwrap_or(0);
+        (blocks <= sequence.len()).then_some(blocks)
     }
 
     fn transfer_candidates_for_tier(
@@ -503,6 +529,69 @@ mod tests {
                 ),
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn gpu_target_prefix_isolated_from_other_owner_lengths_and_tiers() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let target = WorkerWithDpRank::new(7, 0);
+        let other = WorkerWithDpRank::new(8, 0);
+        let hashes = local_hashes(&[11, 12, 13]);
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&hashes, target),
+            Some(0)
+        );
+        for (worker, local, external) in [
+            (target, vec![11, 12], vec![101, 102]),
+            (other, vec![11, 12, 13], vec![101, 102, 103]),
+        ] {
+            let mut event =
+                store_event(worker.worker_id, worker.dp_rank, 1, None, &local, &external);
+            event.storage_tier = StorageTier::GpuDirect;
+            indexers
+                .get_or_create(StorageTier::GpuDirect)
+                .apply_event_and_wait(event)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&hashes, target),
+            Some(2)
+        );
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&hashes, other),
+            Some(3)
+        );
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&hashes, WorkerWithDpRank::new(9, 0)),
+            Some(0)
+        );
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&local_hashes(&[11, 99]), target),
+            Some(1)
+        );
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&local_hashes(&[99]), target),
+            Some(0)
+        );
+        let mut host = store_event(9, 0, 1, None, &[11, 12, 13], &[101, 102, 103]);
+        host.storage_tier = StorageTier::HostPinned;
+        indexers
+            .get_or_create(StorageTier::HostPinned)
+            .apply_event_and_wait(host)
+            .await
+            .unwrap();
+        assert_eq!(
+            indexers.gpu_direct_prefix_for_worker(&hashes, WorkerWithDpRank::new(9, 0)),
+            Some(0)
+        );
+        // The donor query still returns both owners and their full root chain.
+        let candidates = indexers.gpu_direct_transfer_candidates(&hashes).unwrap();
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(target.into(), 2), (other.into(), 3)]
+        );
+        assert_eq!(candidates.block_hashes.len(), 3);
     }
 
     #[tokio::test]

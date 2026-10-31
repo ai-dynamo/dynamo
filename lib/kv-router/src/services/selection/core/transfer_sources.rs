@@ -4,9 +4,31 @@
 //! Advisory transfer-source lookup, independent of execution admission.
 
 use super::*;
+use crate::indexer::LowerTierIndexers;
 use crate::protocols::KvTransferEnforcement;
+use crate::services::selection::PromptRequest;
 
 pub(super) const MAX_IN_FLIGHT_TRANSFER_SOURCE_LOOKUPS: usize = 8;
+
+fn owned_indexer_prompt(prompt: PromptView<'_>) -> PromptRequest {
+    if let Some((tokens, mm_infos)) = prompt.routing_tokens_and_mm_infos() {
+        PromptRequest {
+            token_ids: Some(tokens.to_vec()),
+            block_mm_infos: mm_infos.map(<[_]>::to_vec),
+            lora_name: prompt.lora_name.map(str::to_owned),
+            cache_namespace: prompt.cache_namespace.map(str::to_owned),
+            is_eagle: prompt.is_eagle,
+            ..Default::default()
+        }
+    } else {
+        PromptRequest {
+            block_hashes: prompt.block_hashes.map(<[_]>::to_vec),
+            sequence_hashes: prompt.sequence_hashes.map(<[_]>::to_vec),
+            isl_tokens: prompt.isl_tokens,
+            ..Default::default()
+        }
+    }
+}
 
 /// Inventory and endpoint protocol must agree. Host is the existing CPU path;
 /// GPU uses only producer-published GpuDirect blocks and a GPU-only pin endpoint.
@@ -87,7 +109,15 @@ impl SelectionPartition {
         &self,
         query: TransferSourceQuery<'_>,
     ) -> Result<Option<TransferSourceResult>, SelectionError> {
-        let Some(candidates) = self.query_transfer_inventory(&query).await? else {
+        let memory_kind = query.memory_kind;
+        let Some(candidates) = self
+            .query_transfer_inventory(&query, move |lower_tier, hashes| match memory_kind {
+                TransferSourceMemoryKind::Host => lower_tier.host_transfer_candidates(hashes),
+                TransferSourceMemoryKind::Gpu => lower_tier.gpu_direct_transfer_candidates(hashes),
+            })
+            .await?
+            .flatten()
+        else {
             return Ok(None);
         };
         // Re-read membership after inventory lookup; no departed endpoint is authoritative.
@@ -122,28 +152,30 @@ impl SelectionPartition {
             }
             target.clone()
         };
-        let Some(candidates) = self.query_transfer_inventory(query).await? else {
-            return Ok(None);
-        };
+        let worker = query.target;
+        let prefix = self
+            .query_transfer_inventory(query, move |lower_tier, hashes| {
+                lower_tier.gpu_direct_prefix_for_worker(hashes, worker)
+            })
+            .await?
+            .flatten();
         if Instant::now() >= query.deadline
             || self.0.workers_tx.borrow().get(&query.target.worker_id) != Some(&target)
         {
             return Ok(None);
         }
-        let blocks = candidates
-            .owner_prefix_blocks
-            .iter()
-            .find_map(|(source, blocks)| {
-                (*source == KvTransferCandidateSource::Worker(query.target)).then_some(*blocks)
-            })
-            .unwrap_or(0);
-        Ok((blocks <= candidates.block_hashes.len()).then_some(blocks))
+        Ok(prefix)
     }
 
-    async fn query_transfer_inventory(
+    async fn query_transfer_inventory<T, F>(
         &self,
         query: &TransferSourceQuery<'_>,
-    ) -> Result<Option<KvTransferCandidates>, SelectionError> {
+        lookup: F,
+    ) -> Result<Option<T>, SelectionError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&LowerTierIndexers, &[LocalBlockHash]) -> T + Send + 'static,
+    {
         let entry = &self.0;
         if Instant::now() >= query.deadline
             || entry.key.model_name != query.model_name
@@ -169,44 +201,41 @@ impl SelectionPartition {
         let Ok(permit) = entry.transfer_source_slots.clone().try_acquire_owned() else {
             return Ok(None);
         };
-        let hashes = query
-            .prompt
-            .block_hashes_for_indexer(entry.block_size, entry.is_eagle)?;
-        if Instant::now() >= query.deadline {
-            return Ok(None);
-        }
         let lower_tier = match &entry.indexer {
             Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } => {
                 lower_tier.clone()
             }
             Indexer::Remote { .. } | Indexer::None => return Ok(None),
         };
-        let memory_kind = query.memory_kind;
+        let prompt = owned_indexer_prompt(query.prompt);
+        let block_size = entry.block_size;
+        let is_eagle = entry.is_eagle;
+        let deadline = query.deadline;
         // Retained GPU inventory is independent of native execution Device
         // events. Both walks stay off the executor and hold the permit through
         // abandoned/expired work; neither walk can acquire a GPU memory lease.
-        let lookup = tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            match memory_kind {
-                TransferSourceMemoryKind::Host => lower_tier.host_transfer_candidates(&hashes),
-                TransferSourceMemoryKind::Gpu => lower_tier.gpu_direct_transfer_candidates(&hashes),
+            if Instant::now() >= deadline {
+                return Ok(None);
             }
+            let hashes = prompt
+                .view()
+                .block_hashes_for_indexer(block_size, is_eagle)?;
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            Ok::<_, SelectionError>(Some(lookup(&lower_tier, &hashes)))
         });
-        let candidates = match tokio::time::timeout_at(query.deadline.into(), lookup).await {
-            Ok(Ok(candidates)) => candidates,
+        let result = match tokio::time::timeout_at(query.deadline.into(), task).await {
+            Ok(Ok(result)) => result?,
             Ok(Err(error)) => return Err(SelectionError::Internal(error.to_string())),
             Err(_) => return Ok(None),
         };
         if Instant::now() >= query.deadline {
             return Ok(None);
         }
-        // A completed empty walk is an observed zero; timeout/unsupported input
-        // above remains None so callers cannot treat unknown target residency as cold.
-        Ok(Some(candidates.unwrap_or(KvTransferCandidates {
-            block_hashes: Vec::new(),
-            owner_prefix_blocks: Vec::new(),
-            routing_snapshot: None,
-        })))
+        Ok(result)
     }
 }
 
