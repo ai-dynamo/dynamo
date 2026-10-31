@@ -570,17 +570,21 @@ mod tests {
         let pool_clone = pool.clone();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
 
         // Spawn a thread that will wait for the item
         let handle = thread::spawn(move || {
             counter_clone.store(1, Ordering::SeqCst); // Mark that we're waiting
+            started_tx.send(()).unwrap();
             let waiting_item = pool_clone.acquire_blocking(); // This will block
             counter_clone.store(2, Ordering::SeqCst); // Mark that we got it
             assert_eq!(*waiting_item, 0); // Should be reset value
         });
 
-        // Give the thread time to start waiting
-        thread::sleep(Duration::from_millis(10));
+        // Wait for the thread to start instead of assuming a scheduling delay.
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("pool waiter did not start");
         assert_eq!(counter.load(Ordering::SeqCst), 1); // Should be waiting
 
         // Drop the item to trigger condvar notification
