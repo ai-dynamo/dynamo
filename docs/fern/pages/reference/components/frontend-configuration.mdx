@@ -852,11 +852,6 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
-<Note>
-These behaviors require a build containing
-[PR #17367](https://github.com/ai-dynamo/dynamo/pull/17367).
-</Note>
-
 Responses from the Messages handlers, including request parsing and validation errors, return
 the assigned request ID in the `request-id` response header. HTTP errors from these handlers
 use the [Anthropic error envelope](https://platform.claude.com/docs/en/api/errors), including
