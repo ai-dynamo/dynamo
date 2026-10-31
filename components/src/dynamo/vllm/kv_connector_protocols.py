@@ -101,6 +101,17 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     def decode_request_kv_transfer_params(
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
+        # vLLM retains Mooncake send blocks only for FINISHED_LENGTH_CAPPED.
+        reasons = [output.finish_reason for output in prefill_response.outputs]
+        if (
+            not prefill_response.finished
+            or not reasons
+            or any(reason != "length" for reason in reasons)
+        ):
+            raise RuntimeError(
+                "Mooncake prefill did not produce transferable KV: "
+                f"request={prefill_response.request_id}, finish_reasons={reasons!r}"
+            )
         host, port = self._get_bootstrap_addr(self._vllm_config)
         return {
             "do_remote_decode": False,

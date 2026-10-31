@@ -111,6 +111,41 @@ def test_nixl_decode_returns_none_when_engine_omits():
 # ---------------------------------------------------------------------------
 
 
+def _successful_prefill_response(**kwargs) -> SimpleNamespace:
+    return SimpleNamespace(
+        request_id="prefill-request",
+        finished=True,
+        outputs=[SimpleNamespace(finish_reason="length", token_ids=[42])],
+        **kwargs,
+    )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("finished", "reasons"),
+    [
+        pytest.param(True, ["error"], id="failed-kv-load"),
+        pytest.param(True, ["abort"], id="aborted"),
+        pytest.param(True, ["stop"], id="stopped-without-send-blocks"),
+        pytest.param(False, [None], id="unfinished"),
+        pytest.param(False, ["length"], id="unfinished-request"),
+        pytest.param(True, [], id="empty-result"),
+        pytest.param(True, ["length", "error"], id="one-output-failed"),
+    ],
+)
+def test_mooncake_rejects_nontransferable_prefill(fake_mooncake, finished, reasons):
+    proto = MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="eng"))
+    response = SimpleNamespace(
+        request_id="failed-prefill",
+        finished=finished,
+        outputs=[
+            SimpleNamespace(finish_reason=reason, token_ids=[]) for reason in reasons
+        ],
+    )
+    with pytest.raises(RuntimeError, match="did not produce transferable KV"):
+        proto.decode_request_kv_transfer_params(response)
+
+
 def test_mooncake_prefill_request_shape(fake_mooncake):
     proto = MooncakeConnectorProtocol(_config("MooncakeConnector"))
     params = proto.prefill_request_kv_transfer_params()
@@ -127,7 +162,7 @@ def test_mooncake_transfer_id_persists_across_prefill_and_decode(fake_mooncake):
     proto = MooncakeConnectorProtocol(cfg)
     prefill_tid = proto.prefill_request_kv_transfer_params()["transfer_id"]
     decode_tid = proto.decode_request_kv_transfer_params(
-        SimpleNamespace(kv_transfer_params=None)
+        _successful_prefill_response(kv_transfer_params=None)
     )["transfer_id"]
     assert prefill_tid == decode_tid
 
@@ -151,7 +186,7 @@ def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatc
     cfg = _config("MooncakeConnector", engine_id="eng-prefill-0")
     proto = MooncakeConnectorProtocol(cfg)
     params = proto.decode_request_kv_transfer_params(
-        SimpleNamespace(kv_transfer_params=None)
+        _successful_prefill_response(kv_transfer_params=None)
     )
     assert params == {
         "do_remote_decode": False,
@@ -167,7 +202,7 @@ def test_mooncake_decode_ignores_engine_kv_transfer_params(fake_mooncake):
     ``res.kv_transfer_params`` must not leak into the decode-side payload."""
     cfg = _config("MooncakeConnector", engine_id="eng-1")
     proto = MooncakeConnectorProtocol(cfg)
-    response = SimpleNamespace(
+    response = _successful_prefill_response(
         kv_transfer_params={"remote_engine_id": "WRONG", "remote_host": "decoy"}
     )
     params = proto.decode_request_kv_transfer_params(response)
@@ -205,7 +240,7 @@ def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
     # Calling decode multiple times must not rebind the helper.
     for _ in range(3):
         proto.decode_request_kv_transfer_params(
-            SimpleNamespace(kv_transfer_params=None)
+            _successful_prefill_response(kv_transfer_params=None)
         )
     assert proto._get_bootstrap_addr is helper
 
@@ -444,7 +479,7 @@ def test_multiconnector_decode_uses_child_engine_id_not_wrapper(fake_mooncake):
         )
     )
     params = proto.decode_request_kv_transfer_params(
-        SimpleNamespace(kv_transfer_params=None)
+        _successful_prefill_response(kv_transfer_params=None)
     )
     assert params["remote_engine_id"] == "mooncake-eng"
 
@@ -462,7 +497,7 @@ def test_multiconnector_child_engine_id_falls_back_to_wrapper(fake_mooncake):
         )
     )
     params = proto.decode_request_kv_transfer_params(
-        SimpleNamespace(kv_transfer_params=None)
+        _successful_prefill_response(kv_transfer_params=None)
     )
     assert params["remote_engine_id"] == "wrapper-eng"
 
