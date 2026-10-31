@@ -336,6 +336,12 @@ impl WorkerSelectionPolicy {
         prepared: Option<PreparedRows>,
         trace: Option<SelectionTraceSpec>,
     ) -> Result<RowPick, SelectionFailure> {
+        // With the reference policy compiled out the match has one arm; clippy then asks for a
+        // `let`, which would not compile with it in.
+        #[cfg_attr(
+            not(any(test, feature = "testing", feature = "bench")),
+            allow(clippy::infallible_destructuring_match)
+        )]
         let state = match &self.state {
             #[cfg(any(test, feature = "testing", feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => {

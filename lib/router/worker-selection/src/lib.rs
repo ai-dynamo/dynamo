@@ -16,6 +16,7 @@
 pub mod conditional_disagg;
 mod context;
 mod error;
+pub mod host;
 mod inputs;
 pub mod kv_transfer;
 pub mod lora_filter;

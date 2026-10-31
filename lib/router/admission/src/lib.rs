@@ -18,6 +18,7 @@
 //! public for the kernel in another crate; hosts and plugins do not call them.
 
 pub mod classifier;
+pub mod host;
 pub mod placement;
 pub mod profile;
 pub mod queue;

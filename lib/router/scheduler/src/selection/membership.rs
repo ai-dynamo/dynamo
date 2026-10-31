@@ -8,7 +8,7 @@
 //! complete desired snapshots. [`CatalogReconciler`] turns each snapshot into
 //! catalog upserts and deletes, retrying workers the core has not yet accepted
 //! as schedulable and removing workers that left. A snapshot whose pass fails
-//! is re-applied after [`RECONCILE_RETRY_DELAY`] unless a newer one arrives.
+//! is re-applied after `RECONCILE_RETRY_DELAY` unless a newer one arrives.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -161,7 +161,7 @@ impl CatalogReconciler {
     /// wants selection to fail closed yields an empty snapshot before closing.
     ///
     /// A snapshot whose pass failed is kept in a single pending slot and
-    /// re-applied after [`RECONCILE_RETRY_DELAY`]; a newer snapshot from the
+    /// re-applied after `RECONCILE_RETRY_DELAY`; a newer snapshot from the
     /// source supersedes it. Sources block until membership changes, so
     /// without this a failed pass would wait for an unrelated change.
     pub async fn run(mut self, mut source: impl WorkerCatalogSource, cancel: CancellationToken) {

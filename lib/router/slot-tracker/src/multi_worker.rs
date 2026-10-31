@@ -96,7 +96,7 @@ fn active_request_expiry_duration_from_lookup(
 
 /// Complete scheduler-owned load for one worker rank.
 ///
-/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](crate::prelude::ActiveLoad)
+/// This is an in-process snapshot rather than the event-plane [`ActiveLoad`](dynamo_router_protocol::load::ActiveLoad)
 /// protocol. Scheduler publishers always own both active-load fields, while remote wire updates may
 /// contain only a subset of fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

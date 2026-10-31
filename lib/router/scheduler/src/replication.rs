@@ -31,7 +31,7 @@ pub const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
 pub use dynamo_session_affinity::wire::AffinityBindingEvent;
 
-/// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
+/// Publishes bindings from a [`dynamo_session_affinity::SessionAffinity`]
 /// into a transport channel. Best effort: a full channel drops the update.
 pub struct AffinityMeshSink {
     partition: RoutingPartitionId,

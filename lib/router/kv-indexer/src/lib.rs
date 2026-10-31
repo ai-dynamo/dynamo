@@ -58,6 +58,7 @@ pub mod concurrent_radix_tree_compressed;
 pub mod config;
 pub mod cuckoo;
 pub mod delegate;
+pub mod host;
 pub mod identity;
 pub mod kv_hints;
 mod kv_indexer;

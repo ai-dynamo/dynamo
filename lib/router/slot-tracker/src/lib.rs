@@ -16,6 +16,7 @@ pub mod booking;
 pub mod busy;
 mod cleanup;
 mod compressed_path_arena;
+pub mod host;
 pub mod multi_worker;
 mod prefill_tracker;
 mod prelude;

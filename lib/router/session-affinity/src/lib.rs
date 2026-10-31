@@ -25,6 +25,7 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+pub mod host;
 pub mod wire;
 
 pub use dynamo_router_protocol::worker::WorkerAffinityTarget as AffinityTarget;
