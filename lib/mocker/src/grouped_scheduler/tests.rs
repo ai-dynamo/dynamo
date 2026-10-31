@@ -6,7 +6,7 @@ use std::time::Duration;
 use parking_lot::Mutex as ParkingLotMutex;
 use std::sync::Mutex as StdMutex;
 
-use dynamo_kv_router::protocols::StorageTier;
+use dynamo_router_protocol::residency::StorageTier;
 
 use crate::common::handoff::HandoffId;
 use crate::common::perf_model::{AisCallback, PerfModel};

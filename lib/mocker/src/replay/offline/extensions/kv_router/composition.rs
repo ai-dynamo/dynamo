@@ -8,8 +8,9 @@ use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_router_protocol::WorkerType;
+use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
@@ -727,7 +728,7 @@ mod tests {
             [(
                 WorkerType::Aggregated,
                 startup_policy_parameters(
-                    &dynamo_kv_router::SelectionConfig::from(&config),
+                    &dynamo_worker_selection::host::SelectionConfig::from(&config),
                     WorkerType::Aggregated
                 )
             )]
@@ -761,14 +762,14 @@ mod tests {
                 (
                     WorkerType::Prefill,
                     startup_policy_parameters(
-                        &dynamo_kv_router::SelectionConfig::from(&config),
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
                         WorkerType::Prefill
                     )
                 ),
                 (
                     WorkerType::Decode,
                     startup_policy_parameters(
-                        &dynamo_kv_router::SelectionConfig::from(&config),
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
                         WorkerType::Decode
                     )
                 ),

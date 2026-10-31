@@ -71,5 +71,5 @@ impl SchedulerLifecycleEvent {
 pub struct SchedulerCommandEffects {
     pub result: SchedulerCommandResult,
     pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+    pub kv_events: Vec<dynamo_kv_events::event::RouterEvent>,
 }

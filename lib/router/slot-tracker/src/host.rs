@@ -7,6 +7,7 @@
 //! owning module; this list is the host contract (hosts inventory v2, section 3).
 
 pub use crate::booking::SchedulerBookingDescriptor;
+pub use crate::busy::BusyRanksExt;
 pub use crate::multi_worker::{
     ActiveSequencesMultiWorker, LocalWorkerLoad, NoopSequencePublisher,
     ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,

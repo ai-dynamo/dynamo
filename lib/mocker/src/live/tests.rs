@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::*;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
-use dynamo_kv_router::protocols::StorageTier;
+use dynamo_router_protocol::residency::StorageTier;
 
 struct NoopKvSink;
 
@@ -26,13 +26,13 @@ impl FpmSink for CountingFpmSink {
 }
 
 impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
-    fn publish(&self, _event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
+    fn publish(&self, _event: dynamo_kv_events::event::KvCacheEvent) -> anyhow::Result<()> {
         Ok(())
     }
 
     fn publish_with_storage_tier(
         &self,
-        _event: dynamo_kv_router::protocols::KvCacheEvent,
+        _event: dynamo_kv_events::event::KvCacheEvent,
         _storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
         Ok(())

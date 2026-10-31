@@ -45,11 +45,13 @@ pub use crate::selection::types::{SelectionWorkerConfig, WorkerCatalogRecord, Wo
 pub use crate::selector::DefaultWorkerSelector;
 /// The synchronous selection entry a host or a replay harness drives directly, and the
 /// reference selector tests compare against.
-pub use crate::selector::{WorkerSelectionInput, WorkerSelector};
+pub use crate::selector::{WorkerCapacityExt, WorkerSelectionInput, WorkerSelector};
 pub use crate::shared_cache::SharedKvCache;
 pub use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};
 pub use crate::tracking_hash::{TrackingHashConfig, TrackingHashContext};
-pub use crate::types::{KvSchedulerError, ScheduleMode, SchedulingRequest};
+pub use crate::types::{
+    KvSchedulerError, ScheduleMode, ScheduleRequest, SchedulingContext, SchedulingRequest,
+};
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 pub use dynamo_admission::classifier::RequestLifecycle;
 pub use dynamo_kv_indexer::backend::IndexerPolicy;

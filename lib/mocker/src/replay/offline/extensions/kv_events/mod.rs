@@ -3,7 +3,8 @@
 
 use aisimulate_core::engine::KvEvent;
 use anyhow::Context;
-use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_router_protocol::residency::StorageTier;
 
 use crate::common::protocols::{MockerConfig, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;
@@ -83,11 +84,9 @@ impl ReplayEngineObservation for RouterEventObservation {
             // handoff destinations.
             .filter(|event| event.storage_tier == StorageTier::Device)
             .flat_map(|event| match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Stored(store) => {
-                    store.blocks.as_slice()
-                }
-                dynamo_kv_router::protocols::KvCacheEventData::Removed(_)
-                | dynamo_kv_router::protocols::KvCacheEventData::Cleared => &[],
+                dynamo_kv_events::event::KvCacheEventData::Stored(store) => store.blocks.as_slice(),
+                dynamo_kv_events::event::KvCacheEventData::Removed(_)
+                | dynamo_kv_events::event::KvCacheEventData::Cleared => &[],
             })
             .map(|block| block.tokens_hash.0)
             .collect()
@@ -109,7 +108,7 @@ fn encode_events(
     encoder: &mut KvIngestEventEncoder<'_>,
     events: &[RouterEvent],
 ) -> anyhow::Result<()> {
-    use dynamo_kv_router::protocols::KvCacheEventData;
+    use dynamo_kv_events::event::KvCacheEventData;
 
     for event in events {
         let (tier_tag, tier_name) = storage_tier_identity(event.storage_tier);

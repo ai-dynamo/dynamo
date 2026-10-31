@@ -4,10 +4,11 @@
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
 use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, StorageTier,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::residency::StorageTier;
 
 use crate::common::protocols::ForwardPassSnapshot;
 
@@ -99,10 +100,10 @@ mod tests {
     use std::sync::Arc;
 
     use aisimulate_core::engine::{KvBlock, StoredBlocks};
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_kv_router::protocols::{
-        KvCacheEventData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    };
+    use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+    use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_router_protocol::block_hash::LocalBlockHash;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 
     use super::*;

@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_router_protocol::residency::StorageTier;
 use futures::{Sink, SinkExt, StreamExt};
 use serde::Serialize;
 use tmq::{
@@ -425,10 +426,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash,
-    };
+    use dynamo_kv_events::event::{KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 
@@ -533,7 +532,7 @@ mod tests {
         .await
         .expect("replay must return the published event");
         assert_eq!(frames[2], 0u64.to_be_bytes());
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&frames[3]).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&frames[3]).unwrap();
         assert_eq!(batch.data_parallel_rank, Some(0));
         assert_eq!(batch.events.len(), 1);
     }
@@ -572,8 +571,8 @@ mod tests {
 
     #[test]
     fn encoded_batch_decodes_through_router_zmq_wire() {
-        use dynamo_kv_router::protocols::KvCacheRemoveData;
-        use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
+        use dynamo_kv_events::event::KvCacheRemoveData;
+        use dynamo_kv_events::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
 
         let stored = RawKvEvent {
             event: stored_event(),

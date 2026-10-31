@@ -9,34 +9,37 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_kv_router::LocalBlockHash;
+use dynamo_admission::host::{
+    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, WorkerPlacement,
+};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_kv_indexer::host::RadixTree;
+use dynamo_kv_indexer::host::{
+    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, SessionPrefixIndexer,
+    TieredMatchDetails, query_lower_tiers_with_options,
+};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::indexer::{
-    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
-    query_lower_tiers_with_options,
+use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
+use dynamo_kv_router::scheduling::BusyThresholdsExt;
+use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
+use dynamo_router_protocol::session::SessionContext;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{
+    CacheHitWeights, OverlapAnalysis, OverlapSignals, RoutingConstraints, ScheduleMode,
+    SchedulingContext, SchedulingRequest, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerCapacityExt, WorkerSelectionInput, WorkerSelector,
 };
-use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
-};
-use dynamo_kv_router::scheduling::CacheHitWeights;
-use dynamo_kv_router::scheduling::{BusyRanksExt, BusyThresholdsExt};
-use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
-    ScheduleMode, SchedulingContext, WorkerPlacement,
-};
-use dynamo_kv_router::sequences::topology::WorkerDpRange;
-use dynamo_kv_router::services::selection::affinity::{
+use dynamo_session_affinity::host::{
     AcquireStep, AffinityError, AffinityLease, AffinityTarget, Hold, SessionAffinity,
     SessionAffinityConfig, subagent_group_affinity_id,
 };
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
-    SessionContext, SessionPrefixIndexer, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    tracking_hash_context,
+use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, BusyRanksExt, PrefillLoadHint, SequenceRequest, WorkerDpRange,
+    WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
@@ -67,36 +70,36 @@ pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayCom
 #[derive(Clone, Copy)]
 enum KvEventSummary {
     Stored {
-        parent_hash: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        parent_hash: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
         start_position: Option<u32>,
         count: usize,
-        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
-        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        first: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
+        last: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
     },
     Removed {
         count: usize,
-        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
-        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        first: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
+        last: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
     },
     Cleared,
 }
 
 impl KvEventSummary {
-    fn from_data(data: &dynamo_kv_router::protocols::KvCacheEventData) -> Self {
+    fn from_data(data: &dynamo_kv_events::event::KvCacheEventData) -> Self {
         match data {
-            dynamo_kv_router::protocols::KvCacheEventData::Stored(stored) => Self::Stored {
+            dynamo_kv_events::event::KvCacheEventData::Stored(stored) => Self::Stored {
                 parent_hash: stored.parent_hash,
                 start_position: stored.start_position,
                 count: stored.blocks.len(),
                 first: stored.blocks.first().map(|block| block.block_hash),
                 last: stored.blocks.last().map(|block| block.block_hash),
             },
-            dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => Self::Removed {
+            dynamo_kv_events::event::KvCacheEventData::Removed(removed) => Self::Removed {
                 count: removed.block_hashes.len(),
                 first: removed.block_hashes.first().copied(),
                 last: removed.block_hashes.last().copied(),
             },
-            dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
+            dynamo_kv_events::event::KvCacheEventData::Cleared => Self::Cleared,
         }
     }
 }
@@ -1563,13 +1566,18 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
-    use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    use dynamo_admission::host::RouterQueuePolicy;
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
-    use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::residency::StorageTier;
+    use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+    use dynamo_scheduler::host::{
+        PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,
+    };
     use rustc_hash::FxHashMap;
     use serde_json::Value;
     use tempfile::NamedTempFile;
@@ -2635,7 +2643,7 @@ models:
             .on_request_arrival(&ordinary_class_name, None, 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<dynamo_admission::host::QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
         assert_eq!(rejection.policy_class, "latency_uncached");
         assert_eq!(rejection.current, 0);
@@ -2661,7 +2669,7 @@ models:
             .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<dynamo_admission::host::QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);
@@ -3215,7 +3223,7 @@ policy_classes:
             KvCacheEvent {
                 event_id: 100,
                 dp_rank: rank,
-                data: KvCacheEventData::Removed(dynamo_kv_router::protocols::KvCacheRemoveData {
+                data: KvCacheEventData::Removed(dynamo_kv_events::event::KvCacheRemoveData {
                     block_hashes: hashes.into_iter().map(ExternalSequenceBlockHash).collect(),
                 }),
             },

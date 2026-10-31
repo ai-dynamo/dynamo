@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
-use dynamo_kv_router::SelectionConfig;
+use dynamo_worker_selection::host::SelectionConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::protocols::MockerConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike};
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, ActiveSequencesMultiWorker, LocalWorkerLoad, SchedulerLoadSnapshot,
+    SequencePublisher,
 };
-use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;

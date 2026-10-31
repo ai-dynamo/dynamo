@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockerConfig};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 pub use agentic::AgenticReplayOptions;
 /// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
@@ -189,7 +189,7 @@ impl Default for ConversationAffinityConfig {
 
 impl ConversationAffinityConfig {
     pub fn validate(self) -> anyhow::Result<()> {
-        use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_TTL_SECS;
+        use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_TTL_SECS;
         anyhow::ensure!(
             self.ttl_seconds.is_finite()
                 && (1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&self.ttl_seconds),

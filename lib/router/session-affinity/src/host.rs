@@ -7,7 +7,8 @@
 //! host contract (hosts inventory v2, section 3).
 
 pub use crate::{
-    AffinityReplicaSink, AffinityTarget, AffinityVersion, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS, ReplicaApplyOutcome, SessionAffinityConfig, SessionAffinityMode,
-    WeakSessionAffinity,
+    AcquireStep, AffinityError, AffinityLease, AffinityReplicaSink, AffinityTarget,
+    AffinityVersion, Hold, MAX_SESSION_AFFINITY_ID_BYTES, MAX_SESSION_AFFINITY_TTL_SECS,
+    ReplicaApplyOutcome, SessionAffinity, SessionAffinityConfig, SessionAffinityMode,
+    WeakSessionAffinity, subagent_group_affinity_id,
 };

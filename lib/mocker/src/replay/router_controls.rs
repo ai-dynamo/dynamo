@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_custom_policy_builtin::DefaultWorkerSelectorControl;
-use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyConfig, RuntimePolicyUpdate};
+use dynamo_router_protocol::WorkerType;
 use parking_lot::Mutex;
 
 /// Desired router policy parameters keyed by worker type (`aggregated`, `prefill` or `decode`),
@@ -165,7 +165,7 @@ pub fn parse_router_worker_type(name: &str) -> Result<WorkerType> {
 mod tests {
     use super::*;
     use dynamo_custom_policy_builtin::DefaultWorkerSelector;
-    use dynamo_kv_router::KvRouterConfig;
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
 
     fn registry_with(
@@ -176,7 +176,7 @@ mod tests {
             .iter()
             .map(|(worker_type, config)| {
                 let selector = DefaultWorkerSelector::new(
-                    Some(dynamo_kv_router::SelectionConfig::from(config)),
+                    Some(dynamo_worker_selection::host::SelectionConfig::from(config)),
                     "replay",
                 );
                 registry.register(*worker_type, selector.runtime_control());

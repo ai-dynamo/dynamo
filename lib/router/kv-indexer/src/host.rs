@@ -37,6 +37,7 @@ pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;
 pub use crate::residency::{ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot};
+pub use crate::session_prefix_index::SessionPrefixIndexer;
 pub use crate::session_updates::SessionUpdateSender;
 pub use crate::thread_pool::ThreadPoolIndexer;
 pub use crate::traits::{KvIndexerInterface, SyncIndexer};

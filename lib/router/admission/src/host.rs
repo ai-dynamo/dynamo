@@ -7,5 +7,6 @@
 //! host contract (hosts inventory v2, section 3).
 
 pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, WorkerView};
+pub use crate::placement::WorkerPlacement;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{PolicyQueue, QueueRejection, QueueSnapshot};

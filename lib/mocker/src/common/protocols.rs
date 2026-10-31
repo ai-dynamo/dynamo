@@ -6,7 +6,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use validator::Validate;
 
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_router_protocol::residency::StorageTier;
 use dynamo_tokens::Token;
 
 pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};
@@ -283,7 +284,7 @@ mod tests {
                     .map(|event_id| RawKvEvent {
                         event: KvCacheEvent {
                             event_id,
-                            data: dynamo_kv_router::protocols::KvCacheEventData::Cleared,
+                            data: dynamo_kv_events::event::KvCacheEventData::Cleared,
                             dp_rank: 0,
                         },
                         block_token_ids: None,
