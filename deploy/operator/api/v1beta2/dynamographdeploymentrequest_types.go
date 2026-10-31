@@ -237,11 +237,14 @@ type AISimulateSpec struct {
 	// field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
-	// num_gpus_per_node, and namespace are operator-owned. Request admission
+	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
 	// rejects them, and the Run controller enforces its values while lowering the
 	// immutable snapshot. The operator runs the AISimulate version from its
 	// configured planner image; Requests and Runs cannot select a different image
 	// or version.
+	// Request and Run creation validate the merged input against the bundled AISimulate input
+	// schema. Request spec changes require the same validation; Run specs are immutable.
+	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object

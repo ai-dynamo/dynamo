@@ -34,6 +34,7 @@ import (
 // than the v1beta1 reconciler (the v1beta2 admission webhook) share the same order and the
 // same error wording.
 type Discoverer struct {
+	// Reader queries the Kubernetes API. Nil makes Discover return a configuration error.
 	Reader client.Reader
 	// DCGM scrapes the DCGM exporter. Nil skips it.
 	DCGM  *GPUDiscovery
@@ -45,10 +46,10 @@ type Discoverer struct {
 }
 
 // Discover returns the discovered GPUs, restricted to filterSKU when it is set. An error
-// means no backend produced a result.
+// means no backend produced a result. d and ctx must not be nil; Reader may be nil.
 func (d *Discoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
-	if d == nil || d.Reader == nil {
+	if d.Reader == nil {
 		return nil, errors.New("auto-discovery failed: APIReader is not configured")
 	}
 
@@ -84,11 +85,8 @@ func (d *Discoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GP
 // KnownSKU returns the hardware catalog name of the discovered GPU, or empty when the model
 // is not one the catalog knows. Unlike the v1beta1 reconciler it never falls back to the raw
 // model string: a v1beta2 SKU is an AISimulate catalog name, and an unknown name would only
-// fail later inside the search.
+// fail later inside the search. info must not be nil.
 func KnownSKU(info *GPUInfo) nvidiacomv1beta1.GPUSKUType {
-	if info == nil {
-		return ""
-	}
 	if info.System != "" {
 		return info.System
 	}

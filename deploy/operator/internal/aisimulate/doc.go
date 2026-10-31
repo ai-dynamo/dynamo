@@ -19,7 +19,9 @@
 // AISimulate recommendation input consumed by `aisimulate recommend --stack dynamo`.
 //
 // Admission and reconciliation use the same lowering. Admission runs it after structural
-// validation so malformed overrides and unmappable typed values fail before persistence. The
+// validation, then validates the complete merged input against the Pydantic-generated JSON
+// Schema for the pinned AISimulate release. Unchanged specs may still receive metadata
+// updates after the bundled schema changes; any spec edit requires a fully valid input. The
 // Request reconciler snapshots the accepted input into an immutable Run. The Run reconciler
 // lowers that snapshot once, records the result in status.aisimulate.input and passes the same
 // document to the Job.
@@ -27,8 +29,8 @@
 // Lower starts with the public engine-role underlay required for AISimulate's default
 // aggregated-and-disaggregated search. It then translates the typed spec (model, backends,
 // hardware, workload, objective) into that input. The derived defaults that no API field
-// carries are added next: the request count, a bounded trial budget for a
-// KV-load range search, and optimization.strict_sla when an SLA bound is set. Last,
+// carries are added next: the request count, a bounded trial budget for every search,
+// and optimization.strict_sla when an SLA bound is set. Last,
 // spec.aisimulate.inputOverrides is applied on top as a JSON Merge Patch (RFC 7386): upstream
 // objects merge recursively, arrays and scalars replace the value, and null deletes it. The
 // input overrides are authoritative: they win on every path they name, including the derived
