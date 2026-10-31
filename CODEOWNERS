@@ -608,6 +608,8 @@ requirements.txt                                                                
 /.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /agents/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/Cargo.lock                                                                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-global-router-codeowners
+/Cargo.toml                                                                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-global-router-codeowners
 /agent-docs/                                                                                            @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners

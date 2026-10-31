@@ -1049,6 +1049,14 @@ shared:
   - performance
   - router
   - global-router
+- glob: Cargo.lock
+  owners:
+  - ops
+  - global-router
+- glob: Cargo.toml
+  owners:
+  - ops
+  - global-router
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router
