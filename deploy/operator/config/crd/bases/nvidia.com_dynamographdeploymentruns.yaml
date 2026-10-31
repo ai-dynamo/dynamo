@@ -56,35 +56,34 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+              description: |-
+                DynamoGraphDeploymentRunSpec is an immutable snapshot of an accepted DGDR spec.
+                Request admission resolves its structural defaults before the Request controller copies it;
+                Request admission defaulting does not apply to Runs.
+
+                The Run reconciler lowers this immutable typed snapshot plus inputOverrides exactly once and
+                records the resulting public recommendation input in status.aisimulate.input.
               properties:
                 aisimulate:
-                  description: AISimulate selects the execution artifact and supplies native AISimulate input.
+                  description: AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
                   properties:
-                    image:
+                    inputOverrides:
                       description: |-
-                        Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        and execution defaults are resolved outside this API.
-                      minLength: 1
-                      type: string
-                    parameters:
-                      description: |-
-                        Parameters contains native AISimulate input. Field names and nesting use
-                        the upstream AISimulate JSON contract, including snake_case names.
+                        InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
+                        the typed fields. It uses the upstream AISimulate JSON contract, including
+                        snake_case names. Values here take precedence, and null deletes a lowered
+                        field. The dgdr_run member must remain an object, and its operator-owned
+                        transport, identity, and runtime fields name, max_candidates, snapshot_dir,
+                        runtime_image, runtime_version_override, derive_runtime_images,
+                        num_gpus_per_node, and namespace are operator-owned. Request admission
+                        rejects them, and the Run controller enforces its values while lowering the
+                        immutable snapshot. The operator runs the AISimulate version from its
+                        configured planner image; Requests and Runs cannot select a different image
+                        or version.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
-                    versionOverride:
-                      description: |-
-                        VersionOverride declares the AISimulate compatibility version when it
-                        cannot be inferred from the effective image.
-                      minLength: 1
-                      type: string
                   type: object
                 backends:
-                  default:
-                    - vllm
-                    - sglang
-                    - trtllm
                   description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
                   items:
                     description: Backend identifies an inference backend searched by AISimulate and used by generated candidates.
@@ -95,30 +94,53 @@ spec:
                     type: string
                   minItems: 1
                   type: array
+                  x-kubernetes-list-type: set
                 hardware:
                   description: |-
                     Hardware bounds the accelerator configurations evaluated by the search.
-                    Admission discovers any omitted hardware values from the cluster.
+                    When omitted, admission discovers SKU, budget and node width. An exactly empty object opts
+                    out of operator hardware discovery and typed defaults. Admission completes every nonempty
+                    object with any missing hardware values; explicit values remain authoritative.
                   properties:
                     gpu:
                       description: |-
                         GPU describes accelerator identity and the maximum allocation per candidate.
-                        Omitted fields are resolved independently by admission.
+                        In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster.
                       properties:
                         budget:
                           description: |-
                             Budget is the maximum total number of GPUs one candidate may use.
-                            When omitted, admission derives the available GPU budget from the cluster.
+                            When omitted for a known SKU, admission derives the available GPU budget from the cluster.
+                            An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an
+                            explicit `numGpusPerNode` in the parent hardware object.
                           format: int32
                           minimum: 1
                           type: integer
                         sku:
                           description: |-
                             SKU identifies the accelerator using the AISimulate hardware catalog name.
-                            When omitted, admission discovers the accelerator from the cluster.
+                            Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,
+                            `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,
+                            `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.
+                            The field remains open so an external AISimulate systems catalog can add identifiers.
+                            Admission passes an unknown identifier through unchanged and warns when `budget` and the
+                            parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because
+                            cluster discovery cannot associate capacity or topology with it. When omitted from a
+                            nonempty hardware object, admission discovers the accelerator.
                           minLength: 1
                           type: string
                       type: object
+                    numGpusPerNode:
+                      description: |-
+                        NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers
+                        to AISimulate's num_gpus_per_node input.
+                        An explicit value is authoritative. In a nonempty hardware object, admission discovers
+                        an omitted value from the selected cluster node shape. The Run controller never discovers
+                        this value. An exactly empty hardware object opts out of all operator hardware discovery
+                        and typed hardware defaults, leaving AISimulate input and defaults authoritative.
+                      format: int32
+                      minimum: 1
+                      type: integer
                   type: object
                 model:
                   description: Model identifies the model whose deployment configurations are evaluated.
@@ -131,11 +153,10 @@ spec:
                     - name
                   type: object
                 objective:
-                  default: {}
                   description: |-
-                    Objective defines scalar optimization or a multi-objective Pareto search.
-                    When omitted, the schema supplies the default Optimize mode and SLA;
-                    admission supplies the conditional scalar metric.
+                    Objective defines scalar optimization. When omitted,
+                    admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults
+                    to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
                   properties:
                     metric:
                       description: |-
@@ -151,7 +172,7 @@ spec:
                         - GoodputPerGPU
                       type: string
                     metrics:
-                      description: Metrics lists two or more distinct scalar targets when mode is Pareto.
+                      description: Metrics is reserved for the future Pareto implementation.
                       items:
                         description: ObjectiveMetric is a metric optimized by AISimulate.
                         enum:
@@ -163,22 +184,20 @@ spec:
                           - Goodput
                           - GoodputPerGPU
                         type: string
-                      maxItems: 7
+                      maxItems: 2
                       minItems: 2
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      default: Optimize
-                      description: Mode selects scalar optimization or a Pareto search.
+                      description: Mode selects scalar optimization. Only Optimize is currently supported.
                       enum:
                         - Optimize
-                        - Pareto
                       type: string
                     sla:
-                      default:
-                        itlMs: 30
-                        ttftMs: 2000
-                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      description: |-
+                        SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
+                        omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
+                        defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -201,21 +220,17 @@ spec:
                           rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
                   type: object
                   x-kubernetes-validations:
-                    - message: Optimize accepts only metric; Pareto requires metrics
-                      rule: '!has(self.mode) || (self.mode == ''Optimize'' && !has(self.metrics)) || (self.mode == ''Pareto'' && !has(self.metric) && has(self.metrics))'
+                    - message: metrics is reserved for the future Pareto implementation
+                      rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
-                    - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
-                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                 recommendation:
-                  default: {}
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
-                      default: 1
                       description: |-
                         MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
-                        candidates are ordered best first; Pareto candidates have no scalar rank.
+                        candidates are ordered best first.
                         This field does not limit internal trials.
                       format: int32
                       maximum: 100
@@ -223,68 +238,108 @@ spec:
                       type: integer
                   type: object
                 workload:
-                  default: {}
-                  description: Workload defines the synthetic traffic model used for every candidate evaluation.
+                  description: |-
+                    Workload defines the synthetic traffic model used for every candidate evaluation.
+                    When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
+                    an explicit empty workload receives the same shape. workload.static: {} opts out of all
+                    traffic defaults. Any other static object is completed with its missing defaults.
+                    spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+                    every lowered traffic field it names.
+                    The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
+                    search. Lowering independently defaults optimizer.max_trials to 320.
                   properties:
                     static:
-                      default:
-                        isl: 4000
-                        kvLoadRatio:
-                          - 0
-                          - 1
-                        osl: 1000
                       description: |-
-                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
-                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
-                        An explicit empty object opts out of this underlay.
+                        Static defines AISimulate synthetic traffic. When omitted, admission supplies the
+                        complete static default. An explicit empty object opts out; any nonempty object is
+                        completed with omitted inputTokens, outputTokens and load defaults.
                       properties:
-                        concurrency:
-                          description: Concurrency is a fixed closed-loop in-flight request cap.
+                        inputTokens:
+                          description: InputTokens is the synthetic request input length in tokens.
                           format: int32
                           minimum: 1
                           type: integer
-                        isl:
-                          description: ISL is the input sequence length in tokens.
-                          format: int32
-                          minimum: 1
-                          type: integer
-                        kvLoadRatio:
+                        load:
                           description: |-
-                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value
-                            range requires a bounded AISimulate sweep.
-                          items:
-                            maximum: 1
-                            minimum: 0
-                            type: number
-                          maxItems: 2
-                          minItems: 1
-                          type: array
-                        numRequestRatio:
-                          description: NumRequestRatio sets request count relative to the selected load.
-                          exclusiveMinimum: true
-                          minimum: 0
-                          type: number
-                        osl:
-                          description: OSL is the output sequence length in tokens.
+                            Load selects the synthetic load model. When omitted from a nonempty static
+                            workload, admission defaults it to concurrency 10.
+                          properties:
+                            concurrency:
+                              description: Concurrency is a fixed closed-loop in-flight request cap.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            kvCapacityFraction:
+                              description: KVCapacityFraction derives concurrency from each candidate's estimated KV capacity.
+                              properties:
+                                range:
+                                  description: Range searches fractions between min and max.
+                                  properties:
+                                    max:
+                                      description: Max is the upper end of the searched fraction range.
+                                      exclusiveMinimum: true
+                                      maximum: 1
+                                      minimum: 0
+                                      type: number
+                                    min:
+                                      description: Min is the lower end of the searched fraction range.
+                                      exclusiveMinimum: true
+                                      maximum: 1
+                                      minimum: 0
+                                      type: number
+                                  required:
+                                    - max
+                                    - min
+                                  type: object
+                                  x-kubernetes-validations:
+                                    - message: min must be less than max
+                                      rule: self.min < self.max
+                                value:
+                                  description: |-
+                                    Value uses a fixed fraction of the candidate's KV capacity. A value of 1
+                                    uses its full estimated capacity.
+                                  exclusiveMinimum: true
+                                  maximum: 1
+                                  minimum: 0
+                                  type: number
+                              type: object
+                              x-kubernetes-validations:
+                                - message: exactly one of value or range must be specified
+                                  rule: '(has(self.value) ? 1 : 0) + (has(self.range) ? 1 : 0) == 1'
+                            requestsPerSecond:
+                              description: RequestsPerSecond is a fixed open-loop arrival rate.
+                              exclusiveMinimum: true
+                              minimum: 0
+                              type: number
+                          type: object
+                          x-kubernetes-validations:
+                            - message: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified
+                              rule: '(has(self.requestsPerSecond) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvCapacityFraction) ? 1 : 0) == 1'
+                        outputTokens:
+                          description: OutputTokens is the synthetic request output length in tokens.
                           format: int32
                           minimum: 1
                           type: integer
-                        requestRate:
-                          description: RequestRate is a fixed open-loop arrival rate in requests per second.
-                          exclusiveMinimum: true
-                          minimum: 0
-                          type: number
                       type: object
-                      x-kubernetes-validations:
-                        - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
-                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
                   type: object
-              required:
-                - model
               type: object
+              x-kubernetes-validations:
+                - message: spec must be a fully resolved Request admission snapshot
+                  rule: has(self.model) && has(self.backends) && size(self.backends) > 0 && has(self.hardware) && ((!has(self.hardware.gpu) && !has(self.hardware.numGpusPerNode)) || (has(self.hardware.gpu) && has(self.hardware.gpu.sku) && has(self.hardware.gpu.budget) && has(self.hardware.numGpusPerNode))) && has(self.workload) && has(self.workload.static) && ((!has(self.workload.static.inputTokens) && !has(self.workload.static.outputTokens) && !has(self.workload.static.load)) || (has(self.workload.static.inputTokens) && has(self.workload.static.outputTokens) && has(self.workload.static.load))) && has(self.objective) && has(self.objective.mode) && has(self.objective.metric) && has(self.objective.sla) && has(self.recommendation) && has(self.recommendation.maxCandidates) && self.recommendation.maxCandidates > 0
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:
+                aisimulate:
+                  description: AISimulate reports the effective input executed by AISimulate.
+                  properties:
+                    input:
+                      description: |-
+                        Input is the fully lowered AISimulate input after typed fields, derived defaults and
+                        spec.aisimulate.inputOverrides have been merged. Field names and nesting use the
+                        upstream AISimulate JSON contract.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
                 candidateRefs:
                   description: |-
                     CandidateRefs identifies the current bounded DGDC projection. List order

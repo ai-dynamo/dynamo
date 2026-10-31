@@ -46,8 +46,13 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. To fetch media over the cluster's internal network, set
-> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
@@ -129,7 +134,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.21.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.22.
 - The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
@@ -559,7 +564,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.21/python/sglang/srt/disaggregation/encoder/server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.22/python/sglang/srt/disaggregation/encoder/server.py) internally).
 
 ## Profiling
 

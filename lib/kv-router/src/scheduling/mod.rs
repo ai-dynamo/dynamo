@@ -30,7 +30,8 @@ pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
 pub use policy_config::{
-    PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
+    BusyThresholds, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider, RouterPolicyConfig,
+    RouterPolicyConfigError,
 };
 pub use policy_queue::{
     PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
@@ -46,8 +47,7 @@ pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     RequestClassifierConfig, RequestClassifierContext, RequestClassifierFactory,
     RequestClassifierParameters, RequestClassifierProvider, RequestClassifierProviderError,
-    RequestClassifierRegistryError, RequestClassifierWorker, RequestProgress,
-    RequestProgressUpdater,
+    RequestClassifierRegistryError, RequestProgress, RequestProgressUpdater,
 };
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};

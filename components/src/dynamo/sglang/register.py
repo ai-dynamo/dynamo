@@ -5,11 +5,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
+from importlib.metadata import version
 from typing import Any, List, Optional
 
 import sglang as sgl
 import yaml
+from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -50,7 +53,9 @@ from dynamo.sglang.capacity import (
     get_spec_decode_runtime_data,
     kv_event_block_size,
     model_card_dp_rank_bounds,
+    per_rank_max_running_requests,
     runtime_capacity,
+    sglang_dp_layout,
 )
 from dynamo.sglang.engine_generate import (
     DISAGG_PREFILL_CANCEL_ANYTIME_V1,
@@ -62,10 +67,13 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
+from dynamo.sglang.state_agent import inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+SGLANG_SYSTEMONE_SERIAL_V1 = "sglang_systemone_serial_v1"
 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
     "tool_call_structural_tag_reasoning_gate"
 )
@@ -118,6 +126,49 @@ def _supports_engine_generate(
     return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
         output_type.supports_chat() or output_type == ModelType.Completions
     )
+
+
+def _supports_systemone_serial(
+    server_args: ServerArgs,
+    input_type: ModelInput,
+    output_type: ModelType,
+    worker_type: WorkerType,
+) -> bool:
+    """Gate the serialized SGLang 0.5.19/0.5.22 execution profile.
+
+    CUDA is the qualified deployment; device support is not validated here,
+    and XPU remains unqualified.
+
+    Serialization and disabled overlap apply to the entire worker, including
+    chat and completions. Isolate decision workers with a separate served-model
+    name or namespace-scoped frontend; other versions require qualification.
+    """
+    # Relax the validated pin only after mixed scoring/decode GPU validation.
+    priority_preemption = getattr(
+        server_args, "enable_priority_scheduling", False
+    ) and not getattr(server_args, "disable_priority_preemption", False)
+    eligible = (
+        worker_type == WorkerType.Aggregated
+        and _supports_engine_generate(input_type, output_type, worker_type)
+        and sglang_dp_layout(server_args) == (1, False)
+        and per_rank_max_running_requests(server_args) == 1
+        and getattr(server_args, "disable_overlap_schedule", False) is True
+        and getattr(server_args, "pp_size", 1) == 1
+        and not getattr(server_args, "speculative_algorithm", None)
+        and not getattr(server_args, "dllm_algorithm", None)
+        and not priority_preemption
+    )
+    if not eligible:
+        return False
+    installed = version("sglang")
+    if re.fullmatch(r"0\.5\.(?:19|22)(?:\+cu[0-9]+)?", installed) is None:
+        logging.warning(
+            "Decision scoring is disabled: the serial worker uses SGLang %s; "
+            "the qualified CUDA profiles require SGLang 0.5.19 or 0.5.22",
+            installed,
+        )
+        return False
+    return True
 
 
 def _register_model_source_path(
@@ -185,6 +236,7 @@ async def _register_model_with_runtime_config(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -200,11 +252,17 @@ async def _register_model_with_runtime_config(
         needs: DNF list of peer roles this worker requires to serve. Empty (or
             `None`) means no peer dependency, which is the correct value for
             Aggregated workers.
+        forwards_kv_hints: Whether the registered handler forwards router hints
+            to the engine. Only LLM decode and prefill handlers opt in.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
+    if runtime_config is not None and forwards_kv_hints:
+        publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
+        if inventory_sources(engine):
+            runtime_config.kv_event_source_mode = "state_agent_v2"
 
     if dynamo_args.use_sglang_tokenizer and not (
         output_type.supports_embedding() or output_type.supports_rerank()
@@ -223,6 +281,19 @@ async def _register_model_with_runtime_config(
             json.dumps(True),
         )
         logging.info("Published SGLang engine-native generate capability")
+        if _supports_systemone_serial(
+            server_args, input_type, output_type, worker_type
+        ):
+            runtime_config.set_engine_specific(
+                SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
+            )
+            logging.info(
+                "Published SGLang %s System One capability: the entire worker, "
+                "including chat and completions, is serialized with overlap disabled; "
+                "isolate decision workers with a separate served-model name or "
+                "namespace-scoped frontend for this low-throughput profile",
+                version("sglang"),
+            )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None
@@ -381,13 +452,54 @@ def _mooncake_key_prefix(
     return "_".join(parts) if parts else None
 
 
+def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
+    if not hasattr(envs, "MOONCAKE_TENANT_ID"):
+        return "default"
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
+    if (
+        extra_config.get("master_server_address") is not None
+        or extra_config.get("client_server_address") is not None
+    ):
+        tenant = extra_config.get("tenant_id", "default")
+    elif (config_path := os.getenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH")) is not None:
+        with open(config_path, encoding="utf-8") as config_file:
+            tenant = json.load(config_file).get("tenant_id", "default")
+    else:
+        tenant = os.getenv("MOONCAKE_TENANT_ID", "default")
+    if tenant is None:
+        return "default"
+    return str(tenant).strip() or "default"
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
-    if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
+    # SGLang's direct external linker writes GPU KV straight to Mooncake with its own
+    # key layout and names keys after model_path rather than served_model_name.
+    linker = (
+        bool(getattr(server_args, "enable_unified_cache_external_linker", False))
+        and getattr(server_args, "unified_cache_external_linker_backend", None)
+        == "mooncake"
+    )
+    if (
+        getattr(server_args, "hicache_storage_backend", None) != "mooncake"
+        and not linker
+    ):
         return None
 
-    extra_config = _parse_hicache_storage_extra_config(
-        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    # Since sgl-project/sglang#46388 the linker reads its storage options from
+    # --unified-cache-external-linker-config (a JSON object) and falls back to the
+    # deprecated --hicache-storage-backend-extra-config only when that is unset.
+    linker_config = (
+        getattr(server_args, "unified_cache_external_linker_config", None)
+        if linker
+        else None
     )
+    if isinstance(linker_config, dict):
+        extra_config = dict(linker_config)
+    else:
+        extra_config = _parse_hicache_storage_extra_config(
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
+        )
 
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
@@ -428,6 +540,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     return {
         "backend": "mooncake",
+        "tenant_id": _mooncake_tenant_id(extra_config),
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
         "tp_size": tp_size,
         "pp_size": pp_size,
@@ -437,8 +550,10 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
         "key_prefix": _mooncake_key_prefix(
-            extra_config, getattr(server_args, "served_model_name", None)
+            extra_config,
+            getattr(server_args, "model_path" if linker else "served_model_name", None),
         ),
+        "key_layout": "linker" if linker else "hicache",
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
@@ -721,6 +836,7 @@ async def register_model_with_readiness_gate(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -734,6 +850,7 @@ async def register_model_with_readiness_gate(
         readiness_gate: Optional event to signal when registration completes.
         worker_type: Topology role; see `_register_model_with_runtime_config`.
         needs: DNF peer requirements; see `_register_model_with_runtime_config`.
+        forwards_kv_hints: Whether this handler forwards router hints to the engine.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -748,6 +865,7 @@ async def register_model_with_readiness_gate(
         worker_type=worker_type,
         needs=needs,
         serves_lora_load=serves_lora_load,
+        forwards_kv_hints=forwards_kv_hints,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

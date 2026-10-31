@@ -21,14 +21,17 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+# The sidecar image builds all sidecars in one `cargo build`, which links the
+# vLLM sidecar's `mm-routing` here too. Enable it so this crate's SBOM lists
+# what the binary links; nothing in this sidecar calls it.
+dynamo-llm = { workspace = true, features = ["mm-routing"] }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-clap = { version = "4", features = ["derive", "env", "string"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

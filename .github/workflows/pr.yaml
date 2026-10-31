@@ -21,7 +21,7 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -33,6 +33,7 @@ jobs:
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
+      sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -123,7 +124,7 @@ jobs:
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - operator
@@ -131,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-config-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -165,9 +167,12 @@ jobs:
       - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          if [[ '${{ needs.changed-files.outputs.sidecar_trtllm_image }}' == 'true' ]]; then
+            test '${{ needs.sidecar-trtllm-nightly-config-test.result }}' = 'success'
+          fi
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - deploy-operator
@@ -270,7 +275,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Helm Chart Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -339,6 +344,19 @@ jobs:
 # Sidecar
 # ============================================================================
 
+  sidecar-trtllm-nightly-config-test:
+    name: TRT-LLM nightly configuration (CPU)
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar_trtllm_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Test nightly selection
+        run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
+
   sidecar-build:
     name: dynamo-sidecar
     needs: changed-files
@@ -355,6 +373,10 @@ jobs:
       # build exceed 60m with room to spare in run 34547963529.
       build_timeout_minutes: 90
       artifact_retention_days: '7'
+      # Nothing in PR CI runs these binaries; the build checks that the image
+      # and its license policy still build. Post-merge builds the shipping
+      # profile, including the LTO link.
+      fast_release_profile: true
       diff_event_context: pr
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
@@ -1282,8 +1304,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # ============================================================================
@@ -1418,6 +1439,8 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
+  # Serialize checkpoint lifecycles through cleanup: each Snapshot install
+  # reserves resources on the same GPU nodes until its namespace is deleted.
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
     if: |
@@ -1462,8 +1485,12 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1492,6 +1519,8 @@ jobs:
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  # Check both cleanups so a failed vLLM cleanup cannot be bypassed when
+  # the blocked SGLang lifecycle only runs its no-op cleanup.
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM Snapshot Operator Setup
     if: |
@@ -1499,8 +1528,16 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true')) &&
+      (needs.deploy-cleanup-checkpoint-sglang.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-sglang.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_sglang != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm, deploy-cleanup-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read

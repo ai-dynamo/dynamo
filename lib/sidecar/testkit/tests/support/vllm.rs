@@ -33,8 +33,8 @@ use tonic_health::pb::{
 };
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
+    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -218,6 +218,7 @@ impl WireFixture for Fixture {
         );
         assert!(native.response.as_ref().unwrap().output_logprobs);
         assert!(native.response.as_ref().unwrap().prompt_logprobs);
+        assert_eq!(native.response.as_ref().unwrap().output_text, Some(false));
         let native_outputs: Vec<_> = handle
             .native_responses()
             .into_iter()
@@ -244,16 +245,7 @@ impl WireFixture for Fixture {
                 .collect::<Vec<_>>(),
             native_tokens
         );
-        assert_eq!(
-            outputs
-                .iter()
-                .filter_map(|output| output.text.as_deref())
-                .collect::<String>(),
-            native_outputs
-                .iter()
-                .map(|output| output.text.as_str())
-                .collect::<String>()
-        );
+        assert!(outputs.iter().all(|output| output.text.is_none()));
         assert_eq!(
             outputs
                 .iter()
@@ -313,12 +305,13 @@ impl WireFixture for Fixture {
                 expected
             );
         }
+        // The first output carries them, before any frontend stop string.
         assert!(
-            outputs[..outputs.len() - 1]
+            outputs[1..]
                 .iter()
                 .all(|output| output.engine_data.is_none())
         );
-        let prompts = &outputs.last().unwrap().engine_data.as_ref().unwrap()["prompt_logprobs"];
+        let prompts = &outputs[0].engine_data.as_ref().unwrap()["prompt_logprobs"];
         let prompt_info = handle
             .native_responses()
             .into_iter()
@@ -531,7 +524,7 @@ impl Protocol for Adapter {
     }
 }
 
-impl ProcessFixture for Fixture {
+impl DiscoveryFixture for Fixture {
     fn set_served_model_name(&self, name: &str) {
         *self.served_model_name.lock().unwrap() = Some(name.to_owned());
     }
@@ -553,12 +546,14 @@ impl ProcessFixture for Fixture {
     fn assert_unhealthy_startup(logs: &str) {
         assert!(logs.contains("did not become SERVING"), "{logs}");
     }
+}
 
+impl ProcessFixture for Fixture {
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
 
-    fn command() -> Command {
+    fn command(_model: &str) -> Command {
         let mut command = sidecar_command("dynamo-vllm-sidecar", "DYNAMO_VLLM_SIDECAR");
         command.env_remove("VLLM_HTTP_ENDPOINT");
         command
@@ -586,6 +581,7 @@ impl ProcessFixture for Fixture {
 }
 
 impl HandoffFixture for Fixture {
+    const KV_BLOCK_SIZE: u32 = 4;
     const HAS_BOOTSTRAP: bool = false;
 
     fn assert_handoff(

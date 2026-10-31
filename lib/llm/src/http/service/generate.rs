@@ -76,7 +76,12 @@ fn generate_metric_error_type(status: StatusCode) -> ErrorType {
 
 #[derive(Debug)]
 struct GenerateRequestContext {
+    /// Server-minted id for the request context, routing, and logs. Never client-chosen:
+    /// in-flight request state is keyed on it.
     request_id: String,
+    /// Client-facing id echoed in the response body and the `vllm_tito` envelope, following
+    /// vLLM's `x-request-id` > body `request_id` precedence. Correlation only.
+    public_request_id: String,
     data_parallel_rank: Option<u32>,
 }
 
@@ -130,12 +135,13 @@ fn resolve_generate_request_context(
     headers: &HeaderMap,
     body_request_id: Option<&str>,
 ) -> GenerateRequestContext {
-    let request_id = headers
+    let request_id = get_or_create_request_id(headers);
+    let public_request_id = headers
         .get(X_REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
         .or_else(|| body_request_id.map(ToOwned::to_owned))
-        .unwrap_or_else(|| get_or_create_request_id(headers));
+        .unwrap_or_else(|| request_id.clone());
     let data_parallel_rank = headers
         .get(X_DATA_PARALLEL_RANK_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -143,6 +149,7 @@ fn resolve_generate_request_context(
 
     GenerateRequestContext {
         request_id,
+        public_request_id,
         data_parallel_rank,
     }
 }
@@ -152,11 +159,12 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+fn generate_dispatch_span(request_id: &str, public_request_id: &str, model: &str) -> tracing::Span {
     tracing::info_span!(
         target: "request_span",
         "generate",
         request_id = %request_id,
+        x_request_id = %public_request_id,
         model = %model,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
@@ -601,7 +609,7 @@ fn preprocessed_from_generate(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
     routing_metadata: GenerateRoutingMetadata,
 ) -> anyhow::Result<PreprocessedRequest> {
     let tracker = Arc::new(RequestTracker::new());
@@ -610,7 +618,7 @@ fn preprocessed_from_generate(
         request,
         model,
         data_parallel_rank,
-        request_id,
+        public_request_id,
         routing_metadata,
         tracker,
     )
@@ -620,7 +628,7 @@ fn preprocessed_from_generate_with_tracker(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
     routing_metadata: GenerateRoutingMetadata,
     tracker: Arc<RequestTracker>,
 ) -> anyhow::Result<PreprocessedRequest> {
@@ -661,7 +669,7 @@ fn preprocessed_from_generate_with_tracker(
             }
         }
     };
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, public_request_id))?;
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("vllm_tito".to_string(), vllm_tito);
     if let Some(kv_transfer_params) = request.kv_transfer_params.as_ref() {
@@ -745,14 +753,22 @@ impl GenerateMetricLifecycle {
         input_tokens: usize,
     ) -> Self {
         let metrics = state.metrics_clone();
+        let inflight = metrics.clone().create_inflight_guard(
+            &metric_model,
+            super::metrics::Endpoint::Generate,
+            false,
+            request_id,
+        );
+        // The prompt is already tokenized, so report its size before any output.
+        inflight.request_metrics().add_input_tokens(input_tokens);
         Self {
-            inflight: metrics.clone().create_inflight_guard(
-                &metric_model,
-                super::metrics::Endpoint::Generate,
-                false,
-                request_id,
+            collector: GenerateMetricCollector::new(
+                inflight.response_collector(),
+                metrics.create_http_queue_guard(&metric_model),
+                tracker,
+                input_tokens,
             ),
-            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            inflight,
             metric_model,
         }
     }
@@ -764,14 +780,14 @@ impl GenerateMetricLifecycle {
 
 impl GenerateMetricCollector {
     fn new(
-        metrics: Arc<super::metrics::Metrics>,
-        model: &str,
+        response: ResponseMetricCollector,
+        http_queue: HttpQueueGuard,
         tracker: Arc<RequestTracker>,
         input_tokens: usize,
     ) -> Self {
         Self {
-            response: metrics.clone().create_response_collector(model),
-            http_queue: Some(metrics.create_http_queue_guard(model)),
+            response,
+            http_queue: Some(http_queue),
             tracker,
             input_tokens,
             output_tokens: 0,
@@ -821,8 +837,8 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases a migrated attempt's usage onto the client's
+            // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
@@ -850,7 +866,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
@@ -885,7 +901,11 @@ async fn handler_generate(
         .to_string();
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
-    let dispatch_span = generate_dispatch_span(&request_context.request_id, &metric_model);
+    let dispatch_span = generate_dispatch_span(
+        &request_context.request_id,
+        &request_context.public_request_id,
+        &metric_model,
+    );
     let mut metric_lifecycle = dispatch_span.in_scope(|| {
         GenerateMetricLifecycle::new(
             state.as_ref(),
@@ -973,7 +993,7 @@ async fn handler_generate(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_context.public_request_id,
         routing_metadata,
         tracker,
     ) {
@@ -1018,6 +1038,7 @@ async fn handler_generate(
             engine,
             context,
             request_id,
+            request_context.public_request_id,
             state.clone(),
             response_options,
             metric_lifecycle,
@@ -1041,6 +1062,7 @@ async fn generate_dispatch(
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     context: Context<PreprocessedRequest>,
     request_id: String,
+    public_request_id: String,
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
     metric_lifecycle: GenerateMetricLifecycle,
@@ -1126,7 +1148,7 @@ async fn generate_dispatch(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
             stream,
-            request_id.clone(),
+            public_request_id,
             response_options,
         ),
     )
@@ -1571,7 +1593,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Clone)]
-    struct RequestIdCaptureLayer(Arc<Mutex<Option<String>>>);
+    struct RequestIdCaptureLayer(Arc<Mutex<RequestIdVisitor>>);
 
     impl<S: Subscriber> Layer<S> for RequestIdCaptureLayer {
         fn on_new_span(
@@ -1583,7 +1605,7 @@ pub(crate) mod tests {
             let mut visitor = RequestIdVisitor::default();
             attrs.record(&mut visitor);
             if visitor.request_id.is_some() {
-                *self.0.lock().unwrap() = visitor.request_id;
+                *self.0.lock().unwrap() = visitor;
             }
         }
     }
@@ -1591,18 +1613,23 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct RequestIdVisitor {
         request_id: Option<String>,
+        x_request_id: Option<String>,
     }
 
     impl Visit for RequestIdVisitor {
         fn record_str(&mut self, field: &Field, value: &str) {
             if field.name() == "request_id" {
                 self.request_id = Some(value.to_string());
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(value.to_string());
             }
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             if field.name() == "request_id" {
                 self.request_id = Some(format!("{value:?}"));
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(format!("{value:?}"));
             }
         }
     }
@@ -1754,6 +1781,130 @@ pub(crate) mod tests {
             ),
             1
         );
+    }
+
+    /// Echoes each request's tokens back, and holds every request until `barrier` releases them
+    /// together so both are in flight at once. Records what the worker saw for each request.
+    struct ConcurrentEchoEngine {
+        barrier: tokio::sync::Barrier,
+        seen: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for ConcurrentEchoEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let envelope_request_id = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra["vllm_tito"]["request_id"].as_str())
+                .map(str::to_string);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.id().to_string(), envelope_request_id));
+            self.barrier.wait().await;
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                token_ids: request.token_ids.to_vec(),
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                ..Default::default()
+            })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    /// Serve `engine` through a frontend source/sink pipeline, like the discovery watcher
+    /// does, so responses are matched to callers by request id.
+    pub(crate) fn engine_behind_frontend(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+    ) -> crate::types::openai::generate::GenerateStreamingEngine {
+        use dynamo_runtime::pipeline::{ServiceBackend, Source};
+        let frontend = dynamo_runtime::pipeline::ServiceFrontend::<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+        >::new();
+        frontend
+            .link(ServiceBackend::from_engine(engine))
+            .unwrap()
+            .link_terminal(frontend)
+            .unwrap()
+    }
+
+    async fn concurrent_generate_with_shared_client_id(
+        headers: HeaderMap,
+        body_request_id: Option<&str>,
+        expected_public_id: &str,
+    ) {
+        const MODEL: &str = "generate-concurrent-model";
+        let engine = Arc::new(ConcurrentEchoEngine {
+            barrier: tokio::sync::Barrier::new(2),
+            seen: Mutex::new(Vec::new()),
+        });
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model(
+                MODEL,
+                "generate-concurrent-test",
+                engine_behind_frontend(engine.clone()),
+            )
+            .unwrap();
+
+        let send = |token_ids: Vec<u32>| {
+            let mut body = serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "model": MODEL
+            });
+            if let Some(id) = body_request_id {
+                body["request_id"] = serde_json::json!(id);
+            }
+            let request = serde_json::from_value(body).unwrap();
+            handler_generate(State(state.clone()), headers.clone(), Json(request))
+        };
+        let (first, second) = tokio::time::timeout(
+            Duration::from_secs(10),
+            futures::future::join(send(vec![1, 2, 3]), send(vec![7, 8])),
+        )
+        .await
+        .expect("concurrent generate requests must not hang");
+
+        for (response, expected_tokens) in [(first, vec![1, 2, 3]), (second, vec![7, 8])] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["request_id"], expected_public_id);
+            assert_eq!(
+                body["choices"][0]["token_ids"],
+                serde_json::json!(expected_tokens)
+            );
+        }
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].0, seen[1].0,
+            "each request needs its own context id"
+        );
+        for (context_id, envelope_request_id) in seen.iter() {
+            assert_ne!(context_id, expected_public_id);
+            assert_eq!(envelope_request_id.as_deref(), Some(expected_public_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_generate_requests_sharing_x_request_id_get_their_own_output() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "1".parse().unwrap());
+        concurrent_generate_with_shared_client_id(headers, None, "1").await;
     }
 
     #[tokio::test]
@@ -2501,7 +2652,8 @@ pub(crate) mod tests {
 
         let context = resolve_generate_request_context(&headers, Some("body-request"));
 
-        assert_eq!(context.request_id, "header-request");
+        assert_eq!(context.public_request_id, "header-request");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
         assert_eq!(context.data_parallel_rank, Some(3));
     }
 
@@ -2512,22 +2664,36 @@ pub(crate) mod tests {
 
         let context = resolve_generate_request_context(&headers, Some("body-request"));
 
-        assert_eq!(context.request_id, "body-request");
+        assert_eq!(context.public_request_id, "body-request");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
         assert_eq!(context.data_parallel_rank, None);
+
+        let context = resolve_generate_request_context(&HeaderMap::new(), None);
+        assert_eq!(context.public_request_id, context.request_id);
     }
 
     #[test]
     fn generate_dispatch_span_uses_resolved_request_id() {
-        let captured_request_id = Arc::new(Mutex::new(None));
+        let captured_request_id = Arc::new(Mutex::new(RequestIdVisitor::default()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );
 
-        let dispatch_span = generate_dispatch_span("header-request", "test-model");
+        let context = resolve_generate_request_context(&HeaderMap::new(), Some("body-request"));
+        let dispatch_span = generate_dispatch_span(
+            &context.request_id,
+            &context.public_request_id,
+            "test-model",
+        );
 
         assert_eq!(
-            captured_request_id.lock().unwrap().as_deref(),
-            Some("header-request")
+            captured_request_id.lock().unwrap().request_id.as_deref(),
+            Some(context.request_id.as_str())
+        );
+        assert_eq!(
+            captured_request_id.lock().unwrap().x_request_id.as_deref(),
+            Some("body-request")
         );
         let fields = dispatch_span
             .metadata()
@@ -2535,6 +2701,7 @@ pub(crate) mod tests {
             .fields();
         for field in [
             "request_id",
+            "x_request_id",
             "model",
             "input_tokens",
             "output_tokens",
@@ -2584,6 +2751,7 @@ pub(crate) mod tests {
         generate_dispatch(
             engine,
             context,
+            request_id.clone(),
             request_id,
             state,
             response_options,
@@ -3165,8 +3333,18 @@ pub(crate) mod tests {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let metric_model = state.manager().metric_model_for(MODEL).to_string();
-        let mut collector =
-            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let inflight = state.metrics_clone().create_inflight_guard(
+            &metric_model,
+            Endpoint::Generate,
+            false,
+            "generate-worker-metadata-test",
+        );
+        let mut collector = GenerateMetricCollector::new(
+            inflight.response_collector(),
+            state.metrics_clone().create_http_queue_guard(&metric_model),
+            tracker,
+            3,
+        );
         let mut first = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![10],
             index: Some(0),
@@ -3231,8 +3409,18 @@ pub(crate) mod tests {
         state.metrics_clone().register(&registry).unwrap();
 
         {
-            let mut collector =
-                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            let inflight = state.metrics_clone().create_inflight_guard(
+                &metric_model,
+                Endpoint::Generate,
+                false,
+                "generate-cache-metric-test",
+            );
+            let mut collector = GenerateMetricCollector::new(
+                inflight.response_collector(),
+                state.metrics_clone().create_http_queue_guard(&metric_model),
+                tracker,
+                3,
+            );
             let mut annotated = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![10],
                 index: Some(0),
@@ -3341,8 +3529,10 @@ pub(crate) mod tests {
         );
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        // The retry's cache hit covers the 3 token prompt, so the rebased backend count wins
+        // over the router's estimate of 1.
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 3.0);
     }
 
     #[test]

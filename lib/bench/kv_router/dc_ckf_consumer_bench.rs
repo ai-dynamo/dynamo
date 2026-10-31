@@ -22,7 +22,7 @@ use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::dc_ckf_metadata::DcCkfCorpusMetadata;
 use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{
     CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
@@ -37,7 +37,7 @@ use dynamo_kv_router::protocols::{
 };
 use serde::{Deserialize, Serialize};
 
-const CORPUS_SCHEMA_VERSION: u32 = 3;
+const CORPUS_SCHEMA_VERSION: u32 = 4;
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const MAX_LANES: usize = 16;
 const DEFAULT_EXPECTED_BLOCKS_PER_LANE: usize = 4_096;
@@ -390,7 +390,7 @@ fn generate_corpus(
     }
     let format = generated[0].snapshot.identity().format();
     let pools: [Option<PoolId>; MAX_LANES] = std::array::from_fn(|lane| {
-        (lane < args.lanes).then(|| PoolId::new(domain, DcId::new(lane as u64 + 1)))
+        (lane < args.lanes).then(|| PoolId::new(domain, ClusterId::new(lane as u64 + 1)))
     });
     let manifest = GlobalCkfManifest::new(consumer, domain, format, pools)?;
     let mut lanes = Vec::with_capacity(args.lanes);
@@ -496,7 +496,7 @@ fn generate_lane_state(
         );
     }
     let identity = ProducerIdentity::new(
-        PoolId::new(domain, DcId::new(lane as u64 + 1)),
+        PoolId::new(domain, ClusterId::new(lane as u64 + 1)),
         1,
         1,
         state.format(),
@@ -1272,7 +1272,7 @@ fn read_consumer_corpus(path: &Path) -> anyhow::Result<FrozenConsumerCorpus> {
         .context("consumer corpus is missing numeric schema_version")?;
     if version == 2 {
         anyhow::bail!(
-            "consumer corpus schema v2 uses retired endpoint/cache-domain identity; regenerate it as v3"
+            "consumer corpus schema v2 uses retired endpoint/cache-domain identity; regenerate it as v4"
         );
     }
     ensure!(
@@ -1356,7 +1356,27 @@ mod tests {
         let error = read_consumer_corpus(&path).unwrap_err();
         let _ = std::fs::remove_file(path);
 
-        assert!(error.to_string().contains("regenerate it as v3"));
+        assert!(error.to_string().contains("regenerate it as v4"));
+        Ok(())
+    }
+
+    #[test]
+    fn v3_corpus_requires_regeneration() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dynamo-dc-ckf-v3-corpus-{}.json",
+            std::process::id()
+        ));
+        let file = File::create(&path)?;
+        serde_json::to_writer(file, &serde_json::json!({ "schema_version": 3 }))?;
+
+        let error = read_consumer_corpus(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported consumer corpus schema version 3; expected 4")
+        );
         Ok(())
     }
 
