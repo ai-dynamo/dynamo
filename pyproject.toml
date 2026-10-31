@@ -114,6 +114,9 @@ docs = { requires-python = ">=3.11" }
 [project.entry-points."vllm.general_plugins"]
 dynamo_nixl_telemetry = "dynamo.vllm.nixl_telemetry:allow_nixl_telemetry_capture"
 
+[project.entry-points."sglang.srt.plugins"]
+dynamo_memory_occupation = "dynamo.sglang.memory_occupation:register_memory_occupation_plugin"
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
