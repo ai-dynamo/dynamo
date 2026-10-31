@@ -59,17 +59,36 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 
 	// Regular and init containers receive authoritative paths ahead of authored references.
 	for _, containers := range containerLists {
-		for i := range containers {
-			container := &containers[i]
-			env := make([]corev1.EnvVar, 0, len(paths)+len(container.Env))
-			env = append(env, paths...)
-			for _, variable := range container.Env {
-				if !slices.ContainsFunc(paths, func(path corev1.EnvVar) bool { return path.Name == variable.Name }) {
-					env = append(env, variable)
-				}
-			}
-			container.Env = env
-		}
+		prependOperatorEnv(containers, paths)
 	}
 	return nil
+}
+
+// configureAgentConfigKey points every regular and init container of a fresh
+// Agent clique PodSpec at its pod's record from agentPartitionRecords. Grove
+// injects GROVE_PCLQ_POD_INDEX ahead of template variables, so Kubernetes expands
+// the reference into the pod's clique index.
+func configureAgentConfigKey(agentPodSpec *corev1.PodSpec, templateName string) {
+	key := []corev1.EnvVar{{
+		Name:  agentConfigKeyEnvVar,
+		Value: agentConfigKeyPrefix(templateName) + "$(GROVE_PCLQ_POD_INDEX)",
+	}}
+	prependOperatorEnv(agentPodSpec.Containers, key)
+	prependOperatorEnv(agentPodSpec.InitContainers, key)
+}
+
+// prependOperatorEnv rewrites each container's Env in place so operator values
+// precede, and replace, authored variables with the same names.
+func prependOperatorEnv(containers []corev1.Container, operatorEnv []corev1.EnvVar) {
+	for i := range containers {
+		container := &containers[i]
+		env := make([]corev1.EnvVar, 0, len(operatorEnv)+len(container.Env))
+		env = append(env, operatorEnv...)
+		for _, variable := range container.Env {
+			if !slices.ContainsFunc(operatorEnv, func(operator corev1.EnvVar) bool { return operator.Name == variable.Name }) {
+				env = append(env, variable)
+			}
+		}
+		container.Env = env
+	}
 }

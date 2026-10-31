@@ -347,8 +347,20 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		spec := &clique.Spec.PodSpec
 		require.Equal(t, "main", spec.Containers[0].Name)
 		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
-		require.Equal(t, companions.Containers[1:], spec.Containers[1:])
-		require.Equal(t, companions.InitContainers, spec.InitContainers)
+
+		t.Log("Agent companions also lead with their own clique's config key, even when cliques share a stage")
+		wantCompanions := companions.DeepCopy()
+		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
+			agentConfigKey := corev1.EnvVar{Name: "LPX_AGENT_CONFIG_KEY", Value: "agent-" + clique.Name + "-$(GROVE_PCLQ_POD_INDEX)"}
+			require.Equal(t, agentConfigKey, spec.Containers[0].Env[0])
+			for _, containers := range [][]corev1.Container{wantCompanions.Containers[1:], wantCompanions.InitContainers} {
+				for i := range containers {
+					containers[i].Env = append([]corev1.EnvVar{agentConfigKey}, containers[i].Env...)
+				}
+			}
+		}
+		require.Equal(t, wantCompanions.Containers[1:], spec.Containers[1:])
+		require.Equal(t, wantCompanions.InitContainers, spec.InitContainers)
 		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
 		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 	}

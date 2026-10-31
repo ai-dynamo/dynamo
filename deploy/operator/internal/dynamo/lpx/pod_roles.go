@@ -17,6 +17,8 @@ const (
 	v3LPUResourceName corev1.ResourceName = "nvidia.com/lpu"
 
 	allocationEnvVar = "LPX_ALLOCATION"
+	// agentConfigKeyEnvVar names the LPU ConfigMap key holding an Agent pod's partition record.
+	agentConfigKeyEnvVar = "LPX_AGENT_CONFIG_KEY"
 )
 
 // configureAgentScheduling consumes a fresh, nonnil Agent PodSpec containing main.

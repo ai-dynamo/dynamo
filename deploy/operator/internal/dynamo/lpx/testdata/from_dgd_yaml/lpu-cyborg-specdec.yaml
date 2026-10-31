@@ -2,6 +2,38 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  agent-draft-agt-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=2
+    node_offset=0
+    rank=0
+  agent-draft-agt-1: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=2
+    node_offset=0
+    rank=1
+  agent-draft-agt-2: |
+    partition_row=1
+    partition_index=1
+    partition_id=1
+    partition_path=part-1
+    node_count=2
+    node_offset=2
+    rank=0
+  agent-draft-agt-3: |
+    partition_row=1
+    partition_index=1
+    partition_id=1
+    partition_path=part-1
+    node_count=2
+    node_offset=2
+    rank=1
   nodes_per_partition: |-
     2
     2
@@ -20,7 +52,7 @@ metadata:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-draft-lpu-f7e538558e0f1981
+  name: lpu-cyborg-specdec-5f16-draft-lpu-1694ca73501b4fb9
   namespace: test
 ---
 data:
@@ -35,6 +67,38 @@ metadata:
   namespace: test
 ---
 data:
+  agent-target-agt-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=0
+  agent-target-agt-1: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=1
+  agent-target-agt-2: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=2
+  agent-target-agt-3: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=3
   nodes_per_partition: "4"
   partition_ids: "0"
   partition_node_offsets: "0"
@@ -45,7 +109,7 @@ metadata:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-cyborg-specdec-5f16-target-lpu-8d6eca440bc0b75b
+  name: lpu-cyborg-specdec-5f16-target-lpu-aa884ff26e3b8b32
   namespace: test
 ---
 metadata:
@@ -63,7 +127,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
+        nvidia.com/extra-resources-hash: 1694ca73501b4fb991624e8501b914275efdb2982ddee648eb2572d969b9b2f4
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:dc63a4fb7d8b41d6258355fd6f7adc220181b365917c9588b5a132ab01577d92
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
         scheduling.lpu.nvidia.com/model: default
@@ -86,6 +150,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-draft-agt-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_MODEL_PATH
               value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
@@ -142,13 +208,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-f7e538558e0f1981
+              name: lpu-cyborg-specdec-5f16-draft-lpu-1694ca73501b4fb9
             name: config
         replicas: 4
         roleName: draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
+        nvidia.com/extra-resources-hash: 1694ca73501b4fb991624e8501b914275efdb2982ddee648eb2572d969b9b2f4
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -223,7 +289,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-draft-lpu-f7e538558e0f1981
+              name: lpu-cyborg-specdec-5f16-draft-lpu-1694ca73501b4fb9
             name: config
         replicas: 1
         roleName: draft-cond
@@ -231,7 +297,7 @@ spec:
         - draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        nvidia.com/extra-resources-hash: 8d6eca440bc0b75bbfa1bce8f7b6fc05ede250bfe9fbc1679683cc9cc0d51bae
+        nvidia.com/extra-resources-hash: aa884ff26e3b8b321f1100a5f99092d00fc8b7a778b22be54b7003a319ae27be
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:854ab24e6fc14c78d58e9ec555076b7989fb69313e3fa5b904e4862171805846
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2c4af29ceff09a818bd40a75337da3523c304cc3a9c0a3b04ce5b44c99ad8922
         scheduling.lpu.nvidia.com/model: default
@@ -254,6 +320,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-target-agt-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_MODEL_PATH
               value: /models/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
@@ -310,7 +378,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-cyborg-specdec-5f16-target-lpu-8d6eca440bc0b75b
+              name: lpu-cyborg-specdec-5f16-target-lpu-aa884ff26e3b8b32
             name: config
         replicas: 4
         roleName: target-agt

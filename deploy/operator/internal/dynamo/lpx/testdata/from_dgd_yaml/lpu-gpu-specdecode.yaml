@@ -2,6 +2,38 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  agent-agt-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=2
+    node_offset=0
+    rank=0
+  agent-agt-1: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=2
+    node_offset=0
+    rank=1
+  agent-agt-2: |
+    partition_row=1
+    partition_index=1
+    partition_id=1
+    partition_path=part-1
+    node_count=2
+    node_offset=2
+    rank=0
+  agent-agt-3: |
+    partition_row=1
+    partition_index=1
+    partition_id=1
+    partition_path=part-1
+    node_count=2
+    node_offset=2
+    rank=1
   nodes_per_partition: |-
     2
     2
@@ -20,7 +52,7 @@ metadata:
     lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-gpu-specdecode-bc86-lpu-f7e538558e0f1981
+  name: lpu-gpu-specdecode-bc86-lpu-e703fe8836a58976
   namespace: test
 ---
 metadata:
@@ -38,7 +70,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
+        nvidia.com/extra-resources-hash: e703fe8836a589768c40be484922bfe4db034149101e86697f25c10185a9fc17
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:dc63a4fb7d8b41d6258355fd6f7adc220181b365917c9588b5a132ab01577d92
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
         scheduling.lpu.nvidia.com/model: default
@@ -61,6 +93,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_MODEL_PATH
               value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
@@ -117,13 +151,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-gpu-specdecode-bc86-lpu-f7e538558e0f1981
+              name: lpu-gpu-specdecode-bc86-lpu-e703fe8836a58976
             name: config
         replicas: 4
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        nvidia.com/extra-resources-hash: f7e538558e0f1981519d2318a01e088c637412ce44f360e859c09b15ef0cca9f
+        nvidia.com/extra-resources-hash: e703fe8836a589768c40be484922bfe4db034149101e86697f25c10185a9fc17
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:410d8b39eaa22fcd6df769c9fa845e98c3366dfb229058c86a99684c85605946
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -198,7 +232,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpu-gpu-specdecode-bc86-lpu-f7e538558e0f1981
+              name: lpu-gpu-specdecode-bc86-lpu-e703fe8836a58976
             name: config
         replicas: 1
         roleName: cond

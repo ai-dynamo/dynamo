@@ -105,8 +105,14 @@ func RenderNodeLocal(
 		return nil, err
 	}
 
-	// Share partition configuration across the workload's roles.
-	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
+	// Share partition configuration, including each Agent pod's record, across the workload's roles.
+	partitionData := resolvedPartitionData(projections)
+	agentRecords, err := agentPartitionRecords(projections, plan.Agents)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(partitionData, agentRecords)
+	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", partitionData)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +197,9 @@ func RenderNodeLocal(
 		if index+1 < len(projections) && stage == projections[index+1].stage {
 			podSpec = *podSpec.DeepCopy()
 		}
+
+		// Each clique, including ones sharing a stage template, names its own records.
+		configureAgentConfigKey(&podSpec, agent.TemplateName)
 
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
