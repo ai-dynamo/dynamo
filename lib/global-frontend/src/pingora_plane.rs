@@ -20,6 +20,7 @@ use axum::http::{Method, StatusCode, Uri, header};
 use dynamo_global_router::{InFlightGuard, InFlightTracker, Pool, PoolSelector, RoutingRequest};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
+use pingora_core::modules::http::HttpModules;
 use pingora_core::server::Fds;
 use pingora_core::server::configuration::ServerConf;
 use pingora_core::services::Service as _;
@@ -169,6 +170,9 @@ impl ProxyHttp for PingoraProxy {
     fn new_ctx(&self) -> Ctx {
         Ctx::default()
     }
+
+    // The default adds a disabled compression module, which still runs on every chunk.
+    fn init_downstream_modules(&self, _modules: &mut HttpModules) {}
 
     fn early_request_body_buffer_limit(&self, session: &Session, _ctx: &Ctx) -> Option<usize> {
         let request = session.req_header();

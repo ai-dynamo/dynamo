@@ -166,6 +166,15 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
+    // Dynamo's filter always enables `request_span=trace`, which lifts the `log` crate's
+    // level to TRACE, so each `log::debug!` (Pingora logs several per streamed chunk) runs
+    // the log-to-tracing bridge and the target filter only to be dropped. Keep `log` at
+    // INFO unless DYN_LOG asks for more.
+    if !std::env::var("DYN_LOG")
+        .is_ok_and(|filter| filter.contains("debug") || filter.contains("trace"))
+    {
+        log::set_max_level(log::LevelFilter::Info);
+    }
     let mut args = Args::parse();
     let mut ids = HashSet::new();
     if let Some(repeated) = args.pools.iter().find(|pool| !ids.insert(&pool.id)) {

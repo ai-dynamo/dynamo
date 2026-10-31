@@ -2641,6 +2641,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "hyper-util",
+ "log",
  "pingora-core",
  "pingora-http",
  "pingora-proxy",
