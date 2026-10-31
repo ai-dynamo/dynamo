@@ -31,11 +31,14 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     utils::zmq::{connect_sub_socket, multipart_message},
 };
-use dynamo_kv_router::{
-    SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend, SharedKvCache,
-    indexer::KvRouterError,
-    protocols::{ExternalSequenceBlockHash, SharedCacheHits, StorageTier, WorkerId},
+use dynamo_kv_indexer::host::{
+    KvRouterError, SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
 };
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::host::SharedKvCache;
+use dynamo_worker_selection::host::SharedCacheHits;
 
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -915,7 +918,7 @@ mod tests {
     use std::{collections::HashMap, ops::Range};
 
     use super::*;
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio::sync::watch;
 
     fn mooncake_config() -> SglangHicacheMooncakeConfig {

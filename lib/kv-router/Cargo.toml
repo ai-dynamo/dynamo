@@ -26,7 +26,8 @@ standalone-indexer = ["http", "ingest-zmq", "peer-recovery"]
 standalone-slot-tracker = ["http", "replica-sync-zmq"]
 standalone-selection = ["standalone-indexer", "replica-sync-zmq"]
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
-runtime-protocols = ["dep:dynamo-runtime"]
+# Deprecated and empty: the runtime-backed metrics constructor lives in the frontend host now.
+runtime-protocols = []
 bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
 profile = ["dynamo-kv-indexer/profile"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
@@ -34,7 +35,6 @@ testing = ["dynamo-scheduler/testing", "dynamo-router-protocol/testing", "dynamo
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true, optional = true }
 dynamo-admission = { workspace = true }
 dynamo-scheduler = { workspace = true }
 dynamo-kv-events = { workspace = true }

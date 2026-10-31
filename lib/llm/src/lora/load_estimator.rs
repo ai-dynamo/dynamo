@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_slot_tracker::host::{ActiveSequenceEvent, ActiveSequenceEventData};
 
 use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
 use crate::lora::config::PredictorType;
@@ -705,11 +705,12 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::protocols::{ActiveSequenceEventBatch, WorkerWithDpRank};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::transports::event_plane::EventPublisher;
     use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_slot_tracker::host::ActiveSequenceEventBatch;
 
     use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 

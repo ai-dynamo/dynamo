@@ -5,10 +5,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, CanonicalIdentityMaterial, ClusterId, IndexerDomainId, PoolId, RoutingScopeId,
+use dynamo_kv_indexer::cuckoo::{CKF_LANE_COUNT, GlobalCkfIndexer};
+use dynamo_kv_indexer::host::CanonicalIdentityMaterial;
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IndexerDomainId, PoolId, RoutingScopeId,
 };
-use dynamo_kv_router::indexer::cuckoo::{CKF_LANE_COUNT, GlobalCkfIndexer};
 use dynamo_runtime::protocols::EndpointId;
 
 use super::identity::{KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError};
@@ -262,16 +263,19 @@ fn digest16(bytes: &[u8]) -> [u8; 16] {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dynamo_kv_router::identity::{ExplicitIdentityMap, IdentitySource, IndexerIdentitySpec};
-    use dynamo_kv_router::indexer::cuckoo::{
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+    };
+    use dynamo_kv_hashing::routing::{
+        BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    };
+    use dynamo_kv_indexer::cuckoo::{
         CkfConfig, ConsumerInstanceId, DcCkfState, GlobalCkfIngestOutcome, GlobalCkfManifest,
         GlobalCkfSnapshot, LaneLease, PrefixSearchConfig, ProducerIdentity,
     };
-    use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, compute_block_hash_for_seq,
-        compute_seq_hash_for_block,
-    };
+    use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
+    use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+    use dynamo_router_protocol::identity::IdentitySource;
 
     use super::*;
 

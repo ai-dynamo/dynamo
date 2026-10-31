@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::Bytes;
-use dynamo_kv_router::indexer::cuckoo::{DcCkfDelta, DcCkfFormatIdentity, ProducerIdentity};
+use dynamo_kv_indexer::cuckoo::{DcCkfDelta, DcCkfFormatIdentity, ProducerIdentity};
 
 use super::cbi1 as images;
 use super::hub::HubSnapshot;
@@ -207,17 +207,18 @@ fn filter_format(format: DcCkfFormatIdentity) -> Result<images::FilterFormat, Cb
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::LocalBlockHash;
-    use dynamo_kv_router::identity::{
-        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
-    use dynamo_kv_router::indexer::cuckoo::{
+    use dynamo_kv_hashing::routing::{
+        BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    };
+    use dynamo_kv_indexer::cuckoo::{
         CkfConfig, ConsumerInstanceId, DcCkfState, LaneLease, ProducerIdentity,
     };
-    use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, compute_block_hash_for_seq,
-        compute_seq_hash_for_block,
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
 
     use super::*;

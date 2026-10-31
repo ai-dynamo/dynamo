@@ -4,8 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEventData, Placement, PlacementEvent, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
@@ -239,10 +240,12 @@ impl BatchingState {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, Placement, ResidencyDomain, StorageTier,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::placement::Placement;
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier};
 
     use super::*;
 

@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use dynamo_kv_router::scheduling::queue::RuntimePolicyControl;
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_scheduler::host::RuntimePolicyControl;
 use parking_lot::Mutex;
 use serde::Serialize;
 use uuid::Uuid;

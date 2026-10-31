@@ -11,12 +11,10 @@ use std::{
 
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::KvRouterConfig,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerInputs,
-};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{KvTransferEnforcement, PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -2428,14 +2426,14 @@ impl ModelManager {
         // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
         let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
-        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
+        let shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
                 .map(|c| c.shared_cache_type)
                 .unwrap_or_default()
             {
-                dynamo_kv_router::SharedCacheType::None => None,
-                dynamo_kv_router::SharedCacheType::Hicache => {
+                dynamo_worker_selection::host::SharedCacheType::None => None,
+                dynamo_worker_selection::host::SharedCacheType::Hicache => {
                     let worker_component_name = &endpoint.id().component;
                     tracing::info!(
                         worker_component = worker_component_name,
@@ -2942,7 +2940,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},

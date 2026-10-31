@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::selector::{WorkerSelectionInput, WorkerSelector};
 use dynamo_runtime::pipeline::{OccupancyReservation, PushRouter, RoutingOccupancyState};
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_scheduler::host::{WorkerSelectionInput, WorkerSelector};
 
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig, preprocessor::PreprocessedRequest,

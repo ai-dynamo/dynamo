@@ -17,3 +17,11 @@ pub use crate::prompt_registry::WorkerLoadProjection;
 pub use crate::single::ActiveSequences;
 pub use crate::topology::WorkerDpRange;
 pub use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
+
+// What the frontend host (lib/llm) names beyond the lists above.
+pub use crate::multi_worker::{ReplicaWorkerPolicy, active_request_expiry_duration};
+pub use crate::single::RequestId;
+pub use crate::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
+pub use crate::wire::{
+    ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS,
+};

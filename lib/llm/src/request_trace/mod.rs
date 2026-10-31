@@ -110,10 +110,10 @@ pub fn publish(record: RequestTraceRecord) {
 /// request tracing is initialized in this process with `router_selection`
 /// records enabled, so a process without a trace bus never pays for capture.
 /// Resolved once at router construction.
-pub fn router_selection_spec() -> Option<dynamo_kv_router::protocols::SelectionTraceSpec> {
+pub fn router_selection_spec() -> Option<dynamo_worker_selection::host::SelectionTraceSpec> {
     let policy = policy();
     (config::capture_enabled() && policy.emit_router_selection_records()).then_some(
-        dynamo_kv_router::protocols::SelectionTraceSpec {
+        dynamo_worker_selection::host::SelectionTraceSpec {
             top_k: policy.router_selection_top_k,
         },
     )

@@ -9,16 +9,19 @@
 
 mod direct_zmq;
 
-pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError,
-    SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
-};
-use dynamo_kv_router::protocols::{
+use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_router_protocol::load::{SchedulerGroup, SchedulerLoad};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_scheduler::host::ModelLoadResponse;
+use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS,
 };
-pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
-use dynamo_kv_router::services::selection::{ModelLoadResponse, SelectionService};
+pub use dynamo_slot_tracker::host::{
+    ActiveSequences, ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, RequestId,
+    SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError, SequencePublisher,
+    SequenceRequest, SequenceSubscriber,
+};
 
 use anyhow::Result;
 use dynamo_runtime::component::Endpoint;
@@ -147,7 +150,7 @@ impl ActiveSequenceEventPublisher {
         self.enqueue(ActiveSequenceEvent {
             request_id,
             worker,
-            data: dynamo_kv_router::protocols::ActiveSequenceEventData::MarkPrefillCompleted,
+            data: dynamo_slot_tracker::host::ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: worker.worker_id,
             lora_name: None,
         })
@@ -363,10 +366,7 @@ pub(crate) async fn host_replica_channels(
     router_id: u64,
     publishes_outbound: bool,
     cancellation_token: CancellationToken,
-) -> Result<(
-    dynamo_kv_router::services::selection::HostReplicaChannels,
-    ReplicaIngress,
-)> {
+) -> Result<(dynamo_scheduler::host::HostReplicaChannels, ReplicaIngress)> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let (event_sender, local_publisher_id) = if publishes_outbound {
         let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
@@ -407,7 +407,7 @@ pub(crate) async fn host_replica_channels(
         cancellation_token,
     };
     Ok((
-        dynamo_kv_router::services::selection::HostReplicaChannels {
+        dynamo_scheduler::host::HostReplicaChannels {
             outbound: event_sender,
             inbound_tx,
             inbound_rx,
@@ -605,7 +605,7 @@ async fn run_scheduler_load_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::protocols::ActiveSequenceEventData;
+    use dynamo_slot_tracker::host::ActiveSequenceEventData;
     use tokio::time::Instant;
 
     fn free_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
@@ -1074,7 +1074,7 @@ mod tests {
         let model = |name: &str, worker_id, blocks, tokens| ModelLoadResponse {
             model_name: name.into(),
             routing_group: "default".into(),
-            loads: vec![dynamo_kv_router::protocols::PotentialLoad {
+            loads: vec![dynamo_scheduler::host::PotentialLoad {
                 worker_id,
                 dp_rank: 0,
                 potential_decode_blocks: blocks,
@@ -1109,7 +1109,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn scheduler_publisher_batches_live_loads_and_removes_departed_ranks() -> Result<()> {
-        use dynamo_kv_router::services::selection::{SelectionServiceBuilder, WorkerRequest};
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+        use dynamo_scheduler::host::WorkerRequest;
 
         let distributed = dynamo_runtime::DistributedRuntime::new(
             dynamo_runtime::Runtime::from_current()?,
@@ -1127,7 +1128,7 @@ mod tests {
                     router_queue_threshold: None,
                     ..Default::default()
                 },
-                dynamo_kv_router::WorkerType::Aggregated,
+                dynamo_router_protocol::worker_type::WorkerType::Aggregated,
                 dynamo_custom_policy_builtin::default_registry(),
             )
             .indexer_threads(1)

@@ -23,9 +23,11 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
 
-use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
-use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, SchedulerLoad, WorkerId};
+use dynamo_kv_events::event::KvCacheEventError;
+use dynamo_kv_indexer::cuckoo::{CkfConfig, CkfFailureAction};
+use dynamo_router_protocol::identity::PoolId;
+use dynamo_router_protocol::load::SchedulerLoad;
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::component::{Client, Instance};
 use dynamo_runtime::protocols::EndpointId;
@@ -115,7 +117,7 @@ pub enum PoolRelayError {
         message: String,
     },
     #[error(transparent)]
-    Build(#[from] dynamo_kv_router::indexer::cuckoo::CkfBuildError),
+    Build(#[from] dynamo_kv_indexer::cuckoo::CkfBuildError),
     #[error(transparent)]
     Event(#[from] KvCacheEventError),
     #[error("Pool Relay publisher requires a replacement snapshot: {0}")]
@@ -1025,7 +1027,7 @@ fn new_relay_incarnation() -> anyhow::Result<u64> {
 #[allow(clippy::too_many_arguments)]
 async fn run_host_supervisor(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     mut membership_rx: watch::Receiver<DcMembershipView>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
@@ -1256,7 +1258,7 @@ fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState,
 
 fn reject_duplicate_live_pools(
     view: &mut DcMembershipView,
-    cluster_id: dynamo_kv_router::ClusterId,
+    cluster_id: dynamo_router_protocol::identity::ClusterId,
 ) {
     let mut owners: HashMap<PoolId, Vec<EndpointId>> = HashMap::new();
     for (endpoint, membership) in view.endpoints.iter() {
@@ -1416,7 +1418,7 @@ fn report_producer_fence_trigger(endpoint: &EndpointId, trigger: &ProducerFenceT
 #[allow(clippy::too_many_arguments)]
 async fn run_endpoint_slot(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     endpoint: EndpointId,
     mut metadata_rx: watch::Receiver<Option<EndpointMembership>>,
     status: SharedEndpointStatus,
@@ -1960,7 +1962,7 @@ async fn diagnostic_tick() {
 #[allow(clippy::too_many_arguments)]
 async fn start_endpoint_pool(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     endpoint: EndpointId,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
@@ -2622,11 +2624,12 @@ mod tests {
         assert_eq!(workers.len(), 1);
     }
 
-    use dynamo_kv_router::{
-        identity::{CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId},
-        indexer::cuckoo::{CkfFailureDisposition, CkfFailurePoint},
-        protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank},
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_kv_indexer::cuckoo::{CkfFailureDisposition, CkfFailurePoint};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{DiscoveryInstance, DiscoverySpec, EventTransportKind},

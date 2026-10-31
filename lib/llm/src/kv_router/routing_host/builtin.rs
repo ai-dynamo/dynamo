@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::{
-    protocols::{WorkerSelectionResult, WorkerWithDpRank},
-    scheduling::KvSchedulerError,
-    selector::{HostedSelectionInputs, WorkerInputs, WorkerSelectionInput, WorkerSelector},
-};
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::pipeline::{BuiltinRoutePicker, RouterMode};
+use dynamo_scheduler::host::{
+    HostedSelectionInputs, KvSchedulerError, WorkerSelectionInput, WorkerSelectionResult,
+    WorkerSelector,
+};
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -50,10 +51,12 @@ impl BuiltinWorkerSelector {
             .contains(WorkerInputs::OCCUPANCY)
             && occupancy.is_none()
         {
-            return Err(dynamo_kv_router::WorkerSelectionPolicyError::failed(
-                "selector requires hosted OCCUPANCY input",
-            )
-            .into());
+            return Err(
+                dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyError::failed(
+                    "selector requires hosted OCCUPANCY input",
+                )
+                .into(),
+            );
         }
         Ok((worker_ids, occupancy))
     }
@@ -145,7 +148,7 @@ impl RoutingHost {
         }
         let target = lora
             .selector
-            .select_worker(dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+            .select_worker(dynamo_scheduler::host::WorkerSelectionInput::hosted(
                 &candidates,
                 None,
             ))?
@@ -232,7 +235,7 @@ impl RoutingHost {
                             } else {
                                 selector
                                     .select_worker(
-                                        dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+                                        dynamo_scheduler::host::WorkerSelectionInput::hosted(
                                             ids, None,
                                         ),
                                     )

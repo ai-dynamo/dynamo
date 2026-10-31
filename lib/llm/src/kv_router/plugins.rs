@@ -40,7 +40,7 @@ impl RouterPluginBuilder {
 
     pub(crate) fn validate_config(
         &self,
-        config: &dynamo_kv_router::KvRouterConfig,
+        config: &dynamo_kv_router::config::KvRouterConfig,
     ) -> anyhow::Result<()> {
         if config.request_classifier_config()?.is_some()
             && self.plugins.request_classifier().is_none()

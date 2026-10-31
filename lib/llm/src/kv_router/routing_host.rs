@@ -8,11 +8,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::{AbortCause, KvSchedulerError},
-    selector::{WorkerInputs, WorkerSelector},
-};
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -25,6 +24,7 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike, WorkerSelector};
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
@@ -446,9 +446,9 @@ impl RoutingHost {
                 None => self
                     .inner
                     .with_selectable_worker_ids(|ids| {
-                        selector.peek_worker(
-                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
-                        )
+                        selector.peek_worker(dynamo_scheduler::host::WorkerSelectionInput::hosted(
+                            ids, None,
+                        ))
                     })
                     .ok()
                     .and_then(Result::ok),

@@ -13,24 +13,23 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::WorkerType;
+use dynamo_admission::host::{QueueLimitKind, QueueRejection};
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::scheduling::{
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
-    RejectThresholdsProvider, WorkerAvailabilityProvider,
-};
-use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
-use dynamo_kv_router::services::selection::{
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+use dynamo_kv_router::services::selection::{SelectionService, SelectionServiceBuilder};
+use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionId};
+use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker_type::WorkerType;
+use dynamo_scheduler::host::{
     CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
+    HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PrefillLoadEstimator, RejectThresholdsProvider, SelectionHost,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
+    WorkerAvailabilityProvider, WorkerCatalogSource, WorkerConfigLike, WorkerRequest,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
+use dynamo_slot_tracker::host::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
@@ -54,8 +53,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub reject_thresholds: Option<RejectThresholdsProvider>,
     pub available_worker_provider: WorkerAvailabilityProvider,
     pub registration_availability_provider: RegistrationAvailabilityProvider,
-    pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
-    pub lora_worker_filter: Option<Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>>,
+    pub shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>>,
+    pub lora_worker_filter: Option<Arc<dyn dynamo_worker_selection::host::LoraWorkerFilter>>,
     /// Builds and feeds the router's index from the runtime; the partition
     /// takes its index from it.
     pub ingress: Arc<dyn KvEventIngress>,
@@ -92,7 +91,7 @@ fn record_queue_rejection(
 
 fn update_queue_metrics(
     per_class: &[RouterQueueMetricHandles],
-    mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
+    mut stats_for: impl FnMut(usize) -> Option<dynamo_scheduler::host::ClassQueueStats>,
 ) {
     for (class_index, handles) in per_class.iter().enumerate() {
         let Some(stats) = stats_for(class_index) else {
@@ -194,12 +193,12 @@ struct SenderLoadSink {
     worker_type: &'static str,
 }
 
-impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink {
-    fn publish(&self, snapshot: dynamo_kv_router::sequences::SchedulerLoadSnapshot) {
+impl dynamo_scheduler::host::SchedulerLoadSink for SenderLoadSink {
+    fn publish(&self, snapshot: dynamo_slot_tracker::host::SchedulerLoadSnapshot) {
         self.sender.publish(snapshot);
     }
 
-    fn publish_batch(&self, snapshots: Vec<dynamo_kv_router::sequences::SchedulerLoadSnapshot>) {
+    fn publish_batch(&self, snapshots: Vec<dynamo_slot_tracker::host::SchedulerLoadSnapshot>) {
         self.sender.publish_batch(snapshots);
     }
 
@@ -216,7 +215,7 @@ impl EmbeddedSelection {
     pub(crate) async fn start(
         args: EmbeddedSelectionArgs,
         workers_with_configs: RuntimeConfigWatch,
-        request_leases: Option<Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>>,
+        request_leases: Option<Arc<dyn dynamo_slot_tracker::host::ReplicaRequestLeaseObserver>>,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, crate::kv_router::sequence::ReplicaIngress)> {
         let worker_registration =
@@ -249,7 +248,7 @@ impl EmbeddedSelection {
             ),
         ));
         let slot = std::sync::Mutex::new(Some(channels));
-        let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
+        let replica_sync: Option<dynamo_scheduler::host::HostReplicaSyncFactory> =
             Some(Arc::new(move |_partition| {
                 slot.lock().ok().and_then(|mut s| s.take())
             }));
@@ -392,8 +391,7 @@ impl EmbeddedSelection {
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
         let table = self.partition.session_affinity(
-            dynamo_kv_router::services::selection::affinity::SessionAffinityConfig::new(ttl)
-                .with_mode(mode),
+            dynamo_session_affinity::host::SessionAffinityConfig::new(ttl).with_mode(mode),
         )?;
         Ok(self
             .affinity
@@ -515,21 +513,21 @@ pub(crate) fn worker_request_from_runtime_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::services::selection::SchedulerLoadSink;
+    use dynamo_scheduler::host::SchedulerLoadSink;
 
     #[test]
     fn queue_metrics_are_updated_by_class_index() {
         let handles = ["latency", "bulk"]
             .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
         let stats = [
-            dynamo_kv_router::queue::ClassQueueStats {
+            dynamo_scheduler::host::ClassQueueStats {
                 received_total: 10,
                 rejected_due_time_passed_total: 1,
                 pending_count: 2,
                 pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
             },
-            dynamo_kv_router::queue::ClassQueueStats {
+            dynamo_scheduler::host::ClassQueueStats {
                 received_total: 20,
                 rejected_due_time_passed_total: 3,
                 pending_count: 3,
@@ -570,15 +568,15 @@ mod tests {
         };
         config.taints.insert("gpu=h100".to_string());
         config.runtime_data.insert(
-            dynamo_kv_router::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY.to_string(),
+            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
         config.runtime_data.insert(
-            dynamo_kv_router::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY.to_string(),
+            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY.to_string(),
             serde_json::Value::String("decode".to_string()),
         );
         config.runtime_data.insert(
-            dynamo_kv_router::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
                 .to_string(),
             serde_json::json!({"2": "tcp://w:9002", "3": "tcp://w:9003"}),
         );

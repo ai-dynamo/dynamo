@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::SelectionConfig;
+use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
+use dynamo_router_protocol::worker_type::WorkerType;
+use dynamo_worker_selection::host::SelectionConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,10 +27,6 @@ use crate::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-};
-use dynamo_kv_router::{
-    RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
@@ -356,7 +357,7 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
@@ -482,7 +483,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-    use dynamo_kv_router::KvRouterConfig;
+    use dynamo_kv_router::config::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {

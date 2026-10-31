@@ -6,9 +6,10 @@ use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
-use dynamo_kv_router::protocols::{ActiveLoad, SchedulerLoad, WorkerId, WorkerWithDpRank};
+use dynamo_kv_indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
+use dynamo_router_protocol::identity::PoolId;
+use dynamo_router_protocol::load::{ActiveLoad, SchedulerLoad};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::transports::event_plane::EventEnvelope;
 use parking_lot::Mutex;
@@ -1607,12 +1608,12 @@ fn validate_roles(roles: &[WorkerRole]) -> anyhow::Result<()> {
 mod tests {
     use std::sync::{Arc, mpsc as std_mpsc};
 
-    use dynamo_kv_router::identity::{
-        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
     use futures::StreamExt;
     use tokio_util::sync::CancellationToken;
@@ -3380,7 +3381,7 @@ mod tests {
             dp_rank,
             active_decode_blocks: 3,
             active_prefill_tokens: 4,
-            group: dynamo_kv_router::protocols::SchedulerGroup::Standalone { scheduler_id: 7 },
+            group: dynamo_router_protocol::load::SchedulerGroup::Standalone { scheduler_id: 7 },
         }
     }
 

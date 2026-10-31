@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use dynamo_kv_router::RouterEventSink;
-use dynamo_kv_router::indexer::{KvRouterError, LocalKvIndexer};
-use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
-};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_indexer::host::{KvRouterError, LocalKvIndexer};
+use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier};
 use dynamo_runtime::transports::event_plane::EventPublisher;
+use dynamo_scheduler::host::RouterEventSink;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 

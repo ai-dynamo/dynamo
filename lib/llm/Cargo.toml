@@ -73,7 +73,19 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
+dynamo-admission = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-indexer = { workspace = true, features = ["export"] }
+# The selection service module (`services::selection`) is gated on the three adapter
+# features; the frontend supplies its own index ingress and replica channels, so a
+# follow-up gates the adapters inside the service and lib/llm drops them.
+dynamo-kv-router = { workspace = true, features = ["metrics", "ingest-zmq", "replica-sync-zmq", "peer-recovery"] }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }

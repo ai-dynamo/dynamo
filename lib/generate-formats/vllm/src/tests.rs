@@ -127,18 +127,18 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
     });
     let preprocessed = project(&raw, &routing_metadata(4, false, None));
 
-    let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let hash_a = dynamo_kv_hashing::routing::hash_mm_identifier(&preprocessed_mm_identifier(
         "image",
         b"opaque-a",
     ))
     .expect("content-derived hash");
-    let hash_b = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let hash_b = dynamo_kv_hashing::routing::hash_mm_identifier(&preprocessed_mm_identifier(
         "image",
         b"opaque-b",
     ))
     .expect("content-derived hash");
-    let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_a);
-    let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_b);
+    let pad_a = dynamo_kv_hashing::routing::pad_value_for_mm_hash(hash_a);
+    let pad_b = dynamo_kv_hashing::routing::pad_value_for_mm_hash(hash_b);
     let mm = preprocessed
         .mm_routing_info
         .as_ref()
@@ -198,10 +198,10 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .mm_routing_info
         .as_ref()
         .expect("base request keeps exact MM routing");
-    let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+    let request_hashes = dynamo_kv_hashing::routing::compute_block_hash_for_seq(
         &routing.routing_token_ids,
         4,
-        dynamo_kv_router::protocols::BlockHashOptions::default(),
+        dynamo_kv_hashing::routing::BlockHashOptions::default(),
     );
     let marked_identifier = preprocessed
         .extra_args
@@ -214,8 +214,8 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .expect("frontend-approved marked MM hash")
         .to_string();
     let event_mm_info =
-        dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
-            dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+        dynamo_kv_events::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+            dynamo_kv_events::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
                 marked_identifier,
                 1,
             )),
@@ -225,11 +225,11 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .next()
         .flatten()
         .expect("block MM metadata");
-    let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+    let event_block = dynamo_kv_events::zmq_wire::create_stored_block_from_parts(
         4,
         7,
         &[10, 99, 99, 20],
-        dynamo_kv_router::zmq_wire::StoredBlockOptions {
+        dynamo_kv_events::zmq_wire::StoredBlockOptions {
             mm_extra_info: Some(event_mm_info),
             image_token_id: Some(99),
             ..Default::default()
@@ -259,11 +259,11 @@ fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
     let routing = generate_mm_routing_info(&request, 5)
         .expect("valid sparse MM routing metadata")
         .expect("MM routing projection");
-    let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let mm_hash = dynamo_kv_hashing::routing::hash_mm_identifier(&preprocessed_mm_identifier(
         "image", b"sparse",
     ))
     .expect("content-derived identifier");
-    let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
+    let pad = dynamo_kv_hashing::routing::pad_value_for_mm_hash(mm_hash);
     assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
     for (name, token_ids, features, expected_error) in [

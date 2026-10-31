@@ -7,13 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use dynamo_kv_router::identity::{
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
-use dynamo_kv_router::protocols::{
-    ActiveLoad, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
-};
+use dynamo_router_protocol::load::ActiveLoad;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::{
     DistributedRuntime, Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider,

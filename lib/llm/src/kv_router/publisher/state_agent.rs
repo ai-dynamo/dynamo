@@ -31,18 +31,17 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::{
-    identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
-    indexer::{
-        KvIndexerMetrics, KvStateAgentIdentity, KvStateAgentStatus, KvStateAttachmentStatus,
-        KvStateProtocolVersion, LocalKvIndexer,
-    },
-    protocols::{
-        KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
-    },
-    zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer};
+use dynamo_kv_indexer::host::{
+    CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
+    KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
 };
+use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
+use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+use dynamo_router_protocol::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
@@ -794,8 +793,8 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         worker: WorkerWithDpRank,
         domain: ResidencyDomain,
     ) -> Result<u64> {
-        let placement = dynamo_kv_router::protocols::Placement {
-            owner: dynamo_kv_router::protocols::PlacementOwner::LocalWorker(worker),
+        let placement = dynamo_kv_events::placement::Placement {
+            owner: dynamo_kv_events::placement::PlacementOwner::LocalWorker(worker),
             tier: StorageTier::Device,
             residency_domain: domain,
         };
@@ -1784,7 +1783,7 @@ struct NormalizedRawBatch {
 }
 
 fn normalize_raw_batch(
-    raw_events: Vec<dynamo_kv_router::zmq_wire::RawKvEvent>,
+    raw_events: Vec<dynamo_kv_events::zmq_wire::RawKvEvent>,
     worker: WorkerWithDpRank,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
@@ -1815,7 +1814,7 @@ fn normalize_raw_batch(
             )
             && !matches!(
                 raw_event,
-                dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
+                dynamo_kv_events::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
             )
         {
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
@@ -1839,7 +1838,7 @@ fn normalize_raw_batch(
             Err(_) => continue,
         };
         if ownership == KvEventOwnership::Kvcr
-            && let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+            && let dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored {
                 block_size,
                 group_idx,
                 kv_cache_spec_kind,
@@ -1929,17 +1928,14 @@ mod tests {
         },
     };
 
-    use dynamo_kv_router::{
-        identity::{
-            CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-            StableDpSlotId,
-        },
-        indexer::WorkerKvQueryResponse,
-        protocols::{
-            ExternalSequenceBlockHash, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
-            Placement, PlacementOwner,
-        },
-        zmq_wire::{BlockHashValue, RawKvEvent},
+    use dynamo_kv_events::event::{KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::placement::{Placement, PlacementOwner};
+    use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
+    use dynamo_kv_indexer::host::WorkerKvQueryResponse;
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        StableDpSlotId,
     };
 
     use super::*;
@@ -2296,7 +2292,7 @@ mod tests {
             ZmqEventNormalizer::new(4)
                 .preprocess_with_reason(raw_store(Some("CPU"), Some("kvcr"), 107), worker)
                 .unwrap_err(),
-            dynamo_kv_router::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
+            dynamo_kv_events::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
         );
 
         let normalized = normalize_raw_batch(
@@ -2380,7 +2376,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let worker = WorkerWithDpRank::new(17, 3);
         let mut framework = ZmqEventNormalizer::new(4);
         let mut cache_owner = ZmqEventNormalizer::new(4);
@@ -2501,7 +2497,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&boundary_wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let normalized = normalize_raw_batch(
             batch.events,
             worker,

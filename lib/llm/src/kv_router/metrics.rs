@@ -68,8 +68,8 @@ use crate::protocols::common::timing::RequestPhase;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-use dynamo_kv_router::indexer::ApproximateLruStats;
-use dynamo_kv_router::sequences::LocalWorkerLoad;
+use dynamo_kv_indexer::host::ApproximateLruStats;
+use dynamo_slot_tracker::host::LocalWorkerLoad;
 use worker_registered::RouterWorkerRegistered;
 pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 
@@ -496,9 +496,7 @@ impl ActiveSequenceIngressMetrics {
     }
 }
 
-impl dynamo_kv_router::services::selection::ReplicaIngressObserver
-    for ActiveSequenceIngressMetricHandles
-{
+impl dynamo_scheduler::host::ReplicaIngressObserver for ActiveSequenceIngressMetricHandles {
     fn observe_drain(&self, queue_depth: usize, applied: usize) {
         self.queue_depth.set(queue_depth as i64);
         self.events_applied_total.inc_by(applied as u64);

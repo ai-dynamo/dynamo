@@ -6,12 +6,13 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_kv_router::indexer::{
+use dynamo_kv_indexer::host::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
@@ -170,7 +171,7 @@ impl RemoteIndexer {
 }
 
 #[async_trait::async_trait]
-impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndexer {
+impl dynamo_kv_indexer::host::RemotePrimary for RemoteIndexer {
     async fn find_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
@@ -209,7 +210,7 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
     async fn record_routing_decision(
         &self,
         worker: WorkerWithDpRank,
-        hashes: dynamo_kv_router::indexer::RoutingDecisionHashes,
+        hashes: dynamo_kv_indexer::host::RoutingDecisionHashes,
     ) -> Result<()> {
         self.record_hashed_routing_decision(worker, hashes.local_hashes, hashes.sequence_hashes)
             .await
@@ -548,10 +549,10 @@ mod tests {
     use crate::kv_router::indexer::{LowerTierIndexers, SideIndexer};
     use std::time::Duration;
 
-    use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
-    };
-    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, PruneConfig};
+    use dynamo_router_protocol::residency::StorageTier;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]

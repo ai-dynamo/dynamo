@@ -6,13 +6,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dynamo_kv_router::{
-    indexer::{
-        KvStateAgentIdentity, KvStateAgentStatus, WorkerKvQueryKind, WorkerKvQueryRequest,
-        WorkerKvQueryResponse,
-    },
-    protocols::{DpRank, WorkerId},
+use dynamo_kv_indexer::host::{
+    KvStateAgentIdentity, KvStateAgentStatus, WorkerKvQueryKind, WorkerKvQueryRequest,
+    WorkerKvQueryResponse,
 };
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use dynamo_runtime::{
     component::{Component, Instance},
     pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},

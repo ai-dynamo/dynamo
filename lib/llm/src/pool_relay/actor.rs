@@ -12,21 +12,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "ckf-diagnostics")]
 use std::time::Instant;
 
+use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, RouterEvent};
 #[cfg(test)]
-use dynamo_kv_router::indexer::cuckoo::CkfConfig;
+use dynamo_kv_indexer::cuckoo::CkfConfig;
 #[cfg(any(test, feature = "ckf-diagnostics"))]
-use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
+use dynamo_kv_indexer::cuckoo::DcCkfStats;
 #[cfg(feature = "ckf-diagnostics")]
-use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
-use dynamo_kv_router::indexer::cuckoo::{
+use dynamo_kv_indexer::cuckoo::PublisherEmitOutcome;
+use dynamo_kv_indexer::cuckoo::{
     CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
     DcCkfPublisher, DcCkfRankReplacement, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
 #[cfg(test)]
-use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
-use dynamo_kv_router::protocols::{
-    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, WorkerId, WorkerWithDpRank,
-};
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
@@ -270,7 +269,7 @@ async fn send_actor_fault(
 pub(super) struct StreamScope {
     pub(super) relay_incarnation: u64,
     pub(super) layout_generation: u64,
-    pub(super) pool_id: dynamo_kv_router::identity::PoolId,
+    pub(super) pool_id: dynamo_router_protocol::identity::PoolId,
 }
 
 #[derive(Debug, Clone)]
@@ -662,10 +661,8 @@ impl PoolRelayRecoveryTarget {
         if states.try_reserve(pending.len()).is_err() || waiters.try_reserve(pending.len()).is_err()
         {
             batch_error = Some(
-                PoolRelayError::Build(
-                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-                )
-                .to_string(),
+                PoolRelayError::Build(dynamo_kv_indexer::cuckoo::CkfBuildError::AllocationFailed)
+                    .to_string(),
             );
         }
         for item in pending.by_ref() {
@@ -1395,9 +1392,9 @@ fn replacement_state(
             });
         }
         replacement.push_event(event).map_err(|error| match error {
-            KvCacheEventError::AllocationFailed => PoolRelayError::Build(
-                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-            ),
+            KvCacheEventError::AllocationFailed => {
+                PoolRelayError::Build(dynamo_kv_indexer::cuckoo::CkfBuildError::AllocationFailed)
+            }
             _ => PoolRelayError::InvalidTreeDump {
                 worker_id,
                 dp_rank,
@@ -1409,7 +1406,7 @@ fn replacement_state(
 }
 
 fn publish_batch(
-    batch: dynamo_kv_router::indexer::cuckoo::DcCkfPublicationBatch,
+    batch: dynamo_kv_indexer::cuckoo::DcCkfPublicationBatch,
     publisher: &mut DcCkfPublisher<BroadcastDeltaSink>,
     diagnostics: &ActorDiagnosticsHandle,
 ) -> Result<(), PoolRelayError> {
@@ -1464,15 +1461,14 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+    };
+    use dynamo_kv_indexer::cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId};
+    use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse};
+    use dynamo_router_protocol::block_hash::LocalBlockHash;
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-    };
-    use dynamo_kv_router::indexer::{
-        KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse,
-        cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId},
-    };
-    use dynamo_kv_router::protocols::{
-        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
     use dynamo_runtime::{component::Instance, protocols::EndpointId};
     use tokio::sync::watch;

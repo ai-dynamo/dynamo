@@ -40,9 +40,9 @@ pub fn preprocessed_mm_identifier(modality: &str, raw_kwargs: &[u8]) -> String {
 /// Return the KV-event marker for a content-bound preprocessed-media identity.
 pub fn preprocessed_mm_routing_hash(modality: &str, raw_kwargs: &[u8]) -> String {
     let identifier = preprocessed_mm_identifier(modality, raw_kwargs);
-    let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+    let hash = dynamo_kv_hashing::routing::hash_mm_identifier(&identifier)
         .expect("content-derived multimodal identity is non-empty");
-    dynamo_kv_router::zmq_wire::mark_mm_hash_for_extra_key(hash)
+    dynamo_kv_events::zmq_wire::mark_mm_hash_for_extra_key(hash)
 }
 
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {

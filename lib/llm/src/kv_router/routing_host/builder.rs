@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::selector::{WorkerInputs, WorkerSelector};
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_runtime::{
     component::Client,
     pipeline::{
@@ -21,6 +21,7 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::WorkerSelector;
 
 use super::{BuiltinWorkerSelector, HostedOccupancy, LoraRouting, RoutingHost, RoutingPolicy};
 use crate::{

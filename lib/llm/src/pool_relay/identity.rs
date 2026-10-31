@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use dynamo_kv_router::identity::{IdentitySource, PoolId};
-use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
+use dynamo_kv_indexer::cuckoo::ProducerIdentity;
+use dynamo_router_protocol::identity::{IdentitySource, PoolId};
 use dynamo_runtime::protocols::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -553,7 +553,7 @@ impl PoolIdentitySources {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IndexerDomainId, RoutingScopeId,
     };
 

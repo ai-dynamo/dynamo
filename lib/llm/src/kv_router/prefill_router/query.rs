@@ -4,10 +4,9 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use dynamo_kv_router::{
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::queue::BookingHandle,
-};
+use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{BookingHandle, RoutingConstraints};
 
 use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
 

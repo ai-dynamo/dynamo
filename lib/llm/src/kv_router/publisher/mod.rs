@@ -8,11 +8,25 @@ use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
-use dynamo_kv_router::protocols::*;
-pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
+use dynamo_kv_events::event::KvCacheEvent;
 #[cfg(test)]
-use dynamo_kv_router::zmq_wire::*;
+use dynamo_kv_events::event::{
+    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+use dynamo_kv_events::placement::{Placement, PlacementEvent};
+pub use dynamo_kv_events::zmq_wire::create_stored_blocks;
+#[cfg(test)]
+use dynamo_kv_events::zmq_wire::{
+    BlockHashValue, ExtraKeyItem, KvEventBatch, RawKvEvent, convert_event,
+    create_stored_block_from_parts, extra_keys_to_block_mm_infos, parse_mm_hash_from_extra_key,
+};
+use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
+#[cfg(test)]
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::residency::StorageTier;
+#[cfg(test)]
+use dynamo_router_protocol::residency::{ResetScope, ResidencyDomain};
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
 use dynamo_runtime::protocols::EndpointId;

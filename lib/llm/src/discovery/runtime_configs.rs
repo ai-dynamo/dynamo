@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;

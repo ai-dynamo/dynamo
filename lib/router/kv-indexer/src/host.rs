@@ -37,10 +37,24 @@ pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;
 pub use crate::residency::{ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot};
-pub use crate::session_prefix_index::SessionPrefixIndexer;
+pub use crate::session_prefix_index::{
+    SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
+};
 pub use crate::session_updates::SessionUpdateSender;
 pub use crate::thread_pool::ThreadPoolIndexer;
 pub use crate::traits::{KvIndexerInterface, SyncIndexer};
 pub use crate::types::{
     KvRouterError, MatchDetails, RoutingDecisionHashes, WireTieredMatchDetails,
 };
+
+// What the frontend host (lib/llm) names beyond the lists above.
+pub use crate::api::{
+    IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
+    IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
+    KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT, KvStateAgentIdentity, KvStateAgentStatus,
+    KvStateAttachmentStatus, KvStateRecoveryReceipt, WorkerKvQueryKind, WorkerKvQueryRequest,
+};
+pub use crate::approximate_lru::ApproximateLruIncarnation;
+pub use crate::identity::{CanonicalIdentityMaterial, ExplicitIdentityMap, IndexerIdentitySpec};
+pub use crate::residency::ResidencyProjectionError;
+pub use crate::types::GetWorkersRequest;

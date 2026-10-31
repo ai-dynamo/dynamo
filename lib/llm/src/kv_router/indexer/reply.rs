@@ -9,7 +9,7 @@
 //! `PushRouter`, `AddressedPushRouter`, and `Ingress` with the same wire encoding as the
 //! bare enums.
 
-use dynamo_kv_router::indexer::{
+use dynamo_kv_indexer::host::{
     IndexerQueryResponse, IndexerRecordRoutingDecisionResponse, WorkerKvQueryResponse,
 };
 use dynamo_runtime::error::DynamoError;
@@ -109,8 +109,8 @@ impl MaybeError for IndexerRecordRoutingDecisionReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::indexer::WireTieredMatchDetails;
-    use dynamo_kv_router::protocols::ResetScope;
+    use dynamo_kv_indexer::host::WireTieredMatchDetails;
+    use dynamo_router_protocol::residency::ResetScope;
 
     #[test]
     fn worker_kv_query_reply_is_wire_transparent() {

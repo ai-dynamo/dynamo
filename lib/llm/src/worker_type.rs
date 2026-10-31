@@ -6,4 +6,4 @@
 //! The canonical type lives in `dynamo-kv-router` so policy providers and all router hosts can
 //! share it without introducing a dependency cycle.
 
-pub use dynamo_kv_router::worker_type::{ParseWorkerTypeError, WorkerType};
+pub use dynamo_router_protocol::worker_type::{ParseWorkerTypeError, WorkerType};

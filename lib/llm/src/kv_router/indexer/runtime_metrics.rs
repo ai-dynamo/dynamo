@@ -1,26 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Builds the indexer's counters from a runtime `Component`. Lives here, not in the stage,
-//! because the stage must not depend on `dynamo-runtime`.
+//! Builds the indexer's counters from a runtime `Component`. Lives in the frontend host, not
+//! in the stage or the composition crate: neither may depend on `dynamo-runtime`.
 
 use std::sync::Arc;
-#[cfg(feature = "metrics")]
 use std::sync::OnceLock;
 
 use dynamo_kv_indexer::metrics::KvIndexerMetrics;
 use dynamo_runtime::component::Component;
-#[cfg(feature = "metrics")]
 use dynamo_runtime::metrics::MetricsHierarchy;
 
-#[cfg(feature = "metrics")]
 const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
-#[cfg(feature = "metrics")]
 const KV_CACHE_EVENT_WARNINGS_SUFFIX: &str = "kv_cache_event_warnings";
-#[cfg(feature = "metrics")]
 const CKF_MUTATION_SUFFIX: &str = "ckf_mutation_total";
 
-#[cfg(feature = "metrics")]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 /// Host-side constructor for [`KvIndexerMetrics`] from a runtime component.
@@ -32,7 +26,6 @@ pub trait KvIndexerMetricsExt {
 
 impl KvIndexerMetricsExt for KvIndexerMetrics {
     fn from_component(component: &Component) -> Arc<KvIndexerMetrics> {
-        #[cfg(feature = "metrics")]
         {
             use dynamo_kv_indexer::metrics::{
                 CKF_MUTATION_HELP, CKF_MUTATION_LABELS, KV_CACHE_EVENT_WARNINGS_HELP,
@@ -77,12 +70,6 @@ impl KvIndexerMetricsExt for KvIndexerMetrics {
                     }
                 })
                 .clone()
-        }
-
-        #[cfg(not(feature = "metrics"))]
-        {
-            let _ = component;
-            Arc::new(KvIndexerMetrics::new_unregistered())
         }
     }
 }

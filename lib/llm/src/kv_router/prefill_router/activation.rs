@@ -1,17 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::ConditionalDisaggConfig;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_scheduler::host::PrefillLoadEstimator;
+use dynamo_worker_selection::host::{ConditionalDisaggConfig, make_conditional_disagg_policy};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
-    config::KvRouterConfig,
-};
 use dynamo_runtime::{
     component::Endpoint, discovery::DiscoveryQuery, pipeline::RouterMode,
     prelude::DistributedRuntimeProvider,
@@ -670,7 +668,6 @@ mod tests {
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -683,6 +680,7 @@ mod tests {
         },
         storage::kv,
     };
+    use dynamo_scheduler::host::RoutingConstraints;
     use futures::StreamExt;
     use std::collections::HashSet;
 

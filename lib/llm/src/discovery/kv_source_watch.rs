@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
+use dynamo_kv_events::event::KV_EVENT_SUBJECT;
 use dynamo_runtime::{
     discovery::{
         Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
@@ -321,7 +321,7 @@ fn publish_view(sender: &watch::Sender<KvSourceMembershipView>, view: KvSourceMe
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         component::{Instance, TransportType},
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},

@@ -11,15 +11,13 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::{
-    kv_hints::{
-        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-    },
-    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
-    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
+use dynamo_router_protocol::kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
+use dynamo_scheduler::host::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
+use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -541,7 +539,7 @@ impl ModelRuntimeConfig {
     }
 }
 
-impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -1262,7 +1260,7 @@ mod tests {
 
     #[test]
     fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         config
@@ -1277,7 +1275,7 @@ mod tests {
 
     #[test]
     fn kv_hint_transfer_support_requires_explicit_true() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());

@@ -10,7 +10,6 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
@@ -20,6 +19,7 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 use dynamo_renderer::PromptFormatter;
 
@@ -2272,9 +2272,8 @@ mod tests {
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
-        use dynamo_kv_router::plugins::request_classifier::WorkerView;
-        use dynamo_kv_router::scheduling::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+        use dynamo_kv_router::plugins::request_classifier::{
+            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2322,7 +2321,7 @@ request_classifier:
         .unwrap();
         let router_config = RouterConfig::new(
             RouterMode::KV,
-            dynamo_kv_router::KvRouterConfig {
+            dynamo_kv_router::config::KvRouterConfig {
                 use_kv_events: false,
                 router_policy_config: Some(policy_file.path().display().to_string()),
                 ..Default::default()
@@ -2330,17 +2329,18 @@ request_classifier:
         );
         let instances = Arc::new(AtomicUsize::new(0));
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let factory: dynamo_kv_router::scheduling::RequestClassifierFactory = Arc::new({
-            let instances = instances.clone();
-            move |context| {
-                assert_eq!(context.block_size(), 16);
-                Box::new(RejectingClassifier {
-                    instance: instances.fetch_add(1, Ordering::Relaxed),
-                    calls: 0,
-                    events: events.clone(),
-                })
-            }
-        });
+        let factory: dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory =
+            Arc::new({
+                let instances = instances.clone();
+                move |context| {
+                    assert_eq!(context.block_size(), 16);
+                    Box::new(RejectingClassifier {
+                        instance: instances.fetch_add(1, Ordering::Relaxed),
+                        calls: 0,
+                        events: events.clone(),
+                    })
+                }
+            });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let mut registry = dynamo_custom_policy_builtin::default_registry();
         registry
@@ -2476,9 +2476,9 @@ request_classifier:
             (0..2)
                 .map(|instance| (
                     WorkerType::Aggregated,
-                    dynamo_kv_router::RoutingPartitionId::new(
+                    dynamo_router_protocol::identity::RoutingPartitionId::new(
                         format!("classifier-model-{instance}"),
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP
+                        dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP
                     ),
                 ))
                 .collect::<Vec<_>>()
@@ -3304,7 +3304,7 @@ request_classifier:
     fn only_explicit_policies_require_typed_model_cards() {
         let unresolved = RouterPluginBuilder::default();
         let resolved = dynamo_custom_policy_builtin::default_registry()
-            .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
+            .resolve_plugins(&dynamo_kv_router::config::KvRouterConfig::default())
             .unwrap();
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
