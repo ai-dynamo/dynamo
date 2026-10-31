@@ -18,8 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import numpy as np
 import pytest
 import torch
+from vllm.inputs.engine import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers import TokenizeParams
+from vllm.sampling_params import SamplingParams
 
 import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -148,6 +151,31 @@ def _make_handler(
     handler._deferred_aborts = {}
     handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
+
+
+def _engine_client(
+    is_encoder_decoder: bool = False, **attrs: object
+) -> SimpleNamespace:
+    """An engine client with the renderer and model config of vLLM's EngineClient.
+
+    Its renderer renders a token prompt to vLLM's token input, and records the calls.
+    """
+
+    def render_cmpl(prompts, tok_params):
+        [prompt] = prompts
+        engine_input = tokens_input(prompt["prompt_token_ids"])
+        engine_input["arrival_time"] = 1.0
+        return [engine_input]
+
+    renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024),
+        render_cmpl=MagicMock(side_effect=render_cmpl),
+    )
+    return SimpleNamespace(
+        renderer=renderer,
+        model_config=SimpleNamespace(is_encoder_decoder=is_encoder_decoder),
+        **attrs,
+    )
 
 
 def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
@@ -1005,7 +1033,7 @@ async def test_engine_data_uses_effective_engine_prompt(
                 finished=bool(i),
             )
 
-    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    handler.engine_client = _engine_client(generate=fake_generate, tokenizer=None)
     chunks = [
         chunk
         async for chunk in handler._generate_token_mode(
@@ -1082,7 +1110,7 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
             ],
         )
 
-    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    handler.engine_client = _engine_client(generate=fake_generate, tokenizer=None)
     context = MagicMock()
     context.id.return_value = "artifact-request"
     chunks = [chunk async for chunk in handler.generate(request, context)]
@@ -1222,7 +1250,7 @@ async def test_artifact_terminal_delivery_only_on_success(
                 ],
             )
 
-    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    handler.engine_client = _engine_client(generate=fake_generate, tokenizer=None)
     context = MagicMock()
     context.id.return_value = "artifact-request"
 
@@ -1311,7 +1339,7 @@ async def test_artifact_logprobs_do_not_widen_client_output(
             ],
         )
 
-    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    handler.engine_client = _engine_client(generate=fake_generate, tokenizer=None)
     if route_start is not None:
         build = mod.build_sampling_params
 
@@ -1486,7 +1514,7 @@ async def test_artifact_destination_rejection_is_invalid_argument(
     )
     budget = artifact_capture.CaptureBudget(1 << 20)
     monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
-    handler.engine_client = SimpleNamespace(generate=MagicMock(), tokenizer=None)
+    handler.engine_client = _engine_client(generate=MagicMock(), tokenizer=None)
 
     expected = mod.InvalidArgument if client_error else ArtifactStorageError
     with pytest.raises(expected, match="policy says no"):
@@ -1889,7 +1917,7 @@ def prefill_probe_handler():
     async def generate(*args, **kwargs):
         yield response
 
-    handler.engine_client = SimpleNamespace(
+    handler.engine_client = _engine_client(
         generate=MagicMock(side_effect=generate), vllm_config=object()
     )
     return handler
@@ -3668,3 +3696,93 @@ class TestRLAdminRouteHardening:
         await guard.abort()
         assert len(escalated) == 1
         assert isinstance(escalated[0], EngineDeadError)
+
+
+@pytest.mark.parametrize(
+    ("tokenization_kwargs", "expected_tok_params"),
+    [
+        (None, TokenizeParams(max_total_tokens=1024)),
+        (
+            {"truncate_prompt_tokens": 2},
+            TokenizeParams(max_total_tokens=1024).with_kwargs(truncate_prompt_tokens=2),
+        ),
+    ],
+    ids=["defaults", "tokenization-kwargs"],
+)
+def test_render_tokens_prompt_uses_vllm_raw_prompt_steps(
+    tokenization_kwargs, expected_tok_params
+):
+    engine_client = _engine_client()
+    prompt = {"prompt_token_ids": [1, 2, 3], "multi_modal_data": None}
+
+    rendered = mod.render_tokens_prompt(engine_client, prompt, tokenization_kwargs)
+
+    assert rendered == tokens_input([1, 2, 3])
+    engine_client.renderer.render_cmpl.assert_called_once_with(
+        [prompt], expected_tok_params
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "text",
+        {"prompt": "text"},
+        {"prompt_embeds": torch.zeros(2, 4)},
+        {"type": "token", "prompt_token_ids": [1]},
+        {"prompt_token_ids": [1], "multi_modal_data": {"image": [object()]}},
+        {"prompt_token_ids": [1], "multi_modal_uuids": {"image": ["uuid"]}},
+        {"prompt_token_ids": [1], "mm_processor_kwargs": {"num_crops": 4}},
+        {"prompt_token_ids": (1, 2)},
+        None,
+    ],
+    ids=[
+        "text",
+        "text-dict",
+        "embeds",
+        "rendered",
+        "multimodal",
+        "multimodal-uuids",
+        "mm-processor-kwargs",
+        "tuple-tokens",
+        "none",
+    ],
+)
+def test_render_tokens_prompt_leaves_other_prompts_to_vllm(prompt):
+    engine_client = _engine_client()
+
+    assert mod.render_tokens_prompt(engine_client, prompt) is prompt
+    engine_client.renderer.render_cmpl.assert_not_called()
+
+
+def test_render_tokens_prompt_leaves_encoder_decoder_prompts_to_vllm():
+    engine_client = _engine_client(is_encoder_decoder=True)
+    prompt = {"prompt_token_ids": [1, 2]}
+
+    assert mod.render_tokens_prompt(engine_client, prompt) is prompt
+    engine_client.renderer.render_cmpl.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_generate_tokens_passes_a_rendered_prompt_to_vllm():
+    handler = _make_handler()
+    engine_client = _engine_client()
+    seen_prompts = []
+
+    async def fake_generate(prompt, sampling_params, request_id, **kwargs):
+        seen_prompts.append(prompt)
+        if False:
+            yield None
+
+    engine_client.generate = fake_generate
+    handler.engine_client = engine_client
+
+    async for _ in handler.generate_tokens(
+        PatchedTokensPrompt(prompt_token_ids=[1, 2, 3], multi_modal_data=None),
+        SamplingParams(max_tokens=1),
+        "req-1",
+    ):
+        pass
+
+    assert seen_prompts == [tokens_input([1, 2, 3])]
