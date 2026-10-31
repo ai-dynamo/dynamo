@@ -22,26 +22,37 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
+};
+use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::protocols::compute_block_hash_for_seq;
-use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
-    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
-    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
-    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
-    warn_for_unserved_worker_selection_policies,
+    self, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
+use dynamo_scheduler::host::RouterConfigOverride;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::{
+    OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, WorkerPatchRequest, WorkerRequest,
+};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
@@ -1558,7 +1569,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: dynamo_kv_router::protocols::OverlapScores,
+    inner: dynamo_kv_indexer::host::OverlapScores,
 }
 
 #[pymethods]
@@ -1584,7 +1595,7 @@ enum RadixTreeRequest {
     FindMatches {
         local_block_hashes: Vec<LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<dynamo_kv_router::protocols::OverlapScores>,
+        response_tx: mpsc::SyncSender<dynamo_kv_indexer::host::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -1619,7 +1630,7 @@ impl RadixTree {
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
-            let mut radix_tree = dynamo_kv_router::indexer::RadixTree::new();
+            let mut radix_tree = dynamo_kv_indexer::host::RadixTree::new();
 
             loop {
                 match request_rx.recv() {
@@ -1784,7 +1795,7 @@ impl RadixTree {
 
 impl RadixTree {
     fn handle_request(
-        radix_tree: &mut dynamo_kv_router::indexer::RadixTree,
+        radix_tree: &mut dynamo_kv_indexer::host::RadixTree,
         request: RadixTreeRequest,
     ) {
         match request {
@@ -2035,7 +2046,7 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     plugins: RouterPlugins,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
@@ -2170,9 +2181,9 @@ async fn create_kv_router_from_endpoint(
             factory(
                 config,
                 policy_worker_role,
-                dynamo_kv_router::RoutingPartitionRef::new(
+                dynamo_router_protocol::identity::RoutingPartitionRef::new(
                     &policy_model_name,
-                    dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP,
                 ),
             )
         }))

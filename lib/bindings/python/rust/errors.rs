@@ -20,7 +20,7 @@ use pyo3::types::PyModule;
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
 
-pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
+pub fn queue_rejection_to_pyerr(rejection: dynamo_admission::host::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
     let attributes = Python::with_gil(|py| -> PyResult<()> {
         let value = error.value(py);

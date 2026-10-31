@@ -7,7 +7,9 @@
 //! Every item is re-exported from its owning module; this list is the host contract (hosts
 //! inventory v2, section 3).
 
-pub use crate::conditional_disagg::{ConditionalDisaggConfig, ConditionalDisaggDecisionInput};
+pub use crate::conditional_disagg::{
+    ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,
+};
 pub use crate::error::WorkerSelectionPolicyError;
 pub use crate::lora_filter::LoraWorkerFilter;
 pub use crate::policy::WorkerSelectionPolicy;

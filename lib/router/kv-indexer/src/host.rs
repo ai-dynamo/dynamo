@@ -11,6 +11,7 @@ pub use crate::api::{KvStateProtocolVersion, WorkerKvQueryResponse};
 pub use crate::approximate_lru::ApproximateLruStats;
 pub use crate::backend::{Indexer, IndexerPolicy, RemotePrimary, SideIndexer};
 pub use crate::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+pub use crate::config::ApproximateCachePolicyKind;
 pub use crate::local::LocalKvIndexer;
 pub use crate::lower_tier_indexers::TieredMatchDetails;
 pub use crate::metrics::KvIndexerMetrics;

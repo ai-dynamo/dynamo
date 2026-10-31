@@ -7,8 +7,8 @@ use aisimulate_core::{
     ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfModelConfig, ForwardPassPerfReadiness,
     ScheduledRequestMetrics,
 };
-use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AisCallback;
+use dynamo_scheduler::host::PrefillLoadEstimator;
 use pyo3::prelude::*;
 use std::sync::Arc;
 #[cfg(feature = "ais-forward-pass")]

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry;
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -505,8 +505,8 @@ async fn serve<P: crate::EndpointPicker>(
 mod tests {
     use std::sync::Arc;
 
-    use dynamo_kv_router::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
+    use dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use tokio::sync::Mutex;
 
     use super::*;

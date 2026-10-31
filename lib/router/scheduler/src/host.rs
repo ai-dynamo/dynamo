@@ -13,8 +13,8 @@ pub use crate::overlap::{OverlapAnalysis, OverlapScoresResponse, OverlapSignals}
 pub use crate::overlap_summary::MooncakeOverlapSummary;
 pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{
-    KvHintTransferWorkerMetadata, PotentialLoad, RouterEventSink, RouterRequest, RouterResponse,
-    RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
+    KvHintTransferWorkerMetadata, KvTransferEnforcement, PotentialLoad, RouterEventSink,
+    RouterRequest, RouterResponse, RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
 pub use crate::queue::{ClassQueueStats, RuntimePolicyControl};
 pub use crate::replication::{

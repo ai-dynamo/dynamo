@@ -13,13 +13,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
-    SelectionService, SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
-    warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP;
+use dynamo_scheduler::host::{
+    PromptRequest, RoutingConstraints, SelectAndReserveRequest as CoreSelectAndReserveRequest,
+    SelectionError,
+};
 use kube::Client;
 use tokio_util::sync::CancellationToken;
 
@@ -258,18 +261,13 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+    use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::services::selection::{
-        CatalogReconciler, WorkerRequest, WorkerSelectionPolicyParameters,
-    };
-    use dynamo_kv_router::{
-        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 
     use super::*;
 

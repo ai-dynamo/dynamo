@@ -14,12 +14,9 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
+use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
-    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
-    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
-    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_deprecated_overlap_score_weight_override,
+    KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
@@ -36,6 +33,11 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_scheduler::host::{
+    RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    TrackingHashAlgorithm as RsTrackingHashAlgorithm,
+};
+use dynamo_worker_selection::host::ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind;
 
 use super::ais_callback::create_ais_prefill_load_estimator;
 use super::replay::{
@@ -286,17 +288,17 @@ impl KvRouterConfig {
             )));
         }
         dynamo_custom_policy_builtin::startup_policy_parameters(
-            &dynamo_kv_router::SelectionConfig::from(&self.inner),
+            &dynamo_worker_selection::host::SelectionConfig::from(&self.inner),
             role,
         )
-            .into_iter()
-            .map(|(name, value)| match value.as_f64() {
-                Some(value) => Ok((name, value)),
-                None => Err(PyValueError::new_err(format!(
-                    "policy parameter {name} is not a number: {value}"
-                ))),
-            })
-            .collect()
+        .into_iter()
+        .map(|(name, value)| match value.as_f64() {
+            Some(value) => Ok((name, value)),
+            None => Err(PyValueError::new_err(format!(
+                "policy parameter {name} is not a number: {value}"
+            ))),
+        })
+        .collect()
     }
 
     #[getter]

@@ -18,11 +18,16 @@ path = "src/bin/dynamo-ext-proc.rs"
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 async-trait = { workspace = true }
+dynamo-kv-events = { workspace = true }
 dynamo-kv-router = { workspace = true, features = [
     "metrics",
-    "runtime-protocols",
-    "standalone-selection",
+    "ingest-zmq",
+    "replica-sync-zmq",
+    "peer-recovery",
 ] }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 

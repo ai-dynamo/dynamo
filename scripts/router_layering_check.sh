@@ -64,7 +64,11 @@ ROUTER_TEST_FEATURES="testing bench profile"
 # --host: packages whose resolved graph must not route a table crate to one of
 # HOST_FORBIDDEN. Hosts missing from the workspace are skipped with a notice.
 HOSTS="dynamo-llm dynamo-ext-proc dynamo-mocker"
-HOST_FORBIDDEN="prometheus axum hyper reqwest zmq"
+# prometheus joins this list in step 9c, when exposition moves to dynamo-metrics; today the
+# kv-indexer `export` feature (kv-router `metrics`) reaches it by design.
+HOST_FORBIDDEN="axum hyper reqwest zmq"
+# The ZMQ socket helper is the one router crate allowed to reach zmq.
+HOST_ADAPTER_EXEMPT="dynamo-zmq:zmq"
 
 # Executable behavior the protocol crate must not contain (SPLIT_V2 G9).
 BEHAVIOR_RE='\bdyn |\basync |std::fs|anyhow|tracing|derive_builder|#\[doc\(hidden\)\][[:space:]]*pub'
@@ -288,7 +292,15 @@ if [ "$host_mode" -eq 1 ]; then
         spec="$x@${v#v}"
         tree "$host" "$x" -i "$spec" >"$tmp/inv_tree.txt"
         awk '{ print $1 }' "$tmp/inv_tree.txt" | lines >"$tmp/inv.txt"
-        comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits.txt"
+        comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits_all.txt"
+        # drop the adapter crate that exists to reach this dependency, if one is declared for it
+        exempt=""
+        for e in $HOST_ADAPTER_EXEMPT; do [ "${e#*:}" = "$x" ] && exempt="${e%%:*}"; done
+        if [ -n "$exempt" ]; then
+          grep -vxF -- "$exempt" "$tmp/inv_hits_all.txt" >"$tmp/inv_hits.txt" || true
+        else
+          cp "$tmp/inv_hits_all.txt" "$tmp/inv_hits.txt"
+        fi
         if [ ! -s "$tmp/inv_hits.txt" ]; then
           ok "$host: no router crate reaches $spec"
         else

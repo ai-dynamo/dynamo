@@ -106,7 +106,7 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     video_token_id: Option<u32>,
     #[serde(default)]
-    router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
+    router_hint_source: Option<dynamo_router_protocol::metadata::RouterHintSourceMetadata>,
 }
 
 #[pyclass]
@@ -128,7 +128,7 @@ impl KvStateAttachmentOwner {
             .map(|input| {
                 Ok(llm_rs::kv_router::publisher::KvStateAttachmentDescriptor {
                     cache_owner_id: input.cache_owner_id.parse()?,
-                    worker: dynamo_kv_router::protocols::WorkerWithDpRank {
+                    worker: dynamo_router_protocol::worker::WorkerWithDpRank {
                         worker_id,
                         dp_rank: input.global_dp_rank,
                     },
