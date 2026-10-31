@@ -606,7 +606,7 @@ def _normalize_reasoning_for_template(
         "tokenize": False,
         "return_dict": False,
     }
-    has_tools = kwargs.pop("tools", None) is not None
+    tools = kwargs.pop("tools", None)
 
     def render_template(probe_messages, *, tools):
         probe_messages = [
@@ -617,9 +617,7 @@ def _normalize_reasoning_for_template(
         ]
         return apply_template(probe_messages, tools=tools, **kwargs)
 
-    normalize_reasoning_content(
-        adapted, render_template=render_template, has_tools=has_tools
-    )
+    normalize_reasoning_content(adapted, render_template=render_template, tools=tools)
     for index in segmented:
         adapted[index]["reasoning"] = adapted[index].pop("reasoning_content")
     return adapted

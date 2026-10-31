@@ -146,6 +146,36 @@ async def test_explicit_reasoning_takes_precedence():
     assert value == original
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["calc", "other"])
+async def test_preprocess_uses_actual_tools_for_template_probe(tool_name):
+    template = (
+        "{% for m in messages if m.role == 'assistant' %}"
+        "{% if tools[0].function.name == 'calc' %}{{ m.reasoning_content }}"
+        "{% else %}{% for segment in m.reasoning_content %}{{ segment }}"
+        "{% if not loop.last %}{{ m.tool_calls[loop.index0].function.name }}"
+        "{% endif %}{% endfor %}{% endif %}{% endfor %}"
+    )
+    tokenizer = PreTrainedTokenizerBase(chat_template=template)
+    renderer = CapturingRenderer(tokenizer)
+    value = request(["first", "second"], with_tools=True)
+    value["tools"][0]["function"]["name"] = tool_name
+    original = copy.deepcopy(value)
+
+    await prepost.preprocess_chat_request(
+        value,
+        tokenizer=tokenizer,
+        renderer=renderer,
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+    )
+
+    assert renderer.prompt == (
+        "first\nsecond" if tool_name == "calc" else "firstcalcsecond"
+    )
+    assert value == original
+
+
 def test_reasoning_with_iterator_tool_calls():
     value = request(["first", "second"], with_tools=True)
     calls = value["messages"][1]["tool_calls"]
