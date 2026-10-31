@@ -25,6 +25,8 @@ import (
 	"strings"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -2397,6 +2399,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 		name                         string
 		replicas                     int32
 		existingDeployment           *appsv1.Deployment
+		existingObjects              []client.Object
 		wantComponentReconcileResult ComponentReconcileResult
 	}{
 		{
@@ -2477,6 +2480,70 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:               "crash-looping Pod the Deployment selects",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects: []client.Object{
+				crashLoopTestPod("test-component-a", crashLoopTestDCDName),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   dcdReasonContainerCrashLooping,
+				message:  "pod test-component-a container main restarted 3 times, last exit code 1 (Error)",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
+		{
+			name:               "crash-looping Pod outside the Deployment's selector",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects: []client.Object{
+				crashLoopTestPod("other-component-a", "other-component"),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
+		{
+			name:               "terminating crash-looping Pod during a rollout",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects:    []client.Object{crashLoopTestTerminatingPod()},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2527,9 +2594,11 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				}
 				objects = append(objects, ownedDeployment)
 			}
+			objects = append(objects, tt.existingObjects...)
 
 			// Set up fake client with the DCD and existing Deployment
 			fakeKubeClient := fake.NewClientBuilder().
+				WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
@@ -2560,6 +2629,40 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
+}
+
+// The DCD whose Deployment the crash-loop cases reconcile.
+const (
+	crashLoopTestDCDName   = "test-component"
+	crashLoopTestNamespace = "default"
+)
+
+// crashLoopTestDeployment describes the unready Deployment of the crash-loop
+// cases' DCD.
+func crashLoopTestDeployment() *appsv1.Deployment {
+	return &appsv1.Deployment{
+		Name:       crashLoopTestDCDName,
+		Namespace:  crashLoopTestNamespace,
+		Generation: 1,
+		Spec: appsv1.DeploymentSpec{
+			Replicas: new(int32(1)),
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+		},
+	}
+}
+
+// crashLoopTestTerminatingPod describes a crash-looping Pod of the crash-loop
+// cases' DCD that a rollout is deleting.
+func crashLoopTestTerminatingPod() *corev1.Pod {
+	pod := crashLoopTestPod("test-component-previous-a", crashLoopTestDCDName)
+	pod.DeletionTimestamp = new(metav1.Now())
+	// The fake client refuses a deleted object that no finalizer holds.
+	pod.Finalizers = []string{"test.nvidia.com/hold"}
+	return pod
 }
 
 func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testing.T) {
@@ -2620,6 +2723,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 	}
 
 	fakeKubeClient := fake.NewClientBuilder().
+		WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 		WithScheme(s).
 		WithObjects(dcd, deployment).
 		WithStatusSubresource(dcd, deployment).
