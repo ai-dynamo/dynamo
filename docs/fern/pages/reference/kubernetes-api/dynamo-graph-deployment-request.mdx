@@ -76,6 +76,91 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 DGD Overrides
+
+**Experimental.** When `dgdrV1Beta2.enabled` is enabled in the operator Helm chart,
+`spec.overrides.dgd` accepts one partial `nvidia.com/v1beta1` DGD. The publisher
+applies that same override to every selected Candidate, across backends and topologies.
+The override uses the existing DGD structural merge rules: components and named container
+entries merge by name, and container argument lists replace the generated arguments.
+Other DGD API versions are not accepted here.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: custom-worker-image
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  overrides: # OPTIONAL; omitted means no DGD override.
+    dgd: # OPTIONAL; partial DGD resource.
+      apiVersion: nvidia.com/v1beta1 # REQUIRED when dgd is set.
+      kind: DynamoGraphDeployment # REQUIRED when dgd is set.
+      metadata:
+        labels:
+          workload: customized
+      spec:
+        components:
+          - name: worker
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    image: registry.example/runtime:1.7.0
+```
+
+The Request controller freezes the override into the immutable Run spec. The publisher
+applies it atomically: if a target component is absent or any part cannot be applied,
+the Candidate retains the unchanged generated DGD spec and reports `Valid=False`.
+For example, a `decode` override can fail for an aggregated Candidate whose topology
+contains only `worker`. No subset of a failed override is applied.
+
+After a successful merge, the publisher sends a copy of the DGD through strict
+server-side dry-run creation, including DGD defaults, schema, CEL, and validating
+webhooks. It discards the dry-run response and stores the payload from before the check.
+Unknown fields and incorrect field types remain visible on invalid Candidates;
+`Valid=False` records the failure. Infrastructure failures are retried instead of being
+recorded as an invalid deployment.
+
+`Candidate.spec` contains exactly the DGD spec, including `backendFramework`.
+The publisher copies DGD labels and annotations to Candidate metadata while retaining
+control of the Candidate's name, namespace, owner references, and publisher metadata keys.
+Overrides of that identity or reserved metadata fail atomically. Evaluation parameters,
+metrics, and the final `Valid` condition belong to Candidate status:
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentCandidate
+metadata:
+  name: example-candidate
+spec: # Immutable, opaque DGD spec; preserved even when validation fails.
+  backendFramework: vllm
+  components: []
+status:
+  parameters: # Original resolved simulation inputs.
+    tp: 2
+  metrics: # Original simulation results; not recomputed after overrides.
+    throughput: 12.5
+  conditions:
+    - type: Valid
+      status: "True"
+      reason: ValidationSucceeded
+      message: Strict DGD dry-run succeeded
+      observedGeneration: 1
+      lastTransitionTime: "2026-10-30T12:00:00Z"
+```
+
+`Valid=True` means the DGD passed admission at checking time; it does not indicate a
+running deployment. Overrides may change model, backend, GPU allocation, parallelism,
+images, or arguments. The original simulation parameters and metrics are not a
+performance prediction for the overridden DGD.
+
+Invalid Candidates count toward `recommendation.maxCandidates` and retain their original
+search order in Run references. They do not trigger replacement searches. A successful
+Run requires a successful search and at least one `Valid=True` Candidate; when all
+selected Candidates are invalid, the Run fails and keeps them for diagnosis.
+
 ## Spec reference
 
 Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.

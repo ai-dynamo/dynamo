@@ -27,6 +27,7 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	utiljson "k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/yaml"
 )
 
@@ -73,7 +74,11 @@ func ParseManifest(manifest string) (*Manifest, error) {
 			continue
 		}
 		var obj map[string]any
-		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+		raw, err := yaml.YAMLToJSON([]byte(doc))
+		if err != nil {
+			return nil, fmt.Errorf("manifest document is not a YAML mapping: %w", err)
+		}
+		if err := utiljson.Unmarshal(raw, &obj); err != nil {
 			return nil, fmt.Errorf("manifest document is not a YAML mapping: %w", err)
 		}
 		if len(obj) == 0 {
@@ -107,10 +112,9 @@ func validateManifest(id, manifest string) error {
 	return nil
 }
 
-// decodeManifest extracts the DGD spec and companion resources from a rendered
-// manifest. A DGD in either supported apiVersion crosses the same typed conversion
-// boundary before the snapshot is accepted and before a Candidate is built.
-func decodeManifest(id, source string) (*v1beta1.DynamoGraphDeploymentSpec, string, error) {
+// decodeManifest preserves the complete v1beta1 DGD without pruning or typed decoding.
+// Legacy v1alpha1 output still crosses the existing conversion boundary.
+func decodeManifest(id, source string) (*unstructured.Unstructured, string, error) {
 	manifest, err := ParseManifest(source)
 	if err != nil {
 		return nil, "", fmt.Errorf("manifest of candidate %q: %w", id, err)
@@ -126,14 +130,17 @@ func decodeManifest(id, source string) (*v1beta1.DynamoGraphDeploymentSpec, stri
 		if err := alpha.ConvertTo(&beta); err != nil {
 			return nil, "", fmt.Errorf("manifest of candidate %q: converting %s DynamoGraphDeployment: %w", id, obj.GetAPIVersion(), err)
 		}
-	case v1beta1.GroupVersion.String():
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &beta); err != nil {
-			return nil, "", fmt.Errorf("manifest of candidate %q: decoding %s DynamoGraphDeployment: %w", id, obj.GetAPIVersion(), err)
+		content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&beta)
+		if err != nil {
+			return nil, "", fmt.Errorf("manifest of candidate %q: encoding converted DGD: %w", id, err)
 		}
+		obj = &unstructured.Unstructured{Object: content}
+		obj.SetGroupVersionKind(v1beta1.DynamoGraphDeploymentGVK)
+	case v1beta1.GroupVersion.String():
 	default:
 		return nil, "", fmt.Errorf("manifest of candidate %q: unsupported DynamoGraphDeployment apiVersion %q", id, obj.GetAPIVersion())
 	}
-	return &beta.Spec, strings.Join(manifest.Companions, "\n---\n"), nil
+	return obj, strings.Join(manifest.Companions, "\n---\n"), nil
 }
 
 // SnapshotSchemaVersion is the only wire version this publisher understands.

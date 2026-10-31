@@ -72,6 +72,10 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
+	// Candidate payloads are opaque, so complete spec immutability belongs to admission.
+	candidateHandler := &webhookvalidation.DynamoGraphDeploymentCandidateHandler{}
+	candidateHandler.RegisterWithManager(mgr, gate)
+
 	if isClusterWide {
 		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {

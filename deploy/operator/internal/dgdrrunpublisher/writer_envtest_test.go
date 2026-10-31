@@ -23,6 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,10 +33,13 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -43,6 +48,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+var publisherEnv = operatorenv.New(operatorenv.Options{
+	Admission:       operatorenv.AdmissionWebhooks{Mutating: true, Validating: true},
+	OperatorVersion: "1.6.0",
+	SetupWebhooks: func(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
+		return webhooksetup.Setup(mgr, webhooksetup.Options{
+			Config: opts.OperatorConfig, RuntimeConfig: opts.RuntimeConfig,
+			OperatorVersion: opts.OperatorVersion, OperatorPrincipal: opts.OperatorPrincipal,
+		})
+	},
+})
+
+func TestMain(m *testing.M) {
+	os.Exit(publisherEnv.RunM(m))
+}
 
 // These tests send the publisher's real server-side-apply payloads to an API server that
 // has the v1beta2 CRDs installed. The reconciler tests use a fake writer; this is the
@@ -60,10 +80,7 @@ type writerFixture struct {
 
 func newWriterFixture(t *testing.T) *writerFixture {
 	t.Helper()
-	env := operatorenv.New(operatorenv.Options{
-		// The publisher has no webhooks; the environment only requires the hook to exist.
-		SetupWebhooks: func(ctrl.Manager, operatorenv.WebhookSetupOptions) error { return nil },
-	}).RunT(t)
+	env := publisherEnv.ForTest(t)
 	ctx := context.Background()
 	c := env.Client()
 
@@ -133,16 +150,18 @@ func envtestCandidate() dgdcreconcile.DesiredCandidate {
 		Spec:       validManifest + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: companion\n",
 		Parameters: map[string]any{"tp": 2},
 		Metrics:    map[string]any{"throughput": 12.5},
+		Validity: metav1.Condition{Type: v1beta2.DGDCConditionValid, Status: metav1.ConditionTrue,
+			Reason: "ValidationSucceeded", LastTransitionTime: metav1.Now()},
 	}
 }
 
 func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconcile.DesiredCandidate) *v1beta2.DynamoGraphDeploymentCandidate {
 	t.Helper()
-	spec, _, err := decodeManifest(candidate.ID, candidate.Spec)
+	dgd, _, err := decodeManifest(candidate.ID, candidate.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parameters, err := json.Marshal(candidate.Parameters)
+	spec, err := json.Marshal(dgd.Object["spec"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,10 +169,7 @@ func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconc
 		Namespace: namespace,
 		Name:      name,
 		Labels:    map[string]string{"owner": "foreign"},
-		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
-			DynamoGraphDeploymentSpec: *spec,
-			Parameters:                runtime.RawExtension{Raw: parameters},
-		},
+		Spec:      runtime.RawExtension{Raw: spec},
 	}
 }
 
@@ -161,9 +177,13 @@ type writeInterceptClient struct {
 	client.Client
 	beforeCreate func()
 	beforeApply  func()
+	createError  error
 }
 
 func (c *writeInterceptClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	if c.createError != nil {
+		return c.createError
+	}
 	if c.beforeCreate != nil {
 		hook := c.beforeCreate
 		c.beforeCreate = nil
@@ -289,6 +309,104 @@ func hasApplyManager(fields []metav1.ManagedFieldsEntry, subresource string) boo
 	return false
 }
 
+func TestEnvtestCandidatePreparation(t *testing.T) {
+	f := newWriterFixture(t)
+	const overridePrefix = `{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment",`
+	tests := []struct {
+		name       string
+		manifest   string
+		override   string
+		reason     string
+		wantSpec   string
+		wantLabel  string
+		absentSpec string
+	}{
+		{name: "valid DGD keeps its pre-defaulting spec", manifest: validManifest, reason: "ValidationSucceeded"},
+		{name: "optional DGD backend is not synthesized", manifest: strings.Replace(validManifest, "  backendFramework: vllm\n", "", 1), reason: "ValidationSucceeded", absentSpec: `"backendFramework"`},
+		{name: "unknown field is retained", manifest: validManifest + "  unknownField: 9007199254740993\n", reason: "ValidationFailed", wantSpec: `"unknownField":9007199254740993`},
+		{name: "wrong type is retained", manifest: "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec:\n  components: not-a-list\n", reason: "ValidationFailed", wantSpec: `"components":"not-a-list"`},
+		{name: "DGD webhook rejects an ambiguous runtime image", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), reason: "ValidationFailed", wantSpec: `"image":"registry.example/runtime:custom"`},
+		{name: "shared override applies without recomputing metrics", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","replicas":3}]}}`, reason: "ValidationSucceeded", wantSpec: `"replicas":3`},
+		{name: "missing target applies nothing", manifest: validManifest, override: overridePrefix + `"spec":{"backendFramework":"sglang","components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantSpec: `"backendFramework":"vllm"`},
+		{name: "metadata is copied to Candidate", manifest: validManifest, override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationSucceeded", wantLabel: "kept"},
+		{name: "identity override fails atomically", manifest: validManifest, override: overridePrefix + `"metadata":{"namespace":"other"},"spec":{"backendFramework":"sglang"}}`, reason: "OverrideFailed", wantSpec: `"backendFramework":"vllm"`},
+	}
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Prepare a generated DGD through the production override and admission paths")
+			run := f.run.DeepCopy()
+			if test.override != "" {
+				run.Spec.Overrides = &v1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(test.override)}}
+			}
+			candidate := envtestCandidate()
+			candidate.ID = fmt.Sprintf("case-%d", i)
+			candidate.Spec = test.manifest
+			wire, err := json.Marshal(Snapshot{SchemaVersion: SnapshotSchemaVersion,
+				Run: SnapshotRun{Phase: PhaseRunning},
+				Candidates: []SnapshotCandidate{{ID: candidate.ID, Outcome: OutcomeMaterialized,
+					Manifest: candidate.Spec, Parameters: candidate.Parameters, Metrics: candidate.Metrics}},
+			})
+			require.NoError(t, err)
+			parsed, err := ParseSnapshot(wire)
+			require.NoError(t, err, "readable DGD content errors must not fail the snapshot protocol")
+			candidate = Desire(run.Name, string(run.UID), parsed).Candidates[0]
+			prepared, err := f.writer.PrepareCandidate(f.ctx, run, candidate)
+			require.NoError(t, err)
+			require.Equal(t, test.reason, prepared.Validity.Reason)
+
+			t.Log("Persist the pre-dry-run payload and its original evaluation facts")
+			name := f.name(candidate.ID)
+			stored, err := f.writer.CreateCandidate(f.ctx, run, name, prepared)
+			require.NoError(t, err)
+			require.NoError(t, f.writer.PopulateStatus(f.ctx, name, stored.ResourceVersion, prepared))
+			got := f.candidate(name)
+			require.Contains(t, string(got.Status.Parameters.Raw), `"tp":2`)
+			require.Contains(t, string(got.Status.Metrics.Raw), `"throughput":12.5`)
+			require.Equal(t, test.reason, meta.FindStatusCondition(got.Status.Conditions, v1beta2.DGDCConditionValid).Reason)
+			if test.wantSpec != "" {
+				require.Contains(t, string(got.Spec.Raw), test.wantSpec)
+			}
+			if test.absentSpec != "" {
+				require.NotContains(t, string(got.Spec.Raw), test.absentSpec)
+			}
+			if test.wantLabel != "" {
+				require.Equal(t, test.wantLabel, got.Labels["custom"])
+				require.Equal(t, test.wantLabel, got.Annotations["custom"])
+			}
+			if i == 0 {
+				var spec map[string]any
+				require.NoError(t, json.Unmarshal(got.Spec.Raw, &spec))
+				for _, component := range spec["components"].([]any) {
+					require.NotContains(t, component.(map[string]any), "replicas", "dry-run defaults leaked into the stored payload")
+				}
+			}
+
+			t.Log("Verify dry-run did not create a deployment")
+			deployments := &unstructured.UnstructuredList{}
+			deployments.SetAPIVersion("nvidia.com/v1beta1")
+			deployments.SetKind("DynamoGraphDeploymentList")
+			require.NoError(t, f.client.List(f.ctx, deployments, client.InNamespace(run.Namespace)))
+			require.Empty(t, deployments.Items)
+
+			t.Log("Reuse the persisted validity verdict after a publisher restart")
+			restartedWriter := *f.writer
+			restartedWriter.Client = &writeInterceptClient{Client: f.client, createError: errors.New("dry-run must not run again")}
+			restarted := &Reconciler{Client: f.client, Writer: &restartedWriter, Namespace: run.Namespace}
+			desired := DesiredState{Candidates: []dgdcreconcile.DesiredCandidate{candidate}, Names: map[string]string{candidate.ID: name}}
+			require.NoError(t, restarted.prepareCandidates(f.ctx, run, &desired))
+			require.Equal(t, got.Status.Conditions[0], desired.Candidates[0].Validity)
+		})
+	}
+
+	t.Run("API outage remains retryable", func(t *testing.T) {
+		t.Log("Fail the API create operation before a definitive content verdict exists")
+		writer := *f.writer
+		writer.Client = &writeInterceptClient{Client: f.client, createError: apierrors.NewServiceUnavailable("temporary outage")}
+		_, err := writer.PrepareCandidate(f.ctx, f.run, envtestCandidate())
+		require.True(t, apierrors.IsServiceUnavailable(err), "unexpected error: %v", err)
+	})
+}
+
 func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	f := newWriterFixture(t)
 	name := f.name("a")
@@ -311,11 +429,14 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	if !strings.Contains(got.Annotations[AnnotationAdditionalResources], "kind: ConfigMap") {
 		t.Errorf("companion annotation = %q", got.Annotations[AnnotationAdditionalResources])
 	}
-	var parameters map[string]any
-	if err := json.Unmarshal(got.Spec.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
-		t.Errorf("parameters = %s, err = %v", got.Spec.Parameters.Raw, err)
+	var spec map[string]any
+	if err := json.Unmarshal(got.Spec.Raw, &spec); err != nil {
+		t.Fatal(err)
 	}
-	if got.Status.Metrics != nil {
+	if _, found := spec["parameters"]; found {
+		t.Fatal("simulation parameters must not be injected into the DGD spec")
+	}
+	if got.Status.Metrics != nil || got.Status.Parameters != nil {
 		t.Errorf("candidate apply wrote through the status subresource: %+v", got.Status)
 	}
 	if !hasApplyManager(got.ManagedFields, "") {
@@ -446,6 +567,16 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	var metrics map[string]any
 	if err := json.Unmarshal(got.Status.Metrics.Raw, &metrics); err != nil || metrics["throughput"] != 12.5 {
 		t.Errorf("metrics = %s, err = %v", got.Status.Metrics.Raw, err)
+	}
+	var parameters map[string]any
+	if got.Status.Parameters == nil {
+		t.Fatal("status.parameters is not set after PopulateStatus")
+	}
+	if err := json.Unmarshal(got.Status.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
+		t.Errorf("parameters = %s, err = %v", got.Status.Parameters.Raw, err)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta2.DGDCConditionValid) {
+		t.Fatalf("validity was not published: %+v", got.Status.Conditions)
 	}
 	if !hasApplyManager(got.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, got.ManagedFields)

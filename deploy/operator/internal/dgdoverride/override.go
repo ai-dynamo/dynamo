@@ -94,6 +94,9 @@ func DeprecatedDGDOverrideTargetReplacementHint(name string) (string, bool) {
 type Warning struct {
 	Path    string
 	Message string
+
+	// Discarded reports sanitization that strict callers must reject atomically.
+	Discarded bool
 }
 
 func (w Warning) String() string {
@@ -101,6 +104,35 @@ func (w Warning) String() string {
 		return w.Message
 	}
 	return w.Path + ": " + w.Message
+}
+
+// TargetNotFoundError identifies an override entry absent from the generated topology.
+type TargetNotFoundError struct {
+	Target string
+}
+
+func (e *TargetNotFoundError) Error() string {
+	return fmt.Sprintf("override target %q is not present in the generated blueprint", e.Target)
+}
+
+// ApplyStrict applies a v1beta1 override atomically and rejects any discarded fields.
+// Both inputs must be non-nil. Neither input is mutated, including when application fails.
+func ApplyStrict(blueprint, override *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	if override.GroupVersionKind() != betaGVK {
+		return nil, fmt.Errorf("override must be %s %s", betaGVK.GroupVersion(), betaGVK.Kind)
+	}
+
+	// The compatibility merge may translate legacy names, but strict callers never lose fields.
+	merged, warnings, err := Apply(blueprint, override)
+	if err != nil {
+		return nil, err
+	}
+	for _, warning := range warnings {
+		if warning.Discarded {
+			return nil, fmt.Errorf("override %s: %s", warning.Path, warning.Message)
+		}
+	}
+	return merged, nil
 }
 
 // Apply overlays a partial DGD override onto a complete DGD blueprint.
@@ -330,8 +362,9 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 			}
 			if len(reserved) > 0 {
 				warnings = append(warnings, Warning{
-					Path:    "metadata.annotations",
-					Message: "ignored reserved operator keys: " + strings.Join(reserved, ", "),
+					Discarded: true,
+					Path:      "metadata.annotations",
+					Message:   "ignored reserved operator keys: " + strings.Join(reserved, ", "),
 				})
 			}
 		}
@@ -354,8 +387,9 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 		return warnings, nil
 	}
 	warnings = append([]Warning{{
-		Path:    "metadata",
-		Message: "ignored identity/runtime fields: " + strings.Join(ignored, ", "),
+		Discarded: true,
+		Path:      "metadata",
+		Message:   "ignored identity/runtime fields: " + strings.Join(ignored, ", "),
 	}}, warnings...)
 	return warnings, nil
 }
@@ -642,7 +676,7 @@ func resolveDGDOverrideTarget(
 
 	deprecated, found := deprecatedDGDOverrideTargets[name]
 	if !found {
-		return "", false, fmt.Errorf("override target %q is not present in the generated blueprint", name)
+		return "", false, &TargetNotFoundError{Target: name}
 	}
 	if deprecated.backendFramework != backendFramework {
 		return "", false, fmt.Errorf(
