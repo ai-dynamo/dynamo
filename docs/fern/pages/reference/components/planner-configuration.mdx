@@ -185,7 +185,7 @@ build, or mount a local copy before starting Planner. Use the
 generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
 AISimulate Python and Rust releases that support execution profiles through the
 common forward-pass query API. This integration pins Python
-`0.13.0.dev202610280000000086` and Rust `0.13.0-dev.202610280000000086`,
+`0.13.0.dev202610290000000087` and Rust `0.13.0-dev.202610290000000087`,
 which include that support. Use version-2 execution profiles; version 1 retains
 its legacy direct-phase queries and must be explicitly migrated and repinned.
 

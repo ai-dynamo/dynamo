@@ -568,22 +568,21 @@ func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
 	}
 
 	static := workload.Static
-	static.ISL = oneOfPtr(c, int32(1), int32(4000), int32(131072))
-	static.OSL = oneOfPtr(c, int32(1), int32(1000), int32(16384))
-	static.NumRequestRatio = oneOfPtr(c, 0.5, 1.0, 1000.0)
-	static.RequestRate = nil
-	static.Concurrency = nil
-	static.KVLoadRatio = nil
+	static.InputTokens = oneOfPtr(c, int32(1), int32(4000), int32(131072))
+	static.OutputTokens = oneOfPtr(c, int32(1), int32(1000), int32(16384))
+	static.Load = nil
 	switch c.Intn(4) {
 	case 1:
-		static.RequestRate = oneOfPtr(c, 0.1, 1.0, 100.0)
+		static.Load = &v1beta2.StaticLoadSpec{RequestsPerSecond: oneOfPtr(c, 0.1, 1.0, 100.0)}
 	case 2:
-		static.Concurrency = oneOfPtr(c, int32(1), int32(32), int32(1024))
+		static.Load = &v1beta2.StaticLoadSpec{Concurrency: oneOfPtr(c, int32(1), int32(32), int32(1024))}
 	case 3:
 		if c.Bool() {
-			static.KVLoadRatio = v1beta2.KVLoadRatio{0.5}
+			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: new(0.5)}}
 		} else {
-			static.KVLoadRatio = v1beta2.KVLoadRatio{0.0, 1.0}
+			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{
+				Range: &v1beta2.KVCapacityFractionRange{Min: 0.1, Max: 1.0},
+			}}
 		}
 	}
 }
@@ -653,7 +652,7 @@ func isGoodputMetric(metric v1beta2.ObjectiveMetric) bool {
 	return metric == "Goodput" || metric == "GoodputPerGPU"
 }
 
-type fuzzAISimulateParameters struct {
+type fuzzAISimulateInputOverrides struct {
 	Search   *fuzzAISimulateSearch   `json:"search,omitempty"`
 	Workload *fuzzAISimulateWorkload `json:"workload,omitempty"`
 }
@@ -671,20 +670,20 @@ type fuzzAISimulateWorkload struct {
 func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
 
-	// Exercise both absent and typed object parameter payloads.
+	// Exercise both absent and typed object input override payloads.
 	if c.Bool() {
-		s.Parameters = nil
+		s.InputOverrides = nil
 		return
 	}
 
 	// Marshal a typed test input instead of generating arbitrary RawExtension bytes.
-	parameters := &fuzzAISimulateParameters{}
-	c.Fill(parameters)
-	raw, err := json.Marshal(parameters)
+	overrides := &fuzzAISimulateInputOverrides{}
+	c.Fill(overrides)
+	raw, err := json.Marshal(overrides)
 	if err != nil {
 		panic(err)
 	}
-	s.Parameters = &runtime.RawExtension{Raw: raw}
+	s.InputOverrides = &runtime.RawExtension{Raw: raw}
 }
 
 func marshalFuzzEnvelope(value any) *apiextensionsv1.JSON {

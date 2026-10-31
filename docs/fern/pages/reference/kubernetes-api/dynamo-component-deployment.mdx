@@ -174,7 +174,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    In multinode sidecar mode, the leader must declare `spec.initContainers[name=runtime]`. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each declared runtime init container receives Dynamo defaults. Main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Multinode sidecars currently require `backendFramework: sglang` or `backendFramework: vllm`. Multinode support for TensorRT-LLM is planned.
+    In multinode sidecar mode, the leader must declare `spec.initContainers[name=runtime]`. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each declared runtime init container receives Dynamo defaults. Main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Set `backendFramework` explicitly, as the examples do; the operator does not infer a backend from a native engine command.
 
     LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
 
@@ -294,7 +294,7 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode sidecars currently support SGLang and vLLM. Multinode support for TensorRT-LLM is planned. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+This mode supports `worker`, `prefill`, and `decode` components. Multinode sidecars support SGLang, vLLM, and TensorRT-LLM. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
 
@@ -312,17 +312,40 @@ podTemplate:
         restartPolicy: Always
 ```
 
-SGLang and vLLM multinode sidecar deployments require an explicit `backendFramework` of `sglang` or `vllm` and complete `leader` and `worker` `roles[].podTemplate` definitions instead of a shared `podTemplate`. The leader must declare a runtime init container. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each role's template supplies the engine command and topology arguments. The operator does not inject executor or coordination flags in sidecar mode.
+Multinode sidecar deployments require complete `leader` and `worker` `roles[].podTemplate` definitions instead of a shared `podTemplate`. Set `backendFramework` explicitly, as the examples do; without it the operator applies no backend defaults and no provider startup ordering. The leader must declare a runtime init container. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each role's template supplies the engine command and topology arguments. The operator does not inject executor or coordination flags in sidecar mode, and it does not apply the TensorRT-LLM SSH key mount, `mpirun` wrapper, or worker probe rewrite.
 
 For DGDs created with operator version 1.6.0 or later, `main` and each declared `runtime` receive `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator preserves the authored engine configuration in `main` and merges Dynamo defaults into each declared runtime init container. In sidecar mode, main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Deployments that run the engine and Dynamo together in `main` retain shared-template support and generated multinode arguments.
 
-Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md) and the [vLLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md) for topology requirements and examples.
+Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md), the [vLLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md), and the [TensorRT-LLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md) for topology requirements and examples.
 
-Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples, including `multinode_tp.yaml` and `multinode_dp.yaml`.
+Set the engine launch configuration and sidecar command for your backend. See the [vLLM](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/trtllm/deploy) sidecar manifests for complete examples, including `multinode_tp.yaml` and `multinode_dp.yaml`.
 
 ## Runtime Version Compatibility
 
-DGD admission requires `runtimeVersionOverride` for non-LPX components when any runtime image tag lacks a parseable semantic version. Controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The `runtimeVersionOverride` image selection rules apply to both the shared `podTemplate` and `roles[].podTemplate`. The override must match the Dynamo version in every affected runtime container.
+DGD admission requires `runtimeVersionOverride` for components with `type: frontend`, `worker`, `prefill`, `decode`, `planner`, or `epp` when any runtime image tag lacks a parseable semantic version. Controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The `runtimeVersionOverride` image selection rules apply to both the shared `podTemplate` and `roles[].podTemplate`. The override must match the Dynamo version in every affected runtime container.
+
+Components without a `type` do not require `runtimeVersionOverride`. Custom helper types are also exempt in `v1alpha1` only; `v1beta1` does not allow custom types. LPX retains its exemption. No Dynamo runtime version is defaulted for these helpers; an image is still required, and an explicitly supplied override must satisfy its format constraints. For example, this DGD helper is valid without an override:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: helper-example
+spec:
+  components:
+    - name: helper
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: busybox:latest
+              command: ["sh", "-c"]
+              args: ["while true; do sleep 30; done"]
+```
+
+Setting a previously unset component type to `frontend`, `worker`, `prefill`, `decode`, `planner`, or `epp` revalidates its runtime version even when the image and override are unchanged. Once set, the component type is immutable in both `v1alpha1` and `v1beta1`. With the image above, adding `type: worker` without a valid `runtimeVersionOverride` is rejected.
+
+Standalone DCDs may omit `runtimeVersionOverride` even when the runtime image tag is not parseable, except for `type: epp`, which requires a resolvable version to validate its EPP configuration contract.
 
 When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
 

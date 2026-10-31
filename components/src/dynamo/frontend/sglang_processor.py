@@ -27,6 +27,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
+from .responses_history import responses_tools_request
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -603,6 +604,19 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
+        if request.get("responses_native_tools") and not (
+            self.exclude_tools_when_tool_choice_none
+            and request.get("tool_choice") == "none"
+        ):
+            # Inline and pool postprocessing must use the same tool identities
+            # as the prompt, including when parsers are recreated in the parent.
+            request = responses_tools_request(
+                request,
+                self.tokenizer.get_chat_template(
+                    chat_template=request.get("chat_template"),
+                    tools=request.get("tools"),
+                ),
+            )
         if self.debug_perf:
             from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
                 enter_generator,

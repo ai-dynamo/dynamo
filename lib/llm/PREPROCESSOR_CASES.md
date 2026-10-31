@@ -53,6 +53,17 @@ the request. The exact arg name and value varies per family:
   `thinking_mode: "chat"` (matches V4 formatter's `resolve_thinking_mode`
   convention; keeps parser and prompt synchronized)
 - `gemma4` — `enable_thinking: false`
+- `minimax_m3` — `thinking_mode: "disabled"`, but only when the rendered
+  generation prompt ends with `</mm:think>` or a grammar controls the
+  output (`response_format`, top-level `guided_*`, forced `tool_choice`).
+  A chat template that does not render `thinking_mode` leaves a disabled
+  request's prompt open, so the model may still write
+  `<mm:think>...</mm:think>` and the parser keeps running. A request with
+  no rendered text (token input) or no generation prompt
+  (`add_generation_prompt: false`, `continue_final_message`) keeps the
+  request's decision. Known gap: with a grammar the parser stays off, so a
+  worker that delays the grammar until reasoning ends could still put think
+  markup in `content` under such a template.
 
 When the gate fires, no reasoning parser runs; the model output is
 treated as plain content.
@@ -154,7 +165,7 @@ if you know the answer, fill it in.
 | `mistral` (tool + reasoning) | **YES** for reasoning | disabled unless `reasoning_effort` is present and not `none` | — | — | `[TOOL_CALLS]` tool text; `[THINK]...[/THINK]` reasoning. |
 | `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
 | `minimax_m2` (tool + reasoning) | NO | `thinking=false` / `enable_thinking=false` | — | — | Force reasoning with `<think>...</think>`; dynamically distinguishes bare guided JSON from reasoning followed by an XML tool payload. |
-| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
+| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` when the rendered prompt ends with `</mm:think>` or a grammar controls the output (see PRE.2) | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
 | `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | Deprecated legacy MiniMax pass-through; does not populate `reasoning_content`. Use `minimax_m2` for MiniMax M2 tool-calling deployments. |
 | `glm47` (tool) | NO | — | — | — | Plain XML. |
 | `jamba` (tool) | NO | — | — | — | `<tool_calls>` plain text wrapper. |

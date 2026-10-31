@@ -377,7 +377,7 @@ def read_efa_device_counters(pod) -> dict:
         "if not u: print('{}'); raise SystemExit\n"
         "dev=open('/sys/class/infiniband_verbs/%s/ibdev'%u[0]).read().strip()\n"
         "ip=os.environ.get('EFA_EXPORTER_HOST','')\n"
-        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics'%ip,timeout=10).read().decode()\n"
+        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics?collect[]=amazonefa'%ip,timeout=10).read().decode()\n"
         "lines=[l for l in t.splitlines() if l.startswith('node_amazonefa_')]\n"
         "print(json.dumps({'_ibdev':dev,'_lines':lines}))"
     )

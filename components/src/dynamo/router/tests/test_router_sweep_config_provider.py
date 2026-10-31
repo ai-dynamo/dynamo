@@ -177,6 +177,14 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
+    with pytest.raises(ValueError, match="less than or equal to 31536000"):
+        adapter.compile_prediction(
+            {
+                "policy": "kv_router",
+                "conversation_affinity": {"ttl_seconds": 31_536_001},
+            },
+            prediction_context,
+        )
     with pytest.raises(ValueError, match="round_robin rejects"):
         adapter.compile_recommendation(
             {

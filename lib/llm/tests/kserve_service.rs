@@ -105,6 +105,8 @@ pub mod kserve_test {
         ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
             let (request, context) = request.transfer(());
             let ctx = context.context();
+            assert!(uuid::Uuid::parse_str(ctx.id()).is_ok());
+            assert_ne!(Some(ctx.id()), request.inner.user.as_deref());
 
             // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
             let generator = request.response_generator(ctx.id().to_string());
@@ -226,6 +228,8 @@ pub mod kserve_test {
             // name "repeat", if so, send the same response as many time as the value of the tensor
             let (request, context) = request.transfer(());
             let ctx = context.context();
+            assert!(uuid::Uuid::parse_str(ctx.id()).is_ok());
+            assert_ne!(Some(ctx.id()), request.id.as_deref());
 
             let repeat_count = request
                 .tensors
@@ -504,16 +508,31 @@ pub mod kserve_test {
         let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
 
         let model_name = "split";
+        let client_id = uuid::Uuid::new_v4().to_string();
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: vec![text_input.clone()],
             ..Default::default()
         });
 
-        let response = client.model_infer(request).await.unwrap();
-        validate_infer_response(response, model_name);
+        let request = request.into_inner();
+        let mut second_client = client.clone();
+        let (first, second) = timeout(
+            Duration::from_secs(5),
+            futures::future::join(
+                client.model_infer(request.clone()),
+                second_client.model_infer(request),
+            ),
+        )
+        .await
+        .expect("requests sharing a client id must not hang");
+        for response in [first, second] {
+            let response = response.unwrap();
+            assert_eq!(response.get_ref().id, client_id);
+            validate_infer_response(response, model_name);
+        }
 
         // Input data in raw_input_content
         let mut text_input = text_input.clone();
@@ -525,12 +544,13 @@ pub mod kserve_test {
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: vec![text_input],
             raw_input_contents: vec![serialized_input],
             ..Default::default()
         });
         let response = client.model_infer(request).await.unwrap();
+        assert_eq!(response.get_ref().id, client_id);
         validate_infer_response(response, model_name);
     }
 
@@ -1249,6 +1269,7 @@ pub mod kserve_test {
         validate_tensor_response(
             response,
             model_name,
+            "1234",
             inputs,
             std::collections::HashMap::new(),
         );
@@ -1592,22 +1613,38 @@ pub mod kserve_test {
         }
 
         let model_name = "tensor";
+        let client_id = uuid::Uuid::new_v4().to_string();
         let inputs = vec![text_input.clone()];
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: inputs.clone(),
             ..Default::default()
         });
 
-        let response = client.model_infer(request).await.unwrap();
-        validate_tensor_response(
-            response,
-            model_name,
-            inputs,
-            std::collections::HashMap::new(),
-        );
+        let request = request.into_inner();
+        let mut second_client = client.clone();
+        let (first, second) = timeout(
+            Duration::from_secs(5),
+            futures::future::join(
+                client.model_infer(request.clone()),
+                second_client.model_infer(request),
+            ),
+        )
+        .await
+        .expect("requests sharing a client id must not hang");
+        for response in [first, second] {
+            let response = response.unwrap();
+            assert_eq!(response.get_ref().id, client_id);
+            validate_tensor_response(
+                response,
+                model_name,
+                &client_id,
+                inputs.clone(),
+                std::collections::HashMap::new(),
+            );
+        }
 
         // streaming response in model_infer(), expect failure
         let repeat = inference::model_infer_request::InferInputTensor {
@@ -1702,6 +1739,7 @@ pub mod kserve_test {
                     validate_tensor_response(
                         Response::new(response.clone()),
                         model_name,
+                        "1234",
                         inputs.clone(),
                         std::collections::HashMap::from([
                             ("text_input".into(), serialized_text_input.clone()),
@@ -1718,6 +1756,7 @@ pub mod kserve_test {
     fn validate_tensor_response(
         response: Response<ModelInferResponse>,
         model_name: &str,
+        request_id: &str,
         inputs: Vec<inference::model_infer_request::InferInputTensor>,
         expected_raw_outputs: std::collections::HashMap<String, Vec<u8>>,
     ) {
@@ -1733,7 +1772,7 @@ pub mod kserve_test {
         );
         assert_eq!(
             response.get_ref().id,
-            "1234",
+            request_id,
             "Expected response of the same request ID"
         );
         assert_eq!(

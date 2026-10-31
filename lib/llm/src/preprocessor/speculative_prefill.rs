@@ -611,6 +611,8 @@ mod tests {
         });
 
         NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "mock-llama".to_string(),
                 messages,
@@ -645,6 +647,7 @@ mod tests {
         };
 
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "chatcmpl-test".to_string(),
                 object: "chat.completion.chunk".to_string(),

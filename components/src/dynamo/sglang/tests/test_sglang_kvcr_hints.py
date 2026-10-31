@@ -15,7 +15,11 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelType, WorkerType
-from dynamo.sglang.kv_hints import kv_hint_kwargs, kvcr_hint_endpoints
+from dynamo.sglang.kv_hints import (
+    kv_hint_kwargs,
+    kvcr_hint_endpoints,
+    publish_kvcr_hint_capabilities,
+)
 
 # Marker-only collection may provide only partial SGLang stubs.
 _register_import_error = None
@@ -57,6 +61,76 @@ def test_router_hint_forwarding_is_private_and_lossless():
     assert kv_hint_kwargs(_OldEngine(), {"kv_hint": hint}) == {}
     assert kv_hint_kwargs(_HintEngine(), {"extra_args": {"kv_hint": hint}}) == {}
     assert kv_hint_kwargs(_HintEngine(), {"nvext": {"kv_hint": hint}}) == {}
+
+
+def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine():
+    worker_type = WorkerType.Prefill
+    args = SimpleNamespace(
+        enable_hierarchical_cache=False,
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="kvcr",
+        nnodes=1,
+        tp_size=1,
+        dp_size=1,
+        pp_size=1,
+    )
+    source = {
+        "dp_rank": 0,
+        "capabilities": ["router_hint", "kvcr_inventory"],
+        "source_control_endpoint": "tcp://worker:24100",
+        "inventory_lifetime": "process_local",
+        "reset_clears_owner_inventory": True,
+        "owner_incarnation_scoped": True,
+    }
+    engine = _HintEngine()
+    engine._scheduler_init_result = SimpleNamespace(
+        scheduler_infos=[{"kv_hint_sources": [source]}]
+    )
+    values = {}
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda k, v: values.update({k: json.loads(v)})
+    )
+    publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
+    assert values == {
+        KV_HINT_TRANSFER_CAPABILITY_KEY: True,
+        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: str(worker_type),
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: {
+            "0": "tcp://worker:24100"
+        },
+    }
+    values.clear()
+    source["capabilities"] = ["router_hint"]
+    publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
+    assert values == {}
+    source["capabilities"].append("kvcr_inventory")
+    args.tp_size = 2
+    publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
+    assert values == {}
+    args.tp_size = 1
+    args.dp_size = 2
+    publish_kvcr_hint_capabilities(runtime, engine, args, worker_type)
+    assert values == {}
+
+
+def test_linker_hint_endpoint_rejects_loopback_with_kvcr_config_guidance():
+    infos = [
+        {
+            "kv_hint_sources": [
+                {
+                    "dp_rank": 0,
+                    "capabilities": ["router_hint", "kvcr_inventory"],
+                    "source_control_endpoint": "tcp://127.0.1.1:24100",
+                    "inventory_lifetime": "process_local",
+                    "reset_clears_owner_inventory": True,
+                    "owner_incarnation_scoped": True,
+                }
+            ]
+        }
+    ]
+    with pytest.raises(
+        ValueError, match="advertise_host.*--hicache-storage-backend-extra-config"
+    ):
+        kvcr_hint_endpoints(infos, (0, 1), require_inventory=True)
 
 
 @pytest.mark.parametrize(

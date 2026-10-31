@@ -107,6 +107,18 @@ class frontend_service:
     INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
     # Total known input tokens of admitted requests.
     INPUT_TOKENS_TOTAL = "input_tokens_total"
+    # Questions per admitted System One request.
+    SYSTEMONE_QUESTIONS = "systemone_questions"
+    # Expanded prompt tokens per admitted System One request.
+    SYSTEMONE_INPUT_TOKENS = "systemone_input_tokens"
+    # Requested candidate token IDs per admitted System One request.
+    SYSTEMONE_CANDIDATE_IDS = "systemone_candidate_ids"
+    # Cached prompt tokens reported by a completed System One branch.
+    SYSTEMONE_CACHED_TOKENS = "systemone_cached_tokens"
+    # Total question branches admitted for System One dispatch.
+    SYSTEMONE_ADMITTED_BRANCHES_TOTAL = "systemone_admitted_branches_total"
+    # Duration of a System One execution phase in seconds.
+    SYSTEMONE_PHASE_SECONDS = "systemone_phase_seconds"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)

@@ -431,7 +431,8 @@ def test_engine_request_limit_flag_outranks_both_environment_names(admission_env
     assert _CANONICAL_LIMIT_ENV in help_text
     assert _LEGACY_LIMIT_ENV in help_text
     assert "per DP rank" in help_text
-    assert "max_num_seqs" in help_text
+    assert "default: unlimited" in help_text
+    assert "max_num_seqs" not in help_text
 
 
 @pytest.mark.parametrize(
@@ -461,3 +462,10 @@ def test_engine_request_limit_rejects_non_positive_values(admission_env, value):
         _parse_runtime_args(["--engine-request-limit", value])
 
     assert _admission_environment() == dict.fromkeys(_ADMISSION_ENV)
+
+
+def test_invalid_allow_remote_urls_fails_at_startup(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "disabled")
+
+    with pytest.raises(ValueError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        _parse_runtime_args([])

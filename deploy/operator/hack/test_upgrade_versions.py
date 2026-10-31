@@ -130,8 +130,9 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         inventory = fixtures.require_complete_matrix("v1.6.0")
         self.assertEqual(len(inventory["missingScenarios"]), 14)
         for source in (None, "v1.7.0"):
-            with self.subTest(source=source), self.assertRaisesRegex(
-                ValueError, "Incomplete release matrix"
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(ValueError, "Incomplete release matrix"),
             ):
                 fixtures.require_complete_matrix(source)
         path = next((self.tree / "latest").rglob("input.yaml"))
@@ -155,6 +156,8 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             ),
         ):
             fixtures.regenerate(release_tag="v1.6.0")
+        fixtures.check()
+        self.install_compatibility_fixture()
         fixtures.check()
         lock = json.loads((self.tree / "history.lock.json").read_text())
         self.assertEqual(lock["captureInventory"], inventory)
@@ -197,14 +200,23 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         # Model the capture boundary only; production admission/reconciliation is tested by clustertest.
         version = fixtures.app_version((self.root / fixtures.CHART).read_text())
         root = Path(env["DYNAMO_UPGRADE_CAPTURE_DIR"])
-        for role in ("history", "latest"):
+        for role in ("history", "compatibility", "latest"):
             for source in fixtures.fixture_inputs(role):
                 relative = source.relative_to(self.tree)
                 objects = list(yaml.safe_load_all(source.read_text()))
-                if role == "history":
+                if role != "latest":
                     for obj in objects:
                         obj["metadata"]["uid"] = "recaptured-uid"
                         if obj["kind"] == "DynamoGraphDeployment":
+                            if role == "compatibility" and fixtures.minor(version) > (
+                                1,
+                                7,
+                            ):
+                                previous = f"1.{int(version.split('.')[1]) - 1}.0"
+                                self.assertEqual(
+                                    obj["status"]["conditions"][0]["message"],
+                                    f"reconciled by {previous}",
+                                )
                             obj.setdefault("status", {})["conditions"] = [
                                 {
                                     "type": "Ready",
@@ -216,6 +228,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                     destination = root / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(yaml.safe_dump_all(objects))
+
                     continue
                 for destination in (
                     root / relative,
@@ -233,6 +246,20 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                         ] = version
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(yaml.safe_dump_all(objects))
+
+    def install_compatibility_fixture(self):
+        source = (
+            fixtures.OPERATOR
+            / "internal/controller/testdata/upgrade/compatibility/missing-origin"
+        )
+        destination = self.tree / "compatibility/missing-origin"
+        shutil.copytree(source, destination)
+        lock = json.loads((self.tree / "history.lock.json").read_text())
+        self.assertEqual(lock["reconciledVersion"], "1.6.0")
+        lock.pop("captureInventory", None)
+        path = destination / "input.yaml"
+        lock["inputs"] = {path.relative_to(self.tree).as_posix(): fixtures.digest(path)}
+        (self.tree / "compatibility.lock.json").write_text(json.dumps(lock))
 
     def test_complete_matrix_survives_two_release_cycles(self):
         shutil.rmtree(self.tree / "latest")
@@ -274,11 +301,20 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             p.relative_to(self.tree): p.read_bytes()
             for p in (self.tree / "latest").rglob("output.yaml")
         }
+        compatibility = self.tree / "compatibility/missing-origin/input.yaml"
+
+        def capture_without_compatibility(command, *, env, **kwargs):
+            self.capture_api_outputs(command, env=env, **kwargs)
+            (
+                Path(env["DYNAMO_UPGRADE_CAPTURE_DIR"])
+                / "compatibility/missing-origin/input.yaml"
+            ).unlink()
+
         # Each release consumes the oldest origin's last released-controller state.
         with (
             patch.object(
                 fixtures.subprocess, "run", side_effect=self.capture_api_outputs
-            ),
+            ) as capture_command,
             patch.object(
                 fixtures,
                 "capture_source",
@@ -289,20 +325,100 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 },
             ),
         ):
-            for version in ("1.6.0", "1.7.0"):
+            for version in ("1.6.0", "1.7.0", "1.8.0"):
                 with self.subTest(version=version):
                     before = next(
                         obj
                         for obj in yaml.safe_load_all(oldest.read_text())
                         if obj["kind"] == "DynamoGraphDeployment"
                     )
-                    if version == "1.7.0":
+                    if version != "1.6.0":
+                        prior_version = f"1.{int(version.split('.')[1]) - 1}.0"
                         self.assertEqual(
                             before["status"]["conditions"][0]["message"],
-                            "reconciled by 1.6.0",
+                            f"reconciled by {prior_version}",
                         )
                     (self.root / fixtures.CHART).write_text(f"appVersion: {version}\n")
+                    if version == "1.7.0":
+                        compatibility_before = compatibility.read_bytes()
+                        compatibility_lock_before = (
+                            self.tree / "compatibility.lock.json"
+                        ).read_bytes()
+                        before_capture = {
+                            path.relative_to(self.tree): path.read_bytes()
+                            for path in self.tree.rglob("*")
+                            if path.is_file()
+                        }
+                        capture_command.side_effect = capture_without_compatibility
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "Capture incomplete: compatibility/missing-origin/input.yaml",
+                        ):
+                            fixtures.regenerate()
+                        self.assertEqual(
+                            before_capture,
+                            {
+                                path.relative_to(self.tree): path.read_bytes()
+                                for path in self.tree.rglob("*")
+                                if path.is_file()
+                            },
+                        )
+                        capture_command.side_effect = self.capture_api_outputs
                     fixtures.regenerate()
+                    if version == "1.6.0":
+                        fixtures.check()
+                        self.install_compatibility_fixture()
+                        compatibility_original = next(
+                            obj
+                            for obj in yaml.safe_load_all(compatibility.read_text())
+                            if obj["kind"] == "DynamoGraphDeployment"
+                        )
+                        provenance = compatibility.with_name("provenance.json")
+                        initial_provenance = provenance.read_bytes()
+                    else:
+                        compatibility_after = compatibility.read_bytes()
+                        legacy = next(
+                            obj
+                            for obj in yaml.safe_load_all(compatibility_after)
+                            if obj["kind"] == "DynamoGraphDeployment"
+                        )
+                        self.assertEqual(legacy["spec"], compatibility_original["spec"])
+                        self.assertEqual(
+                            legacy["metadata"]["annotations"],
+                            compatibility_original["metadata"]["annotations"],
+                        )
+                        self.assertEqual(
+                            legacy["status"]["conditions"][0]["message"],
+                            f"reconciled by {version}",
+                        )
+                        self.assertEqual(provenance.read_bytes(), initial_provenance)
+
+                        if version == "1.7.0":
+                            # Advancing ordinary history alone cannot authorize the next bump.
+                            lock_path = self.tree / "compatibility.lock.json"
+                            fresh_lock = lock_path.read_bytes()
+                            compatibility.write_bytes(compatibility_before)
+                            lock_path.write_bytes(compatibility_lock_before)
+                            next_version = f"1.{int(version.split('.')[1]) + 1}.0"
+                            (self.root / fixtures.CHART).write_text(
+                                f"appVersion: {next_version}\n"
+                            )
+                            with (
+                                patch.object(
+                                    fixtures.subprocess,
+                                    "check_output",
+                                    return_value=f"appVersion: {version}\n",
+                                ),
+                                self.assertRaisesRegex(
+                                    ValueError, "same last reconciler"
+                                ),
+                            ):
+                                fixtures.check(base="previous-release")
+                            compatibility.write_bytes(compatibility_after)
+                            lock_path.write_bytes(fresh_lock)
+                            (self.root / fixtures.CHART).write_text(
+                                f"appVersion: {version}\n"
+                            )
                     fixtures.check()
                     after = next(
                         obj
@@ -338,7 +454,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             )
         self.assertEqual(len(namespaces), len(set(namespaces)))
         self.assertEqual(
-            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.7.0"
+            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.8.0"
         )
         for path in (self.tree / "latest").rglob("output.yaml"):
             self.assertIn("$var:operator-version", path.read_text())
@@ -350,6 +466,12 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 ],
                 "1.6.0",
             )
+
+        # Removing the independent inventory and its lock cannot bypass the gate.
+        (self.tree / "compatibility").rename(self.root / "removed-compatibility")
+        (self.tree / "compatibility.lock.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing required missing-origin"):
+            fixtures.check()
 
     def test_candidate_capture_does_not_publish_history(self):
         (self.tree / "required-matrix.json").write_text(

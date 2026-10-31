@@ -161,12 +161,52 @@ pub use router_controls::{
 };
 pub use validate::validate_replay_args_mode;
 
+/// Conversation grouping used by native session affinity in offline replay.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAffinityMode {
+    #[default]
+    Session,
+    SiblingGroup,
+}
+
+/// Optional native binding policy; its TTL follows virtual replay time.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConversationAffinityConfig {
+    pub mode: ConversationAffinityMode,
+    pub ttl_seconds: f64,
+}
+
+impl Default for ConversationAffinityConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConversationAffinityMode::Session,
+            ttl_seconds: 300.0,
+        }
+    }
+}
+
+impl ConversationAffinityConfig {
+    pub fn validate(self) -> anyhow::Result<()> {
+        use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_TTL_SECS;
+        anyhow::ensure!(
+            self.ttl_seconds.is_finite()
+                && (1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&self.ttl_seconds),
+            "conversation affinity TTL must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS} seconds"
+        );
+        Ok(())
+    }
+}
+
 /// Settings for the offline replays a host runs on one thread, installed by [`with_replay_scope`].
 ///
 /// They reach replay internals that the entrypoint signatures do not carry. The default scope is
 /// the behavior outside any [`with_replay_scope`].
 #[derive(Clone, Debug, Default)]
 pub struct ReplayScope {
+    /// Native session/sibling affinity, independently scoped to each worker pool.
+    pub conversation_affinity: Option<ConversationAffinityConfig>,
     /// Delays the KV cache events (blocks stored and removed) the router's indexer observes by this
     /// much simulated time. Prefill and request completions stay immediate, as a live router
     /// observes them in-band on the response path. `0.0` keeps synchronous updates. Offline
@@ -185,6 +225,7 @@ pub struct ReplayScope {
 thread_local! {
     static REPLAY_SCOPE: std::cell::RefCell<ReplayScope> = const {
         std::cell::RefCell::new(ReplayScope {
+            conversation_affinity: None,
             kv_event_lag_ms: 0.0,
             router_controls: None,
             determinism: ReplayDeterminism::Random,
@@ -198,6 +239,9 @@ thread_local! {
 /// control registry it does not own. The previous scope is restored when `replay` returns or
 /// unwinds.
 pub fn with_replay_scope<T>(scope: ReplayScope, replay: impl FnOnce() -> T) -> anyhow::Result<T> {
+    if let Some(config) = scope.conversation_affinity {
+        config.validate()?;
+    }
     let lag_ms = scope.kv_event_lag_ms;
     anyhow::ensure!(
         lag_ms.is_finite() && lag_ms >= 0.0,
@@ -295,6 +339,7 @@ mod tests {
         let is_default = |scope: ReplayScope| {
             scope.kv_event_lag_ms == 0.0
                 && scope.router_controls.is_none()
+                && scope.conversation_affinity.is_none()
                 && scope.determinism == ReplayDeterminism::Random
         };
         assert!(is_default(replay_scope()));
@@ -303,6 +348,7 @@ mod tests {
             kv_event_lag_ms: 25.0,
             router_controls: Some(ReplayRouterControls::new()),
             determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
         };
         with_replay_scope(outer, || {
             let current = replay_scope();

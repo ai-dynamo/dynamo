@@ -61,7 +61,7 @@ async fn responses_sse_requires_terminal_event_without_trailers() {
 }
 
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
-/// unary and streaming requests, including mixed tools and namespace members.
+/// unary and streaming requests, including mixed function/hosted tool lists.
 #[tokio::test]
 #[serial]
 async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
@@ -73,13 +73,6 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
                 (
                     json!([tool("read_file"), {"type": "web_search"}]),
                     "web_search",
-                ),
-                (
-                    json!([{
-                        "type": "namespace", "name": "custom", "description": "Custom tools",
-                        "tools": [{"type": "custom", "name": "run", "format": {"type": "text"}}]
-                    }]),
-                    "custom",
                 ),
             ] {
                 let body = json!({
@@ -102,6 +95,40 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
 
 /// Unsupported choices return HTTP 400 without dispatch for unary and streaming
 /// requests even when the supplied function tool definitions are valid.
+/// Custom tools now share the function-template adapter while retaining their
+/// namespace and custom identity in the public Responses surface.
+#[tokio::test]
+#[serial]
+async fn namespaced_custom_tools_are_accepted_and_echoed() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL, "input":"ping", "stream":stream,
+                    "tools":[{"type":"namespace","name":"custom","description":"Custom tools",
+                        "tools":[{"type":"custom","name":"run","format":{"type":"text"}}]}]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            if stream {
+                assert!(body.contains("response.completed"));
+            } else {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["tools"][0]["type"], "namespace");
+                assert_eq!(body["tools"][0]["tools"][0]["type"], "custom");
+            }
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {

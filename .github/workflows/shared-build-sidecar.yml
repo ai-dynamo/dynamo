@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: ''
+      fast_release_profile:
+        description: 'Compile with codegen-units=16 and no LTO instead of the shipping release profile (about half the compile time). For PR checks only; published images keep the shipping profile.'
+        required: false
+        type: boolean
+        default: false
     outputs:
       target_tag_plain:
         description: 'Plain sidecar image tag prefix'
@@ -135,6 +140,9 @@ jobs:
           cuda_version: ''
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          # Keep in sync with "Extract sidecar binaries" and "Compliance
+          # extract" below, so their builds cache-hit this one.
+          extra_build_args: FAST_RELEASE_PROFILE=${{ inputs.fast_release_profile }}
           push_image: true
           no_load: true
           use_sccache: false
@@ -164,12 +172,15 @@ jobs:
       - name: Extract sidecar binaries (amd64)
         id: binary-artifact
         shell: bash
+        env:
+          FAST_RELEASE_PROFILE: ${{ inputs.fast_release_profile }}
         run: |
           set -euo pipefail
           mkdir -p sidecar-binaries
           docker buildx build \
             --target sidecar-binaries \
             --platform linux/amd64 \
+            --build-arg FAST_RELEASE_PROFILE="${FAST_RELEASE_PROFILE}" \
             -f lib/sidecar/Dockerfile \
             --output type=local,dest=sidecar-binaries \
             .
@@ -246,3 +257,4 @@ jobs:
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
           git_sha: ${{ github.sha }}
           artifact_retention_days: ${{ inputs.artifact_retention_days }}
+          extra_build_args: FAST_RELEASE_PROFILE=${{ inputs.fast_release_profile }}

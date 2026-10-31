@@ -14,18 +14,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
-    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
-    OutputTextContent, OutputTokenDetails, ReasoningItem, ReasoningItemContent,
-    ReasoningTextContent, RefusalContent, Response, ResponseCompletedEvent,
-    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
-    ResponseError, ResponseErrorCode, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
-    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent, ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent,
-    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
-    ResponseUsage, ServiceTierResponses, Status, TextResponseFormatConfiguration,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    AssistantRole, IncompleteDetails, InputTokenDetails, Instructions, MessagePhase, OutputContent,
+    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, ReasoningItem, ReasoningItemContent, ReasoningTextContent, RefusalContent,
+    RequestToolChoiceParam, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent, ResponseError, ResponseErrorCode, ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent, ResponseIncompleteEvent, ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
+    ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent, ResponseStreamEvent,
+    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ResponseUsage,
+    ServiceTierResponses, Status, TextResponseFormatConfiguration, ToolChoiceOptions, Truncation,
 };
 use serde::{
     Serialize,
@@ -55,6 +55,9 @@ pub struct ResponseStreamConverter {
     message_output_index: u32,
     message_output_status: Option<OutputStatus>,
     accumulated_text: String,
+    message_phase: Option<MessagePhase>,
+    closed_messages: Vec<(u32, OutputMessage)>,
+    custom_tool_error: Option<String>,
     accumulated_refusal: String,
     text_content_index: Option<u32>,
     refusal_content_index: Option<u32>,
@@ -64,6 +67,9 @@ pub struct ResponseStreamConverter {
     active_reasoning_index: Option<usize>,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
+    // Hold custom calls and following tool headers until a completion boundary,
+    // so dropping a partial custom input cannot leave an item or an index gap.
+    deferred_tool_calls: Vec<usize>,
     // Output index counter
     next_output_index: u32,
     // Usage stats from the backend's final chunk
@@ -102,10 +108,14 @@ struct FunctionCallState {
     name: String,
     namespace: Option<String>,
     is_allowed: bool,
+    backend_name: String,
+    custom: bool,
+    search: bool,
     accumulated_args: String,
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
     started: bool,
+    deferred: bool,
     output_status: Option<OutputStatus>,
 }
 
@@ -118,15 +128,13 @@ impl FunctionCallState {
 impl ResponseStreamConverter {
     /// Initialize a response stream with its tool aliases and resolve allowed backend
     /// names once for use across all chunks.
-    pub fn new(model: String, mut params: ResponseParams) -> Self {
+    pub fn new(model: String, params: ResponseParams) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let tool_names = params.tool_names.take().unwrap_or_else(|| {
-            super::ToolNameMap::new(params.tools.as_deref().unwrap_or_default(), None)
-        });
+        let tool_names = params.tool_name_map().into_owned();
         let allowed_names = params.allowed_backend_names(&tool_names);
 
         Self {
@@ -143,12 +151,16 @@ impl ResponseStreamConverter {
             message_output_index: 0,
             message_output_status: None,
             accumulated_text: String::new(),
+            message_phase: None,
+            closed_messages: Vec::new(),
+            custom_tool_error: None,
             accumulated_refusal: String::new(),
             text_content_index: None,
             refusal_content_index: None,
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
+            deferred_tool_calls: Vec::new(),
             next_output_index: 0,
             usage: None,
             incomplete_reason: None,
@@ -168,12 +180,16 @@ impl ResponseStreamConverter {
         seq
     }
 
-    fn append_message_part(
-        &mut self,
-        part: OutputContent,
-        events: &mut Vec<Result<Event, anyhow::Error>>,
-    ) -> u32 {
+    fn start_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        self.append_active_reasoning_done_events(events, OutputStatus::Completed);
         if !self.message_started {
+            if !self.deferred_tool_calls.is_empty() {
+                self.append_pending_function_call_done_events(
+                    events,
+                    OutputStatus::Completed,
+                    false,
+                );
+            }
             self.message_started = true;
             self.message_output_index = self.next_output_index;
             self.next_output_index += 1;
@@ -185,12 +201,21 @@ impl ResponseStreamConverter {
                         id: self.message_item_id.clone(),
                         content: vec![],
                         role: AssistantRole::Assistant,
-                        phase: None,
+                        phase: self.message_phase,
                         status: OutputStatus::InProgress,
                     }),
                 });
             events.push(self.make_sse_event(&added));
         }
+    }
+
+    fn append_message_part(
+        &mut self,
+        part: OutputContent,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) -> u32 {
+        self.start_message(events);
+
         let content_index = u32::from(self.text_content_index.is_some())
             + u32::from(self.refusal_content_index.is_some());
         let added = ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
@@ -363,7 +388,10 @@ impl ResponseStreamConverter {
                 .params
                 .tool_choice
                 .clone()
-                .or(Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto))),
+                .or(Some(RequestToolChoiceParam::Option(
+                    ToolChoiceOptions::Auto,
+                )))
+                .map(|choice| choice.sdk_response_choice()),
             tools: Some(
                 self.params
                     .tools
@@ -476,13 +504,66 @@ impl ResponseStreamConverter {
             });
         }
 
+        // Terminal status must be known before phase/text boundaries can flush
+        // a buffered custom call from this same chunk.
+        if let Some(reason) = chunk
+            .inner
+            .choices
+            .iter()
+            .find_map(|choice| responses_incomplete_reason(choice.finish_reason))
+        {
+            self.incomplete_reason = Some(reason);
+        }
+        // A visible boundary may arrive with the last argument fragment. Merge
+        // buffered bytes first, so a completed call is not mistaken for a cut tail.
+        let boundary_can_flush = matches!(
+            &chunk.message_boundary,
+            Some(super::super::chat_completions::MessageBoundary::Start(_))
+        ) || chunk.inner.choices.iter().any(|choice| {
+            matches!(choice.delta.content.as_ref(), Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty())
+                || choice.delta.refusal.as_deref().is_some_and(|text| !text.is_empty())
+                || choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
+        });
+        let mut merged_arguments = HashSet::new();
+        if boundary_can_flush && !self.deferred_tool_calls.is_empty() {
+            for choice in &chunk.inner.choices {
+                for call in choice.delta.tool_calls.iter().flatten() {
+                    if self.params.parallel_tool_calls == Some(false) && call.index > 0 {
+                        continue;
+                    }
+                    if let Some(state) = self.function_call_items.get_mut(call.index as usize)
+                        && state.deferred
+                        && let Some(arguments) =
+                            call.function.as_ref().and_then(|f| f.arguments.as_ref())
+                    {
+                        state.accumulated_args.push_str(arguments);
+                        state.pending_arg_deltas.push(arguments.clone());
+                        merged_arguments.insert((choice.index, call.index));
+                    }
+                }
+            }
+        }
         let mut should_finish_function_calls = false;
+        match &chunk.message_boundary {
+            Some(super::super::chat_completions::MessageBoundary::Start(phase)) => {
+                self.close_current_message(events);
+                // A new assistant message follows a closed tool message. Finish
+                // its calls before publishing later commentary or final text.
+                self.append_pending_function_call_done_events(
+                    events,
+                    OutputStatus::Completed,
+                    false,
+                );
+                self.message_phase = Some(*phase);
+                self.start_message(events);
+            }
+            Some(super::super::chat_completions::MessageBoundary::End) => {
+                self.close_current_message(events);
+            }
+            None => {}
+        }
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
-
-            if let Some(reason) = responses_incomplete_reason(choice.finish_reason) {
-                self.incomplete_reason = Some(reason);
-            }
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
@@ -587,10 +668,14 @@ impl ResponseStreamConverter {
                             name: String::new(),
                             namespace: None,
                             is_allowed: false,
+                            backend_name: String::new(),
+                            custom: false,
+                            search: false,
                             accumulated_args: String::new(),
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
                             started: false,
+                            deferred: false,
                             output_status: None,
                         });
                     }
@@ -605,12 +690,19 @@ impl ResponseStreamConverter {
                                 .allowed_names
                                 .as_ref()
                                 .is_none_or(|allowed| allowed.contains(name));
+                            self.function_call_items[tc_index].backend_name = name.clone();
+                            self.function_call_items[tc_index].custom =
+                                self.params.tool_identity(name).2;
+                            self.function_call_items[tc_index].search =
+                                self.params.is_client_search(name);
                             let (namespace, original_name) = self.tool_names.decode(name);
                             self.function_call_items[tc_index].name = original_name.to_owned();
                             self.function_call_items[tc_index].namespace =
                                 namespace.map(str::to_owned);
                         }
-                        if let Some(args) = &func.arguments {
+                        if let Some(args) = &func.arguments
+                            && !merged_arguments.contains(&(choice.index, tc.index))
+                        {
                             self.function_call_items[tc_index]
                                 .accumulated_args
                                 .push_str(args);
@@ -620,20 +712,22 @@ impl ResponseStreamConverter {
                         }
                     }
 
-                    // Within a single call, identity (id/name) and arguments can arrive in
-                    // either order — arguments may begin before the identity chunk. Do not
-                    // publish an output item with empty required fields; once identity is
-                    // complete, publish the item and any argument fragments already received.
-                    // Across parallel calls, the in-tree parsers emit one call at a time with
-                    // a monotonically increasing index, so indices are not interleaved today;
-                    // keying state by `tc_index` would handle interleaving too, but that path
-                    // is defensive rather than exercised by any current backend.
-                    let (should_start, disallowed_name) = {
+                    // Identity and arguments can arrive in either order. Custom
+                    // items have no incomplete status, so defer their publication
+                    // and preserve the order of any following parallel calls.
+                    let (should_start, should_defer, disallowed_name) = {
                         let state = &self.function_call_items[tc_index];
                         let has_identity = state.has_identity();
                         let is_allowed = state.is_allowed;
+                        let new_call = !state.started
+                            && !state.deferred
+                            && state.output_status.is_none()
+                            && has_identity
+                            && is_allowed;
+                        let defer = state.custom || !self.deferred_tool_calls.is_empty();
                         (
-                            !state.started && has_identity && is_allowed,
+                            new_call && !defer,
+                            new_call && defer,
                             (has_identity && !is_allowed).then(|| state.name.clone()),
                         )
                     };
@@ -650,78 +744,17 @@ impl ResponseStreamConverter {
                         self.terminal_failure_emitted = true;
                         return true;
                     }
-                    if should_start {
+                    if should_defer {
+                        self.function_call_items[tc_index].deferred = true;
+                        self.deferred_tool_calls.push(tc_index);
+                    }
+                    if should_start || should_defer {
                         // Starting an allowed tool call is an explicit reasoning
                         // phase boundary, independent of the finish reason.
                         self.append_active_reasoning_done_events(events, OutputStatus::Completed);
                     }
-                    let new_output_index = should_start.then(|| {
-                        let output_index = self.next_output_index;
-                        self.next_output_index += 1;
-                        output_index
-                    });
-                    let (item_added, argument_target, argument_deltas) = {
-                        let state = &mut self.function_call_items[tc_index];
-                        let item_added = if let Some(output_index) = new_output_index {
-                            state.started = true;
-                            state.output_index = Some(output_index);
-                            Some((
-                                state.item_id.clone(),
-                                state.call_id.clone(),
-                                state.name.clone(),
-                                state.namespace.clone(),
-                                output_index,
-                            ))
-                        } else {
-                            None
-                        };
-                        let argument_deltas = if state.started {
-                            std::mem::take(&mut state.pending_arg_deltas)
-                        } else {
-                            Vec::new()
-                        };
-                        (
-                            item_added,
-                            state
-                                .output_index
-                                .map(|output_index| (state.item_id.clone(), output_index)),
-                            argument_deltas,
-                        )
-                    };
-
-                    if let Some((item_id, call_id, name, namespace, output_index)) = item_added {
-                        let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                            ResponseOutputItemAddedEvent {
-                                sequence_number: self.next_seq(),
-                                output_index,
-                                item: OutputItem::FunctionCall(FunctionToolCall {
-                                    caller: None,
-                                    r#async: None,
-                                    id: Some(item_id),
-                                    call_id,
-                                    namespace,
-                                    name,
-                                    arguments: String::new(),
-                                    status: Some(OutputStatus::InProgress),
-                                }),
-                            },
-                        );
-                        events.push(self.make_sse_event(&item_added));
-                    }
-
-                    if let Some((item_id, output_index)) = argument_target {
-                        for delta in argument_deltas {
-                            let args_delta =
-                                ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
-                                    ResponseFunctionCallArgumentsDeltaEvent {
-                                        sequence_number: self.next_seq(),
-                                        item_id: item_id.clone(),
-                                        output_index,
-                                        delta,
-                                    },
-                                );
-                            events.push(self.make_sse_event(&args_delta));
-                        }
+                    if should_start || self.function_call_items[tc_index].started {
+                        self.append_function_call_delta_events(tc_index, events);
                     }
                 }
             }
@@ -753,16 +786,97 @@ impl ResponseStreamConverter {
         false
     }
 
+    fn append_function_call_delta_events(
+        &mut self,
+        tc_index: usize,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let state = &mut self.function_call_items[tc_index];
+        let item_added = if !state.started {
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            state.started = true;
+            state.output_index = Some(output_index);
+            Some((
+                state.item_id.clone(),
+                state.call_id.clone(),
+                state.backend_name.clone(),
+                output_index,
+            ))
+        } else {
+            None
+        };
+        let output_index = state
+            .output_index
+            .expect("started call has an output index");
+        let item_id = state.item_id.clone();
+        let argument_deltas = if !state.custom && !state.search {
+            std::mem::take(&mut state.pending_arg_deltas)
+        } else {
+            Vec::new()
+        };
+        if let Some((item_id, call_id, name, output_index)) = item_added {
+            match self
+                .params
+                .tool_output(item_id, call_id, &name, "", OutputStatus::InProgress)
+            {
+                Ok(item) => {
+                    let event = ResponseStreamEvent::ResponseOutputItemAdded(
+                        ResponseOutputItemAddedEvent {
+                            sequence_number: self.next_seq(),
+                            output_index,
+                            item,
+                        },
+                    );
+                    events.push(self.make_sse_event(&event));
+                }
+                Err(error) => self.custom_tool_error = Some(error.to_string()),
+            }
+        }
+        for delta in argument_deltas {
+            let event = ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
+                ResponseFunctionCallArgumentsDeltaEvent {
+                    sequence_number: self.next_seq(),
+                    item_id: item_id.clone(),
+                    output_index,
+                    delta,
+                },
+            );
+            events.push(self.make_sse_event(&event));
+        }
+    }
+
     fn append_pending_function_call_done_events(
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
         output_status: OutputStatus,
         only_terminal_is_incomplete: bool,
     ) {
+        let deferred = std::mem::take(&mut self.deferred_tool_calls);
+        let last = deferred.len().saturating_sub(1);
+        let interrupted = self.incomplete_reason.is_some();
+        let mut dropped_terminal = false;
+        for (position, index) in deferred.into_iter().enumerate() {
+            let state = &mut self.function_call_items[index];
+            state.deferred = false;
+            let incomplete = output_status == OutputStatus::Incomplete
+                && (!only_terminal_is_incomplete || position == last);
+            // A later interruption must preserve earlier completed raw-text calls.
+            if state.custom
+                && (incomplete || (interrupted && position == last))
+                && serde_json::from_str::<serde_json::Value>(&state.accumulated_args).is_err()
+            {
+                state.output_status = Some(OutputStatus::Incomplete);
+                dropped_terminal = position == last;
+                continue;
+            }
+            self.append_function_call_delta_events(index, events);
+        }
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let terminal_output_index = (only_terminal_is_incomplete
-            && output_status == OutputStatus::Incomplete)
+            && output_status == OutputStatus::Incomplete
+            && !dropped_terminal)
             .then(|| {
                 self.function_call_items
                     .iter()
@@ -790,7 +904,7 @@ impl ResponseStreamConverter {
                 (
                     fc.item_id.clone(),
                     fc.call_id.clone(),
-                    fc.name.clone(),
+                    fc.backend_name.clone(),
                     fc.namespace.clone(),
                     fc.output_index
                         .expect("started function call is missing an output index"),
@@ -802,36 +916,66 @@ impl ResponseStreamConverter {
             .collect();
         pending.sort_unstable_by_key(|(_, _, _, _, output_index, _, _)| *output_index);
 
-        for (item_id, call_id, fc_name, namespace, output_index, accumulated_args, call_status) in
-            pending
+        for (
+            item_id,
+            call_id,
+            backend_name,
+            _namespace,
+            output_index,
+            accumulated_args,
+            call_status,
+        ) in pending
         {
-            let args_done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
-                ResponseFunctionCallArgumentsDoneEvent {
-                    sequence_number: self.next_seq(),
-                    item_id: item_id.clone(),
-                    output_index,
-                    arguments: accumulated_args.clone(),
-                    name: Some(fc_name.clone()),
-                },
-            );
-            events.push(self.make_sse_event(&args_done));
-
-            let item_done =
-                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                    sequence_number: self.next_seq(),
-                    output_index,
-                    item: OutputItem::FunctionCall(FunctionToolCall {
-                        caller: None,
-                        r#async: None,
-                        id: Some(item_id),
-                        call_id,
-                        namespace,
-                        name: fc_name,
+            let item = match self.params.tool_output(
+                item_id.clone(),
+                call_id,
+                &backend_name,
+                &accumulated_args,
+                call_status,
+            ) {
+                Ok(item) => item,
+                Err(error) => {
+                    self.custom_tool_error = Some(error.to_string());
+                    continue;
+                }
+            };
+            if let OutputItem::CustomToolCall(call) = &item {
+                let delta = ResponseStreamEvent::ResponseCustomToolCallInputDelta(
+                    ResponseCustomToolCallInputDeltaEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: item_id.clone(),
+                        output_index,
+                        delta: call.input.clone(),
+                    },
+                );
+                events.push(self.make_sse_event(&delta));
+                let done = ResponseStreamEvent::ResponseCustomToolCallInputDone(
+                    ResponseCustomToolCallInputDoneEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: item_id.clone(),
+                        output_index,
+                        input: call.input.clone(),
+                    },
+                );
+                events.push(self.make_sse_event(&done));
+            } else if !matches!(&item, OutputItem::ToolSearchCall(_)) {
+                let done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+                    ResponseFunctionCallArgumentsDoneEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: item_id.clone(),
+                        output_index,
                         arguments: accumulated_args,
-                        status: Some(call_status),
-                    }),
-                });
-            events.push(self.make_sse_event(&item_done));
+                        name: Some(self.params.tool_identity(&backend_name).0),
+                    },
+                );
+                events.push(self.make_sse_event(&done));
+            }
+            let done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+                sequence_number: self.next_seq(),
+                output_index,
+                item,
+            });
+            events.push(self.make_sse_event(&done));
         }
     }
 
@@ -844,6 +988,11 @@ impl ResponseStreamConverter {
     }
 
     fn terminal_output_index(&self) -> Option<u32> {
+        // A buffered tool is the terminal item even before it receives an index;
+        // preceding visible text must not inherit that tool's truncation status.
+        if !self.deferred_tool_calls.is_empty() {
+            return None;
+        }
         self.function_call_items
             .iter()
             .filter_map(|call| call.output_index)
@@ -900,7 +1049,7 @@ impl ResponseStreamConverter {
             id: self.message_item_id.clone(),
             content: self.message_content(),
             role: AssistantRole::Assistant,
-            phase: None,
+            phase: self.message_phase,
             status: self.message_output_status.unwrap_or(output_status),
         }
     }
@@ -909,6 +1058,11 @@ impl ResponseStreamConverter {
         let terminal_only =
             self.incomplete_reason.is_some() && output_status == OutputStatus::Incomplete;
         let mut output = Vec::new();
+        output.extend(
+            self.closed_messages
+                .iter()
+                .map(|(index, message)| (*index, OutputItem::Message(message.clone()))),
+        );
         for reasoning in &self.reasoning_items {
             output.push((
                 reasoning.output_index,
@@ -935,16 +1089,16 @@ impl ResponseStreamConverter {
                 };
                 output.push((
                     output_index,
-                    OutputItem::FunctionCall(FunctionToolCall {
-                        caller: None,
-                        r#async: None,
-                        id: Some(function_call.item_id.clone()),
-                        call_id: function_call.call_id.clone(),
-                        namespace: function_call.namespace.clone(),
-                        name: function_call.name.clone(),
-                        arguments: function_call.accumulated_args.clone(),
-                        status: Some(function_call.output_status.unwrap_or(function_status)),
-                    }),
+                    match self.params.tool_output(
+                        function_call.item_id.clone(),
+                        function_call.call_id.clone(),
+                        &function_call.backend_name,
+                        &function_call.accumulated_args,
+                        function_call.output_status.unwrap_or(function_status),
+                    ) {
+                        Ok(item) => item,
+                        Err(_) => continue,
+                    },
                 ));
             }
         }
@@ -959,6 +1113,19 @@ impl ResponseStreamConverter {
     ) {
         if !self.message_started {
             return;
+        }
+        // Final reconstruction must retain the status sent in output_item.done.
+        self.message_output_status.get_or_insert(output_status);
+        if self.text_content_index.is_none() && self.refusal_content_index.is_none() {
+            let index = self.append_message_part(
+                OutputContent::OutputText(OutputTextContent {
+                    text: String::new(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+                events,
+            );
+            self.text_content_index = Some(index);
         }
 
         for (index, content) in self.message_content().into_iter().enumerate() {
@@ -1006,6 +1173,25 @@ impl ResponseStreamConverter {
         events.push(self.make_sse_event(&item_done));
     }
 
+    fn close_current_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if !self.message_started {
+            return;
+        }
+        self.close_open_message_item(events, OutputStatus::Completed);
+        self.closed_messages.push((
+            self.message_output_index,
+            self.message_output(OutputStatus::Completed),
+        ));
+        self.message_item_id = format!("msg_{}", Uuid::new_v4().simple());
+        self.message_started = false;
+        self.message_output_status = None;
+        self.message_phase = None;
+        self.accumulated_text.clear();
+        self.accumulated_refusal.clear();
+        self.text_content_index = None;
+        self.refusal_content_index = None;
+    }
+
     /// Emit remaining output completion events and `response.completed` at stream end.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
@@ -1032,6 +1218,19 @@ impl ResponseStreamConverter {
         // Fallback for backends that end the transport without a finish-reason chunk.
         self.append_pending_function_call_done_events(events, output_status, true);
 
+        if let Some(message) = self.custom_tool_error.take() {
+            let terminal = self.append_error_events(
+                ResponseError {
+                    misalignment: None,
+                    code: ResponseErrorCode::ServerError,
+                    message,
+                },
+                events,
+            );
+            events.push(terminal);
+            self.terminal_failure_emitted = true;
+            return;
+        }
         let terminal_status = self.terminal_status();
         let response = self.make_response(terminal_status.clone(), self.completed_output());
         let terminal = if terminal_status == Status::Incomplete {
@@ -1094,68 +1293,44 @@ impl ResponseStreamConverter {
         &self,
         event: &ResponseStreamEvent,
     ) -> Result<String, serde_json::Error> {
+        // Only lifecycle events serialize the response object. Ordinary deltas
+        // must not clone the tool catalog on every generated token.
+        let (sequence_number, response) = match event {
+            ResponseStreamEvent::ResponseCreated(event) => (event.sequence_number, &event.response),
+            ResponseStreamEvent::ResponseInProgress(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseCompleted(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseFailed(event) => (event.sequence_number, &event.response),
+            ResponseStreamEvent::ResponseIncomplete(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseQueued(event) => (event.sequence_number, &event.response),
+            _ => return serde_json::to_string(event),
+        };
+        let echoed_tools = self.params.echoed_tools();
         let spec = ResponseSpecFields {
+            template_tools: echoed_tools.as_deref(),
+            requested_tool_choice: self.params.tool_choice.as_ref(),
             presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
             frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
             store: self.params.store.unwrap_or(false),
         };
-
-        match event {
-            ResponseStreamEvent::ResponseCreated(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.created",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseInProgress(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.in_progress",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseCompleted(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.completed",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseFailed(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.failed",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseIncomplete(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.incomplete",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseQueued(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.queued",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            _ => serde_json::to_string(event),
-        }
+        serde_json::to_string(&ResponseEventForSpec::new(
+            get_event_type(event),
+            sequence_number,
+            response,
+            spec,
+        ))
     }
 }
 
 #[derive(Clone, Copy)]
-struct ResponseSpecFields {
+struct ResponseSpecFields<'a> {
+    template_tools: Option<&'a [super::RequestTool]>,
+    requested_tool_choice: Option<&'a RequestToolChoiceParam>,
     presence_penalty: f32,
     frequency_penalty: f32,
     store: bool,
@@ -1165,7 +1340,7 @@ struct ResponseEventForSpec<'a> {
     event_type: &'static str,
     sequence_number: u64,
     response: &'a Response,
-    spec: ResponseSpecFields,
+    spec: ResponseSpecFields<'a>,
 }
 
 impl<'a> ResponseEventForSpec<'a> {
@@ -1173,7 +1348,7 @@ impl<'a> ResponseEventForSpec<'a> {
         event_type: &'static str,
         sequence_number: u64,
         response: &'a Response,
-        spec: ResponseSpecFields,
+        spec: ResponseSpecFields<'a>,
     ) -> Self {
         Self {
             event_type,
@@ -1202,7 +1377,7 @@ impl Serialize for ResponseEventForSpec<'_> {
 
 struct ResponseForSpec<'a> {
     response: &'a Response,
-    spec: ResponseSpecFields,
+    spec: ResponseSpecFields<'a>,
 }
 
 // Mirrors async-openai's `Response` serialization while writing Dynamo's
@@ -1243,8 +1418,16 @@ impl Serialize for ResponseForSpec<'_> {
         map.serialize_entry("status", &response.status)?;
         serialize_optional_entry(&mut map, "temperature", &response.temperature)?;
         serialize_optional_entry(&mut map, "text", &response.text)?;
-        serialize_optional_entry(&mut map, "tool_choice", &response.tool_choice)?;
-        serialize_optional_entry(&mut map, "tools", &response.tools)?;
+        if let Some(choice) = self.spec.requested_tool_choice {
+            map.serialize_entry("tool_choice", choice)?;
+        } else {
+            serialize_optional_entry(&mut map, "tool_choice", &response.tool_choice)?;
+        }
+        if let Some(tools) = self.spec.template_tools {
+            map.serialize_entry("tools", tools)?;
+        } else {
+            serialize_optional_entry(&mut map, "tools", &response.tools)?;
+        }
         serialize_optional_entry(&mut map, "top_logprobs", &response.top_logprobs)?;
         serialize_optional_entry(&mut map, "top_p", &response.top_p)?;
         serialize_optional_entry(&mut map, "truncation", &response.truncation)?;
@@ -1440,6 +1623,7 @@ mod tests {
     ) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
@@ -1448,6 +1632,7 @@ mod tests {
                         content: None,
                         function_call: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                            custom: None,
                             index: tc_index,
                             id: id.map(String::from),
                             r#type: Some(FunctionType::Function),
@@ -1455,7 +1640,6 @@ mod tests {
                                 name: name.map(String::from),
                                 arguments: args.map(String::from),
                             }),
-                            custom: None,
                         }]),
                         role: None,
                         refusal: None,
@@ -1481,6 +1665,7 @@ mod tests {
     fn finish_chunk(reason: FinishReason) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
@@ -1513,6 +1698,7 @@ mod tests {
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {

@@ -154,18 +154,20 @@ Without separately configured gang scheduling or group admission
 (e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
 partially scheduled.
 
-##### Multinode sidecars for SGLang and vLLM
+##### Multinode sidecars for SGLang, vLLM, and TensorRT-LLM
 
 **Change:** Admission accepts `multinode` on a component that declares a `runtime` init
-container when `backendFramework` is `sglang` or `vllm` and the component supplies complete
-`leader` and `worker` role templates. The operator renders the authored engine commands,
+container when the component supplies complete `leader` and `worker` role templates. Set
+`backendFramework` explicitly, as the examples do; the operator does not infer a backend from
+a native engine command. The operator renders the authored engine commands,
 probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
 
 **Affected:** New multinode DGDs that opt into sidecar mode.
 
 **Action:** None for existing workloads. To opt in, see the
-[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes)
-and [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes)
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes)
 sidecar guides.
 
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init

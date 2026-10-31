@@ -63,7 +63,12 @@ fn canonical_generate_models(
 
 #[derive(Debug)]
 struct RequestContext {
+    /// Server-minted id for the request context, routing, and logs. Never client-chosen:
+    /// in-flight request state is keyed on it.
     request_id: String,
+    /// Client-facing id carried to the worker as the envelope `rid`, following SGLang's body
+    /// `rid` > `x-request-id` precedence. Correlation only.
+    public_request_id: String,
     data_parallel_rank: Option<u32>,
 }
 
@@ -140,7 +145,8 @@ fn adapt_openai_error(response: super::openai::ErrorResponse) -> Response {
 }
 
 fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -> RequestContext {
-    let request_id = body_request_id
+    let request_id = get_or_create_request_id(headers);
+    let public_request_id = body_request_id
         .map(ToOwned::to_owned)
         .or_else(|| {
             headers
@@ -148,7 +154,7 @@ fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or_else(|| get_or_create_request_id(headers));
+        .unwrap_or_else(|| request_id.clone());
     let data_parallel_rank = headers
         .get(X_DATA_PARALLEL_RANK_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -156,6 +162,7 @@ fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -
 
     RequestContext {
         request_id,
+        public_request_id,
         data_parallel_rank,
     }
 }
@@ -196,11 +203,11 @@ fn deadline_exceeded_response() -> Response {
     )
 }
 
-fn preprocessed_request(
+pub(super) fn preprocessed_request(
     request: SglangGenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
 ) -> anyhow::Result<PreprocessedRequest> {
     let max_tokens = request.max_new_tokens().map_err(anyhow::Error::msg)?;
     let min_tokens = request.min_new_tokens().map_err(anyhow::Error::msg)?;
@@ -208,7 +215,7 @@ fn preprocessed_request(
     let routing_priority = request.priority.unwrap_or_default();
     let cache_namespace = request.cache_namespace().map(str::to_owned);
     let streaming = request.stream;
-    let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
+    let (input_ids, worker_envelope) = request.into_worker_envelope(public_request_id);
     // The router records TTFT and ITL into the request's tracker.
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(input_ids.len(), None);
@@ -332,7 +339,7 @@ async fn handler(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_context.public_request_id,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
@@ -360,7 +367,8 @@ async fn handler(
     let dispatch_span = tracing::info_span!(
         target: "request_span",
         "generate",
-        request_id = %request_id
+        request_id = %request_id,
+        x_request_id = %request_context.public_request_id,
     );
     let response = match tokio::spawn(
         dispatch(
@@ -563,6 +571,151 @@ mod tests {
                 expected,
             );
         }
+    }
+
+    /// Echoes each request's input ids back, holding every request until `barrier` releases them
+    /// together so both are in flight at once. Records what the worker saw for each request.
+    struct ConcurrentEchoEngine {
+        barrier: tokio::sync::Barrier,
+        seen: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for ConcurrentEchoEngine
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            let rid = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra["sglang_tito"]["rid"].as_str())
+                .map(str::to_string);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.id().to_string(), rid));
+            self.barrier.wait().await;
+            let output = crate::protocols::Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({
+                    "sglang_response": {"output_ids": request.token_ids.to_vec()}
+                })),
+                ..Default::default()
+            });
+            Ok(dynamo_runtime::engine::ResponseStream::new(
+                Box::pin(futures::stream::iter([output])),
+                request.context(),
+            ))
+        }
+    }
+
+    async fn concurrent_generate_with_shared_client_id(
+        headers: HeaderMap,
+        body_rid: Option<&str>,
+        expected_public_id: &str,
+    ) {
+        use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+
+        let engine = Arc::new(ConcurrentEchoEngine {
+            barrier: tokio::sync::Barrier::new(2),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        card.runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let mut worker_set =
+            crate::discovery::WorkerSet::new("sglang-ns".to_string(), "sglang".to_string(), card);
+        worker_set.generate_engine =
+            Some(crate::http::service::generate::tests::engine_behind_frontend(engine.clone()));
+        assert!(
+            state
+                .manager()
+                .add_worker_set("sglang-concurrent-model", "sglang-ns", worker_set)
+        );
+
+        let send = |input_ids: Vec<u32>| {
+            let mut body = serde_json::json!({
+                "input_ids": input_ids,
+                "sampling_params": {"max_new_tokens": 4},
+                "stream": false
+            });
+            if let Some(rid) = body_rid {
+                body["rid"] = serde_json::json!(rid);
+            }
+            let request = serde_json::from_value(body).unwrap();
+            handler(State(state.clone()), headers.clone(), Ok(Json(request)))
+        };
+        let (first, second) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            futures::future::join(send(vec![1, 2, 3]), send(vec![7, 8])),
+        )
+        .await
+        .expect("concurrent SGLang generate requests must not hang");
+
+        for (response, expected_ids) in [(first, vec![1, 2, 3]), (second, vec![7, 8])] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["output_ids"], serde_json::json!(expected_ids));
+        }
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].0, seen[1].0,
+            "each request needs its own context id"
+        );
+        for (context_id, rid) in seen.iter() {
+            assert_ne!(context_id, expected_public_id);
+            assert_eq!(rid.as_deref(), Some(expected_public_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_sglang_requests_sharing_rid_get_their_own_output() {
+        concurrent_generate_with_shared_client_id(
+            HeaderMap::new(),
+            Some("shared-rid"),
+            "shared-rid",
+        )
+        .await;
+    }
+
+    #[test]
+    fn request_context_keeps_client_ids_as_correlation_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
+        headers.insert(X_DATA_PARALLEL_RANK_HEADER, "2".parse().unwrap());
+
+        let context = resolve_request_context(&headers, Some("body-rid"));
+        assert_eq!(context.public_request_id, "body-rid");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
+        assert_eq!(context.data_parallel_rank, Some(2));
+
+        let context = resolve_request_context(&headers, None);
+        assert_eq!(context.public_request_id, "header-request");
+        assert_ne!(context.request_id, "header-request");
+
+        let context = resolve_request_context(&HeaderMap::new(), None);
+        assert_eq!(context.public_request_id, context.request_id);
     }
 
     #[tokio::test]

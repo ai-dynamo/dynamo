@@ -80,8 +80,8 @@ _INSTRUCTION = re.compile(
 # historical versions legitimately appear ("the base image's 2.1.0 copy survived the
 # overlay"). Only the lines that compare or install are held to the pin.
 _DIAGNOSTIC = re.compile(r'^\s*(\|\|\s*\{\s*)?(echo\b|print\(|sys\.exit\(|f?")')
-# A PyNvVideoCodec requirement specifier written inline in a template, e.g. the
-# `pip install 'PyNvVideoCodec==2.2.3'` in trtllm_runtime.Dockerfile.
+# A PyNvVideoCodec requirement specifier written inline in a template, e.g.
+# `pip install 'PyNvVideoCodec==2.2.3'`.
 _INLINE_SPEC = re.compile(
     r"(?i)pynvvideocodec\s*((?:[<>=!~]=?\s*[0-9][^\'\"\s;]*)(?:\s*,\s*[<>=!~]=?\s*[0-9][^\'\"\s;]*)*)"
 )
@@ -235,28 +235,18 @@ def test_the_spec_is_bounded_above() -> None:
 
 
 def test_templates_install_the_same_spec() -> None:
-    """A template that installs PyNvVideoCodec must use the declared specifier.
+    """A template that installs PyNvVideoCodec inline must use the declared specifier.
 
-    The TRT-LLM image installs a system-site copy of its own, beside the venv copy
-    `requirements.trtllm.txt` provides, and its comment says the two specifiers
-    must stay identical. Nothing enforced that, and the two did drift once: the
-    requirements file was capped while the template's inline install was left
-    unbounded, so one image would have carried two different versions.
-
-    One test over all templates rather than one per template: only TRT-LLM carries
-    an inline specifier today, so a per-template parametrization would report two
-    cases that assert nothing. Scanning all three still matters -- a specifier
-    added to another template has to be caught -- so the scan is asserted to find
-    at least one, which is what stops it going quietly blind.
+    None does today: the images install it from the requirements files and the
+    TRT-LLM base ships its own system-site copy. An inline install added later
+    would be a second, unchecked spec, so any found must match. The guard tests
+    below are what keep the templates from going blind.
     """
     staged = [path for path in TEMPLATES if (ROOT / path).is_file()]
     if not staged:
         pytest.skip("no runtime templates are staged in this component image")
-    found = {path: _template_install_specs(path) for path in staged}
-    present = {path: specs for path, specs in found.items() if specs}
-    assert present, f"no template installs PyNvVideoCodec any more: {found}"
-    for path, specs in present.items():
-        for spec in specs:
+    for path in staged:
+        for spec in _template_install_specs(path):
             assert SpecifierSet(spec) == SpecifierSet(
                 EXPECTED_SPEC
             ), f"{path} installs {spec}"

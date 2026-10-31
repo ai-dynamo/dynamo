@@ -88,6 +88,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
             video_token_id: None,
             liveness: None,
             expected_rank: None,
+            recovery: None,
         }),
         false,
         *dp_rank,

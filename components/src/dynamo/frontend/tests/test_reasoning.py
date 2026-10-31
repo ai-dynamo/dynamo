@@ -67,6 +67,51 @@ def test_segment_aware_template_preserves_interleaving():
     assert render(messages) == "beforecalcafter"
 
 
+def test_probe_handles_templates_that_read_tool_schemas():
+    template = (
+        "{% for tool in tools %}{{ tool.function.description | tojson }}"
+        "{% for name, _ in tool.function.parameters.properties.items() %}{{ name }}"
+        "{% endfor %}{% endfor %}" + _STRING_ONLY
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "calc",
+                "description": "c",
+                "parameters": {"type": "object", "properties": {"x": {}}},
+            },
+        }
+    ]
+    messages = [assistant(["before", "after"])]
+    render = template_renderer(template, tools=tools)
+    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    assert render(messages) == '"c"xbefore\nafter'
+
+
+@pytest.mark.parametrize("separately", [False, True])
+def test_json_serialization_distinguishes_lists_from_segments(separately):
+    template = (
+        "{% for message in messages if message.role == 'assistant' %}"
+        + (
+            "{% if message.reasoning_content is string %}"
+            "{{ message.reasoning_content | tojson }}{% else %}"
+            "{% for segment in message.reasoning_content %}{{ segment | tojson }}"
+            "{% if not loop.last %}{{ message.tool_calls[loop.index0].function.name }}"
+            "{% endif %}{% endfor %}{% endif %}"
+            if separately
+            else "{{ message.reasoning_content | tojson }}"
+        )
+        + "{% endfor %}"
+    )
+    messages = [assistant(["before", "after"])]
+    render = template_renderer(template)
+    normalize_reasoning_content(messages, render_template=render, has_tools=True)
+    assert render(messages) == (
+        '"before"calc"after"' if separately else '"before\\nafter"'
+    )
+
+
 def test_template_rejecting_arrays_receives_string():
     messages = [assistant(["before", "after", ""])]
     render = template_renderer(_CONCAT)

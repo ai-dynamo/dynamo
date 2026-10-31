@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Attach actual, process-local HiCache backend inventory to the KV state agent."""
+"""Attach actual, process-local KVCR inventory to the KV state agent."""
 
 from __future__ import annotations
 
@@ -14,11 +14,18 @@ from dynamo.common.kv_state_agent import (
     CACHE_OWNER_PATTERN,
     bounded_close,
     validate_advertise_host,
+    worker_raw_topic,
 )
 from dynamo.llm import KvStateAttachmentOwner
-from dynamo.sglang._compat import resolved_server_args
-from dynamo.sglang.capacity import model_card_dp_rank_bounds
-from dynamo.sglang.kv_hints import kvcr_hint_endpoints
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    resolved_server_args,
+)
+from dynamo.sglang.capacity import kv_event_block_size, model_card_dp_rank_bounds
+from dynamo.sglang.kv_hints import (
+    is_supported_kvcr_linker_topology,
+    kvcr_hint_endpoints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +62,22 @@ def state_agent_descriptors(engine, config) -> list[dict]:
     if not sources:
         return []
     server_args = resolved_server_args(config.server_args)
+    linker = is_supported_kvcr_linker_topology(server_args)
     if (
-        not server_args.enable_hierarchical_cache
+        not (getattr(server_args, "enable_hierarchical_cache", False) or linker)
         or server_args.nnodes != 1
         or server_args.pp_size != 1
         or server_args.tokenizer_worker_num != 1
         or not config.dynamo_args.use_kv_events
     ):
         raise ValueError(
-            "KVCR inventory requires a single-host HiCache worker, one tokenizer "
+            "KVCR inventory requires a single-host HiCache or supported linker worker, one tokenizer "
             "worker, PP=1 and KV event emission"
         )
+    if linker and not filter_supported_async_generate_kwargs(
+        engine, {"kv_hints": None}
+    ):
+        raise ValueError("KVCR linker inventory requires a hint-forwarding worker")
     roles = {
         DisaggregationMode.AGGREGATED: "aggregated",
         DisaggregationMode.PREFILL: "prefill",
@@ -77,8 +89,19 @@ def state_agent_descriptors(engine, config) -> list[dict]:
     bounds = model_card_dp_rank_bounds(server_args)
     if set(sources) != set(range(*bounds)):
         raise ValueError("KVCR inventory must cover every managed DP rank")
+    if linker:
+        for source in sources.values():
+            if source.get("inventory_lifetime") != "process_local":
+                raise ValueError("KVCR linker must report process-local inventory")
+            if (
+                source.get("reset_clears_owner_inventory") is not True
+                or source.get("owner_incarnation_scoped") is not True
+            ):
+                raise ValueError(
+                    "KVCR linker inventory requires reset and incarnation fencing"
+                )
     infos = engine._scheduler_init_result.scheduler_infos
-    endpoints = kvcr_hint_endpoints(infos, bounds)
+    endpoints = kvcr_hint_endpoints(infos, bounds, require_inventory=linker)
     if set(endpoints) != {str(rank) for rank in sources}:
         raise ValueError(
             "KVCR inventory requires a router_hint source for every managed DP rank"
@@ -129,11 +152,15 @@ def state_agent_descriptors(engine, config) -> list[dict]:
         block_size = raw.get("block_size")
         if type(block_size) is not int or block_size <= 0:
             raise ValueError("KVCR raw event source requires a positive block size")
+        if linker and block_size != kv_event_block_size(server_args):
+            raise ValueError("KVCR linker event block size must match the model card")
         topic = raw.get("topic", "")
         if not isinstance(topic, str) or not topic.strip():
             raise ValueError(
                 "KVCR raw event topic must identify this engine incarnation"
             )
+        if linker and topic != worker_raw_topic([owner]):
+            raise ValueError("KVCR linker event topic must identify its owner")
         descriptors.append(
             {
                 "cache_owner_id": owner,
@@ -176,7 +203,7 @@ class StateAgentLifecycle:
             )
             raise
         self._owner = owner
-        logger.info("Attached %d KVCR HiCache inventory owners", len(descriptors))
+        logger.info("Attached %d KVCR inventory owners", len(descriptors))
 
     async def _close_after_start(self, owner, startup):
         # Let the native binding initialize its OnceCell before withdrawal.

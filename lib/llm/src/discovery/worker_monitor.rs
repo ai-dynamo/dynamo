@@ -1271,6 +1271,7 @@ mod tests {
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
@@ -2011,7 +2012,10 @@ mod tests {
 
         assert!(!tracker.update_worker(7, false));
         client.mark_overloaded_immediate(7);
-        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(Arc::new(HashSet::from([7])))
+        );
 
         let overloaded_changed = tracker.update_worker(7, false);
         assert!(

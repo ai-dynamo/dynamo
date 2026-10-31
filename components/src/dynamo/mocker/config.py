@@ -184,8 +184,33 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
 
 def load_mocker_engine_args(args: argparse.Namespace) -> dict:
     if args.extra_engine_args:
-        return normalize_mocker_config(args.extra_engine_args.read_text())
-    return build_mocker_engine_args(args)
+        config = normalize_mocker_config(args.extra_engine_args.read_text())
+    else:
+        config = build_mocker_engine_args(args)
+    validate_systemone_serial_config(args, config)
+    return config
+
+
+def validate_systemone_serial_config(
+    args: argparse.Namespace, config: Mapping[str, Any]
+) -> None:
+    """Gate the serial capability on the effective scheduler configuration."""
+    if not args.systemone_serial:
+        return
+    engine = config["engine"]
+    if (
+        not args.sglang_generate
+        or args.is_prefill_worker
+        or args.is_decode_worker
+        or engine["backend"] != "sglang"
+        or engine["worker_type"] != "aggregated"
+        or config["dp_size"] != 1
+        or engine["max_num_seqs"] != 1
+    ):
+        raise ValueError(
+            "--systemone-serial requires --sglang-generate, an aggregated SGLang "
+            "engine, data-parallel-size=1, and engine max_num_seqs=1"
+        )
 
 
 def apply_worker_engine_args_overrides(

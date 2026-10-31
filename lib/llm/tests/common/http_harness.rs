@@ -68,6 +68,16 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_engine_and_card(engine, ModelDeploymentCard::with_name_only(MODEL)).await
+    }
+
+    /// Start with a model card of the caller's choosing, so handler behavior that depends
+    /// on the registered parsing options (tool-call / reasoning parser) can be exercised.
+    #[allow(dead_code)]
+    pub async fn start_with_engine_and_card(
+        engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -83,11 +93,11 @@ impl HarnessService {
             .build()
             .expect("failed to build harness HTTP service");
 
-        let card = ModelDeploymentCard::with_name_only(MODEL);
         let metrics = service.state_clone().metrics_clone();
+        let checksum = card.mdcsum().to_string();
         service
             .model_manager()
-            .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
+            .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
             .expect("failed to register scripted harness model");
 
         let cancel = CancellationToken::new();

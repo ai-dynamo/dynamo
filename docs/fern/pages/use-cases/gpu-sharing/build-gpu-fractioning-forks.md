@@ -49,7 +49,7 @@ Both changes are open pull requests against the upstream repositories. The resul
 |---|---|---|---|
 | Docker with `buildx` | Recent | The Makefile compiles each service inside a `golang:1.26.3-bookworm` builder container and then builds the image with `docker buildx build` | [Install Docker Engine](https://docs.docker.com/engine/install/), [Docker Build and Buildx](https://docs.docker.com/build/concepts/overview/), [Builders](https://docs.docker.com/build/builders/) |
 | Go | 1.26.3 (`go.mod`) | Only needed if you build outside Docker. The Makefile does not use a host Go toolchain | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/kai-scheduler/KAI-Scheduler/blob/44d1d0a966465c69b1fd0d24b40b9a1ebb73699e/go.mod) |
-| GNU `make` | Any recent | `make build` builds all 15 services for amd64 and arm64, then assembles the image for the host architecture only | [GNU Make](https://www.gnu.org/software/make/) |
+| GNU `make` | Any recent | `make build` builds all 15 services for amd64 and arm64, then assembles the image for the host architecture only | [GNU Make project](https://savannah.gnu.org/projects/make/) |
 | `helm` | 3.x or 4.x | Used for `helm dependency build` and the install. The chart rendered cleanly with Helm 4.1 | [Installing Helm](https://helm.sh/docs/intro/install/) |
 | `kubectl` | Within one minor version of your cluster | | [Install kubectl](https://kubernetes.io/docs/tasks/tools/), [kubectl version skew](https://kubernetes.io/releases/version-skew-policy/#kubectl) |
 | `git` | Any recent | | [Git downloads](https://git-scm.com/downloads) |
@@ -62,7 +62,7 @@ Both changes are open pull requests against the upstream repositories. The resul
 |---|---|---|---|
 | Docker | Recent | Plain `docker build` and `docker push`. `buildx` is needed only for the multi-architecture `docker-buildx` targets | [Install Docker Engine](https://docs.docker.com/engine/install/), [Docker Build and Buildx](https://docs.docker.com/build/concepts/overview/), [Builders](https://docs.docker.com/build/builders/) |
 | Go | 1.26.4 (`go.mod`) | Images build inside `golang:1.27.x` containers, so a host toolchain is not required for them. The `operator/Makefile` calls `go` while evaluating variables, so keep Go on your `PATH` to avoid a `go: No such file or directory` warning | [Go downloads](https://go.dev/dl/), [Installing Go](https://go.dev/doc/install), [`go.mod`](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/go.mod) |
-| GNU `make` | Any recent | | [GNU Make](https://www.gnu.org/software/make/) |
+| GNU `make` | Any recent | | [GNU Make project](https://savannah.gnu.org/projects/make/) |
 | `helm` | 3.x or 4.x | | [Installing Helm](https://helm.sh/docs/intro/install/) |
 | `git` | Any recent | | [Git downloads](https://git-scm.com/downloads) |
 | Network access | | Docker Hub (`golang`, `nvidia/cuda:13.3.1-base-ubuntu24.04` for `mpsd`) and `nvcr.io` (`nvcr.io/nvidia/distroless/go:v4.1.3`, the runtime base image for the other three) | [`golang` on Docker Hub](https://hub.docker.com/_/golang), [`nvidia/cuda` on Docker Hub](https://hub.docker.com/r/nvidia/cuda), [`mpsd` Dockerfile](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/fractioning-manager/mpsd/build/Dockerfile), [operator Dockerfile](https://github.com/kai-scheduler/gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/Dockerfile) |

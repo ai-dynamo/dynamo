@@ -46,13 +46,12 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1.dev202610140007
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)
           # rather than just a connectable socket.
           # The pinned engine ships OpenEngine bindings under tensorrt_llm,
           # but importing them loads TensorRT-LLM for every exec probe.
-          # It does not yet serve grpc.health.v1.Health; use Control.Health.
           # HealthResponse.state is protobuf field 1 (varint); READY is 2.
           # Int32Value decodes that field and skips any other fields.
           startupProbe:

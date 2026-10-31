@@ -97,3 +97,23 @@ tests:
     asserts:
       - hasDocuments:
           count: 4
+
+  - it: matches DGDR requests through every served API version
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    asserts:
+      - equal:
+          path: webhooks[3].name
+          value: vdynamographdeploymentrequest.kb.io
+        documentIndex: 0
+      - equal:
+          path: webhooks[3].matchPolicy
+          value: Equivalent
+        documentIndex: 0
+      - equal:
+          path: webhooks[2].name
+          value: mdynamographdeploymentrequestv1beta1.kb.io
+        documentIndex: 1
+      - equal:
+          path: webhooks[2].matchPolicy
+          value: Equivalent
+        documentIndex: 1

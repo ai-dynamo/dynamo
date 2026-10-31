@@ -48,7 +48,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820@sha256:b8c862fea7c4306043dd2dbda06175af0fc8af4f336435597c07ec92f6fff3bd
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
           # Probe Control.Health without importing TensorRT-LLM; field 1 is state, READY = 2.
           startupProbe:
             exec:

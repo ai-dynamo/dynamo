@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -15,7 +17,14 @@ def _requires_reasoning_string(
     # control bytes, not just their printable names.
     first = "\x01dynamo_reasoning_probe_first\x01"
     last = "\x01dynamo_reasoning_probe_last\x01"
-    tool = {"type": "function", "function": {"name": "probe", "parameters": {}}}
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "probe",
+            "description": "",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
 
     def render(reasoning: str | list[str]) -> str:
         return render_template(
@@ -39,7 +48,9 @@ def _requires_reasoning_string(
         )
 
     try:
-        if first not in render(first):
+        scalar_output = render(first)
+        json_first = json.dumps(first)[1:-1]
+        if first not in scalar_output and json_first not in scalar_output:
             return False
     except (TemplateError, TypeError, ValueError):
         # A probe cannot supply every model-specific template input. Let the
@@ -49,7 +60,17 @@ def _requires_reasoning_string(
         array_output = render([first, last])
     except (TemplateError, TypeError, ValueError):
         return True
-    return first not in array_output and last not in array_output
+    if first in array_output or last in array_output:
+        return False
+    json_last = json.dumps(last)[1:-1]
+    if json_first in array_output or json_last in array_output:
+        # A JSON array is container serialization; separately serialized
+        # segments still allow a template to interleave reasoning and tools.
+        json_array = (
+            rf'\[\s*"{re.escape(json_first)}"\s*,\s*"{re.escape(json_last)}"\s*\]'
+        )
+        return bool(re.search(json_array, array_output))
+    return True
 
 
 def normalize_reasoning_content(

@@ -623,6 +623,9 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
         Endpoint::Generate => todo!(),
+        Endpoint::SystemOne | Endpoint::Decisions => {
+            unreachable!("this fixture indexes only completion endpoints")
+        }
     };
 
     let request_type = match request_type {
@@ -1620,19 +1623,169 @@ async fn test_request_id_annotation() {
     );
 
     let received_uuid_str = received_request_id.unwrap();
-    assert_eq!(
+    assert!(
+        uuid::Uuid::parse_str(&received_uuid_str).is_ok(),
+        "request_id annotation should be a UUID, got {received_uuid_str}"
+    );
+    assert_ne!(
         received_uuid_str,
         request_uuid.to_string(),
-        "Received request ID should match the one we sent: expected {}, got {}",
-        request_uuid,
-        received_uuid_str
+        "client-supplied x-dynamo-request-id must not become the request id"
     );
 
-    tracing::info!(
-        "✅ Request ID annotation test passed! Sent UUID: {}, Received: {}",
-        request_uuid,
-        received_uuid_str
-    );
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Echoes each request's messages back and holds every request until `barrier` releases them
+/// together, so concurrent requests overlap in the frontend. Records each request's context id.
+struct ConcurrentEchoChatEngine {
+    barrier: tokio::sync::Barrier,
+    context_ids: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for ConcurrentEchoChatEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        self.context_ids.lock().unwrap().push(ctx.id().to_string());
+        self.barrier.wait().await;
+
+        let echo = serde_json::to_string(&request.inner.messages)?;
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let output = generator.create_choice(
+            0,
+            Some(echo),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+        );
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+            ctx,
+        ))
+    }
+}
+
+/// Two concurrent requests on each OpenAI-compatible route share client-supplied
+/// `x-dynamo-request-id` and `request-id` headers. Each must complete with its own output, and
+/// the engine must see distinct server-minted context ids rather than the client's id.
+#[tokio::test]
+async fn test_concurrent_requests_with_shared_client_request_id() {
+    use dynamo_runtime::pipeline::{ServiceBackend, ServiceFrontend, Source};
+
+    const MODEL: &str = "concurrent-echo-model";
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_responses_endpoints(true)
+        .enable_anthropic_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let engine = Arc::new(ConcurrentEchoChatEngine {
+        barrier: tokio::sync::Barrier::new(2),
+        context_ids: std::sync::Mutex::new(Vec::new()),
+    });
+    // Discovery-built pipelines start with a frontend source that matches responses to callers
+    // by request id; serve the engine through one so the test exercises that map.
+    let frontend = ServiceFrontend::<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >::new();
+    let pipeline = frontend
+        .link(ServiceBackend::from_engine(engine.clone()))
+        .unwrap()
+        .link_terminal(frontend)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    state
+        .manager()
+        .add_chat_completions_model(MODEL, card.mdcsum(), pipeline)
+        .unwrap();
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let client = reqwest::Client::new();
+    type RequestBody = fn(&str) -> serde_json::Value;
+    let routes: [(&str, RequestBody); 3] = [
+        ("/v1/chat/completions", |marker| {
+            serde_json::json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": marker}],
+            })
+        }),
+        (
+            "/v1/responses",
+            |marker| serde_json::json!({"model": MODEL, "input": marker}),
+        ),
+        ("/v1/messages", |marker| {
+            serde_json::json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": marker}],
+            })
+        }),
+    ];
+
+    for (path, body) in routes {
+        let send = |marker: &'static str| {
+            client
+                .post(format!("http://localhost:{port}{path}"))
+                .header("x-dynamo-request-id", &client_id)
+                .header("request-id", &client_id)
+                .json(&body(marker))
+                .send()
+        };
+        let (first, second) = timeout(
+            std::time::Duration::from_secs(10),
+            futures::future::join(send("alpha-marker"), send("bravo-marker")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path}: concurrent requests must not hang"));
+
+        for (response, own, other) in [
+            (first, "alpha-marker", "bravo-marker"),
+            (second, "bravo-marker", "alpha-marker"),
+        ] {
+            let response = response.unwrap();
+            let status = response.status();
+            let text = response.text().await.unwrap();
+            assert!(status.is_success(), "{path}: status {status}, body {text}");
+            assert!(text.contains(own), "{path}: missing own output: {text}");
+            assert!(
+                !text.contains(other),
+                "{path}: got the other request's output: {text}"
+            );
+        }
+
+        let context_ids = std::mem::take(&mut *engine.context_ids.lock().unwrap());
+        assert_eq!(context_ids.len(), 2, "{path}");
+        assert_ne!(
+            context_ids[0], context_ids[1],
+            "{path}: context ids must differ"
+        );
+        for context_id in &context_ids {
+            assert_ne!(
+                context_id, &client_id,
+                "{path}: client id became the context id"
+            );
+        }
+    }
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

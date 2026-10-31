@@ -21,7 +21,7 @@ async fn sidecar_signs_parent_context_affinity_without_replacing_child() {
             .unwrap(),
     );
     let proto = build_generate_request(
-        &req,
+        req,
         "child-request",
         "test-model",
         None,

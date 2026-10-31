@@ -571,15 +571,24 @@ impl WorkerLoadInput {
 
     /// The `LOAD` row for `worker`: its projection in `loads` when the host observed one,
     /// otherwise `unobserved()` flagged unavailable. Worker selection, the policy-class
-    /// queue, and offline replay all build rows here, so they read the same row for the
-    /// same worker by construction.
+    /// queue, and offline replay all build rows here or in [`Self::from_observed`], so they
+    /// read the same row for the same worker by construction.
     pub(crate) fn for_worker(
         loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         worker: WorkerWithDpRank,
         unobserved: impl FnOnce() -> WorkerLoadProjection,
     ) -> Self {
-        match loads.get(&worker) {
-            Some(&load) => Self::from_projection(load),
+        Self::from_observed(loads.get(&worker).copied(), unobserved)
+    }
+
+    /// The `LOAD` row for a rank's observed projection, or `unobserved()` flagged
+    /// unavailable when there is none.
+    pub(crate) fn from_observed(
+        load: Option<WorkerLoadProjection>,
+        unobserved: impl FnOnce() -> WorkerLoadProjection,
+    ) -> Self {
+        match load {
+            Some(load) => Self::from_projection(load),
             None => Self {
                 available: false,
                 ..Self::from_projection(unobserved())

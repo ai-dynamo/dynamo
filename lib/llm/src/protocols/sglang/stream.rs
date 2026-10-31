@@ -35,7 +35,10 @@ fn response(delta: Annotated<LLMEngineOutput>) -> Result<Option<(bool, Value)>, 
         Some(response) => Ok(Some((prefill, response))),
         // An older prefill worker sends none; joining nothing drops stale fields.
         None if prefill => Ok(Some((true, Value::Object(Default::default())))),
-        None => Err(DynamoError::msg("missing opaque SGLang response")),
+        None => Err(DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::BackendProtocol)
+            .message("missing opaque SGLang response")
+            .build()),
     }
 }
 
@@ -146,6 +149,10 @@ mod tests {
             .await;
 
         assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].as_ref().unwrap_err().class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol,
+        );
         assert!(
             result[0]
                 .as_ref()
