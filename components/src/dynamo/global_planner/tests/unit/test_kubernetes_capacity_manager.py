@@ -39,6 +39,23 @@ def _component(name, replicas, gpu=1, ctype=None, node_count=None):
     return component
 
 
+def _with_operator_gpu_status(components):
+    statuses = {}
+    for component in components:
+        main = component["podTemplate"]["spec"]["containers"][0]
+        gpu = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        status = {}
+        if gpu is not None:
+            total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+            status = {"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu}
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": components},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
+
+
 def _dgd_spec(
     prefill_replicas,
     decode_replicas,
@@ -47,27 +64,23 @@ def _dgd_spec(
     prefill_node_count=None,
 ):
     """A v1beta1 DGD spec with typed prefill and decode components."""
-    return {
-        "spec": {
-            "components": [
-                _component(
-                    "prefill-svc",
-                    prefill_replicas,
-                    gpu=prefill_gpu,
-                    ctype="prefill",
-                    node_count=prefill_node_count,
-                ),
-                _component(
-                    "decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"
-                ),
-            ]
-        }
-    }
+    return _with_operator_gpu_status(
+        [
+            _component(
+                "prefill-svc",
+                prefill_replicas,
+                gpu=prefill_gpu,
+                ctype="prefill",
+                node_count=prefill_node_count,
+            ),
+            _component("decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"),
+        ]
+    )
 
 
 def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
     """A v1beta1 DGD spec with a single generic worker component."""
-    return {"spec": {"components": [_component(name, replicas, gpu=gpu, ctype=ctype)]}}
+    return _with_operator_gpu_status([_component(name, replicas, gpu=gpu, ctype=ctype)])
 
 
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):

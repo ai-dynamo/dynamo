@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Requires Dynamo <= 1.6.x: later releases no longer ship KVBM.
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -28,7 +29,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode decode \
     --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
@@ -36,7 +37,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode decode \
     --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
 # two prefill workers with KVBM enabled
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
@@ -49,7 +50,7 @@ CUDA_VISIBLE_DEVICES=2 DYN_KVBM_CPU_CACHE_GB=20 \
     --enforce-eager \
     --disaggregation-mode prefill \
     --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
@@ -61,7 +62,7 @@ CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \
     --enforce-eager \
     --disaggregation-mode prefill \
     --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

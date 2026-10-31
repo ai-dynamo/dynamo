@@ -14,7 +14,7 @@ one or more sinks. For the capture and replay workflow, see
 | Variable | Default when enabled | Values | Description |
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
-| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool` | Comma-separated record types. Setting the variable enables only the listed types. |
+| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool`, `router_selection` | Comma-separated record types. Setting the variable enables only the listed types. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel`, `s3` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
@@ -33,6 +33,7 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional PULL endpoint for harness tool events. Configure it on only one process. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame topic filter. |
 | `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. Does not filter `agent_context.agent_headers` on `request_end` rows. |
+| `DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K` | `16` | Non-negative integer | Lowest-cost candidates kept per `router_selection` row. `0` keeps every scored candidate. The selected worker is always kept. |
 
 Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 `DYN_REQUEST_TRACE_JSONL_*` remain migration aliases. `DYN_AUDIT_*` variables are migration shims,
@@ -106,6 +107,27 @@ credential-bearing headers.
 Harness events enter through the optional ZMQ endpoint and are normalized into request trace rows
 before fan-out to the configured sinks.
 
+### `router_selection`
+
+Opt-in with `DYN_REQUEST_TRACE_RECORDS=request_end,router_selection`. The KV router emits one row
+per scheduler selection with the final per-candidate cost of every eligible worker the policy
+scored, so a routing decision can be audited without debug logging. Disaggregated serving emits one
+row per phase, distinguished by `worker_type`. The row is captured by the process that runs the
+router scheduler, published from the routing task after the scheduler answers, and never retained
+for the request lifetime. Only a process that initialized request tracing captures it; today that is
+the frontend, not a standalone Python router.
+
+Each candidate is a `[worker_id, dp_rank, cost]` triple, and candidates are sorted by ascending
+cost. By default each row keeps the 16 lowest-cost candidates plus the dispatched worker;
+`DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K` changes that count and `0` keeps every candidate.
+`candidate_count` is the number of workers scored before truncation. The dispatched worker is always
+among the candidates; locate it by joining the `request_end` row's worker id on `request_id`. Costs
+are in the policy's units (scheduler-tracked KV blocks for the builtin policy) at full precision.
+The record does not include the cost formula's inputs; custom policies own their formula, so the
+host only knows the final cost. For ad-hoc inspection without tracing,
+`DYN_LOG='info,dynamo_kv_router::scheduling::selector=trace'` logs the same per-candidate costs as
+`Scored worker candidate` lines, each stamped with `request_id`, `worker_type`, and `selected`.
+
 ## Record Schema
 
 All rows use `schema: dynamo.request.trace.v1` and an `event_type`. A context-free replay row always contains the replay hashes, KV block size, input length, and output length. It also includes request timing, token counts, KV-cache hit metrics, and worker information when the tracker has recorded them:
@@ -144,6 +166,26 @@ A payload row stores the client request under `payload.request`, the completed r
     "request": {"model": "my-model", "messages": []},
     "response": {"id": "chatcmpl-example", "choices": []},
     "payload_complete": true
+  }
+}
+```
+
+A router selection row lists each retained candidate as a `[worker_id, dp_rank, cost]` triple. This
+example, captured with `DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K=3`, kept the three lowest-cost
+candidates out of forty:
+
+```json
+{
+  "schema": "dynamo.request.trace.v1",
+  "event_type": "router_selection",
+  "event_time_unix_ms": 1777312800123,
+  "event_source": "dynamo",
+  "selection": {
+    "request_id": "dynamo-request-id",
+    "worker_type": "decode",
+    "pinned": false,
+    "candidate_count": 40,
+    "candidates": [[7, 0, 1.5], [9, 1, 1.5], [3, 0, 2.25]]
   }
 }
 ```

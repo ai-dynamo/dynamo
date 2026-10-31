@@ -895,10 +895,16 @@ class Connector:
         op = WritableOperation(conn, local_descriptors)
         return op
 
+    async def warmup(self) -> None:
+        """Create the shared NIXL agent before the first transfer.
+
+        Repeated calls reuse the same connection as transfer operations. Setup
+        errors propagate to the caller so startup can fail before serving traffic.
+        """
+        await self._create_connection()
+
     async def initialize(self) -> None:
-        """
-        Deprecated method.
-        """
+        """Deprecated no-op; use warmup() for eager NIXL agent creation."""
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Initialized {{ name: '{self._worker_id}' }} (This method is deprecated)."
         )
@@ -1809,25 +1815,8 @@ class Remote:
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
             )
-        if not (isinstance(nixl_metadata, bytes) or isinstance(nixl_metadata, str)):
-            raise TypeError("Argument `nixl_metadata` must be `bytes` or `str`.")
-        if len(nixl_metadata) == 0:
-            raise ValueError("Argument `nixl_metadata` cannot be empty.")
-
+        nixl_metadata = self.decode_metadata(nixl_metadata)
         self._connection = connection
-
-        # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
-        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
-        # representation of the NIXL metadata.
-        if isinstance(nixl_metadata, str):
-            if nixl_metadata.startswith("b64:"):
-                # Decode the b64-encoded string into bytes.
-                nixl_metadata = base64.b64decode(nixl_metadata[4:])
-            else:
-                # fallback for earlier versions of nixl connect
-                nixl_metadata = bytes.fromhex(nixl_metadata)
-            # Decompress the NIXL metadata.
-            nixl_metadata = zlib.decompress(nixl_metadata)
 
         # loadRemoteMD releases the GIL. An older Remote's finalizer must not
         # remove this metadata before the new reference has been counted.
@@ -1842,6 +1831,29 @@ class Remote:
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
+
+    @staticmethod
+    def decode_metadata(nixl_metadata: bytes | str) -> bytes:
+        """Decode agent metadata without registering a remote or starting a transfer."""
+        if not (isinstance(nixl_metadata, bytes) or isinstance(nixl_metadata, str)):
+            raise TypeError("Argument `nixl_metadata` must be `bytes` or `str`.")
+        if len(nixl_metadata) == 0:
+            raise ValueError("Argument `nixl_metadata` cannot be empty.")
+
+        # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
+        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
+        # representation of the NIXL metadata.
+        if isinstance(nixl_metadata, str):
+            if nixl_metadata.startswith("b64:"):
+                # Decode the b64-encoded string into bytes.
+                nixl_metadata = base64.b64decode(nixl_metadata[4:])
+            else:
+                # fallback for earlier versions of nixl connect
+                nixl_metadata = bytes.fromhex(nixl_metadata)
+            # Decompress the NIXL metadata.
+            nixl_metadata = zlib.decompress(nixl_metadata)
+
+        return nixl_metadata
 
     def __del__(self) -> None:
         self._release()

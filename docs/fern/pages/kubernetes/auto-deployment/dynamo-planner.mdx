@@ -117,7 +117,7 @@ The endpoint floors and `load_scaling_down_sensitivity` matter most because of h
 
 </Step>
 <Step title="Validate before you scale for real" id="validate-before-you-scale-for-real">
-Before letting a new configuration move GPUs, run it in **advisory mode**. The Planner observes traffic, computes recommended replica counts, logs them, and exports them as metrics — but never actually scales.
+Before letting a new configuration move GPUs, run it in **advisory mode**. The Planner observes traffic, computes recommended replica counts, logs them, and exports them as metrics — but never actually scales or otherwise changes the deployment.
 
 ```yaml
 spec:
@@ -131,6 +131,8 @@ spec:
 ```
 
 Watch the recommended counts against your actual traffic — `dynamo_planner_predicted_num_prefill_replicas` and `dynamo_planner_predicted_num_decode_replicas`, or the Replica Counts plot in the [diagnostics reports](../../developer-guide/knowledge-base/modular-components/planner/overview.md#html-diagnostics-reports), which overlays recommendations on actual replicas. Use advisory mode when validating new SLA targets, evaluating a config change, or confirming how the Planner would react to production traffic. Once the recommendations look right, drop `advisory: true` and let it scale.
+
+To replay a recorded trace through the same configuration offline, see [Simulate Planner Decisions with AISimulate](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx). With `advisory: true` the replay also keeps the replicas fixed and only reports the recommendations; set `advisory: false` in the replay to simulate the scaling.
 
 </Step>
 </Steps>

@@ -356,7 +356,7 @@ ruff format <touched_paths>
 ruff check --fix <touched_paths>
 ```
 
-Or use pre-commit (runs isort, black, flake8, ruff, and more):
+Or use pre-commit (runs isort, black, ruff, and more):
 
 ```bash
 pre-commit run --files <touched_files>
@@ -369,7 +369,6 @@ The repo's `.pre-commit-config.yaml` runs these Python hooks:
 
 - **isort** -- import sorting (`profile = "black"`, configured in `pyproject.toml`)
 - **black** -- code formatting
-- **flake8** -- style checks (`max-line-length=88`)
 - **ruff** -- fast linting with auto-fix
 - **codespell** -- spelling checks
 - **trailing-whitespace**, **end-of-file-fixer**, **check-yaml**, **check-json**, **check-toml**
