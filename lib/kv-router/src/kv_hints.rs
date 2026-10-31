@@ -3,10 +3,8 @@
 
 //! Typed KV-cache hints attached to selected backend requests.
 
-mod sources;
-
 pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
-pub use sources::{
+pub use dynamo_worker_selection::kv_transfer::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
     ResolvedTransferSource, WorkerKvTransferKeys,
 };
@@ -206,5 +204,154 @@ mod tests {
 
         assert_eq!(hint.actions[0].action_type, "kv.future_action");
         assert_eq!(serde_json::to_value(hint).unwrap(), value);
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use std::collections::HashMap;
+
+    use crate::protocols::WorkerWithDpRank;
+
+    use super::KvTransferCandidates;
+    use crate::protocols::ResidencyOwnerKeyExt;
+    use crate::protocols::{WorkerConfigLike, WorkerId};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, ResidencyOwner,
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+
+    struct Worker;
+
+    impl WorkerConfigLike for Worker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            2
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn kv_hint_transfer_metadata_for_dp_rank(
+            &self,
+            _dp_rank: u32,
+        ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+            Some(KvHintTransferWorkerMetadata {
+                worker_type: "prefill",
+                source_control_endpoint: Some("tcp://worker:23280"),
+            })
+        }
+    }
+
+    fn workers() -> HashMap<WorkerId, Worker> {
+        (7..=9).map(|worker_id| (worker_id, Worker)).collect()
+    }
+
+    fn candidates(sources: Vec<(KvTransferCandidateSource, usize)>) -> KvTransferCandidates {
+        KvTransferCandidates {
+            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+            owner_prefix_blocks: sources,
+            routing_snapshot: None,
+        }
+    }
+
+    fn source_for(
+        candidates: &KvTransferCandidates,
+        target: WorkerWithDpRank,
+        local_prefix_blocks: usize,
+    ) -> Option<(KvTransferCandidateSource, usize)> {
+        let workers = workers();
+        let target_keys = workers[&target.worker_id].kv_transfer_keys().target()?;
+        let scope = KvTransferScope::of([(target_keys, local_prefix_blocks)]);
+        KvTransferSourceSummary::new(
+            crate::kv_hints::resolve_transfer_sources(candidates, &workers, &scope),
+            scope,
+        )
+        .source_for(target, target_keys, local_prefix_blocks)
+        .map(|choice| (choice.source, choice.prefix_blocks))
+    }
+
+    #[test]
+    fn longest_prefix_beyond_the_local_one_wins() {
+        let target = WorkerWithDpRank::new(7, 0);
+        let other_rank = WorkerWithDpRank::new(7, 1);
+        let (eight, nine) = (WorkerWithDpRank::new(8, 0), WorkerWithDpRank::new(9, 0));
+        let candidates = candidates(vec![
+            (target.into(), 4),
+            (nine.into(), 3),
+            (eight.into(), 3),
+            (other_rank.into(), 2),
+            // Longer than the retained chain, so it could not be fetched.
+            (WorkerWithDpRank::new(9, 1).into(), 5),
+        ]);
+
+        // The target is never its own source; equal prefixes go to the lower source.
+        assert_eq!(source_for(&candidates, target, 0), Some((eight.into(), 3)));
+        assert_eq!(source_for(&candidates, target, 2), Some((eight.into(), 3)));
+        assert_eq!(source_for(&candidates, target, 3), None);
+        // Another DP rank of the same worker is a separate source.
+        let candidates = self::candidates(vec![(target.into(), 4), (other_rank.into(), 2)]);
+        assert_eq!(
+            source_for(&candidates, target, 0),
+            Some((other_rank.into(), 2))
+        );
+    }
+
+    #[test]
+    fn cache_owners_attached_to_the_target_are_skipped() {
+        let owner = |slot: u8| {
+            CacheOwnerId::new(
+                PoolId::new(
+                    IndexerDomainId::new(
+                        CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                        RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                    ),
+                    ClusterId::new(3),
+                ),
+                StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+            )
+        };
+        let key = |owner| ResidencyOwner::cache_owner(owner).compact_key();
+        let target = WorkerWithDpRank::new(7, 0);
+        let other = WorkerWithDpRank::new(8, 0);
+        let metadata = RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: HashMap::new(),
+        };
+        // The two longest sources both belong to the target.
+        let mut candidates = candidates(vec![
+            (KvTransferCandidateSource::CacheOwner(key(owner(4))), 4),
+            (KvTransferCandidateSource::CacheOwner(key(owner(5))), 3),
+            (other.into(), 2),
+        ]);
+        candidates.routing_snapshot = Some(Arc::new(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [
+                (owner(4), metadata.clone(), Some(target)),
+                (owner(5), metadata, Some(target)),
+            ],
+        )));
+
+        assert_eq!(source_for(&candidates, target, 0), Some((other.into(), 2)));
+        assert_eq!(
+            source_for(&candidates, other, 0),
+            Some((KvTransferCandidateSource::CacheOwner(key(owner(4))), 4))
+        );
     }
 }

@@ -11,7 +11,8 @@ use std::{cell::OnceCell, collections::HashMap};
 use std::cell::Cell;
 
 mod derive;
-mod policy;
+#[cfg(test)]
+mod policy_tests;
 #[cfg(any(test, feature = "bench"))]
 mod reference;
 
@@ -41,7 +42,7 @@ use crate::plugins::worker_selection::{
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-pub use policy::{
+pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
     SelectionFailure, WorkerSelectionPolicy,
 };

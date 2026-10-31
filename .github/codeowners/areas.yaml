@@ -68,6 +68,7 @@ areas:
   - lib/router/protocol/
   - lib/router/session-affinity/
   - lib/router/slot-tracker/
+  - lib/router/worker-selection/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
   - lib/llm/src/kv_router/indexer/

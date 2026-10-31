@@ -34,6 +34,7 @@ impl<'a> WorkerSelectionContext<'a> {
     /// expected output length, zero priority, no shared-cache hits, no tier matches, and
     /// prefill-load tracking off. The kernel sets what the request carries with the `with_*`
     /// methods; a test builds exactly the view it needs.
+    #[inline]
     pub fn new(isl_tokens: usize, block_size: u32) -> Self {
         Self {
             request_id: None,
@@ -53,11 +54,13 @@ impl<'a> WorkerSelectionContext<'a> {
         }
     }
 
+    #[inline]
     pub fn with_request_id(mut self, request_id: Option<&'a str>) -> Self {
         self.request_id = request_id;
         self
     }
 
+    #[inline]
     pub fn with_prefill_tracking(mut self, track_prefill_tokens: bool) -> Self {
         self.track_prefill_tokens = track_prefill_tokens;
         self
@@ -65,37 +68,44 @@ impl<'a> WorkerSelectionContext<'a> {
 
     /// The exact worker and rank the host imposes: an explicit pin or an eligible
     /// exclusive-affinity target.
+    #[inline]
     pub fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
         self.pinned_worker = pinned_worker;
         self
     }
 
+    #[inline]
     pub fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
         self.router_temperature_override = temperature;
         self
     }
 
+    #[inline]
     pub fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
         self.session_context = session_context;
         self
     }
 
+    #[inline]
     pub fn with_affinity_target(mut self, affinity_target: Option<WorkerAffinityTarget>) -> Self {
         self.affinity_target = affinity_target;
         self
     }
 
+    #[inline]
     pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
         self.expected_output_tokens = expected_output_tokens;
         self
     }
 
+    #[inline]
     pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
         self.priority_jump = priority_jump;
         self.strict_priority = strict_priority;
         self
     }
 
+    #[inline]
     pub fn with_shared_cache_hits(
         mut self,
         shared_cache_hits: Option<&'a SharedCacheHits>,
@@ -106,12 +116,14 @@ impl<'a> WorkerSelectionContext<'a> {
 
     /// Whether any rank reported per-tier overlap, so cache columns read device overlap
     /// from the tier blocks rather than the effective estimate.
+    #[inline]
     pub fn with_tier_matches(mut self, has_tier_matches: bool) -> Self {
         self.has_tier_matches = has_tier_matches;
         self
     }
 
     /// Request-wide cache facts shared by every candidate row.
+    #[inline]
     pub(crate) fn cache_snapshot(&self) -> CacheSnapshot<'a> {
         CacheSnapshot {
             shared_hits: self.shared_cache_hits,
@@ -120,6 +132,7 @@ impl<'a> WorkerSelectionContext<'a> {
     }
 
     /// The request id for tracked requests; `None` for query-only selections.
+    #[inline]
     pub fn request_id(&self) -> Option<&str> {
         self.request_id
     }
@@ -127,6 +140,7 @@ impl<'a> WorkerSelectionContext<'a> {
     /// The exact worker/rank imposed by the host for this selection, if any.
     /// Includes explicit pins and eligible exclusive-affinity targets. This is
     /// read-only routing metadata, not permission to change eligibility.
+    #[inline]
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker
     }
@@ -134,27 +148,32 @@ impl<'a> WorkerSelectionContext<'a> {
     /// Input sequence length in tokens, the same value classifiers read as
     /// `ClassifyRequest::isl_tokens`. No rounding or cache weighting is applied.
     /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
+    #[inline]
     pub fn isl_tokens(&self) -> usize {
         self.isl_tokens
     }
 
     /// Return the input size in KV blocks. Zero when
     /// [`isl_tokens`](Self::isl_tokens) is zero.
+    #[inline]
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }
 
     /// Return the number of tokens in one KV block.
+    #[inline]
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
 
     /// Return whether this request contributes to prefill-load tracking.
+    #[inline]
     pub fn tracks_prefill_tokens(&self) -> bool {
         self.track_prefill_tokens
     }
 
     /// Return the session metadata available to worker selection.
+    #[inline]
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.session_context
     }
@@ -163,32 +182,38 @@ impl<'a> WorkerSelectionContext<'a> {
     ///
     /// The default selector treats an eligible target as exclusive. Custom policies receive it as
     /// advisory context; it may be absent from their candidate set when unavailable or filtered.
+    #[inline]
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.affinity_target
     }
 
     /// Return the expected output length, if the request supplies one.
+    #[inline]
     pub fn expected_output_tokens(&self) -> Option<u32> {
         self.expected_output_tokens
     }
 
     /// Return the request's scheduler priority boost.
+    #[inline]
     pub fn priority_jump(&self) -> f64 {
         self.priority_jump
     }
 
     /// Return the request's strict integer priority.
+    #[inline]
     pub fn strict_priority(&self) -> u32 {
         self.strict_priority
     }
 
     /// Return the request-level router temperature override, if present.
+    #[inline]
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
     }
 
     /// Block positions the external shared cache holds for this request, when a shared
     /// cache is configured and answered.
+    #[inline]
     pub fn shared_cache_hits(&self) -> Option<&SharedCacheHits> {
         self.shared_cache_hits
     }

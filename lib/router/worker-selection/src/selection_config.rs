@@ -55,44 +55,44 @@ pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
+pub fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
     let Some(message) = overlap_score_credit_error_message(value) else {
         return Ok(());
     };
     Err(message.to_string())
 }
 
-pub(crate) fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
+pub fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
     if value.is_finite() && value >= 0.0 {
         return Ok(());
     }
     Err(format!("{field} must be finite and non-negative"))
 }
 
-pub(crate) fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+pub fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
     if value >= min && value <= max {
         return Ok(());
     }
     Err(format!("{field} must be between {min} and {max}"))
 }
 
-pub(crate) const fn default_overlap_score_credit_decay() -> f64 {
+pub const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
 
-pub(crate) const fn default_prefill_load_scale() -> f64 {
+pub const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
-pub(crate) const fn default_decode_active_request_weight() -> f64 {
+pub const fn default_decode_active_request_weight() -> f64 {
     0.0
 }
 
-pub(crate) const fn default_host_cache_hit_weight() -> f64 {
+pub const fn default_host_cache_hit_weight() -> f64 {
     0.75
 }
 
-pub(crate) const fn default_disk_cache_hit_weight() -> f64 {
+pub const fn default_disk_cache_hit_weight() -> f64 {
     0.25
 }
 

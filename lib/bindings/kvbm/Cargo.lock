@@ -2160,6 +2160,7 @@ dependencies = [
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-truthy",
+ "dynamo-worker-selection",
  "dynamo-zmq",
  "fastrand",
  "flume",
@@ -2615,6 +2616,21 @@ name = "dynamo-truthy"
 version = "1.7.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-worker-selection"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "crossbeam-queue",
+ "dynamo-router-protocol",
+ "fastrand",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

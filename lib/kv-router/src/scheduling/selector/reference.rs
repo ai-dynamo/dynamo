@@ -262,16 +262,16 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
         let overlap_credit_decay =
-            if context.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+            if context.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
                 let excess_active_prefill_blocks = load
                     .active_prefill_tokens
                     .saturating_sub(default_context.min_active_prefill_tokens)
                     as f64
-                    / context.block_size as f64;
+                    / context.block_size() as f64;
                 // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
                 // clamp so a worker at the load floor does not compute 0/0.
                 let normalized_prefill_load =
-                    excess_active_prefill_blocks / context.request_blocks.max(1) as f64;
+                    excess_active_prefill_blocks / context.request_blocks().max(1) as f64;
                 1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
             } else {
                 1.0
@@ -290,7 +290,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // conditional disagg leaves a positive overlap credit in place, prefer
         // cache-hot decode workers while still charging decode backlog.
         if self.worker_type == "decode"
-            && !context.track_prefill_tokens
+            && !context.tracks_prefill_tokens()
             && weights.overlap_score_credit > 0.0
         {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
@@ -316,7 +316,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
 
         // Keep reference-only arithmetic out of public worker-input rows, including
         // benchmark builds: their layout must match the production plugin's inputs.
-        let raw_prefill_tokens = if context.track_prefill_tokens {
+        let raw_prefill_tokens = if context.tracks_prefill_tokens() {
             if load.available {
                 let cached_tokens = cache.estimated_cached_tokens;
                 let uncached_tokens = context.isl_tokens().saturating_sub(cached_tokens);
@@ -327,7 +327,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         } else {
             0
         };
-        let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size as f64;
+        let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size() as f64;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
@@ -439,7 +439,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     }
 
     let temperature = context
-        .router_temperature_override
+        .router_temperature_override()
         .unwrap_or(scorer.kv_router_config.router_temperature);
     let get_score = |worker, config: &C| {
         let preferred_taint_multiplier = request

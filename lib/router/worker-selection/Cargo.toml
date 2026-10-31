@@ -1,0 +1,35 @@
+[package]
+name = "dynamo-worker-selection"
+description = "Candidate rows in, a pick out: the Dynamo router's worker selection stage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# The reference picker, for parity tests and benchmarks of the composed policy.
+bench = ["dynamo-router-protocol/bench", "dep:parking_lot"]
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = ["dynamo-router-protocol/testing", "dep:parking_lot"]
+
+[dependencies]
+dynamo-router-protocol = { workspace = true }
+async-trait = { workspace = true }
+crossbeam-queue = "0.3"
+fastrand = "2"
+parking_lot = { workspace = true, optional = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

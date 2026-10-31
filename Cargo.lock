@@ -2687,6 +2687,7 @@ dependencies = [
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-truthy",
+ "dynamo-worker-selection",
  "dynamo-zmq",
  "fastrand",
  "flume",
@@ -3487,6 +3488,23 @@ dependencies = [
  "tonic-health 0.14.6",
  "tracing",
  "vllm-proto",
+]
+
+[[package]]
+name = "dynamo-worker-selection"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "crossbeam-queue",
+ "dynamo-router-protocol",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

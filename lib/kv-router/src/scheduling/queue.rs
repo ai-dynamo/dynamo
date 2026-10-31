@@ -54,7 +54,7 @@ use crate::sequences::{
 };
 
 // The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
-pub use crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS;
+pub use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 

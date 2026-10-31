@@ -46,6 +46,7 @@ pub struct WorkerCandidate<'a> {
 
 impl<'a> WorkerCandidate<'a> {
     /// A single-worker view; `info` is called with row 0.
+    #[inline]
     pub(crate) fn new(
         data: &'a CandidateData,
         inputs: WorkerInputs,
@@ -62,17 +63,20 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// Worker identity is always available.
+    #[inline]
     pub fn worker(self) -> WorkerWithDpRank {
         self.data.worker
     }
 
     /// This worker's identity and advertised capacity. Always available, with no input group
     /// to declare; the host looks it up on each call.
+    #[inline]
     pub fn info(self) -> WorkerInfo {
         (self.info)(self.row as usize)
     }
 
     /// Read this worker's cache snapshot only when this component declared CACHE.
+    #[inline]
     pub fn cache(self) -> Option<WorkerCacheInput<'a>> {
         self.inputs
             .contains(WorkerInputs::CACHE)
@@ -83,6 +87,7 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// Read this worker's load snapshot only when this component declared LOAD.
+    #[inline]
     pub fn load(self) -> Option<&'a WorkerLoadInput> {
         self.inputs
             .contains(WorkerInputs::LOAD)
@@ -93,6 +98,7 @@ impl<'a> WorkerCandidate<'a> {
     /// KV_TRANSFER; filters and pickers do not receive it. None also means the
     /// host has no transfer data for this request: no worker in the partition
     /// consumes router hints, or the indexer cannot retain the matched block chain.
+    #[inline]
     pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
         if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
             self.data.transfer
@@ -103,6 +109,7 @@ impl<'a> WorkerCandidate<'a> {
 
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
     /// None means no preference was supplied, access was not requested, or the host pinned the worker.
+    #[inline]
     pub fn preferred_taint_multiplier(self) -> Option<f64> {
         if self.inputs.contains(WorkerInputs::PREFERRED_TAINT) {
             self.data.preferred_taint_multiplier
@@ -125,6 +132,7 @@ pub struct WorkerCandidates<'a> {
 }
 
 impl<'a> WorkerCandidates<'a> {
+    #[inline]
     pub(crate) fn new(
         rows: &'a [CandidateData],
         inputs: WorkerInputs,
@@ -140,6 +148,7 @@ impl<'a> WorkerCandidates<'a> {
         }
     }
 
+    #[inline]
     fn candidate(self, row: usize, data: &'a CandidateData) -> WorkerCandidate<'a> {
         WorkerCandidate {
             data,
@@ -151,21 +160,25 @@ impl<'a> WorkerCandidates<'a> {
     }
 
     /// Number of surviving workers, equal to the scorer's cost-buffer length.
+    #[inline]
     pub fn len(self) -> usize {
         self.rows.len()
     }
 
     /// Whether the batch contains no workers.
+    #[inline]
     pub fn is_empty(self) -> bool {
         self.rows.is_empty()
     }
 
     /// Borrow one row with this scorer's input permissions, or None for an out-of-range index.
+    #[inline]
     pub fn get(self, row: usize) -> Option<WorkerCandidate<'a>> {
         self.rows.get(row).map(|data| self.candidate(row, data))
     }
 
     /// Iterate over the surviving workers without copying their data.
+    #[inline]
     pub fn iter(
         self,
     ) -> impl ExactSizeIterator<Item = WorkerCandidate<'a>> + DoubleEndedIterator + Clone {
@@ -201,13 +214,15 @@ impl WorkerInputs {
     pub const OCCUPANCY: Self = Self(1 << 5);
     /// Request the KV prefix each worker could fetch from another worker or cache.
     pub const KV_TRANSFER: Self = Self(1 << 6);
-    #[cfg(any(test, feature = "bench"))]
-    pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
+    /// Every optional column but the fetch column, which only scorers may declare.
+    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
+    #[inline]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
+    #[inline]
     pub(crate) fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
@@ -216,6 +231,7 @@ impl WorkerInputs {
 impl BitOr for WorkerInputs {
     type Output = Self;
 
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }
@@ -239,6 +255,7 @@ pub struct WorkerInputRows {
 }
 
 impl WorkerInputRows {
+    #[inline]
     pub fn new(
         inputs: WorkerInputs,
         rows: Vec<CandidateData>,
@@ -260,6 +277,7 @@ impl WorkerInputRows {
     }
 
     /// Rows for a reader that declared no inputs.
+    #[inline]
     pub fn empty() -> Self {
         Self {
             inputs: WorkerInputs::NONE,
@@ -287,6 +305,7 @@ impl WorkerInputRows {
 }
 
 impl std::fmt::Debug for WorkerInputRows {
+    #[inline]
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WorkerInputRows")
@@ -323,16 +342,19 @@ pub struct WorkerCacheInputs<'a> {
 
 impl<'a> WorkerCacheInputs<'a> {
     /// Number of cache rows, equal to the picker candidate count.
+    #[inline]
     pub fn len(self) -> usize {
         self.rows.len()
     }
 
     /// Whether there are no cache rows.
+    #[inline]
     pub fn is_empty(self) -> bool {
         self.rows.is_empty()
     }
 
     /// Borrow one cache row, or None for an out-of-range index.
+    #[inline]
     pub fn get(self, row: usize) -> Option<WorkerCacheInput<'a>> {
         self.rows.get(row).map(|data| WorkerCacheInput {
             data,
@@ -341,6 +363,7 @@ impl<'a> WorkerCacheInputs<'a> {
     }
 
     /// Iterate over cache rows without copying their data.
+    #[inline]
     pub fn iter(
         self,
     ) -> impl ExactSizeIterator<Item = WorkerCacheInput<'a>> + DoubleEndedIterator + Clone {
@@ -371,7 +394,7 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<CandidateData>() == 128);
 
-pub use dynamo_router_protocol::load::{DEFAULT_MAX_BATCHED_TOKENS, WorkerCapacity};
+pub use dynamo_router_protocol::load::WorkerCapacity;
 
 /// Static facts about one worker rank: its identity and the capacity its runtime config
 /// advertises. Every component can read it without declaring an input group. It changes
@@ -383,16 +406,19 @@ pub struct WorkerInfo {
 }
 
 impl WorkerInfo {
+    #[inline]
     pub fn new(worker: WorkerWithDpRank, capacity: WorkerCapacity) -> Self {
         Self { worker, capacity }
     }
 
     /// Worker ID and data-parallel rank.
+    #[inline]
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
     }
 
     /// Prefill tokens the rank batches per engine step, when reported.
+    #[inline]
     pub fn max_num_batched_tokens(&self) -> Option<u64> {
         self.capacity.max_num_batched_tokens()
     }
@@ -400,11 +426,13 @@ impl WorkerInfo {
     /// Total KV blocks the worker advertises for this rank, when reported: capacity, not free
     /// blocks. Some adapters derive it from aggregate data (vLLM data parallelism publishes
     /// the process total divided by the rank count), so treat it as approximate.
+    #[inline]
     pub fn total_kv_blocks(&self) -> Option<u64> {
         self.capacity.total_kv_blocks()
     }
 
     /// Both advertised values, as a fullness check takes them.
+    #[inline]
     pub fn capacity(&self) -> WorkerCapacity {
         self.capacity
     }
@@ -428,6 +456,7 @@ pub struct WorkerInputView<'a> {
 }
 
 impl CandidateData {
+    #[inline]
     pub(crate) fn with_inputs_from(&self, additional: &Self, inputs: WorkerInputs) -> Self {
         debug_assert_eq!(self.worker, additional.worker);
         Self {
@@ -470,17 +499,20 @@ impl CandidateData {
 
 impl ScoredWorkerCandidate {
     /// Return this candidate's worker ID and data-parallel rank.
+    #[inline]
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
     }
 
     /// Return the sum of all scorer contributions for this candidate.
+    #[inline]
     pub fn cost(&self) -> f64 {
         self.cost
     }
 
     /// Return the optional cost multiplier from preferred routing constraints when the picker
     /// requested [`WorkerInputs::PREFERRED_TAINT`].
+    #[inline]
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
     }
@@ -490,6 +522,7 @@ impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
     /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    #[inline]
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
     }
@@ -497,6 +530,7 @@ impl<'a> WorkerCacheInput<'a> {
     /// Whether the request snapshot contains any tier-specific matches before worker filtering.
     /// False means only accounting estimates (or no cache data) were supplied. This describes
     /// observed matches, not worker cache capacity or whether a particular worker has a match.
+    #[inline]
     pub fn has_tier_matches(self) -> bool {
         self.snapshot.has_tier_matches
     }
@@ -505,6 +539,7 @@ impl<'a> WorkerCacheInput<'a> {
     /// Lower-tier matches use the host's cache weights. Missing estimates are zero;
     /// neither value is clamped to prompt length. This is the current lookup snapshot,
     /// not a count of physically resident GPU tokens. Policy scores do not alter it.
+    #[inline]
     pub fn accounting_cache_estimate(&self) -> (f64, usize) {
         (
             self.data.effective_overlap_blocks,
@@ -513,26 +548,31 @@ impl<'a> WorkerCacheInput<'a> {
     }
 
     /// Return device-resident prefix overlap in KV blocks.
+    #[inline]
     pub fn device_overlap_blocks(&self) -> f64 {
         self.data.device_overlap_blocks
     }
 
     /// Return host-pinned prefix overlap in KV blocks.
+    #[inline]
     pub fn host_overlap_blocks(&self) -> f64 {
         self.data.host_overlap_blocks
     }
 
     /// Return disk prefix overlap in KV blocks.
+    #[inline]
     pub fn disk_overlap_blocks(&self) -> f64 {
         self.data.disk_overlap_blocks
     }
 }
 
 impl dynamo_router_protocol::load::RankLoad for WorkerLoadInput {
+    #[inline]
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
 
+    #[inline]
     fn active_decode_blocks(&self) -> usize {
         self.active_decode_blocks
     }
@@ -541,11 +581,13 @@ impl dynamo_router_protocol::load::RankLoad for WorkerLoadInput {
 impl WorkerLoadInput {
     /// Whether the host supplied a load projection for this worker in this selection.
     /// False distinguishes a missing observation from an observed idle worker.
+    #[inline]
     pub fn is_available(&self) -> bool {
         self.available
     }
 
     /// Return the tokens active in this worker's prefill stage.
+    #[inline]
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
@@ -555,17 +597,20 @@ impl WorkerLoadInput {
     /// Counts each request's prompt blocks, plus the blocks generation adds only when the
     /// router runs with `--router-track-output-blocks` (off by default). Zero when the router
     /// runs with `--no-router-track-active-blocks`, as the prefill KV router always does.
+    #[inline]
     pub fn active_decode_blocks(&self) -> usize {
         self.active_decode_blocks
     }
 
     /// Return the projected active decode footprint in KV blocks, including the incoming
     /// request's blocks not already active on this worker.
+    #[inline]
     pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
     }
 
     /// Return this worker's active request count.
+    #[inline]
     pub fn active_requests(&self) -> usize {
         self.active_requests
     }
@@ -583,6 +628,7 @@ impl WorkerTransferInput {
     /// (`preferred` enforcement falls back to another island). Booking this
     /// worker attaches a fetch hint for that source. Fetches are best effort:
     /// the source may no longer hold the blocks when the request runs.
+    #[inline]
     pub fn source_prefix_blocks(&self) -> Option<u32> {
         self.source_prefix_blocks
     }
@@ -590,22 +636,26 @@ impl WorkerTransferInput {
 
 impl<'a> WorkerInputView<'a> {
     /// Return the eligible candidates and their total costs.
+    #[inline]
     pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
         self.candidates
     }
 
     /// Return index-aligned KV-cache inputs when the picker requested them.
+    #[inline]
     pub fn cache(self) -> Option<WorkerCacheInputs<'a>> {
         self.cache
     }
 
     /// Return index-aligned active-load inputs when the picker requested them.
+    #[inline]
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
     }
 
     /// Return static info for the candidate at `row`, or None for an out-of-range row.
     /// Always available, with no input group to declare; the host looks it up on each call.
+    #[inline]
     pub fn info(self, row: usize) -> Option<WorkerInfo> {
         (row < self.candidates.len()).then(|| (self.info)(row))
     }
