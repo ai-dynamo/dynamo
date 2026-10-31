@@ -49,7 +49,8 @@ pub struct GrpcTransportArgs {
     )]
     pub grpc_retry_interval_secs: u64,
 
-    /// Maximum duration for each sidecar gRPC startup phase.
+    /// Maximum duration of sidecar gRPC startup. The vLLM sidecar applies it once, from
+    /// metadata bootstrap through registration; other sidecars apply it to each startup phase.
     #[arg(
         long = "grpc-startup-deadline-secs",
         env = "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
