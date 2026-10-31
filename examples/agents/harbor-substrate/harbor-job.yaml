@@ -23,12 +23,19 @@ agents:
     kwargs:
       version: "0.72.1"
       thinking: "off"
-      preinstalled: true
     env:
       DYNAMO_BASE_URL: ${MODEL_BASE_URL}
+      # Blank means "use the context window the endpoint advertises".
       DYNAMO_CONTEXT_WINDOW: "${MODEL_CONTEXT_WINDOW}"
       DYNAMO_MAX_TOKENS: "${MODEL_MAX_TOKENS}"
       DYN_AGENT_SESSION_FINAL: "${DYN_AGENT_SESSION_FINAL}"
+verifier:
+  # The prepared image carries the build wheels and the grader's packages, so
+  # the unchanged test script runs without registry access.
+  env:
+    UV_OFFLINE: "1"
+    PIP_NO_INDEX: "1"
+    PIP_FIND_LINKS: /opt/wheels
 environment:
   import_path: substrate_environment:SubstrateEnvironment
   delete: true

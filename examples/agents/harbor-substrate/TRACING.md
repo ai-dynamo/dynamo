@@ -49,8 +49,16 @@ kubectl --context "$KUBE_CONTEXT" apply -f .local/tool-trace-service.yaml
 
 Only the public certificate and client configuration go into actors. The
 private key stays in the frontend Secret. The client verifies the certificate
-chain and hostname. Use your normal certificate management for a longer-lived
-installation.
+chain and hostname.
+
+> [!NOTE]
+> This hand-made certificate is a tutorial shortcut, not a production practice.
+> It expires in seven days and nothing rotates it. For a lasting installation,
+> issue the sidecar's certificate with cert-manager or with Substrate's
+> `servicedns.podcert.ate.dev/identity` signer, and give actors the CA bundle
+> instead of the leaf certificate. The TLS hop exists only because Pi publishes
+> tool events over ZMQ, which the egress gateway cannot authorize. An HTTP
+> transport would need neither stunnel nor the certificate.
 
 ## Add capture to the recipe frontend
 

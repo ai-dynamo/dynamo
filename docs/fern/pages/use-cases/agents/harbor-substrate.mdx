@@ -103,8 +103,9 @@ that node. The model server can run on other nodes.
 For self-hosted inference, use the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx).
 Select the recipe for your hardware and complete its smoke test. Record its
 base URL and exact served model ID in `MODEL_BASE_URL` and `SERVED_MODEL`.
-Set `DYN_AGENT_SESSION_FINAL=1`. This tutorial adds tracing to the frontend later;
-it does not change the recipe's engine or GPU configuration.
+Set `DYN_AGENT_SESSION_FINAL=1` and leave `MODEL_CONTEXT_WINDOW` empty. This
+tutorial adds tracing to the frontend later; it does not change the recipe's
+engine or GPU configuration.
 
 For an external service, set `DYN_AGENT_SESSION_FINAL=0` and use its HTTPS base
 URL, including the API prefix. No GPU is required in the sandbox cluster.
@@ -115,11 +116,13 @@ The pinned provider requires:
   `max_tokens`, and streaming usage support.
 - A model context window and output limit that you can configure explicitly.
 
-Set `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_TOKENS` to limits accepted by the
-endpoint. The supplied patch makes those limits explicit when model discovery
-does not advertise them. A provider with a different protocol needs its own Pi
-provider configuration. An OpenAI-compatible label alone is not a compatibility
-check.
+Set `MODEL_MAX_TOKENS` to the output cap you want on every request. Set
+`MODEL_CONTEXT_WINDOW` only for an endpoint that does not advertise its limit.
+Dynamo lists the engine's serving limit as `context_window` in `GET /v1/models`,
+and the provider patch reads it. The provider uses the explicit variable first,
+then the advertised value, then a default of 128,000 tokens. A provider with a
+different protocol needs its own Pi provider configuration. An OpenAI-compatible
+label alone is not a compatibility check.
 
 External jobs disable Dynamo's session-final control requests. Harbor
 results and Substrate metrics remain available. Dynamo's server-side
@@ -180,7 +183,7 @@ Fetch the pinned Pi integration and task dataset:
 ```bash
 git clone https://github.com/ai-dynamo/agent-plugins deps/agent-plugins
 git -C deps/agent-plugins checkout 223a0b8823610d042e7479bfff9b93eeac4a23ec
-for patch in pi-context-window pi-model-limits pi-tool-trace-tls pi-preinstalled; do
+for patch in pi-provider-limits pi-harbor-adapter; do
 	git -C deps/agent-plugins apply "$EXAMPLE_DIR/$patch.patch"
 done
 export PI_PLUGIN_DIR="$EXAMPLE_DIR/deps/agent-plugins/pi-plugin"
@@ -191,9 +194,14 @@ export DATASET_DIR="$EXAMPLE_DIR/deps/harbor-datasets/datasets/swebench-verified
 export TASK=astropy__astropy-12907
 ```
 
-The patches preserve served context limits, accept explicit model limits,
-and support the prepared image and optional TLS tool-event transport. The image
-contains Pi 0.72.1 and its compiled provider.
+The provider patch applies the model limits described above. The adapter patch
+detects the prepared runtime, starts the optional TLS tool-event transport, and
+otherwise falls back to the upstream installation, which needs registry egress.
+The image contains Pi 0.72.1 and its compiled provider. It also holds the
+repository's build requirements as wheels and the grader's packages in the uv
+cache, so neither the agent nor the verifier needs registry access. Those two
+steps read the repository's `pyproject.toml`, so they work for other tasks
+without changes.
 
 Build the first task image:
 
@@ -305,10 +313,42 @@ kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/egress.yaml harbor-runner
 ```
 
 This is a Substrate egress policy, not a Kubernetes NetworkPolicy. The adapter
-applies it separately to each actor. The supplied dependency hosts allow the
-original verifier to install packages. Review network requirements for each
-new task. Public source access can also let an agent retrieve an existing
-solution; a demonstration with that access is not an unaided accuracy result.
+applies it separately to each actor. The policy allows only the model endpoint.
+Inside the actor, any other name resolves to NXDOMAIN, so a command that reaches
+for the internet fails within a second with a clear error. The prepared image
+carries what the verifier needs, and the Harbor job tells pip and uv to work
+offline.
+
+### Allow more egress
+
+Add a rule only when a task needs one. Each rule names hosts and ports, and the
+gateway decides by protocol:
+
+```yaml
+rules:
+  - http: # cleartext HTTP, authorized per request
+      hostnames: [mirror.example.internal]
+      ports:
+        numbers: [80]
+  - tlsPassthrough: # TLS forwarded by server name, not inspected
+      hostnames: [pypi.org, files.pythonhosted.org]
+      ports:
+        numbers: [443]
+  - https: # TLS intercepted by the gateway
+      hostnames: [api.example.com]
+      ports:
+        numbers: [443]
+```
+
+An `https` rule requires the actor to trust the gateway's interception CA. The
+Substrate guide on
+[MITM egress interception](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-trust-bundle.md)
+shows the `systemInfo` volume that mounts it. Raw TCP is not supported, which is
+why the optional tool-event transport wraps its stream in TLS.
+
+Opening source hosting changes what a pass means. In an earlier batch with
+GitHub reachable, most passing trials had copied the upstream fix. Keep the
+default policy for results you intend to compare.
 
 ## Configure the task template and Harbor job
 
@@ -349,7 +389,11 @@ agents:
     kwargs:
       version: "0.72.1"
       thinking: "off"
-      preinstalled: true
+verifier:
+  env:
+    UV_OFFLINE: "1"
+    PIP_NO_INDEX: "1"
+    PIP_FIND_LINKS: /opt/wheels
 environment:
   import_path: substrate_environment:SubstrateEnvironment
   delete: true
@@ -361,9 +405,13 @@ tasks:
 ```
 
 This excerpt shows the selection fields. Keep the endpoint, environment
-variables, and CLI settings from the complete `harbor-job.yaml`.
-`preinstalled` checks the Pi runtime baked into the image instead of installing
-it for every trial. `delete: true` removes the actor after result collection.
+variables, and CLI settings from the complete `harbor-job.yaml`. The adapter
+reads `/opt/pi-runtime.json` from the image and uses the baked Pi when its
+version matches `version`. Without that file it installs Pi, which needs
+registry egress and fails under the default policy. The verifier variables point
+pip and uv at the wheels and cache in the image, so the unchanged test script
+runs without a registry. `delete: true` removes the actor after result
+collection.
 The task directory name must match a key in `template_map`, and its value must
 name the template built for that task. Set `DYN_AGENT_SESSION_FINAL` to `"0"`
 for an external API. All values under `agents[].env` are strings.
@@ -457,6 +505,39 @@ A prepared image avoids repeated package installation. Prewarming caches its
 layers on the selected node. When adding nodes, repeat these checks with
 placement constrained to each eligible node. A warm image on one worker does
 not establish warmth on other workers.
+
+### Check the verifier offline with the oracle
+
+Harbor's oracle agent applies the task's reference patch instead of calling a
+model, then the verifier runs as usual. Under the default egress policy, a
+reward of 1 proves that the image and the job carry everything the verifier
+needs. Copy the job on the workstation:
+
+```bash
+cp .local/harbor-job.yaml .local/oracle-job.yaml
+```
+
+In `oracle-job.yaml`, set `job_name: swe-oracle` and replace the `agents` list
+with the built-in agent:
+
+```yaml
+agents:
+  - name: oracle
+```
+
+Upload and run it, then read the reward:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/oracle-job.yaml harbor-runner:/work/oracle-job.yaml
+kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+  harbor run --config /work/oracle-job.yaml -y
+kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+  sh -c 'cat /work/jobs/swe-oracle/*/verifier/reward.txt'
+```
+
+A reward of 0 here means the image or the policy is incomplete, not that the
+model failed. Read `verifier/test-stdout.txt` in the trial directory for the
+command that could not run. Repeat this check for every new task image.
 
 ### Optionally restore from a golden snapshot
 
@@ -642,7 +723,8 @@ trace additions using the saved pre-change manifest. Stop the local viewer.
 ## Validation scope
 
 The CLI checks above verify guest startup, the prepared runtime, and actor
-isolation. The first Harbor trial checks model access, tool execution, result
+isolation. The oracle job checks the verifier and the egress policy without a
+model. The first Harbor trial checks model access, tool execution, result
 collection, and verification together.
 
 After changing a dependency pin, endpoint, image, or cluster configuration,

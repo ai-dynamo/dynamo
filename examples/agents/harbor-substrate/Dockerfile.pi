@@ -34,6 +34,27 @@ RUN source "$NVM_DIR/nvm.sh" && cd /root/pi-dynamo-provider && npm ci && npm run
 RUN curl -fsSL https://github.com/astral-sh/uv/releases/download/0.7.13/uv-x86_64-unknown-linux-gnu.tar.gz \
     | tar -xz --strip-components=1 -C /usr/local/bin uv-x86_64-unknown-linux-gnu/uv \
     && mkdir -p /logs/agent /logs/verifier /logs/artifacts /installed-agent
+# Verifier dependencies, so the unchanged test script needs no registry access:
+# the repository's build requirements as wheels, and the SWE-bench grader's
+# packages in the uv cache. The Harbor job sets PIP_NO_INDEX, PIP_FIND_LINKS,
+# and UV_OFFLINE for the verifier.
+RUN source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed \
+    && printf '%s\n' \
+        'import pathlib' \
+        'try:' \
+        '    import tomllib' \
+        'except ModuleNotFoundError:' \
+        '    from pip._vendor import tomli as tomllib' \
+        'path = pathlib.Path("pyproject.toml")' \
+        'data = tomllib.loads(path.read_text()) if path.exists() else {}' \
+        'print("\n".join(data.get("build-system", {}).get("requires", ["setuptools>=40.8.0", "wheel"])))' \
+        | python - > /tmp/build-requires.txt \
+    && mkdir -p /opt/wheels && pip download -q --dest /opt/wheels -r /tmp/build-requires.txt \
+    && rm /tmp/build-requires.txt
+RUN printf '%s\n' '# /// script' '# requires-python = ">=3.11"' \
+        '# dependencies = ["swebench==4.0.3", "datasets==2.16.1", "fastcore<1.11"]' '# ///' > /tmp/grader-seed.py \
+    && (uv python find '>=3.11' >/dev/null 2>&1 || uv python install 3.11) \
+    && uv run /tmp/grader-seed.py && rm /tmp/grader-seed.py
 # Keep login shells cheap: retain task Conda activation but do not auto-load NVM.
 RUN source "$NVM_DIR/nvm.sh" \
     && for binary in node npm npx pi; do ln -s "$NVM_BIN/$binary" "/usr/local/bin/$binary"; done \

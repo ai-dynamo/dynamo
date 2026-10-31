@@ -15,13 +15,13 @@
 
 # A Substrate policy, applied to each actor by the environment adapter.
 # Render MODEL_HOST and MODEL_PORT for the endpoint chosen in the tutorial.
+#
+# Only the model endpoint is reachable. The prepared image carries everything
+# the agent and the verifier need, and any other name resolves to NXDOMAIN
+# inside the actor. Read "Allow more egress" in the tutorial before adding rules.
 rules:
   - ${MODEL_EGRESS_PROTOCOL}:
       hostnames: ["${MODEL_HOST}"]
       ports:
         numbers:
           - ${MODEL_PORT}
-  - tlsPassthrough:
-      hostnames: [pypi.org, files.pythonhosted.org, astral.sh, github.com, "*.githubusercontent.com"]
-      ports:
-        numbers: [443]
