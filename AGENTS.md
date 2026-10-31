@@ -22,6 +22,44 @@ SPDX-License-Identifier: Apache-2.0
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
+## Agent Instruction Files
+
+- `AGENTS.md` is the canonical and only source of agent instructions at every
+  repository scope.
+- Every `AGENTS.md` must have a sibling `CLAUDE.md` containing exactly
+  `@AGENTS.md` so Claude loads the same instructions.
+- Do not put independent instructions in `CLAUDE.md`, and do not make
+  `AGENTS.md` a symlink to `CLAUDE.md`.
+- Add, move, or remove each `AGENTS.md` and `CLAUDE.md` pair together.
+
+## Component Guides
+
+This file is the whole-repository view. Each major tier carries its own agent
+guide with the crate or package map and the rules that are local to it, and many
+individual crates and modules nest a further one inside that. Read the guide for
+the tier you are working in rather than inferring its layout from here:
+
+| Tier | Guide |
+|------|-------|
+| Rust workspace | [`lib/AGENTS.md`](lib/AGENTS.md), and [`lib/runtime/AGENTS.md`](lib/runtime/AGENTS.md) for the runtime crate |
+| Python components | [`components/src/dynamo/AGENTS.md`](components/src/dynamo/AGENTS.md) |
+| Kubernetes | [`deploy/AGENTS.md`](deploy/AGENTS.md), and [`deploy/operator/AGENTS.md`](deploy/operator/AGENTS.md) for the operator |
+| Docs, examples, recipes | [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md), [`recipes/AGENTS.md`](recipes/AGENTS.md) |
+
+Follow the [Agent Instruction Files](#agent-instruction-files) convention at each
+scope. When a nested guide and a broader one both apply, the nested one wins.
+
+## Concepts
+
+The architecture is documented once, under
+[`docs/fern/pages/developer-guide/knowledge-base/`](docs/fern/pages/developer-guide/knowledge-base/).
+Read it there rather than reconstructing it from source:
+
+- [Architecture](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md) — request flow and the runtime/namespace/component/endpoint model
+- [Disaggregated serving](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) — splitting prefill from decode
+- [Routing concepts](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md) — KV-aware routing
+- [KVBM configuration reference](docs/fern/pages/reference/components/kvbm-configuration.mdx) — multi-tier KV cache management
+
 ## Ecosystem
 
 Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
