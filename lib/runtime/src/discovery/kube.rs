@@ -415,9 +415,16 @@ impl Discovery for KubeDiscoveryClient {
 
         // Before the initial sync, list_state is empty whatever the cluster holds.
         self.await_daemon_ready(None).await?;
-        let state = self.list_state.read().await;
-        let instances: Vec<DiscoveryInstance> =
-            state.values().flat_map(|m| m.filter(&query)).collect();
+        // One `Arc` per worker, so the lock is released before the filter walks every card.
+        let snapshot = self.list_state.read().await.clone();
+        // Matching and cloning cards across a large cluster takes milliseconds; the periodic
+        // model reconciliation issues this on every tick, so it stays off the runtime workers.
+        let (query, instances) = tokio::task::spawn_blocking(move || {
+            let instances: Vec<DiscoveryInstance> =
+                snapshot.values().flat_map(|m| m.filter(&query)).collect();
+            (query, instances)
+        })
+        .await?;
 
         tracing::info!(
             "KubeDiscoveryClient::list returning {} instances for query={:?}",
