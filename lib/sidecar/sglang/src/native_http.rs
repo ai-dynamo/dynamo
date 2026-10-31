@@ -641,13 +641,26 @@ fn decode_terminal(meta: &Value, finish: &Value) -> LLMEngineOutput {
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
+    let details = error_chain(&error);
     if error.is_timeout() {
-        client::connection_timeout(format!("SGLang /generate HTTP request timed out: {error}"))
+        client::connection_timeout(format!(
+            "SGLang /generate HTTP request timed out: {details}"
+        ))
     } else if error.is_connect() {
-        client::cannot_connect(format!("could not connect to SGLang /generate: {error}"))
+        client::cannot_connect(format!("could not connect to SGLang /generate: {details}"))
     } else {
-        client::protocol_error(format!("SGLang /generate HTTP request failed: {error}"))
+        client::protocol_error(format!("SGLang /generate HTTP request failed: {details}"))
     }
+}
+
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut details = vec![error.to_string()];
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        details.push(error.to_string());
+        cause = error.source();
+    }
+    details.join(": ")
 }
 
 fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
@@ -672,7 +685,7 @@ fn response_error(status: StatusCode, detail: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{error::Error, time::Duration};
 
     use dynamo_backend_common::engine::RoutingHints;
     use dynamo_backend_common::{
@@ -691,11 +704,31 @@ mod tests {
 
     use super::{
         NativeHttp, NativeRequest, authentication_error, build_http_client, output, request,
-        response_error, response_has_output,
+        request_error, response_error, response_has_output,
     };
     use crate::client::Discovery;
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
+
+    #[tokio::test]
+    async fn request_error_diagnostics_include_the_reqwest_source() {
+        let error = reqwest::Client::new()
+            .get("http://[")
+            .send()
+            .await
+            .expect_err("an invalid URL must fail before connecting");
+        let cause = error
+            .source()
+            .expect("reqwest should expose the underlying URL parse error")
+            .to_string();
+
+        let diagnostic = request_error(error).to_string();
+
+        assert!(
+            diagnostic.contains(&cause),
+            "request diagnostic {diagnostic:?} omitted reqwest cause {cause:?}"
+        );
+    }
 
     fn canonical_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
