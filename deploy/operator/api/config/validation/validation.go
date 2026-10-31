@@ -39,6 +39,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		validateMPI(&config.MPI, field.NewPath("mpi")),
 		validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure")),
 		validateDiscovery(&config.Discovery, field.NewPath("discovery")),
+		validateMultiCluster(&config.MultiCluster, field.NewPath("multiCluster")),
 		validateRBAC(config),
 		validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators")),
 		validateIngress(&config.Ingress, field.NewPath("ingress")),
@@ -207,6 +208,18 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 	}
 
 	return allErrs
+}
+
+func validateMultiCluster(multiCluster *configv1alpha1.MultiClusterConfiguration, fldPath *field.Path) field.ErrorList {
+	switch multiCluster.MCSImplementation {
+	case configv1alpha1.MCSImplementationNone, configv1alpha1.MCSImplementationStandard, configv1alpha1.MCSImplementationKarmada:
+		return nil
+	}
+	return field.ErrorList{field.NotSupported(
+		fldPath.Child("mcsImplementation"),
+		multiCluster.MCSImplementation,
+		[]string{"", "mcs", "karmada"},
+	)}
 }
 
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.

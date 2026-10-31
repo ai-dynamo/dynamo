@@ -182,6 +182,11 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
+    {{- $mcsImplementation := (.Values.dynamo.multiCluster | default dict).mcsImplementation | default "" }}
+    {{- if $mcsImplementation }}
+    multiCluster:
+      mcsImplementation: {{ $mcsImplementation | quote }}
+    {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:
       plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner

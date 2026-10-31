@@ -256,7 +256,7 @@ func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) 
 			result.Eventf(corev1.EventTypeNormal, "Transition", "transition persisted")
 
 			t.Log("Persist status through the outer controller boundary")
-			err := reconciler.persistWorkloadProgramResult(context.Background(), dgd, result)
+			err := reconciler.persistWorkloadProgramResult(context.Background(), dgd, result, nil)
 
 			t.Log("Verify event publication is strictly ordered after successful status persistence")
 			require.True(t, statusUpdated)

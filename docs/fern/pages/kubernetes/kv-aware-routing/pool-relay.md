@@ -382,6 +382,17 @@ and allow long-lived server streams. See the
 [gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md)
 for message sizes, reconnect behavior, and error reasons.
 
+### Export to Other Clusters with MCS
+
+When the operator is configured with a Multi-Cluster Services implementation
+(`dynamo-operator.dynamo.multiCluster.mcsImplementation`), a `DynamoPoolRelay` also makes its DGD a
+Global Router pool. The operator exports `<dgd>-pool-relay` and the DGD's frontend Services to the
+other clusters of the ClusterSet. With a standard MCS implementation, set `clusterId` to the
+cluster's ID in its ClusterSet, which the About API's `ClusterProperty` `cluster.clusterset.k8s.io`
+holds. The DGD's `GlobalRouterPoolExported` condition reports a mismatch when the operator can read
+that property. See
+[Global Router pool export](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#global-router-pool-export).
+
 ## Optional mTLS Sidecar
 
 Mutual TLS (mTLS) is optional and implemented outside Relay. Relay has no built-in TLS configuration,

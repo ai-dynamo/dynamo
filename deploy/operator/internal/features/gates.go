@@ -148,6 +148,7 @@ var allNames = [...]Name{
 	VolcanoScheduler,
 	DRA,
 	Istio,
+	MultiClusterExport,
 	GPUDiscovery,
 }
 
@@ -156,18 +157,25 @@ type Gate interface {
 	Enabled(Name) bool
 }
 
-// Gates is the complete set of operator feature gates.
+// Gates is the complete set of operator feature gates, with the API version
+// that a gate resolved where its consumers depend on it.
 type Gates struct {
-	Checkpoint       bool `json:"checkpoint"`
-	Grove            bool `json:"grove"`
-	LPX              bool `json:"lpx"`
-	LWS              bool `json:"lws"`
-	DisaggregatedSet bool `json:"disaggregatedSet"`
-	KaiScheduler     bool `json:"kaiScheduler"`
-	VolcanoScheduler bool `json:"volcanoScheduler"`
-	DRA              bool `json:"dra"`
-	Istio            bool `json:"istio"`
-	GPUDiscovery     bool `json:"gpuDiscovery"`
+	Checkpoint         bool `json:"checkpoint"`
+	Grove              bool `json:"grove"`
+	LPX                bool `json:"lpx"`
+	LWS                bool `json:"lws"`
+	DisaggregatedSet   bool `json:"disaggregatedSet"`
+	KaiScheduler       bool `json:"kaiScheduler"`
+	VolcanoScheduler   bool `json:"volcanoScheduler"`
+	DRA                bool `json:"dra"`
+	Istio              bool `json:"istio"`
+	MultiClusterExport bool `json:"multiClusterExport"`
+	GPUDiscovery       bool `json:"gpuDiscovery"`
+
+	// ServiceExportVersion is not a gate. It is the multicluster.x-k8s.io
+	// version that the operator reads and writes ServiceExports in, set
+	// whenever MultiClusterExport is enabled.
+	ServiceExportVersion string `json:"-"`
 }
 
 // Defaults returns the default feature gates.
@@ -282,6 +290,15 @@ func New(
 			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
 			return Gates{}, err
 		}
+	}
+
+	// Export Global Router pools only through a configured MCS implementation whose
+	// ServiceExport API this cluster serves, at the version it serves.
+	if config.MultiCluster.MCSImplementation != configv1alpha1.MCSImplementationNone {
+		if gates.ServiceExportVersion, err = resolveMultiClusterExport(ctx, mgr.GetConfig()); err != nil {
+			return Gates{}, err
+		}
+		gates.MultiClusterExport = true
 	}
 
 	logValues := make([]any, 0, 2*len(allNames))
