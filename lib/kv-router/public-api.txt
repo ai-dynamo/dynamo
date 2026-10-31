@@ -1,0 +1,1392 @@
+pub mod dynamo_kv_router
+pub use dynamo_kv_router::ActiveSequences
+pub use dynamo_kv_router::ActiveSequencesMultiWorker
+pub use dynamo_kv_router::AnchorAwareBranchShardedIndexer
+pub use dynamo_kv_router::AnchorRef
+pub use dynamo_kv_router::AnchorTask
+pub use dynamo_kv_router::BranchShardedIndexer
+pub use dynamo_kv_router::ClusterId
+pub use dynamo_kv_router::ConcurrentRadixTreeCompressed
+pub use dynamo_kv_router::ConditionalDisaggConfig
+pub use dynamo_kv_router::ConditionalDisaggPolicyKind
+pub use dynamo_kv_router::DEFAULT_ROUTING_GROUP
+pub use dynamo_kv_router::KvCacheEventError
+pub use dynamo_kv_router::KvSchedulerError
+pub use dynamo_kv_router::KvTransferEnforcement
+pub use dynamo_kv_router::LocalBlockHash
+pub use dynamo_kv_router::LocalScheduler
+pub use dynamo_kv_router::LogicalNode
+pub use dynamo_kv_router::LoraWorkerFilter
+pub use dynamo_kv_router::LowerTierContinuation
+pub use dynamo_kv_router::LowerTierIndexer
+pub use dynamo_kv_router::MaybeError
+pub use dynamo_kv_router::NodeId
+pub use dynamo_kv_router::NoopSequencePublisher
+pub use dynamo_kv_router::OverlapScores
+pub use dynamo_kv_router::PositionalIndexer
+pub use dynamo_kv_router::PotentialLoad
+pub use dynamo_kv_router::PrefillLoadEstimator
+pub use dynamo_kv_router::PrefillTokenDeltas
+pub use dynamo_kv_router::RadixTree
+pub use dynamo_kv_router::ReplicaWorkerPolicy
+pub use dynamo_kv_router::RequestId
+pub use dynamo_kv_router::RouterConfigOverride
+pub use dynamo_kv_router::RouterEvent
+pub use dynamo_kv_router::RouterEventSink
+pub use dynamo_kv_router::RouterPrefillLoadModel
+pub use dynamo_kv_router::RouterQueuePolicy
+pub use dynamo_kv_router::RoutingPartitionId
+pub use dynamo_kv_router::RoutingPartitionRef
+pub use dynamo_kv_router::SchedulerQueue
+pub use dynamo_kv_router::SchedulingRequest
+pub use dynamo_kv_router::SchedulingResponse
+pub use dynamo_kv_router::ScoredWorkerCandidate
+pub use dynamo_kv_router::SelectionConfig
+pub use dynamo_kv_router::SequenceError
+pub use dynamo_kv_router::SequencePublisher
+pub use dynamo_kv_router::SequenceRequest
+pub use dynamo_kv_router::SequenceSubscriber
+pub use dynamo_kv_router::SessionContext
+pub use dynamo_kv_router::SessionId
+pub use dynamo_kv_router::SessionPrefixIndexError
+pub use dynamo_kv_router::SessionPrefixIndexer
+pub use dynamo_kv_router::SharedCacheHits
+pub use dynamo_kv_router::SharedCacheType
+pub use dynamo_kv_router::SharedKvCache
+pub use dynamo_kv_router::SyncIndexer
+pub use dynamo_kv_router::ThreadPoolIndexer
+pub use dynamo_kv_router::TrackingHashAlgorithm
+pub use dynamo_kv_router::TrackingHashContext
+pub use dynamo_kv_router::TrackingHashScope
+pub use dynamo_kv_router::WorkerCacheInput
+pub use dynamo_kv_router::WorkerCacheInputs
+pub use dynamo_kv_router::WorkerCandidate
+pub use dynamo_kv_router::WorkerCandidates
+pub use dynamo_kv_router::WorkerConfigLike
+pub use dynamo_kv_router::WorkerFilter
+pub use dynamo_kv_router::WorkerId
+pub use dynamo_kv_router::WorkerInputView
+pub use dynamo_kv_router::WorkerInputs
+pub use dynamo_kv_router::WorkerLoadInput
+pub use dynamo_kv_router::WorkerLoadProjection
+pub use dynamo_kv_router::WorkerPicker
+pub use dynamo_kv_router::WorkerScorer
+pub use dynamo_kv_router::WorkerSelectionContext
+pub use dynamo_kv_router::WorkerSelectionInput
+pub use dynamo_kv_router::WorkerSelectionInputTrigger
+pub use dynamo_kv_router::WorkerSelectionPolicy
+pub use dynamo_kv_router::WorkerSelectionPolicyError
+pub use dynamo_kv_router::WorkerSelectionPolicyFactory
+pub use dynamo_kv_router::WorkerSelector
+pub use dynamo_kv_router::WorkerType
+pub use dynamo_kv_router::approx
+pub use dynamo_kv_router::compute_block_hash_for_seq
+pub use dynamo_kv_router::concurrent_radix_tree_compressed
+pub use dynamo_kv_router::multi_worker_sequence
+pub use dynamo_kv_router::nested_map
+pub use dynamo_kv_router::radix_tree
+pub use dynamo_kv_router::sequence
+pub use dynamo_kv_router::sequences
+pub use dynamo_kv_router::session_prefix_index
+pub use dynamo_kv_router::zmq_wire
+pub mod dynamo_kv_router::conditional_disagg
+pub use dynamo_kv_router::conditional_disagg::<<dynamo_worker_selection::conditional_disagg::*>>
+pub mod dynamo_kv_router::config
+pub use dynamo_kv_router::config::ApproximateCachePolicyKind
+pub use dynamo_kv_router::config::ConditionalDisaggConfig
+pub use dynamo_kv_router::config::ConditionalDisaggPolicyKind
+pub use dynamo_kv_router::config::OVERLAP_SCORE_CREDIT_RANGE_ERROR
+pub use dynamo_kv_router::config::RouterConfigOverride
+pub use dynamo_kv_router::config::RouterPrefillLoadModel
+pub use dynamo_kv_router::config::RouterQueuePolicy
+pub use dynamo_kv_router::config::SelectionConfig
+pub use dynamo_kv_router::config::SharedCacheType
+pub use dynamo_kv_router::config::overlap_score_credit_error_message
+pub enum dynamo_kv_router::config::WorkerSelectionPolicyConfigError
+pub dynamo_kv_router::config::WorkerSelectionPolicyConfigError::Config
+pub dynamo_kv_router::config::WorkerSelectionPolicyConfigError::Config::source: dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::config::WorkerSelectionPolicyConfigError::Environment
+pub dynamo_kv_router::config::WorkerSelectionPolicyConfigError::Environment::source: std::env::VarError
+pub struct dynamo_kv_router::config::KvRouterConfig
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_decode_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_eff_isl_ratio_threshold: f64
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_eff_isl_threshold: usize
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_enabled: bool
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_policy: dynamo_worker_selection::conditional_disagg::ConditionalDisaggPolicyKind
+pub dynamo_kv_router::config::KvRouterConfig::conditional_disagg_prefill_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::config::KvRouterConfig::decode_active_request_weight: f64
+pub dynamo_kv_router::config::KvRouterConfig::disk_cache_hit_weight: f64
+pub dynamo_kv_router::config::KvRouterConfig::enable_session_prefix_index: bool
+pub dynamo_kv_router::config::KvRouterConfig::host_cache_hit_weight: f64
+pub dynamo_kv_router::config::KvRouterConfig::overlap_score_credit: f64
+pub dynamo_kv_router::config::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::config::KvRouterConfig::prefill_load_scale: f64
+pub dynamo_kv_router::config::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
+pub dynamo_kv_router::config::KvRouterConfig::router_assume_kv_reuse: bool
+pub dynamo_kv_router::config::KvRouterConfig::router_decode_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::config::KvRouterConfig::router_event_threads: u32
+pub dynamo_kv_router::config::KvRouterConfig::router_policy_config: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::config::KvRouterConfig::router_predicted_ttl_secs: core::option::Option<f64>
+pub dynamo_kv_router::config::KvRouterConfig::router_prefill_load_model: dynamo_scheduler::config::RouterPrefillLoadModel
+pub dynamo_kv_router::config::KvRouterConfig::router_prefill_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::config::KvRouterConfig::router_queue_policy: dynamo_admission::profile::RouterQueuePolicy
+pub dynamo_kv_router::config::KvRouterConfig::router_queue_threshold: core::option::Option<f64>
+pub dynamo_kv_router::config::KvRouterConfig::router_replica_sync: bool
+pub dynamo_kv_router::config::KvRouterConfig::router_temperature: f64
+pub dynamo_kv_router::config::KvRouterConfig::router_track_active_blocks: bool
+pub dynamo_kv_router::config::KvRouterConfig::router_track_output_blocks: bool
+pub dynamo_kv_router::config::KvRouterConfig::router_track_prefill_tokens: bool
+pub dynamo_kv_router::config::KvRouterConfig::router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm
+pub dynamo_kv_router::config::KvRouterConfig::router_tracking_key_file: core::option::Option<std::path::PathBuf>
+pub dynamo_kv_router::config::KvRouterConfig::router_tracking_key_id: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::config::KvRouterConfig::router_ttl_secs: f64
+pub dynamo_kv_router::config::KvRouterConfig::serve_indexer: bool
+pub dynamo_kv_router::config::KvRouterConfig::shared_cache_multiplier: core::option::Option<f64>
+pub dynamo_kv_router::config::KvRouterConfig::shared_cache_type: dynamo_worker_selection::selection_config::SharedCacheType
+pub dynamo_kv_router::config::KvRouterConfig::skip_initial_worker_wait: bool
+pub dynamo_kv_router::config::KvRouterConfig::use_kv_events: bool
+pub dynamo_kv_router::config::KvRouterConfig::use_remote_indexer: bool
+impl dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::apply_policy_config(&mut self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::assume_kv_reuse(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking(&self, &[u32], u32, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking_with_context(&self, &dynamo_scheduler::tracking_hash::TrackingHashContext, dynamo_scheduler::tracking_hash::TrackingHashScope<'_>, &[u32], core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::configured_policy_profile(&self) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::explicit_worker_selection_policy_types(&self) -> core::result::Result<alloc::vec::Vec<dynamo_router_protocol::worker_type::WorkerType>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::policy_profile(&self, core::option::Option<&str>) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::predict_on_route_enabled(&self) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::queueing_enabled(&self, core::option::Option<&str>) -> core::result::Result<bool, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::random_seq_hashes_for_tracking(&self, usize) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::request_classifier_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_recheck_interval(&self) -> core::time::Duration
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance(&self) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance_for(&self, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::track_prefill_tokens(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate_config(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::with_policy_model_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::worker_selection_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig
+pub fn dynamo_kv_indexer::config::IndexerConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights
+pub fn dynamo_scheduler::config::CacheHitWeights::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::RouterConfig
+pub fn dynamo_scheduler::config::RouterConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig
+pub fn dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::selection_config::SelectionConfig
+pub fn dynamo_worker_selection::selection_config::SelectionConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::default::Default for dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::default() -> Self
+pub const dynamo_kv_router::config::DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str
+pub const dynamo_kv_router::config::DYN_ROUTER_DECODE_POLICY: &str
+pub const dynamo_kv_router::config::DYN_ROUTER_MIN_INITIAL_WORKERS: &str
+pub const dynamo_kv_router::config::DYN_ROUTER_PREFILL_POLICY: &str
+pub const dynamo_kv_router::config::DYN_ROUTER_WORKER_SELECTION_POLICY: &str
+pub fn dynamo_kv_router::config::apply_deprecated_overlap_score_weight_override(f64, &mut f64, &mut f64)
+pub fn dynamo_kv_router::config::kv_router_config_from_dynamo_env() -> dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::config::min_initial_workers_from_env() -> anyhow::Result<usize>
+pub fn dynamo_kv_router::config::try_kv_router_config_from_dynamo_env() -> core::result::Result<dynamo_kv_router::scheduling::config::KvRouterConfig, alloc::string::String>
+pub mod dynamo_kv_router::identity
+pub use dynamo_kv_router::identity::CacheOwnerId
+pub use dynamo_kv_router::identity::CacheSemanticsId
+pub use dynamo_kv_router::identity::CanonicalIdentityMaterial
+pub use dynamo_kv_router::identity::ClusterId
+pub use dynamo_kv_router::identity::DEFAULT_ROUTING_GROUP
+pub use dynamo_kv_router::identity::ExplicitIdentityMap
+pub use dynamo_kv_router::identity::IdentityParseError
+pub use dynamo_kv_router::identity::IdentitySource
+pub use dynamo_kv_router::identity::IdentitySpecError
+pub use dynamo_kv_router::identity::IndexerDomainId
+pub use dynamo_kv_router::identity::IndexerIdentitySpec
+pub use dynamo_kv_router::identity::MAX_EXPLICIT_IDENTITY_ENTRIES
+pub use dynamo_kv_router::identity::MAX_EXPLICIT_IDENTITY_KEY_BYTES
+pub use dynamo_kv_router::identity::MAX_EXPLICIT_IDENTITY_VALUE_BYTES
+pub use dynamo_kv_router::identity::PoolId
+pub use dynamo_kv_router::identity::RoutingPartitionId
+pub use dynamo_kv_router::identity::RoutingPartitionRef
+pub use dynamo_kv_router::identity::RoutingScopeId
+pub use dynamo_kv_router::identity::StableDpSlotId
+pub mod dynamo_kv_router::indexer
+pub use dynamo_kv_router::indexer::<<dynamo_kv_indexer::*>>
+pub use dynamo_kv_router::indexer::SharedKvCache
+pub mod dynamo_kv_router::kv_hints
+pub use dynamo_kv_router::kv_hints::<<dynamo_scheduler::kv_hints::*>>
+pub mod dynamo_kv_router::plugins
+pub mod dynamo_kv_router::plugins::prelude
+pub use dynamo_kv_router::plugins::prelude::AbortCause
+pub use dynamo_kv_router::plugins::prelude::ClassifierError
+pub use dynamo_kv_router::plugins::prelude::ClassifyEvent
+pub use dynamo_kv_router::plugins::prelude::ClassifyFuture
+pub use dynamo_kv_router::plugins::prelude::ClassifyRequest
+pub use dynamo_kv_router::plugins::prelude::DpRank
+pub use dynamo_kv_router::plugins::prelude::ExternalSequenceBlockHash
+pub use dynamo_kv_router::plugins::prelude::KvHintTransferWorkerMetadata
+pub use dynamo_kv_router::plugins::prelude::KvSchedulerError
+pub use dynamo_kv_router::plugins::prelude::KvTransferCandidateSource
+pub use dynamo_kv_router::plugins::prelude::KvTransferCandidates
+pub use dynamo_kv_router::plugins::prelude::KvTransferEnforcement
+pub use dynamo_kv_router::plugins::prelude::OverlapSignals
+pub use dynamo_kv_router::plugins::prelude::RequestClassifier
+pub use dynamo_kv_router::plugins::prelude::RequestClassifierContext
+pub use dynamo_kv_router::plugins::prelude::RequestProgress
+pub use dynamo_kv_router::plugins::prelude::RoutingConstraints
+pub use dynamo_kv_router::plugins::prelude::RoutingPartitionId
+pub use dynamo_kv_router::plugins::prelude::RoutingPartitionRef
+pub use dynamo_kv_router::plugins::prelude::RuntimePolicyBuilder
+pub use dynamo_kv_router::plugins::prelude::RuntimePolicyConfig
+pub use dynamo_kv_router::plugins::prelude::RuntimePolicyError
+pub use dynamo_kv_router::plugins::prelude::RuntimePolicyUpdate
+pub use dynamo_kv_router::plugins::prelude::ScheduleMode
+pub use dynamo_kv_router::plugins::prelude::SchedulingRequest
+pub use dynamo_kv_router::plugins::prelude::ScoredWorkerCandidate
+pub use dynamo_kv_router::plugins::prelude::SelectionConfig
+pub use dynamo_kv_router::plugins::prelude::SelectionTraceSpec
+pub use dynamo_kv_router::plugins::prelude::SessionContext
+pub use dynamo_kv_router::plugins::prelude::SharedCacheHits
+pub use dynamo_kv_router::plugins::prelude::SharedCacheType
+pub use dynamo_kv_router::plugins::prelude::WorkerAffinityTarget
+pub use dynamo_kv_router::plugins::prelude::WorkerCacheInput
+pub use dynamo_kv_router::plugins::prelude::WorkerCacheInputs
+pub use dynamo_kv_router::plugins::prelude::WorkerCandidate
+pub use dynamo_kv_router::plugins::prelude::WorkerCandidates
+pub use dynamo_kv_router::plugins::prelude::WorkerCapacity
+pub use dynamo_kv_router::plugins::prelude::WorkerConfigLike
+pub use dynamo_kv_router::plugins::prelude::WorkerFilter
+pub use dynamo_kv_router::plugins::prelude::WorkerId
+pub use dynamo_kv_router::plugins::prelude::WorkerInfo
+pub use dynamo_kv_router::plugins::prelude::WorkerInputView
+pub use dynamo_kv_router::plugins::prelude::WorkerInputs
+pub use dynamo_kv_router::plugins::prelude::WorkerKvTransferKeys
+pub use dynamo_kv_router::plugins::prelude::WorkerKvTransferKeysCache
+pub use dynamo_kv_router::plugins::prelude::WorkerLoadInput
+pub use dynamo_kv_router::plugins::prelude::WorkerLoadProjection
+pub use dynamo_kv_router::plugins::prelude::WorkerPicker
+pub use dynamo_kv_router::plugins::prelude::WorkerScorer
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionContext
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionInputTrigger
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionPolicy
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyFactory
+pub use dynamo_kv_router::plugins::prelude::WorkerSelectionResult
+pub use dynamo_kv_router::plugins::prelude::WorkerTransferInput
+pub use dynamo_kv_router::plugins::prelude::WorkerType
+pub use dynamo_kv_router::plugins::prelude::WorkerView
+pub use dynamo_kv_router::plugins::prelude::WorkerWithDpRank
+pub enum dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Config
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Config::source: dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Duplicate
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::EmptyName
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Provider
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Provider::classifier_type: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::Provider::source: dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::ReservedDefault
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::UnknownType
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::RequestClassifierRegistryError::UnknownType::name: alloc::string::String
+pub enum dynamo_kv_router::plugins::prelude::RouterPluginRegistryError
+pub dynamo_kv_router::plugins::prelude::RouterPluginRegistryError::RequestClassifier(dynamo_kv_router::scheduling::RequestClassifierRegistryError)
+pub dynamo_kv_router::plugins::prelude::RouterPluginRegistryError::WorkerSelection(dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError)
+pub enum dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Duplicate
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::EmptyName
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::MissingDefault
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Provider
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Provider::policy_type: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Provider::source: dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::ReservedDefault
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::Selection(dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError)
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownInstance
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownInstance::available: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownInstance::name: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownType
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistryError::UnknownType::name: alloc::string::String
+pub struct dynamo_kv_router::plugins::prelude::KvRouterConfig
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_decode_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_eff_isl_ratio_threshold: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_eff_isl_threshold: usize
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_enabled: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_policy: dynamo_worker_selection::conditional_disagg::ConditionalDisaggPolicyKind
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::conditional_disagg_prefill_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::decode_active_request_weight: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::disk_cache_hit_weight: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::enable_session_prefix_index: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::host_cache_hit_weight: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::overlap_score_credit: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::prefill_load_scale: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_assume_kv_reuse: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_decode_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_event_threads: u32
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_policy_config: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_predicted_ttl_secs: core::option::Option<f64>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_prefill_load_model: dynamo_scheduler::config::RouterPrefillLoadModel
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_prefill_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_queue_policy: dynamo_admission::profile::RouterQueuePolicy
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_queue_threshold: core::option::Option<f64>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_replica_sync: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_temperature: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_track_active_blocks: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_track_output_blocks: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_track_prefill_tokens: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_tracking_key_file: core::option::Option<std::path::PathBuf>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_tracking_key_id: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_ttl_secs: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::serve_indexer: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::shared_cache_multiplier: core::option::Option<f64>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::shared_cache_type: dynamo_worker_selection::selection_config::SharedCacheType
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::skip_initial_worker_wait: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::use_kv_events: bool
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::use_remote_indexer: bool
+impl dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::apply_policy_config(&mut self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::assume_kv_reuse(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking(&self, &[u32], u32, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking_with_context(&self, &dynamo_scheduler::tracking_hash::TrackingHashContext, dynamo_scheduler::tracking_hash::TrackingHashScope<'_>, &[u32], core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::configured_policy_profile(&self) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::explicit_worker_selection_policy_types(&self) -> core::result::Result<alloc::vec::Vec<dynamo_router_protocol::worker_type::WorkerType>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::policy_profile(&self, core::option::Option<&str>) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::predict_on_route_enabled(&self) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::queueing_enabled(&self, core::option::Option<&str>) -> core::result::Result<bool, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::random_seq_hashes_for_tracking(&self, usize) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::request_classifier_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_recheck_interval(&self) -> core::time::Duration
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance(&self) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance_for(&self, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::track_prefill_tokens(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate_config(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::with_policy_model_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::worker_selection_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig
+pub fn dynamo_kv_indexer::config::IndexerConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights
+pub fn dynamo_scheduler::config::CacheHitWeights::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::RouterConfig
+pub fn dynamo_scheduler::config::RouterConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig
+pub fn dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::selection_config::SelectionConfig
+pub fn dynamo_worker_selection::selection_config::SelectionConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::default::Default for dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::default() -> Self
+pub struct dynamo_kv_router::plugins::prelude::RequestClassifierParameters(_)
+impl dynamo_kv_router::scheduling::RequestClassifierParameters
+pub fn dynamo_kv_router::scheduling::RequestClassifierParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::scheduling::RequestClassifierProviderError>
+pub struct dynamo_kv_router::plugins::prelude::RequestClassifierProviderError
+impl dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub fn dynamo_kv_router::scheduling::RequestClassifierProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct dynamo_kv_router::plugins::prelude::RouterPluginRegistry
+impl dynamo_kv_router::plugins::RouterPluginRegistry
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::is_empty(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_request_classifier(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::scheduling::RequestClassifierProvider) -> core::result::Result<(), dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_worker_selection(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_for_worker_type(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_plugins(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<dynamo_kv_router::plugins::RouterPlugins, dynamo_kv_router::plugins::RouterPluginRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_request_classifier(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_kv_router::scheduling::RequestClassifierFactory>, dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::with_default_factory(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub struct dynamo_kv_router::plugins::prelude::RouterPlugins
+impl dynamo_kv_router::plugins::RouterPlugins
+pub fn dynamo_kv_router::plugins::RouterPlugins::has_custom_plugins(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::has_custom_worker_selection(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::is_empty(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::request_classifier(&self) -> core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierFactory>
+pub fn dynamo_kv_router::plugins::RouterPlugins::with_request_classifier(self, dynamo_kv_router::scheduling::RequestClassifierFactory) -> Self
+pub fn dynamo_kv_router::plugins::RouterPlugins::with_worker_selection(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub fn dynamo_kv_router::plugins::RouterPlugins::worker_selection(&self) -> core::option::Option<&dynamo_scheduler::types::WorkerSelectionPolicyFactory>
+pub struct dynamo_kv_router::plugins::prelude::WorkerSelectionConfig
+impl dynamo_kv_router::scheduling::WorkerSelectionConfig
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::aggregated_instance(&self) -> core::option::Option<&str>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance(&self, &str) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionInstance>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance_names(&self) -> alloc::vec::Vec<alloc::string::String>
+pub struct dynamo_kv_router::plugins::prelude::WorkerSelectionInstance
+impl dynamo_kv_router::scheduling::WorkerSelectionInstance
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) -> &serde_yaml::value::Value
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
+pub struct dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyParameters(_)
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyParameters
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError>
+pub struct dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyProviderError
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub type dynamo_kv_router::plugins::prelude::RequestClassifierFactory = alloc::sync::Arc<(dyn core::ops::function::Fn(dynamo_admission::classifier::inputs::RequestClassifierContext) -> alloc::boxed::Box<dyn dynamo_admission::classifier::RequestClassifier> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::plugins::prelude::RequestClassifierProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::scheduling::RequestClassifierParameters) -> core::result::Result<dynamo_kv_router::scheduling::RequestClassifierFactory, dynamo_kv_router::scheduling::RequestClassifierProviderError> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::plugins::WorkerSelectionPolicyParameters) -> core::result::Result<dynamo_scheduler::types::WorkerSelectionPolicyFactory, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyRegistry = dynamo_kv_router::plugins::RouterPluginRegistry
+pub mod dynamo_kv_router::plugins::request_classifier
+pub use dynamo_kv_router::plugins::request_classifier::AbortCause
+pub use dynamo_kv_router::plugins::request_classifier::ClassificationError
+pub use dynamo_kv_router::plugins::request_classifier::ClassificationOverrides
+pub use dynamo_kv_router::plugins::request_classifier::ClassifierError
+pub use dynamo_kv_router::plugins::request_classifier::ClassifyEvent
+pub use dynamo_kv_router::plugins::request_classifier::ClassifyFuture
+pub use dynamo_kv_router::plugins::request_classifier::ClassifyRequest
+pub use dynamo_kv_router::plugins::request_classifier::NoWorkers
+pub use dynamo_kv_router::plugins::request_classifier::RequestClassifier
+pub use dynamo_kv_router::plugins::request_classifier::RequestClassifierContext
+pub use dynamo_kv_router::plugins::request_classifier::RequestClassifierRuntime
+pub use dynamo_kv_router::plugins::request_classifier::RequestLifecycle
+pub use dynamo_kv_router::plugins::request_classifier::RequestProgress
+pub use dynamo_kv_router::plugins::request_classifier::RequestProgressUpdater
+pub use dynamo_kv_router::plugins::request_classifier::WorkerCacheView
+pub use dynamo_kv_router::plugins::request_classifier::WorkerLoadView
+pub use dynamo_kv_router::plugins::request_classifier::WorkerView
+pub enum dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Config
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Config::source: dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Duplicate
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::EmptyName
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Provider
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Provider::classifier_type: alloc::string::String
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::Provider::source: dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::ReservedDefault
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::UnknownType
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError::UnknownType::name: alloc::string::String
+pub struct dynamo_kv_router::plugins::request_classifier::RequestClassifierConfig
+impl dynamo_kv_router::scheduling::RequestClassifierConfig
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::classifier_type(&self) -> &str
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::parameters(&self) -> &serde_yaml::value::Value
+pub struct dynamo_kv_router::plugins::request_classifier::RequestClassifierParameters(_)
+impl dynamo_kv_router::scheduling::RequestClassifierParameters
+pub fn dynamo_kv_router::scheduling::RequestClassifierParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::scheduling::RequestClassifierProviderError>
+pub struct dynamo_kv_router::plugins::request_classifier::RequestClassifierProviderError
+impl dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub fn dynamo_kv_router::scheduling::RequestClassifierProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub type dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory = alloc::sync::Arc<(dyn core::ops::function::Fn(dynamo_admission::classifier::inputs::RequestClassifierContext) -> alloc::boxed::Box<dyn dynamo_admission::classifier::RequestClassifier> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::plugins::request_classifier::RequestClassifierProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::scheduling::RequestClassifierParameters) -> core::result::Result<dynamo_kv_router::scheduling::RequestClassifierFactory, dynamo_kv_router::scheduling::RequestClassifierProviderError> + core::marker::Send + core::marker::Sync)>
+pub mod dynamo_kv_router::plugins::worker_selection
+pub use dynamo_kv_router::plugins::worker_selection::CacheSnapshot
+pub use dynamo_kv_router::plugins::worker_selection::CandidateData
+pub use dynamo_kv_router::plugins::worker_selection::CandidatePreparer
+pub use dynamo_kv_router::plugins::worker_selection::CandidateRank
+pub use dynamo_kv_router::plugins::worker_selection::CandidateRowSource
+pub use dynamo_kv_router::plugins::worker_selection::PreparedRows
+pub use dynamo_kv_router::plugins::worker_selection::RankVisitor
+pub use dynamo_kv_router::plugins::worker_selection::RowPick
+pub use dynamo_kv_router::plugins::worker_selection::RuntimePolicyBuilder
+pub use dynamo_kv_router::plugins::worker_selection::RuntimePolicyConfig
+pub use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError
+pub use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate
+pub use dynamo_kv_router::plugins::worker_selection::ScoredWorkerCandidate
+pub use dynamo_kv_router::plugins::worker_selection::SelectionConfig
+pub use dynamo_kv_router::plugins::worker_selection::SelectionFailure
+pub use dynamo_kv_router::plugins::worker_selection::SelectionTrace
+pub use dynamo_kv_router::plugins::worker_selection::SelectionTraceRow
+pub use dynamo_kv_router::plugins::worker_selection::SelectionTraceSpec
+pub use dynamo_kv_router::plugins::worker_selection::SessionContext
+pub use dynamo_kv_router::plugins::worker_selection::SharedCacheHits
+pub use dynamo_kv_router::plugins::worker_selection::SharedCacheType
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCacheData
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCacheInput
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCacheInputs
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCandidate
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCandidates
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCapacity
+pub use dynamo_kv_router::plugins::worker_selection::WorkerCapacityExt
+pub use dynamo_kv_router::plugins::worker_selection::WorkerFilter
+pub use dynamo_kv_router::plugins::worker_selection::WorkerInfo
+pub use dynamo_kv_router::plugins::worker_selection::WorkerInfoExt
+pub use dynamo_kv_router::plugins::worker_selection::WorkerInputRows
+pub use dynamo_kv_router::plugins::worker_selection::WorkerInputView
+pub use dynamo_kv_router::plugins::worker_selection::WorkerInputs
+pub use dynamo_kv_router::plugins::worker_selection::WorkerLoadInput
+pub use dynamo_kv_router::plugins::worker_selection::WorkerLoadInputExt
+pub use dynamo_kv_router::plugins::worker_selection::WorkerPicker
+pub use dynamo_kv_router::plugins::worker_selection::WorkerScorer
+pub use dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext
+pub use dynamo_kv_router::plugins::worker_selection::WorkerSelectionInputTrigger
+pub use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy
+pub use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyError
+pub use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory
+pub use dynamo_kv_router::plugins::worker_selection::WorkerTransferInput
+pub use dynamo_kv_router::plugins::worker_selection::selection_config
+pub enum dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Duplicate
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::EmptyName
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Provider
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Provider::policy_type: alloc::string::String
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Provider::source: dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::ReservedDefault
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::Selection(dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError)
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownInstance
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownInstance::available: alloc::string::String
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownInstance::name: alloc::string::String
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownType
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::UnknownType::name: alloc::string::String
+pub struct dynamo_kv_router::plugins::worker_selection::WorkerSelectionConfig
+impl dynamo_kv_router::scheduling::WorkerSelectionConfig
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::aggregated_instance(&self) -> core::option::Option<&str>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance(&self, &str) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionInstance>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance_names(&self) -> alloc::vec::Vec<alloc::string::String>
+pub struct dynamo_kv_router::plugins::worker_selection::WorkerSelectionInstance
+impl dynamo_kv_router::scheduling::WorkerSelectionInstance
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) -> &serde_yaml::value::Value
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
+pub struct dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyParameters(_)
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyParameters
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError>
+pub struct dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyProviderError
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub type dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::plugins::WorkerSelectionPolicyParameters) -> core::result::Result<dynamo_scheduler::types::WorkerSelectionPolicyFactory, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError> + core::marker::Send + core::marker::Sync)>
+pub enum dynamo_kv_router::plugins::RouterPluginRegistryError
+pub dynamo_kv_router::plugins::RouterPluginRegistryError::RequestClassifier(dynamo_kv_router::scheduling::RequestClassifierRegistryError)
+pub dynamo_kv_router::plugins::RouterPluginRegistryError::WorkerSelection(dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError)
+pub enum dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Duplicate
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::EmptyName
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Provider
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Provider::policy_type: alloc::string::String
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Provider::source: dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::ReservedDefault
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::Selection(dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError)
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownInstance
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownInstance::available: alloc::string::String
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownInstance::name: alloc::string::String
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownType
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::UnknownType::name: alloc::string::String
+pub struct dynamo_kv_router::plugins::RouterPluginRegistry
+impl dynamo_kv_router::plugins::RouterPluginRegistry
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::is_empty(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_request_classifier(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::scheduling::RequestClassifierProvider) -> core::result::Result<(), dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_worker_selection(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_for_worker_type(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_plugins(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<dynamo_kv_router::plugins::RouterPlugins, dynamo_kv_router::plugins::RouterPluginRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_request_classifier(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_kv_router::scheduling::RequestClassifierFactory>, dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::with_default_factory(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub struct dynamo_kv_router::plugins::RouterPlugins
+impl dynamo_kv_router::plugins::RouterPlugins
+pub fn dynamo_kv_router::plugins::RouterPlugins::has_custom_plugins(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::has_custom_worker_selection(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::is_empty(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPlugins::request_classifier(&self) -> core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierFactory>
+pub fn dynamo_kv_router::plugins::RouterPlugins::with_request_classifier(self, dynamo_kv_router::scheduling::RequestClassifierFactory) -> Self
+pub fn dynamo_kv_router::plugins::RouterPlugins::with_worker_selection(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub fn dynamo_kv_router::plugins::RouterPlugins::worker_selection(&self) -> core::option::Option<&dynamo_scheduler::types::WorkerSelectionPolicyFactory>
+pub struct dynamo_kv_router::plugins::WorkerSelectionPolicyParameters(_)
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyParameters
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError>
+pub struct dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub const dynamo_kv_router::plugins::DYN_ROUTER_DECODE_POLICY: &str
+pub const dynamo_kv_router::plugins::DYN_ROUTER_PREFILL_POLICY: &str
+pub const dynamo_kv_router::plugins::DYN_ROUTER_WORKER_SELECTION_POLICY: &str
+pub type dynamo_kv_router::plugins::WorkerSelectionPolicyProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::plugins::WorkerSelectionPolicyParameters) -> core::result::Result<dynamo_scheduler::types::WorkerSelectionPolicyFactory, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry = dynamo_kv_router::plugins::RouterPluginRegistry
+pub mod dynamo_kv_router::protocols
+pub use dynamo_kv_router::protocols::ActiveBlockEvent
+pub use dynamo_kv_router::protocols::ActiveBlockEventData
+pub use dynamo_kv_router::protocols::ActiveLoad
+pub use dynamo_kv_router::protocols::ActiveSequenceEvent
+pub use dynamo_kv_router::protocols::ActiveSequenceEventBatch
+pub use dynamo_kv_router::protocols::ActiveSequenceEventData
+pub use dynamo_kv_router::protocols::BlockExtraInfo
+pub use dynamo_kv_router::protocols::BlockHashOptions
+pub use dynamo_kv_router::protocols::BlockMmObjectInfo
+pub use dynamo_kv_router::protocols::DpRank
+pub use dynamo_kv_router::protocols::ExternalSequenceBlockHash
+pub use dynamo_kv_router::protocols::KV_EVENT_SUBJECT
+pub use dynamo_kv_router::protocols::KvCacheEvent
+pub use dynamo_kv_router::protocols::KvCacheEventData
+pub use dynamo_kv_router::protocols::KvCacheEventError
+pub use dynamo_kv_router::protocols::KvCacheEvents
+pub use dynamo_kv_router::protocols::KvCacheRemoveData
+pub use dynamo_kv_router::protocols::KvCacheStoreData
+pub use dynamo_kv_router::protocols::KvCacheStoredBlockData
+pub use dynamo_kv_router::protocols::KvHintTransferWorkerMetadata
+pub use dynamo_kv_router::protocols::KvTransferEnforcement
+pub use dynamo_kv_router::protocols::LocalBlockHash
+pub use dynamo_kv_router::protocols::MAX_REPLICA_BATCH_DURATION
+pub use dynamo_kv_router::protocols::MAX_REPLICA_BATCH_EVENTS
+pub use dynamo_kv_router::protocols::MM_PAD_HASH_MASK
+pub use dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE
+pub use dynamo_kv_router::protocols::OverlapScores
+pub use dynamo_kv_router::protocols::Placement
+pub use dynamo_kv_router::protocols::PlacementEvent
+pub use dynamo_kv_router::protocols::PlacementOwner
+pub use dynamo_kv_router::protocols::PotentialLoad
+pub use dynamo_kv_router::protocols::PrefillEvent
+pub use dynamo_kv_router::protocols::PrefillEventData
+pub use dynamo_kv_router::protocols::PrefillLoadHint
+pub use dynamo_kv_router::protocols::RequestExtraInfo
+pub use dynamo_kv_router::protocols::RequestMmObjectInfo
+pub use dynamo_kv_router::protocols::ResetScope
+pub use dynamo_kv_router::protocols::ResidencyDomain
+pub use dynamo_kv_router::protocols::ResidencyOwner
+pub use dynamo_kv_router::protocols::ResidencyOwnerKey
+pub use dynamo_kv_router::protocols::ResidencyOwnerKeyExt
+pub use dynamo_kv_router::protocols::ResidencyProjection
+pub use dynamo_kv_router::protocols::ResidencyProjectionError
+pub use dynamo_kv_router::protocols::ResidencyRoutingSnapshot
+pub use dynamo_kv_router::protocols::ResolvedRouterHintSource
+pub use dynamo_kv_router::protocols::RouterEvent
+pub use dynamo_kv_router::protocols::RouterEventSink
+pub use dynamo_kv_router::protocols::RouterHintSourceMetadata
+pub use dynamo_kv_router::protocols::RouterRequest
+pub use dynamo_kv_router::protocols::RouterResponse
+pub use dynamo_kv_router::protocols::RoutingConstraints
+pub use dynamo_kv_router::protocols::SchedulerGroup
+pub use dynamo_kv_router::protocols::SchedulerLoad
+pub use dynamo_kv_router::protocols::SelectionTrace
+pub use dynamo_kv_router::protocols::SelectionTraceRow
+pub use dynamo_kv_router::protocols::SelectionTraceSpec
+pub use dynamo_kv_router::protocols::SharedCacheHits
+pub use dynamo_kv_router::protocols::StorageTier
+pub use dynamo_kv_router::protocols::TokensWithHashes
+pub use dynamo_kv_router::protocols::UnsupportedResidencyDomain
+pub use dynamo_kv_router::protocols::WireResidencyDomain
+pub use dynamo_kv_router::protocols::WorkerAffinityTarget
+pub use dynamo_kv_router::protocols::WorkerConfigLike
+pub use dynamo_kv_router::protocols::WorkerId
+pub use dynamo_kv_router::protocols::WorkerSelectionResult
+pub use dynamo_kv_router::protocols::WorkerWithDpRank
+pub use dynamo_kv_router::protocols::XXH3_SEED
+pub use dynamo_kv_router::protocols::complete_block_count
+pub use dynamo_kv_router::protocols::compute_block_hash
+pub use dynamo_kv_router::protocols::compute_block_hash_for_seq
+pub use dynamo_kv_router::protocols::compute_block_hash_for_seq_with_seed
+pub use dynamo_kv_router::protocols::compute_next_seq_hash
+pub use dynamo_kv_router::protocols::compute_seq_hash_for_block
+pub use dynamo_kv_router::protocols::compute_seq_hash_for_tokens_with_seeds
+pub use dynamo_kv_router::protocols::hash_mm_identifier
+pub use dynamo_kv_router::protocols::pad_value_for_mm_hash
+pub mod dynamo_kv_router::queue
+pub use dynamo_kv_router::queue::<<dynamo_scheduler::queue::*>>
+pub mod dynamo_kv_router::recovery
+pub use dynamo_kv_router::recovery::CursorObservation
+pub use dynamo_kv_router::recovery::CursorState
+pub mod dynamo_kv_router::scheduling
+pub use dynamo_kv_router::scheduling::<<dynamo_scheduler::filter::*>>
+pub use dynamo_kv_router::scheduling::<<dynamo_scheduler::types::*>>
+pub use dynamo_kv_router::scheduling::AbortCause
+pub use dynamo_kv_router::scheduling::BusyRanksExt
+pub use dynamo_kv_router::scheduling::BusyThresholds
+pub use dynamo_kv_router::scheduling::CacheHitEstimates
+pub use dynamo_kv_router::scheduling::CacheHitWeights
+pub use dynamo_kv_router::scheduling::ClassificationError
+pub use dynamo_kv_router::scheduling::ClassifierError
+pub use dynamo_kv_router::scheduling::ClassifyEvent
+pub use dynamo_kv_router::scheduling::ClassifyFuture
+pub use dynamo_kv_router::scheduling::ClassifyRequest
+pub use dynamo_kv_router::scheduling::InvalidEffectivePrefillTokens
+pub use dynamo_kv_router::scheduling::LocalScheduler
+pub use dynamo_kv_router::scheduling::LoraWorkerFilter
+pub use dynamo_kv_router::scheduling::NoopOverlapScoresRefresh
+pub use dynamo_kv_router::scheduling::OverlapAnalysis
+pub use dynamo_kv_router::scheduling::OverlapScoresRefresh
+pub use dynamo_kv_router::scheduling::OverlapScoresResponse
+pub use dynamo_kv_router::scheduling::OverlapSignals
+pub use dynamo_kv_router::scheduling::PolicyClassConfig
+pub use dynamo_kv_router::scheduling::PolicyProfile
+pub use dynamo_kv_router::scheduling::PolicyProfileSource
+pub use dynamo_kv_router::scheduling::PolicyQueue
+pub use dynamo_kv_router::scheduling::PolicyQueueEntry
+pub use dynamo_kv_router::scheduling::PrefillLoadEstimator
+pub use dynamo_kv_router::scheduling::QueueLimitKind
+pub use dynamo_kv_router::scheduling::QueueRejection
+pub use dynamo_kv_router::scheduling::QueueSnapshot
+pub use dynamo_kv_router::scheduling::RefreshedOverlap
+pub use dynamo_kv_router::scheduling::RejectThresholdsProvider
+pub use dynamo_kv_router::scheduling::RequestClassifier
+pub use dynamo_kv_router::scheduling::RequestClassifierContext
+pub use dynamo_kv_router::scheduling::RequestLifecycle
+pub use dynamo_kv_router::scheduling::RequestProgress
+pub use dynamo_kv_router::scheduling::RequestProgressUpdater
+pub use dynamo_kv_router::scheduling::RouterConfig
+pub use dynamo_kv_router::scheduling::RouterConfigError
+pub use dynamo_kv_router::scheduling::SelectedWorkerTierSnapshot
+pub use dynamo_kv_router::scheduling::SharedCacheOverlapScore
+pub use dynamo_kv_router::scheduling::TieredOverlapRefresher
+pub use dynamo_kv_router::scheduling::Validated
+pub use dynamo_kv_router::scheduling::WorkerOverlapScore
+pub use dynamo_kv_router::scheduling::WorkerPlacement
+pub use dynamo_kv_router::scheduling::effective_prefill_tokens
+pub use dynamo_kv_router::scheduling::prefill_load_hint_from_effective_tokens
+pub mod dynamo_kv_router::scheduling::classifier_rows
+pub use dynamo_kv_router::scheduling::classifier_rows::<<dynamo_scheduler::classifier_rows::*>>
+pub mod dynamo_kv_router::scheduling::config
+pub use dynamo_kv_router::scheduling::config::ApproximateCachePolicyKind
+pub use dynamo_kv_router::scheduling::config::ConditionalDisaggConfig
+pub use dynamo_kv_router::scheduling::config::ConditionalDisaggPolicyKind
+pub use dynamo_kv_router::scheduling::config::OVERLAP_SCORE_CREDIT_RANGE_ERROR
+pub use dynamo_kv_router::scheduling::config::RouterConfigOverride
+pub use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel
+pub use dynamo_kv_router::scheduling::config::RouterQueuePolicy
+pub use dynamo_kv_router::scheduling::config::SelectionConfig
+pub use dynamo_kv_router::scheduling::config::SharedCacheType
+pub use dynamo_kv_router::scheduling::config::overlap_score_credit_error_message
+pub enum dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError
+pub dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError::Config
+pub dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError::Config::source: dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError::Environment
+pub dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError::Environment::source: std::env::VarError
+pub struct dynamo_kv_router::scheduling::config::KvRouterConfig
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_decode_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_eff_isl_ratio_threshold: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_eff_isl_threshold: usize
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_enabled: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_policy: dynamo_worker_selection::conditional_disagg::ConditionalDisaggPolicyKind
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::conditional_disagg_prefill_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::decode_active_request_weight: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::disk_cache_hit_weight: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::enable_session_prefix_index: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::host_cache_hit_weight: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::overlap_score_credit: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::prefill_load_scale: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_assume_kv_reuse: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_decode_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_event_threads: u32
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_policy_config: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_predicted_ttl_secs: core::option::Option<f64>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_prefill_load_model: dynamo_scheduler::config::RouterPrefillLoadModel
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_prefill_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_policy: dynamo_admission::profile::RouterQueuePolicy
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_threshold: core::option::Option<f64>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_replica_sync: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_temperature: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_track_active_blocks: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_track_output_blocks: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_track_prefill_tokens: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_tracking_key_file: core::option::Option<std::path::PathBuf>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_tracking_key_id: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_ttl_secs: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::serve_indexer: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::shared_cache_multiplier: core::option::Option<f64>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::shared_cache_type: dynamo_worker_selection::selection_config::SharedCacheType
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::skip_initial_worker_wait: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::use_kv_events: bool
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::use_remote_indexer: bool
+impl dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::apply_policy_config(&mut self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::assume_kv_reuse(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking(&self, &[u32], u32, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking_with_context(&self, &dynamo_scheduler::tracking_hash::TrackingHashContext, dynamo_scheduler::tracking_hash::TrackingHashScope<'_>, &[u32], core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::configured_policy_profile(&self) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::explicit_worker_selection_policy_types(&self) -> core::result::Result<alloc::vec::Vec<dynamo_router_protocol::worker_type::WorkerType>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::policy_profile(&self, core::option::Option<&str>) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::predict_on_route_enabled(&self) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::queueing_enabled(&self, core::option::Option<&str>) -> core::result::Result<bool, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::random_seq_hashes_for_tracking(&self, usize) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::request_classifier_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_recheck_interval(&self) -> core::time::Duration
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance(&self) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance_for(&self, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::track_prefill_tokens(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate_config(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::with_policy_model_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::worker_selection_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig
+pub fn dynamo_kv_indexer::config::IndexerConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights
+pub fn dynamo_scheduler::config::CacheHitWeights::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::RouterConfig
+pub fn dynamo_scheduler::config::RouterConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig
+pub fn dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::selection_config::SelectionConfig
+pub fn dynamo_worker_selection::selection_config::SelectionConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::default::Default for dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::default() -> Self
+pub const dynamo_kv_router::scheduling::config::DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str
+pub const dynamo_kv_router::scheduling::config::DYN_ROUTER_DECODE_POLICY: &str
+pub const dynamo_kv_router::scheduling::config::DYN_ROUTER_MIN_INITIAL_WORKERS: &str
+pub const dynamo_kv_router::scheduling::config::DYN_ROUTER_PREFILL_POLICY: &str
+pub const dynamo_kv_router::scheduling::config::DYN_ROUTER_WORKER_SELECTION_POLICY: &str
+pub fn dynamo_kv_router::scheduling::config::apply_deprecated_overlap_score_weight_override(f64, &mut f64, &mut f64)
+pub fn dynamo_kv_router::scheduling::config::kv_router_config_from_dynamo_env() -> dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::min_initial_workers_from_env() -> anyhow::Result<usize>
+pub fn dynamo_kv_router::scheduling::config::try_kv_router_config_from_dynamo_env() -> core::result::Result<dynamo_kv_router::scheduling::config::KvRouterConfig, alloc::string::String>
+pub mod dynamo_kv_router::scheduling::overlap
+pub use dynamo_kv_router::scheduling::overlap::<<dynamo_scheduler::overlap::*>>
+pub mod dynamo_kv_router::scheduling::overlap_refresh
+pub use dynamo_kv_router::scheduling::overlap_refresh::<<dynamo_scheduler::overlap_refresh::*>>
+pub mod dynamo_kv_router::scheduling::policy_config
+pub use dynamo_kv_router::scheduling::policy_config::AdmissionConfigError
+pub use dynamo_kv_router::scheduling::policy_config::BusyRanksExt
+pub use dynamo_kv_router::scheduling::policy_config::BusyThresholds
+pub use dynamo_kv_router::scheduling::policy_config::FamilyBucketTable
+pub use dynamo_kv_router::scheduling::policy_config::FullRankCounts
+pub use dynamo_kv_router::scheduling::policy_config::PolicyClassConfig
+pub use dynamo_kv_router::scheduling::policy_config::PolicyProfile
+pub use dynamo_kv_router::scheduling::policy_config::RejectThresholdsProvider
+pub use dynamo_kv_router::scheduling::policy_config::RouterQueuePolicy
+pub use dynamo_kv_router::scheduling::policy_config::SYNTHETIC_POLICY_CLASS
+pub enum dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Parse
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Parse::path: alloc::string::String
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Parse::source: serde_yaml::error::Error
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Read
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Read::path: alloc::string::String
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Read::source: core::io::error::Error
+pub dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::Validation(alloc::string::String)
+impl core::convert::From<dynamo_admission::profile::AdmissionConfigError> for dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::from(dynamo_admission::profile::AdmissionConfigError) -> Self
+pub struct dynamo_kv_router::scheduling::policy_config::RequestClassifierConfig
+impl dynamo_kv_router::scheduling::RequestClassifierConfig
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::classifier_type(&self) -> &str
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::parameters(&self) -> &serde_yaml::value::Value
+pub struct dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig
+impl dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::from_path(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<Self, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::from_yaml(&str) -> core::result::Result<Self, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::has_routing_profiles(&self) -> bool
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::request_classifier(&self) -> core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::resolve_profile(&self, core::option::Option<&str>, core::option::Option<f64>, dynamo_admission::profile::RouterQueuePolicy) -> dynamo_admission::profile::PolicyProfile
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::worker_selection(&self) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>
+pub struct dynamo_kv_router::scheduling::policy_config::WorkerSelectionConfig
+impl dynamo_kv_router::scheduling::WorkerSelectionConfig
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::aggregated_instance(&self) -> core::option::Option<&str>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance(&self, &str) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionInstance>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance_names(&self) -> alloc::vec::Vec<alloc::string::String>
+pub struct dynamo_kv_router::scheduling::policy_config::WorkerSelectionInstance
+impl dynamo_kv_router::scheduling::WorkerSelectionInstance
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) -> &serde_yaml::value::Value
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
+pub trait dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt
+pub fn dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_router_protocol::load::BusyThresholds
+pub fn dynamo_router_protocol::load::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+pub mod dynamo_kv_router::scheduling::policy_queue
+pub use dynamo_kv_router::scheduling::policy_queue::<<dynamo_admission::queue::*>>
+pub mod dynamo_kv_router::scheduling::prefill_load
+pub use dynamo_kv_router::scheduling::prefill_load::<<dynamo_scheduler::prefill_load::*>>
+pub mod dynamo_kv_router::scheduling::protocols
+pub use dynamo_kv_router::scheduling::protocols::<<dynamo_scheduler::protocols::*>>
+pub mod dynamo_kv_router::scheduling::queue
+pub use dynamo_kv_router::scheduling::queue::<<dynamo_scheduler::queue::*>>
+pub mod dynamo_kv_router::scheduling::request_classifier
+pub use dynamo_kv_router::scheduling::request_classifier::AbortCause
+pub use dynamo_kv_router::scheduling::request_classifier::ClassificationError
+pub use dynamo_kv_router::scheduling::request_classifier::ClassificationOverrides
+pub use dynamo_kv_router::scheduling::request_classifier::ClassifierError
+pub use dynamo_kv_router::scheduling::request_classifier::ClassifyEvent
+pub use dynamo_kv_router::scheduling::request_classifier::ClassifyFuture
+pub use dynamo_kv_router::scheduling::request_classifier::ClassifyRequest
+pub use dynamo_kv_router::scheduling::request_classifier::RequestClassifier
+pub use dynamo_kv_router::scheduling::request_classifier::RequestClassifierContext
+pub use dynamo_kv_router::scheduling::request_classifier::RequestClassifierRuntime
+pub use dynamo_kv_router::scheduling::request_classifier::RequestLifecycle
+pub mod dynamo_kv_router::scheduling::router_config
+pub use dynamo_kv_router::scheduling::router_config::<<dynamo_scheduler::config::*>>
+pub mod dynamo_kv_router::scheduling::selector
+pub use dynamo_kv_router::scheduling::selector::<<dynamo_scheduler::selector::*>>
+pub mod dynamo_kv_router::scheduling::shared_cache
+pub use dynamo_kv_router::scheduling::shared_cache::<<dynamo_scheduler::shared_cache::*>>
+pub mod dynamo_kv_router::scheduling::tracking_hash
+pub use dynamo_kv_router::scheduling::tracking_hash::<<dynamo_scheduler::tracking_hash::*>>
+pub enum dynamo_kv_router::scheduling::RequestClassifierRegistryError
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Config
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Config::source: dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Duplicate
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::EmptyName
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Provider
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Provider::classifier_type: alloc::string::String
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::Provider::source: dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::ReservedDefault
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::UnknownType
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::scheduling::RequestClassifierRegistryError::UnknownType::name: alloc::string::String
+pub enum dynamo_kv_router::scheduling::RouterPolicyConfigError
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Parse
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Parse::path: alloc::string::String
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Parse::source: serde_yaml::error::Error
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Read
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Read::path: alloc::string::String
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Read::source: core::io::error::Error
+pub dynamo_kv_router::scheduling::RouterPolicyConfigError::Validation(alloc::string::String)
+impl core::convert::From<dynamo_admission::profile::AdmissionConfigError> for dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError::from(dynamo_admission::profile::AdmissionConfigError) -> Self
+pub struct dynamo_kv_router::scheduling::RequestClassifierConfig
+impl dynamo_kv_router::scheduling::RequestClassifierConfig
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::classifier_type(&self) -> &str
+pub fn dynamo_kv_router::scheduling::RequestClassifierConfig::parameters(&self) -> &serde_yaml::value::Value
+pub struct dynamo_kv_router::scheduling::RequestClassifierParameters(_)
+impl dynamo_kv_router::scheduling::RequestClassifierParameters
+pub fn dynamo_kv_router::scheduling::RequestClassifierParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::scheduling::RequestClassifierProviderError>
+pub struct dynamo_kv_router::scheduling::RequestClassifierProviderError
+impl dynamo_kv_router::scheduling::RequestClassifierProviderError
+pub fn dynamo_kv_router::scheduling::RequestClassifierProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct dynamo_kv_router::scheduling::RouterPolicyConfig
+impl dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::from_path(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<Self, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::from_yaml(&str) -> core::result::Result<Self, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::has_routing_profiles(&self) -> bool
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::request_classifier(&self) -> core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::resolve_profile(&self, core::option::Option<&str>, core::option::Option<f64>, dynamo_admission::profile::RouterQueuePolicy) -> dynamo_admission::profile::PolicyProfile
+pub fn dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig::worker_selection(&self) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>
+pub struct dynamo_kv_router::scheduling::WorkerSelectionConfig
+impl dynamo_kv_router::scheduling::WorkerSelectionConfig
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::aggregated_instance(&self) -> core::option::Option<&str>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance(&self, &str) -> core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionInstance>
+pub fn dynamo_kv_router::scheduling::WorkerSelectionConfig::instance_names(&self) -> alloc::vec::Vec<alloc::string::String>
+pub struct dynamo_kv_router::scheduling::WorkerSelectionInstance
+impl dynamo_kv_router::scheduling::WorkerSelectionInstance
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) -> &serde_yaml::value::Value
+pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
+pub trait dynamo_kv_router::scheduling::BusyThresholdsExt
+pub fn dynamo_kv_router::scheduling::BusyThresholdsExt::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_router_protocol::load::BusyThresholds
+pub fn dynamo_router_protocol::load::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+pub type dynamo_kv_router::scheduling::RequestClassifierFactory = alloc::sync::Arc<(dyn core::ops::function::Fn(dynamo_admission::classifier::inputs::RequestClassifierContext) -> alloc::boxed::Box<dyn dynamo_admission::classifier::RequestClassifier> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::scheduling::RequestClassifierProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::scheduling::RequestClassifierParameters) -> core::result::Result<dynamo_kv_router::scheduling::RequestClassifierFactory, dynamo_kv_router::scheduling::RequestClassifierProviderError> + core::marker::Send + core::marker::Sync)>
+pub mod dynamo_kv_router::selector
+pub use dynamo_kv_router::selector::<<dynamo_scheduler::selector::*>>
+pub mod dynamo_kv_router::services
+pub mod dynamo_kv_router::services::indexer
+pub use dynamo_kv_router::services::indexer::backend
+pub use dynamo_kv_router::services::indexer::lookup
+pub use dynamo_kv_router::services::indexer::recording
+pub use dynamo_kv_router::services::indexer::session_updates
+pub mod dynamo_kv_router::services::indexer::listener
+pub fn dynamo_kv_router::services::indexer::listener::spawn_zmq_listener(dynamo_router_protocol::worker::WorkerId, u32, alloc::sync::Arc<dynamo_kv_router::services::indexer::registry::ListenerRecord>, tokio::sync::watch::Receiver<bool>, u64, tokio_util::sync::cancellation_token::CancellationToken)
+pub mod dynamo_kv_router::services::indexer::logging
+pub struct dynamo_kv_router::services::indexer::logging::AccessLogModel(pub alloc::string::String)
+pub struct dynamo_kv_router::services::indexer::logging::AccessLogSink
+impl dynamo_kv_router::services::indexer::logging::AccessLogSink
+pub fn dynamo_kv_router::services::indexer::logging::AccessLogSink::new(&std::path::Path, http::header::name::HeaderName, bool) -> core::io::error::Result<Self>
+pub fn dynamo_kv_router::services::indexer::logging::AccessLogSink::reopen(&self) -> core::io::error::Result<()>
+pub async fn dynamo_kv_router::services::indexer::logging::access_log_middleware(axum::extract::state::State<core::option::Option<alloc::sync::Arc<dynamo_kv_router::services::indexer::logging::AccessLogSink>>>, http::request::Request<axum_core::body::Body>, axum::middleware::from_fn::Next) -> axum_core::response::Response
+pub fn dynamo_kv_router::services::indexer::logging::parse_header_name(&str) -> core::result::Result<http::header::name::HeaderName, http::error::Error>
+pub mod dynamo_kv_router::services::indexer::metrics
+pub struct dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::errors_total: prometheus::counter::IntCounterVec
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::listeners: prometheus::gauge::IntGaugeVec
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::models: prometheus::gauge::IntGauge
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::request_duration: prometheus::histogram::HistogramVec
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::requests_total: prometheus::counter::IntCounterVec
+pub dynamo_kv_router::services::indexer::metrics::StandaloneIndexerMetrics::workers: prometheus::gauge::IntGauge
+pub async fn dynamo_kv_router::services::indexer::metrics::metrics_middleware(http::request::Request<axum_core::body::Body>, axum::middleware::from_fn::Next) -> axum_core::response::Response
+pub fn dynamo_kv_router::services::indexer::metrics::register(&prometheus::registry::Registry) -> core::result::Result<(), prometheus::errors::Error>
+pub fn dynamo_kv_router::services::indexer::metrics::set_worker_state(usize, usize, [i64; 4])
+pub mod dynamo_kv_router::services::indexer::recovery
+pub async fn dynamo_kv_router::services::indexer::recovery::recover_from_peers(&[alloc::string::String], &dynamo_kv_indexer::registry::IndexRegistry) -> anyhow::Result<bool>
+pub mod dynamo_kv_router::services::indexer::registry
+pub use dynamo_kv_router::services::indexer::registry::IndexClaimError
+pub use dynamo_kv_router::services::indexer::registry::IndexRegistry
+pub use dynamo_kv_router::services::indexer::registry::IndexerEntry
+pub use dynamo_kv_router::services::indexer::registry::LifecycleGuard
+pub enum dynamo_kv_router::services::indexer::registry::ListenerControlError
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidPauseState
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidPauseState::dp_rank: u32
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidPauseState::instance_id: dynamo_router_protocol::worker::WorkerId
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidPauseState::status: dynamo_kv_router::services::indexer::registry::ListenerStatus
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidResumeState
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidResumeState::dp_rank: u32
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidResumeState::instance_id: dynamo_router_protocol::worker::WorkerId
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::InvalidResumeState::status: dynamo_kv_router::services::indexer::registry::ListenerStatus
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::ListenerNotFound
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::ListenerNotFound::dp_rank: u32
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::ListenerNotFound::instance_id: dynamo_router_protocol::worker::WorkerId
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::WorkerNotFound
+pub dynamo_kv_router::services::indexer::registry::ListenerControlError::WorkerNotFound::instance_id: dynamo_router_protocol::worker::WorkerId
+pub enum dynamo_kv_router::services::indexer::registry::ListenerStatus
+pub dynamo_kv_router::services::indexer::registry::ListenerStatus::Active
+pub dynamo_kv_router::services::indexer::registry::ListenerStatus::Failed
+pub dynamo_kv_router::services::indexer::registry::ListenerStatus::Paused
+pub dynamo_kv_router::services::indexer::registry::ListenerStatus::Pending
+impl dynamo_kv_router::services::indexer::registry::ListenerStatus
+pub const dynamo_kv_router::services::indexer::registry::ListenerStatus::ALL: [Self; 4]
+pub fn dynamo_kv_router::services::indexer::registry::ListenerStatus::aggregate(impl core::iter::traits::collect::IntoIterator<Item = Self>) -> Self
+pub fn dynamo_kv_router::services::indexer::registry::ListenerStatus::as_str(self) -> &'static str
+pub fn dynamo_kv_router::services::indexer::registry::ListenerStatus::metric_index(self) -> usize
+impl core::fmt::Display for dynamo_kv_router::services::indexer::registry::ListenerStatus
+pub fn dynamo_kv_router::services::indexer::registry::ListenerStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum dynamo_kv_router::services::indexer::registry::WorkerSource
+pub dynamo_kv_router::services::indexer::registry::WorkerSource::Zmq
+pub struct dynamo_kv_router::services::indexer::registry::ListenerInfo
+pub struct dynamo_kv_router::services::indexer::registry::ListenerRecord
+pub struct dynamo_kv_router::services::indexer::registry::WorkerEntry
+pub struct dynamo_kv_router::services::indexer::registry::WorkerInfo
+pub struct dynamo_kv_router::services::indexer::registry::WorkerRegistry
+impl dynamo_kv_router::services::indexer::registry::WorkerRegistry
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::all_indexers_with_block_size(&self) -> alloc::vec::Vec<(dynamo_router_protocol::identity::RoutingPartitionId, dynamo_kv_indexer::backend::Indexer, u32)>
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::deregister(&self, dynamo_router_protocol::worker::WorkerId, &str, &str) -> anyhow::Result<()>
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::deregister_all_routing_groups(&self, dynamo_router_protocol::worker::WorkerId, &str) -> anyhow::Result<()>
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::deregister_dp_rank(&self, dynamo_router_protocol::worker::WorkerId, u32, &str, &str) -> anyhow::Result<()>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::deregister_peer(&self, &str) -> bool
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::get_indexer(&self, &dynamo_router_protocol::identity::RoutingPartitionId) -> core::option::Option<dashmap::mapref::one::Ref<'_, dynamo_router_protocol::identity::RoutingPartitionId, dynamo_kv_indexer::registry::IndexerEntry>>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::get_or_create_indexer(&self, dynamo_router_protocol::identity::RoutingPartitionId, u32) -> dynamo_kv_indexer::backend::Indexer
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::has_listener(&self, dynamo_router_protocol::worker::WorkerId, u32) -> bool
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::has_worker(&self, dynamo_router_protocol::worker::WorkerId) -> bool
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::index(&self) -> &alloc::sync::Arc<dynamo_kv_indexer::registry::IndexRegistry>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::list(&self) -> alloc::vec::Vec<dynamo_kv_router::services::indexer::registry::WorkerInfo>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::list_filtered(&self, core::option::Option<&str>, core::option::Option<&str>) -> alloc::vec::Vec<dynamo_kv_router::services::indexer::registry::WorkerInfo>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::list_peers(&self) -> alloc::vec::Vec<alloc::string::String>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::new(usize) -> Self
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::new_with_cancel_token(usize, tokio_util::sync::cancellation_token::CancellationToken) -> Self
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::new_with_indexer_metrics(usize, alloc::sync::Arc<dynamo_kv_indexer::metrics::KvIndexerMetrics>) -> Self
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::pause_listener(&self, dynamo_router_protocol::worker::WorkerId, u32) -> core::result::Result<(), dynamo_kv_router::services::indexer::registry::ListenerControlError>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::ready_rx(&self) -> tokio::sync::watch::Receiver<bool>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::refresh_metrics(&self)
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::register(&self, dynamo_router_protocol::worker::WorkerId, alloc::string::String, u32, alloc::string::String, alloc::string::String, u32, core::option::Option<alloc::string::String>) -> anyhow::Result<()>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::register_peer(&self, alloc::string::String)
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::remove_dp_rank_blocks(&self, dynamo_router_protocol::worker::WorkerId, u32, &dynamo_router_protocol::identity::RoutingPartitionId)
+pub async fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::resume_listener(&self, dynamo_router_protocol::worker::WorkerId, u32) -> core::result::Result<(), dynamo_kv_router::services::indexer::registry::ListenerControlError>
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::set_indexer_policy(&self, dynamo_kv_indexer::backend::IndexerPolicy)
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::signal_ready(&self)
+pub fn dynamo_kv_router::services::indexer::registry::WorkerRegistry::with_index(alloc::sync::Arc<dynamo_kv_indexer::registry::IndexRegistry>, tokio_util::sync::cancellation_token::CancellationToken) -> Self
+pub mod dynamo_kv_router::services::indexer::server
+pub struct dynamo_kv_router::services::indexer::server::AppState
+pub dynamo_kv_router::services::indexer::server::AppState::access_log_sink: core::option::Option<alloc::sync::Arc<dynamo_kv_router::services::indexer::logging::AccessLogSink>>
+pub dynamo_kv_router::services::indexer::server::AppState::prom_registry: prometheus::registry::Registry
+pub dynamo_kv_router::services::indexer::server::AppState::registry: alloc::sync::Arc<dynamo_kv_router::services::indexer::registry::WorkerRegistry>
+impl dynamo_kv_router::services::indexer::server::AppState
+pub fn dynamo_kv_router::services::indexer::server::AppState::new(usize) -> anyhow::Result<Self>
+pub fn dynamo_kv_router::services::indexer::server::create_router(alloc::sync::Arc<dynamo_kv_router::services::indexer::server::AppState>) -> axum::routing::Router
+pub struct dynamo_kv_router::services::indexer::IndexerConfig
+pub dynamo_kv_router::services::indexer::IndexerConfig::access_log: core::option::Option<std::path::PathBuf>
+pub dynamo_kv_router::services::indexer::IndexerConfig::access_log_local_time: bool
+pub dynamo_kv_router::services::indexer::IndexerConfig::block_size: core::option::Option<u32>
+pub dynamo_kv_router::services::indexer::IndexerConfig::model_name: alloc::string::String
+pub dynamo_kv_router::services::indexer::IndexerConfig::peers: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::services::indexer::IndexerConfig::port: u16
+pub dynamo_kv_router::services::indexer::IndexerConfig::routing_group: alloc::string::String
+pub dynamo_kv_router::services::indexer::IndexerConfig::threads: usize
+pub dynamo_kv_router::services::indexer::IndexerConfig::trace_id_header: http::header::name::HeaderName
+pub dynamo_kv_router::services::indexer::IndexerConfig::workers: core::option::Option<alloc::string::String>
+pub fn dynamo_kv_router::services::indexer::parse_workers(&str) -> anyhow::Result<alloc::vec::Vec<(u64, u32, alloc::string::String)>>
+pub async fn dynamo_kv_router::services::indexer::run_server(dynamo_kv_router::services::indexer::IndexerConfig) -> anyhow::Result<()>
+pub mod dynamo_kv_router::services::overlap
+pub use dynamo_kv_router::services::overlap::MooncakeOverlapSummary
+pub use dynamo_kv_router::services::overlap::build_mooncake_overlap_summaries
+pub mod dynamo_kv_router::services::selection
+pub use dynamo_kv_router::services::selection::AffinityBindingEvent
+pub use dynamo_kv_router::services::selection::CatalogObserver
+pub use dynamo_kv_router::services::selection::CatalogReconciler
+pub use dynamo_kv_router::services::selection::DEFAULT_MODEL_NAME
+pub use dynamo_kv_router::services::selection::HostCache
+pub use dynamo_kv_router::services::selection::HostEligibility
+pub use dynamo_kv_router::services::selection::HostLoad
+pub use dynamo_kv_router::services::selection::HostReplicaChannels
+pub use dynamo_kv_router::services::selection::HostReplicaSyncFactory
+pub use dynamo_kv_router::services::selection::HostReplication
+pub use dynamo_kv_router::services::selection::HostTelemetry
+pub use dynamo_kv_router::services::selection::KvEventIngress
+pub use dynamo_kv_router::services::selection::KvIndexSource
+pub use dynamo_kv_router::services::selection::LocalIndexIngress
+pub use dynamo_kv_router::services::selection::ModelLoadResponse
+pub use dynamo_kv_router::services::selection::OutputBlockRequest
+pub use dynamo_kv_router::services::selection::OverlapScoresRequest
+pub use dynamo_kv_router::services::selection::OverlapScoresResponse
+pub use dynamo_kv_router::services::selection::PotentialLoadsRequest
+pub use dynamo_kv_router::services::selection::PromptRequest
+pub use dynamo_kv_router::services::selection::PromptView
+pub use dynamo_kv_router::services::selection::ReadyResponse
+pub use dynamo_kv_router::services::selection::ReplicaIngressObserver
+pub use dynamo_kv_router::services::selection::ReservationRequest
+pub use dynamo_kv_router::services::selection::ReservationResponse
+pub use dynamo_kv_router::services::selection::SchedulerLoadSink
+pub use dynamo_kv_router::services::selection::SelectAndReserveRequest
+pub use dynamo_kv_router::services::selection::SelectRequest
+pub use dynamo_kv_router::services::selection::SelectResponse
+pub use dynamo_kv_router::services::selection::Selected
+pub use dynamo_kv_router::services::selection::SelectionAdmission
+pub use dynamo_kv_router::services::selection::SelectionCacheConfig
+pub use dynamo_kv_router::services::selection::SelectionCore
+pub use dynamo_kv_router::services::selection::SelectionError
+pub use dynamo_kv_router::services::selection::SelectionHost
+pub use dynamo_kv_router::services::selection::SelectionInputTrigger
+pub use dynamo_kv_router::services::selection::SelectionOperation
+pub use dynamo_kv_router::services::selection::SelectionOutcome
+pub use dynamo_kv_router::services::selection::SelectionPartition
+pub use dynamo_kv_router::services::selection::SelectionRun
+pub use dynamo_kv_router::services::selection::SelectionScheduler
+pub use dynamo_kv_router::services::selection::SelectionSessionContext
+pub use dynamo_kv_router::services::selection::SelectionWorkerConfig
+pub use dynamo_kv_router::services::selection::SelectionWorkerLoad
+pub use dynamo_kv_router::services::selection::SessionBinding
+pub use dynamo_kv_router::services::selection::SharedCacheOverlapScore
+pub use dynamo_kv_router::services::selection::WorkerCatalogRecord
+pub use dynamo_kv_router::services::selection::WorkerCatalogSource
+pub use dynamo_kv_router::services::selection::WorkerLifecycle
+pub use dynamo_kv_router::services::selection::WorkerOverlapScore
+pub use dynamo_kv_router::services::selection::WorkerPatchRequest
+pub use dynamo_kv_router::services::selection::WorkerRequest
+pub use dynamo_kv_router::services::selection::WorkerSelectionPolicyFactory
+pub use dynamo_kv_router::services::selection::affinity
+pub enum dynamo_kv_router::services::selection::ReplicaPeerError
+pub dynamo_kv_router::services::selection::ReplicaPeerError::Disabled
+pub dynamo_kv_router::services::selection::ReplicaPeerError::InvalidEndpoint(anyhow::Error)
+pub dynamo_kv_router::services::selection::ReplicaPeerError::Unavailable
+pub enum dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Duplicate
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Duplicate::name: alloc::string::String
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::EmptyName
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::MissingDefault
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Provider
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Provider::policy_type: alloc::string::String
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Provider::source: dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::ReservedDefault
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::Selection(dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError)
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownInstance
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownInstance::available: alloc::string::String
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownInstance::name: alloc::string::String
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownType
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownType::available: alloc::string::String
+pub dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError::UnknownType::name: alloc::string::String
+pub struct dynamo_kv_router::services::selection::AppState
+pub dynamo_kv_router::services::selection::AppState::service: alloc::sync::Arc<dynamo_kv_router::services::selection::SelectionService>
+pub struct dynamo_kv_router::services::selection::RouterPluginRegistry
+impl dynamo_kv_router::plugins::RouterPluginRegistry
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::is_empty(&self) -> bool
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_request_classifier(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::scheduling::RequestClassifierProvider) -> core::result::Result<(), dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::register_worker_selection(&mut self, impl core::convert::Into<alloc::string::String>, dynamo_kv_router::plugins::WorkerSelectionPolicyProvider) -> core::result::Result<(), dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_for_worker_type(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<dynamo_scheduler::types::WorkerSelectionPolicyFactory>, dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_plugins(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<dynamo_kv_router::plugins::RouterPlugins, dynamo_kv_router::plugins::RouterPluginRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::resolve_request_classifier(&self, &dynamo_kv_router::scheduling::config::KvRouterConfig) -> core::result::Result<core::option::Option<dynamo_kv_router::scheduling::RequestClassifierFactory>, dynamo_kv_router::scheduling::RequestClassifierRegistryError>
+pub fn dynamo_kv_router::plugins::RouterPluginRegistry::with_default_factory(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub struct dynamo_kv_router::services::selection::SelectionService
+impl dynamo_kv_router::services::selection::SelectionService
+pub fn dynamo_kv_router::services::selection::SelectionService::add_output_block(&self, &str, core::option::Option<f64>) -> core::result::Result<(), dynamo_scheduler::selection::error::SelectionError>
+pub fn dynamo_kv_router::services::selection::SelectionService::apply_session_binding(&self, dynamo_session_affinity::wire::AffinityBindingEvent) -> core::result::Result<(), dynamo_scheduler::selection::error::SelectionError>
+pub fn dynamo_kv_router::services::selection::SelectionService::core(&self) -> &alloc::sync::Arc<dynamo_scheduler::selection::core::SelectionCore>
+pub async fn dynamo_kv_router::services::selection::SelectionService::create_reservation(&self, dynamo_scheduler::selection::types::ReservationRequest) -> core::result::Result<dynamo_scheduler::selection::types::ReservationResponse, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::delete_worker(&self, dynamo_router_protocol::worker::WorkerId) -> core::result::Result<dynamo_scheduler::selection::types::WorkerCatalogRecord, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::deregister_replica_peer(&self, alloc::string::String) -> core::result::Result<bool, dynamo_kv_router::services::selection::ReplicaPeerError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::free_reservation(&self, &str) -> core::result::Result<(), dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::indexer_snapshot(&self) -> serde_json::value::Value
+pub fn dynamo_kv_router::services::selection::SelectionService::list_replica_peers(&self) -> alloc::vec::Vec<alloc::string::String>
+pub fn dynamo_kv_router::services::selection::SelectionService::list_workers(&self, core::option::Option<&str>, core::option::Option<&str>) -> alloc::vec::Vec<dynamo_scheduler::selection::types::WorkerCatalogRecord>
+pub fn dynamo_kv_router::services::selection::SelectionService::loads(&self, core::option::Option<&str>, core::option::Option<&str>) -> alloc::vec::Vec<dynamo_scheduler::selection::types::ModelLoadResponse>
+pub async fn dynamo_kv_router::services::selection::SelectionService::overlap_scores(&self, dynamo_scheduler::selection::types::OverlapScoresRequest) -> core::result::Result<dynamo_scheduler::overlap::OverlapScoresResponse, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::patch_worker(&self, dynamo_router_protocol::worker::WorkerId, dynamo_scheduler::selection::types::WorkerPatchRequest) -> core::result::Result<dynamo_scheduler::selection::types::WorkerCatalogRecord, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::potential_loads(&self, dynamo_scheduler::selection::types::PotentialLoadsRequest) -> core::result::Result<alloc::vec::Vec<dynamo_scheduler::protocols::PotentialLoad>, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::prefill_complete(&self, &str) -> core::result::Result<(), dynamo_scheduler::selection::error::SelectionError>
+pub fn dynamo_kv_router::services::selection::SelectionService::ready(&self) -> dynamo_scheduler::selection::types::ReadyResponse
+pub async fn dynamo_kv_router::services::selection::SelectionService::recover_indexer_from_peers(&self, &[alloc::string::String]) -> anyhow::Result<bool>
+pub async fn dynamo_kv_router::services::selection::SelectionService::register_replica_peer(&self, alloc::string::String) -> core::result::Result<bool, dynamo_kv_router::services::selection::ReplicaPeerError>
+pub fn dynamo_kv_router::services::selection::SelectionService::replica_sync_port(&self) -> core::option::Option<u16>
+pub async fn dynamo_kv_router::services::selection::SelectionService::select(&self, dynamo_scheduler::selection::types::SelectRequest) -> core::result::Result<dynamo_scheduler::selection::types::SelectResponse, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::select_and_reserve(&self, dynamo_scheduler::selection::types::SelectAndReserveRequest) -> core::result::Result<dynamo_scheduler::selection::types::SelectResponse, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::select_and_reserve_with_policy_class(&self, dynamo_scheduler::selection::types::SelectAndReserveRequest, core::option::Option<alloc::string::String>) -> core::result::Result<dynamo_scheduler::selection::types::SelectResponse, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::select_with_policy_class(&self, dynamo_scheduler::selection::types::SelectRequest, core::option::Option<alloc::string::String>) -> core::result::Result<dynamo_scheduler::selection::types::SelectResponse, dynamo_scheduler::selection::error::SelectionError>
+pub fn dynamo_kv_router::services::selection::SelectionService::session_binding_updates(&self) -> core::result::Result<dynamo_kv_router::services::selection::SessionBindingUpdates, dynamo_scheduler::selection::error::SelectionError>
+pub async fn dynamo_kv_router::services::selection::SelectionService::shutdown(&self)
+pub async fn dynamo_kv_router::services::selection::SelectionService::upsert_worker(&self, dynamo_scheduler::selection::types::WorkerRequest) -> core::result::Result<dynamo_scheduler::selection::types::WorkerCatalogRecord, dynamo_scheduler::selection::error::SelectionError>
+impl core::ops::drop::Drop for dynamo_kv_router::services::selection::SelectionService
+pub fn dynamo_kv_router::services::selection::SelectionService::drop(&mut self)
+pub struct dynamo_kv_router::services::selection::SelectionServiceBuilder
+impl dynamo_kv_router::services::selection::SelectionServiceBuilder
+pub async fn dynamo_kv_router::services::selection::SelectionServiceBuilder::build(self) -> anyhow::Result<dynamo_kv_router::services::selection::SelectionService>
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::host(self, dynamo_scheduler::selection::core::SelectionHost) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::host_manages_request_lifecycle(self) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::indexer_peers(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::indexer_threads(self, usize) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::kv_index(self, dynamo_scheduler::selection::core::KvIndexSource) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::new(dynamo_kv_router::scheduling::config::KvRouterConfig, dynamo_router_protocol::worker_type::WorkerType, dynamo_kv_router::plugins::RouterPluginRegistry) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::replica_sync(self, u16, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::selection_cache(self, dynamo_scheduler::selection::pending::SelectionCacheConfig) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::session_affinity(self, core::time::Duration) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::session_affinity_mode(self, dynamo_session_affinity::SessionAffinityMode) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::session_binding_replication(self, u64) -> Self
+pub fn dynamo_kv_router::services::selection::SelectionServiceBuilder::worker_selection_policy_factory(self, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> Self
+pub struct dynamo_kv_router::services::selection::SelectionServiceConfig
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::indexer_peers: alloc::vec::Vec<alloc::string::String>
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::kv_router_config: dynamo_kv_router::scheduling::config::KvRouterConfig
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::port: u16
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::replica_sync_peers: alloc::vec::Vec<alloc::string::String>
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::replica_sync_port: core::option::Option<u16>
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::selection_cache: dynamo_scheduler::selection::pending::SelectionCacheConfig
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::session_affinity_ttl: core::option::Option<core::time::Duration>
+pub dynamo_kv_router::services::selection::SelectionServiceConfig::threads: usize
+impl dynamo_kv_router::services::selection::SelectionServiceConfig
+pub fn dynamo_kv_router::services::selection::SelectionServiceConfig::service_builder(&self, dynamo_router_protocol::worker_type::WorkerType, dynamo_kv_router::plugins::RouterPluginRegistry) -> dynamo_kv_router::services::selection::SelectionServiceBuilder
+pub struct dynamo_kv_router::services::selection::SessionBindingUpdates
+impl dynamo_kv_router::services::selection::SessionBindingUpdates
+pub async fn dynamo_kv_router::services::selection::SessionBindingUpdates::recv_many(&self) -> core::option::Option<alloc::vec::Vec<dynamo_session_affinity::wire::AffinityBindingEvent>>
+pub struct dynamo_kv_router::services::selection::WorkerSelectionPolicyParameters(_)
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyParameters
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyParameters::deserialize<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError>
+pub struct dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError
+impl dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError
+pub fn dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct dynamo_kv_router::services::selection::ZmqDirectIngress
+impl dynamo_kv_router::services::selection::ZmqDirectIngress
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::listeners(&self) -> core::option::Option<&alloc::sync::Arc<dynamo_kv_router::services::indexer::registry::WorkerRegistry>>
+impl core::fmt::Debug for dynamo_kv_router::services::selection::ZmqDirectIngress
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl dynamo_scheduler::selection::ingress::KvEventIngress for dynamo_kv_router::services::selection::ZmqDirectIngress
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::attach(&self, &alloc::sync::Arc<dynamo_kv_indexer::registry::IndexRegistry>, tokio_util::sync::cancellation_token::CancellationToken)
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::detach<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 dynamo_scheduler::selection::types::WorkerCatalogRecord) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = ()> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::missing_metadata(&self, &dynamo_scheduler::selection::types::WorkerCatalogRecord) -> alloc::vec::Vec<alloc::string::String>
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::open(&self, &dynamo_kv_indexer::registry::IndexRegistry, &dynamo_router_protocol::identity::RoutingPartitionId, u32) -> dynamo_kv_indexer::backend::Indexer
+pub fn dynamo_kv_router::services::selection::ZmqDirectIngress::reconcile<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, core::option::Option<&'life1 dynamo_scheduler::selection::types::WorkerCatalogRecord>, &'life2 dynamo_scheduler::selection::types::WorkerCatalogRecord) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), dynamo_scheduler::selection::error::SelectionError>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub const dynamo_kv_router::services::selection::DYN_ROUTER_DECODE_POLICY: &str
+pub const dynamo_kv_router::services::selection::DYN_ROUTER_PREFILL_POLICY: &str
+pub const dynamo_kv_router::services::selection::DYN_ROUTER_WORKER_SELECTION_POLICY: &str
+pub fn dynamo_kv_router::services::selection::local_selection_core(dynamo_kv_router::scheduling::config::KvRouterConfig, usize, tokio_util::sync::cancellation_token::CancellationToken, dynamo_scheduler::selection::pending::SelectionCacheConfig, dynamo_scheduler::types::WorkerSelectionPolicyFactory) -> anyhow::Result<dynamo_scheduler::selection::core::SelectionCore>
+pub fn dynamo_kv_router::services::selection::local_selection_core_with_host(dynamo_kv_router::scheduling::config::KvRouterConfig, usize, tokio_util::sync::cancellation_token::CancellationToken, dynamo_scheduler::selection::pending::SelectionCacheConfig, dynamo_scheduler::types::WorkerSelectionPolicyFactory, dynamo_scheduler::selection::core::SelectionHost) -> anyhow::Result<dynamo_scheduler::selection::core::SelectionCore>
+pub async fn dynamo_kv_router::services::selection::run_server(u16, dynamo_kv_router::services::selection::SelectionService) -> anyhow::Result<()>
+pub fn dynamo_kv_router::services::selection::warn_for_unserved_worker_selection_policies(&dynamo_kv_router::scheduling::config::KvRouterConfig, &[dynamo_router_protocol::worker_type::WorkerType]) -> anyhow::Result<()>
+pub type dynamo_kv_router::services::selection::WorkerSelectionPolicyProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::plugins::WorkerSelectionPolicyParameters) -> core::result::Result<dynamo_scheduler::types::WorkerSelectionPolicyFactory, dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError> + core::marker::Send + core::marker::Sync)>
+pub type dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry = dynamo_kv_router::plugins::RouterPluginRegistry
+pub mod dynamo_kv_router::services::slot_tracker
+pub mod dynamo_kv_router::services::slot_tracker::registry
+pub enum dynamo_kv_router::services::slot_tracker::registry::RegistryError
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::BlockSizeMismatch
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::BlockSizeMismatch::existing: u32
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::BlockSizeMismatch::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::BlockSizeMismatch::requested: u32
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::BlockSizeMismatch::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DpSizeTooLarge
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DpSizeTooLarge::dp_size: u32
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DuplicateWorker
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DuplicateWorker::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DuplicateWorker::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::DuplicateWorker::worker_id: dynamo_router_protocol::worker::WorkerId
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::InvalidBlockSize
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::InvalidDpRange
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::InvalidDpRange::dp_size: u32
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::InvalidDpRange::dp_start: u32
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::InvalidDpSize
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::TrackerNotFound
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::TrackerNotFound::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::TrackerNotFound::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::WorkerNotFound
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::WorkerNotFound::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::WorkerNotFound::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::RegistryError::WorkerNotFound::worker_id: dynamo_router_protocol::worker::WorkerId
+pub enum dynamo_kv_router::services::slot_tracker::registry::ServiceError
+pub dynamo_kv_router::services::slot_tracker::registry::ServiceError::Registry(dynamo_kv_router::services::slot_tracker::registry::RegistryError)
+pub dynamo_kv_router::services::slot_tracker::registry::ServiceError::Sequence(dynamo_slot_tracker::multi_worker::SequenceError)
+pub struct dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::active_decode_blocks: usize
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::active_prefill_tokens: usize
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::dp_rank: u32
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo::worker_id: dynamo_router_protocol::worker::WorkerId
+pub struct dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry
+impl dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::add_request(&self, &dynamo_router_protocol::identity::RoutingPartitionId, alloc::string::String, dynamo_router_protocol::worker::WorkerWithDpRank, alloc::vec::Vec<dynamo_tokens::SequenceHash>, usize) -> core::result::Result<(), dynamo_kv_router::services::slot_tracker::registry::ServiceError>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::free(&self, &dynamo_router_protocol::identity::RoutingPartitionId, &str) -> core::result::Result<(), dynamo_kv_router::services::slot_tracker::registry::ServiceError>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::list_loads(&self, core::option::Option<&str>, core::option::Option<&str>) -> alloc::vec::Vec<dynamo_kv_router::services::slot_tracker::registry::ActiveLoadInfo>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::list_workers(&self, core::option::Option<&str>, core::option::Option<&str>) -> alloc::vec::Vec<dynamo_kv_router::services::slot_tracker::registry::WorkerInfo>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::mark_prefill_completed(&self, &dynamo_router_protocol::identity::RoutingPartitionId, &str) -> core::result::Result<(), dynamo_kv_router::services::slot_tracker::registry::ServiceError>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::new(tokio_util::sync::cancellation_token::CancellationToken) -> Self
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::potential_loads(&self, &dynamo_router_protocol::identity::RoutingPartitionId, &[dynamo_tokens::SequenceHash], usize) -> core::result::Result<alloc::vec::Vec<dynamo_scheduler::protocols::PotentialLoad>, dynamo_kv_router::services::slot_tracker::registry::RegistryError>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::register(&self, dynamo_router_protocol::identity::RoutingPartitionId, dynamo_router_protocol::worker::WorkerId, u32, u32, u32) -> core::result::Result<(), dynamo_kv_router::services::slot_tracker::registry::RegistryError>
+pub fn dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry::unregister(&self, &dynamo_router_protocol::identity::RoutingPartitionId, dynamo_router_protocol::worker::WorkerId) -> core::result::Result<(), dynamo_kv_router::services::slot_tracker::registry::RegistryError>
+pub struct dynamo_kv_router::services::slot_tracker::registry::WorkerInfo
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::block_size: u32
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::dp_size: u32
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::dp_start: u32
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::model_name: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::routing_group: alloc::string::String
+pub dynamo_kv_router::services::slot_tracker::registry::WorkerInfo::worker_id: dynamo_router_protocol::worker::WorkerId
+pub mod dynamo_kv_router::services::slot_tracker::server
+pub struct dynamo_kv_router::services::slot_tracker::server::AppState
+pub dynamo_kv_router::services::slot_tracker::server::AppState::registry: alloc::sync::Arc<dynamo_kv_router::services::slot_tracker::registry::SlotTrackerRegistry>
+pub struct dynamo_kv_router::services::slot_tracker::SlotTrackerConfig
+pub dynamo_kv_router::services::slot_tracker::SlotTrackerConfig::port: u16
+pub dynamo_kv_router::services::slot_tracker::SlotTrackerConfig::replica_sync_peers: alloc::vec::Vec<alloc::string::String>
+pub dynamo_kv_router::services::slot_tracker::SlotTrackerConfig::replica_sync_port: core::option::Option<u16>
+pub async fn dynamo_kv_router::services::slot_tracker::run_server(dynamo_kv_router::services::slot_tracker::SlotTrackerConfig) -> anyhow::Result<()>
+pub mod dynamo_kv_router::tracking_hash
+pub use dynamo_kv_router::tracking_hash::TrackingHashAlgorithm
+pub use dynamo_kv_router::tracking_hash::TrackingHashConfig
+pub use dynamo_kv_router::tracking_hash::TrackingHashContext
+pub use dynamo_kv_router::tracking_hash::TrackingHashScope
+pub fn dynamo_kv_router::tracking_hash::tracking_hash_config(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> anyhow::Result<dynamo_scheduler::tracking_hash::TrackingHashConfig>
+pub fn dynamo_kv_router::tracking_hash::tracking_hash_context(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> anyhow::Result<dynamo_scheduler::tracking_hash::TrackingHashContext>
+pub mod dynamo_kv_router::worker_type
+pub use dynamo_kv_router::worker_type::ParseWorkerTypeError
+pub use dynamo_kv_router::worker_type::WorkerType
+pub struct dynamo_kv_router::KvRouterConfig
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_decode_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_eff_isl_ratio_threshold: f64
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_eff_isl_threshold: usize
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_enabled: bool
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_policy: dynamo_worker_selection::conditional_disagg::ConditionalDisaggPolicyKind
+pub dynamo_kv_router::KvRouterConfig::conditional_disagg_prefill_busy_threshold: core::option::Option<f64>
+pub dynamo_kv_router::KvRouterConfig::decode_active_request_weight: f64
+pub dynamo_kv_router::KvRouterConfig::disk_cache_hit_weight: f64
+pub dynamo_kv_router::KvRouterConfig::enable_session_prefix_index: bool
+pub dynamo_kv_router::KvRouterConfig::host_cache_hit_weight: f64
+pub dynamo_kv_router::KvRouterConfig::overlap_score_credit: f64
+pub dynamo_kv_router::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::KvRouterConfig::prefill_load_scale: f64
+pub dynamo_kv_router::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
+pub dynamo_kv_router::KvRouterConfig::router_assume_kv_reuse: bool
+pub dynamo_kv_router::KvRouterConfig::router_decode_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::KvRouterConfig::router_event_threads: u32
+pub dynamo_kv_router::KvRouterConfig::router_policy_config: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::KvRouterConfig::router_predicted_ttl_secs: core::option::Option<f64>
+pub dynamo_kv_router::KvRouterConfig::router_prefill_load_model: dynamo_scheduler::config::RouterPrefillLoadModel
+pub dynamo_kv_router::KvRouterConfig::router_prefill_policy: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::KvRouterConfig::router_queue_policy: dynamo_admission::profile::RouterQueuePolicy
+pub dynamo_kv_router::KvRouterConfig::router_queue_threshold: core::option::Option<f64>
+pub dynamo_kv_router::KvRouterConfig::router_replica_sync: bool
+pub dynamo_kv_router::KvRouterConfig::router_temperature: f64
+pub dynamo_kv_router::KvRouterConfig::router_track_active_blocks: bool
+pub dynamo_kv_router::KvRouterConfig::router_track_output_blocks: bool
+pub dynamo_kv_router::KvRouterConfig::router_track_prefill_tokens: bool
+pub dynamo_kv_router::KvRouterConfig::router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm
+pub dynamo_kv_router::KvRouterConfig::router_tracking_key_file: core::option::Option<std::path::PathBuf>
+pub dynamo_kv_router::KvRouterConfig::router_tracking_key_id: core::option::Option<alloc::string::String>
+pub dynamo_kv_router::KvRouterConfig::router_ttl_secs: f64
+pub dynamo_kv_router::KvRouterConfig::serve_indexer: bool
+pub dynamo_kv_router::KvRouterConfig::shared_cache_multiplier: core::option::Option<f64>
+pub dynamo_kv_router::KvRouterConfig::shared_cache_type: dynamo_worker_selection::selection_config::SharedCacheType
+pub dynamo_kv_router::KvRouterConfig::skip_initial_worker_wait: bool
+pub dynamo_kv_router::KvRouterConfig::use_kv_events: bool
+pub dynamo_kv_router::KvRouterConfig::use_remote_indexer: bool
+impl dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::apply_policy_config(&mut self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::assume_kv_reuse(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking(&self, &[u32], u32, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::compute_seq_hashes_for_tracking_with_context(&self, &dynamo_scheduler::tracking_hash::TrackingHashContext, dynamo_scheduler::tracking_hash::TrackingHashScope<'_>, &[u32], core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>, dynamo_kv_hashing::routing::BlockHashOptions<'_>, core::option::Option<&[dynamo_router_protocol::block_hash::LocalBlockHash]>) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::configured_policy_profile(&self) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::explicit_worker_selection_policy_types(&self) -> core::result::Result<alloc::vec::Vec<dynamo_router_protocol::worker_type::WorkerType>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::policy_profile(&self, core::option::Option<&str>) -> core::result::Result<dynamo_admission::profile::PolicyProfile, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::predict_on_route_enabled(&self) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::queueing_enabled(&self, core::option::Option<&str>) -> core::result::Result<bool, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::random_seq_hashes_for_tracking(&self, usize) -> core::option::Option<alloc::vec::Vec<u64>>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::request_classifier_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::RequestClassifierConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::router_queue_recheck_interval(&self) -> core::time::Duration
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance(&self) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::selected_worker_selection_policy_instance_for(&self, dynamo_router_protocol::worker_type::WorkerType) -> core::result::Result<core::option::Option<alloc::string::String>, dynamo_kv_router::scheduling::config::WorkerSelectionPolicyConfigError>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::track_prefill_tokens(&self, core::option::Option<&dynamo_scheduler::config::RouterConfigOverride>) -> bool
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::validate_config(&self) -> core::result::Result<(), alloc::string::String>
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::with_policy_model_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::worker_selection_config(&self) -> core::result::Result<core::option::Option<&dynamo_kv_router::scheduling::WorkerSelectionConfig>, dynamo_kv_router::scheduling::policy_config::RouterPolicyConfigError>
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig
+pub fn dynamo_kv_indexer::config::IndexerConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights
+pub fn dynamo_scheduler::config::CacheHitWeights::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_scheduler::config::RouterConfig
+pub fn dynamo_scheduler::config::RouterConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig
+pub fn dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::convert::From<&dynamo_kv_router::scheduling::config::KvRouterConfig> for dynamo_worker_selection::selection_config::SelectionConfig
+pub fn dynamo_worker_selection::selection_config::SelectionConfig::from(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> Self
+impl core::default::Default for dynamo_kv_router::scheduling::config::KvRouterConfig
+pub fn dynamo_kv_router::scheduling::config::KvRouterConfig::default() -> Self
+pub fn dynamo_kv_router::tracking_hash_context(&dynamo_kv_router::scheduling::config::KvRouterConfig) -> anyhow::Result<dynamo_scheduler::tracking_hash::TrackingHashContext>

@@ -35,6 +35,13 @@ assert!(scores.scores.is_empty());
 For end-to-end routing, pair the indexers with `LocalScheduler` and the worker/config protocol
 types re-exported from the crate root.
 
+## Writing a Plugin
+
+A statically linked worker-selection policy or request classifier imports
+`dynamo_kv_router::plugins::prelude::*` and depends on this crate alone; the prelude lists
+every contract, signal view, wire type, configuration type, and registry type a plugin
+names (`tests/plugin_api_prelude.rs` is a policy and a classifier written against it).
+
 ## Features
 
 `default = []`: the flat configuration, the plugin registry, and the shims over the kernel
@@ -75,6 +82,10 @@ cargo test -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-
 cargo clippy -p dynamo-kv-router --all-targets --features http,ingest-zmq,replica-sync-zmq,peer-recovery
 bash scripts/router_features_check.sh
 ```
+
+The crate's public surface is a committed snapshot, `public-api.txt`; `bash
+scripts/router_public_api_check.sh` regenerates it with `cargo-public-api` and fails on a
+difference (`--update` rewrites it; review the diff in the PR).
 
 ## Further Reading
 

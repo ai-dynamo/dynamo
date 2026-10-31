@@ -7,8 +7,10 @@
 //! providers with [`RouterPluginRegistry`]. Signal accessors and callback signatures are unchanged.
 //! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
 //!
-//! Legacy imports remain compatibility re-exports until v1.7; new plugins should use this module.
+//! New plugins import [`prelude`]; the older paths under this module and the crate root stay
+//! as compatibility re-exports until v1.7.
 
+pub mod prelude;
 mod registry;
 pub mod request_classifier;
 pub mod worker_selection;
