@@ -38,19 +38,35 @@ def _config(model: str = "org/model") -> SimpleNamespace:
 
 
 @pytest.mark.parametrize("model_type", sorted(_MM_ROUTING_MODEL_TYPES))
+@pytest.mark.parametrize("model_path", [None, "org/model"])
 def test_supported_family_uses_registry_marker(
-    model_type: str, monkeypatch: pytest.MonkeyPatch
+    model_type: str, model_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(llm_worker, "_resolve_model_dir", lambda _: "/models/cached")
     monkeypatch.setattr(llm_worker, "resolve_routing_image_token_id", lambda *_: 163605)
 
-    assert _resolve_image_token_id(model_type, _config()) == 163605
+    assert _resolve_image_token_id(model_type, _config(), model_path) == 163605
 
 
 def test_registry_miss_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm_worker, "resolve_routing_image_token_id", lambda *_: None)
 
     assert _resolve_image_token_id("qwen3_vl", _config()) is None
+
+
+def test_selected_snapshot_preserves_model_id(tmp_path, monkeypatch) -> None:
+    def fail(_):
+        raise AssertionError("must not re-resolve the broken cache reference")
+
+    def resolve(model_id, model_dir):
+        assert model_id == "org/model"
+        assert model_dir == str(tmp_path)
+        return 163605
+
+    monkeypatch.setattr(llm_worker, "_resolve_model_dir", fail)
+    monkeypatch.setattr(llm_worker, "resolve_routing_image_token_id", resolve)
+
+    assert _resolve_image_token_id("qwen3_vl", _config(), str(tmp_path)) == 163605
 
 
 def test_missing_binding_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
