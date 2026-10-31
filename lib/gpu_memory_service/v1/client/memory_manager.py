@@ -40,18 +40,22 @@ class _InstalledMapping(LocalMapping):
 
 
 class GMSClientMemoryManager:
-    """Own one GMS socket session, allocation table, and local VA table."""
+    """Own one GMS socket session, allocation table, and local VA table.
+
+    Each connect reaches the ``tag`` domain of the GPU ``device`` is on now,
+    which a restore may have moved it to.
+    """
 
     def __init__(
         self,
-        socket_path: str,
+        tag: str,
         vmm: VMMDevice,
         device: int,
         *,
         session_factory: _SessionFactory = _GMSClientSession,
         slab_size: int = DEFAULT_SLAB_SIZE,
     ):
-        self._socket_path = socket_path
+        self._tag = tag
         self._vmm = vmm
         self._device = device
         self._session_factory = session_factory
@@ -86,7 +90,10 @@ class GMSClientMemoryManager:
             try:
                 device_identity.invalidate_device_uuid_cache()
                 device_uuid = device_identity.get_device_uuid(self._device)
-                session = self._session_factory(self._socket_path, lock_type)
+                session = self._session_factory(
+                    device_identity.get_socket_path(device_uuid, self._tag),
+                    lock_type,
+                )
                 if session.identity[1] != device_uuid:
                     try:
                         session.close()
