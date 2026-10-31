@@ -71,6 +71,9 @@ spec:
               value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected-lpx
+            - name: LPX_RDMA_PORT
+              value: "19877"
+            - name: LPX_LPU_RDMA_ADDRS
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:

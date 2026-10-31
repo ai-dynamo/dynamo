@@ -68,6 +68,17 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			for index, offset := range []int{0, 2} {
 				require.Equal(t, lastReplica.Agents[0].CliqueName+"-"+strconv.Itoa(offset), "test-dgd-0-"+servers[index])
 			}
+
+			t.Log("Expand the RDMA addresses as Kubernetes does with the Grove variables of the last workload replica")
+			addrs := strings.NewReplacer(
+				"$(GROVE_PCSG_NAME)", "test-dgd-0-"+scaledPlan.ScalingGroupTemplate,
+				"$(GROVE_PCSG_INDEX)", strconv.Itoa(int(replicas-1)),
+				"$(GROVE_HEADLESS_SERVICE)", "test-dgd-0",
+			).Replace(workload.cyborgAgentRDMAAddrs(scaledPlan))
+			require.Equal(t, strings.Join([]string{
+				lastReplica.Agents[0].CliqueName + "-0.test-dgd-0:19877",
+				lastReplica.Agents[0].CliqueName + "-2.test-dgd-0:19877",
+			}, ","), addrs)
 		})
 	}
 }
@@ -129,24 +140,30 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 	t.Parallel()
 
 	prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + testAgentTemplateName + "-"
+	host := "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-" + testAgentTemplateName + "-"
+	port := ".$(GROVE_HEADLESS_SERVICE):19877"
 	tests := []struct {
 		name        string
 		selection   *dynamov1beta1.LPXLocalPartitions
 		wantServers string
+		wantAddrs   string
 	}{
 		{
 			name:        "every partition on LPUs addresses chain 2-3 through partition 2",
 			wantServers: prefix + "0\n" + prefix + "1\n" + prefix + "3",
+			wantAddrs:   host + "0" + port + "," + host + "1" + port + "," + host + "3" + port,
 		},
 		{
 			name:        "partition 1 on the GPU",
 			selection:   &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			wantServers: prefix + "0\n" + prefix + "2",
+			wantAddrs:   host + "0" + port + "," + host + "2" + port,
 		},
 		{
 			name:        "chain 2-3 on the GPU",
 			selection:   &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{2}},
 			wantServers: prefix + "0\n" + prefix + "1",
+			wantAddrs:   host + "0" + port + "," + host + "1" + port,
 		},
 		{
 			name:      "every partition on the GPU",
@@ -210,6 +227,9 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 				},
 			})
 			require.NotEmpty(t, cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash])
+
+			t.Log("Publish the same Agents to Cyborg as RDMA host:port addresses")
+			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_LPU_RDMA_ADDRS", Value: test.wantAddrs})
 		})
 	}
 }

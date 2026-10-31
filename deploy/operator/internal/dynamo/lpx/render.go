@@ -8,6 +8,7 @@ package lpx
 import (
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -88,6 +89,21 @@ func RenderNodeLocal(
 	modelStoragePath, err := lpuModelStoragePath(storageTemplate.Spec)
 	if err != nil {
 		return nil, err
+	}
+
+	// Hybrid Agents serve RDMA on the operator-owned port, and Cyborg dials
+	// their addresses. Model paths, prepended next, stay first.
+	if hybrid {
+		rdmaPort := corev1.EnvVar{Name: rdmaPortEnvVar, Value: strconv.Itoa(agentRDMAPort)}
+		agentContainerLists := make([][]corev1.Container, 0, 2*len(input.Stages))
+		for _, template := range input.Stages {
+			agentContainerLists = append(agentContainerLists, template.Spec.Containers, template.Spec.InitContainers)
+		}
+		prependOwnedEnv(agentContainerLists, []corev1.EnvVar{rdmaPort})
+		prependOwnedEnv(
+			[][]corev1.Container{cyborg.Spec.PodSpec.Containers, cyborg.Spec.PodSpec.InitContainers},
+			[]corev1.EnvVar{rdmaPort, {Name: lpuRDMAAddrsEnvVar, Value: workload.cyborgAgentRDMAAddrs(plan)}},
+		)
 	}
 
 	// Publish model paths to every container before role-specific bindings are prepended.
