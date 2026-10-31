@@ -102,7 +102,7 @@ These metrics track request processing across all worker pods (prefill and decod
 - `dynamo_component`: Component type (`prefill`, `backend`, `frontend`)
 - `dynamo_endpoint`: Endpoint name (`generate`, `clear_kv_blocks`)
 - `gpu`: GPU index (0-7 for DCGM metrics)
-- `Hostname`: Node hostname (for DCGM metrics)
+- `hostname` or `Hostname`: Node hostname (for DCGM metrics). Recent dcgm-exporter releases (seen on 4.6.1-4.8.4) use lowercase `hostname`; older ones use `Hostname`. The DCGM panels show whichever label is present.
 
 ## Metric Collection Architecture
 
