@@ -5,13 +5,12 @@
 
 use super::parameters::PolicyParameters;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
+    KvFetchScorer, KvFetchSource, WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
-/// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
-/// prefixes) also omits range traversal code.
+/// each worker score. The shared-cache specialization also omits range traversal code.
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
@@ -24,6 +23,34 @@ pub(super) fn build(
         (false, true) => Box::new(DefaultScorer::<false, true>::new(config, worker_label)),
         (true, false) => Box::new(DefaultScorer::<true, false>::new(config, worker_label)),
         (true, true) => Box::new(DefaultScorer::<true, true>::new(config, worker_label)),
+    }
+}
+
+/// [`build`] for the `kvcr` preset: the same cost plus credit for blocks a worker would fetch.
+pub(super) fn build_kv_fetch(
+    config: &PolicyParameters,
+    worker_label: &'static str,
+) -> Box<dyn KvFetchScorer> {
+    match (
+        config.decode_active_request_weight != 0.0,
+        config.shared_cache_multiplier != 0.0,
+    ) {
+        (false, false) => Box::new(FetchCreditScorer(DefaultScorer::<false, false>::new(
+            config,
+            worker_label,
+        ))),
+        (false, true) => Box::new(FetchCreditScorer(DefaultScorer::<false, true>::new(
+            config,
+            worker_label,
+        ))),
+        (true, false) => Box::new(FetchCreditScorer(DefaultScorer::<true, false>::new(
+            config,
+            worker_label,
+        ))),
+        (true, true) => Box::new(FetchCreditScorer(DefaultScorer::<true, true>::new(
+            config,
+            worker_label,
+        ))),
     }
 }
 
@@ -49,8 +76,6 @@ struct PreparedRequest {
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
-    // The host supplies fetch inputs for every candidate or for none.
-    has_kv_transfer: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -120,10 +145,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
-            has_kv_transfer: SHARED_CREDIT
-                && candidates
-                    .get(0)
-                    .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
         if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -138,10 +159,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         Ok(())
     }
 
+    /// `fetchable` counts toward the shared-cache credit; the default passes zero.
     fn score_worker(
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
+        fetchable: f64,
     ) -> Result<f64, WorkerSelectionPolicyError> {
         let load = candidate
             .load()
@@ -157,20 +180,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 let shared = cache
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = if self.prepared.has_kv_transfer {
-                    candidate
-                        .kv_transfer()
-                        .and_then(|transfer| transfer.source_prefix_blocks())
-                        .map_or(0.0, |source| {
-                            let local = cache.device_overlap_blocks()
-                                + cache.host_overlap_blocks()
-                                + cache.disk_overlap_blocks();
-                            (f64::from(source) - local).max(0.0)
-                        })
-                } else {
-                    0.0
-                };
                 self.shared_cache_multiplier * (shared as f64 + fetchable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
@@ -223,10 +232,8 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if SHARED_CREDIT {
-            // The host builds fetch sources per selection only for policies that ask.
-            inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
-        } else if self.overlap_score_credit != 0.0
+        if SHARED_CREDIT
+            || self.overlap_score_credit != 0.0
             || self.host_cache_hit_weight != 0.0
             || self.disk_cache_hit_weight != 0.0
         {
@@ -244,10 +251,58 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            *cost = self.score_worker(context, candidate)?;
+            *cost = self.score_worker(context, candidate, 0.0)?;
         }
         Ok(())
     }
+}
+
+/// The default cost, with blocks a worker would fetch from its offered source counted toward the
+/// shared-cache credit. Every offered fetch stays committed, so a credited fetch is always sent.
+struct FetchCreditScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool>(
+    DefaultScorer<REQUEST_COST, SHARED_CREDIT>,
+);
+
+impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> KvFetchScorer
+    for FetchCreditScorer<REQUEST_COST, SHARED_CREDIT>
+{
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerScorer::required_worker_inputs(&self.0)
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+        _fetches: &mut [Option<KvFetchSource>],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.0.prepare(context, candidates)?;
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let fetchable = if SHARED_CREDIT {
+                fetchable_blocks(candidate)
+            } else {
+                0.0
+            };
+            *cost = self.0.score_worker(context, candidate, fetchable)?;
+        }
+        Ok(())
+    }
+}
+
+/// Blocks a KV fetch would add beyond everything this worker holds.
+fn fetchable_blocks(candidate: WorkerCandidate<'_>) -> f64 {
+    let (Some(cache), Some(source)) = (
+        candidate.cache(),
+        candidate
+            .kv_transfer()
+            .and_then(|transfer| transfer.source_prefix_blocks()),
+    ) else {
+        return 0.0;
+    };
+    let local =
+        cache.device_overlap_blocks() + cache.host_overlap_blocks() + cache.disk_overlap_blocks();
+    (f64::from(source) - local).max(0.0)
 }
 
 #[cfg(test)]

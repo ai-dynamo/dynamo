@@ -67,6 +67,9 @@ pub enum WorkerSelectionPolicyError {
         "picker returned candidate row {row}, but the candidate table contains {candidate_count} rows"
     )]
     InvalidPickerRow { row: usize, candidate_count: usize },
+
+    #[error("KV fetch scorer committed candidate row {row} to a fetch offered for another worker")]
+    InvalidKvFetch { row: usize },
 }
 
 impl WorkerSelectionPolicyError {

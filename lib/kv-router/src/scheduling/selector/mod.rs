@@ -23,7 +23,8 @@ pub use crate::plugins::worker_selection::{
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 use crate::kv_hints::{
-    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+    KvFetchSource, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
+    KvTransferTarget,
 };
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInfo, WorkerInputRows,
@@ -241,23 +242,32 @@ impl<'a> MaterializedSelectionInput<'a> {
     /// Fill every row's fetch input once all rows are built, so the sources
     /// skip anything shorter than the shortest local prefix. `targets` is
     /// index-aligned with `rows`: each hint-capable row's target and local prefix.
+    /// `offers` receives each row's source, index-aligned with `rows`, outside the
+    /// rows every policy copies.
     fn fill_kv_transfer_sources<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
         rows: &mut [CandidateData],
         targets: &[Option<(KvTransferTarget, usize)>],
+        offers: &mut Vec<Option<KvFetchSource>>,
     ) {
         debug_assert_eq!(rows.len(), targets.len());
+        offers.clear();
         let scope = || KvTransferScope::of(targets.iter().flatten().copied());
         let Some(sources) = self.kv_transfer_sources(workers, scope) else {
             return;
         };
+        offers.reserve(rows.len());
         for (row, &target) in rows.iter_mut().zip(targets) {
-            row.transfer = Some(WorkerTransferInput {
-                source_prefix_blocks: target
-                    .and_then(|(target, local)| sources.source_for(row.worker, target, local))
-                    .map(source_prefix_blocks),
+            let offer = target.and_then(|(target, local)| {
+                sources
+                    .source_for(row.worker, target, local)
+                    .map(|choice| KvFetchSource::new(row.worker, choice, local))
             });
+            row.transfer = Some(WorkerTransferInput {
+                source_prefix_blocks: offer.map(|offer| source_prefix_blocks(offer.choice())),
+            });
+            offers.push(offer);
         }
     }
 
@@ -665,7 +675,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
-                .map(|(worker, cost)| (worker, cost, None))
+                .map(|(worker, cost)| (worker, cost, None, None))
         }
         WorkerSelectionPolicyStateRef::Composed(state) => {
             let mut state = state.borrow_mut();
@@ -678,11 +688,13 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 }
             };
             let ComposedPolicyState {
+                fetch_scorer,
                 picker,
                 picker_inputs,
                 candidates,
                 cache_inputs,
                 load_inputs,
+                fetches,
                 ..
             } = &mut *state;
             if candidates.is_empty() {
@@ -731,11 +743,15 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         spec,
                     )
                 });
-                Some((candidate.worker, candidate.cost, trace))
+                // A fetch scorer's decision is final, including no fetch.
+                let committed = fetch_scorer
+                    .is_some()
+                    .then(|| fetches.get(row).copied().flatten());
+                Some((candidate.worker, candidate.cost, trace, committed))
             }
         }
     };
-    let Some((worker, cost, selection_trace)) = selected else {
+    let Some((worker, cost, selection_trace, committed)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -745,7 +761,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
+    let kv_transfer_source = match committed {
+        Some(committed) => committed.map(|fetch| fetch.choice()),
+        // A policy without a fetch scorer commits to no fetch, so the router fetches from the
+        // selected worker's best source.
+        None => input.selected_kv_transfer_source(workers, worker),
+    };
     let result = selection_result(
         request,
         worker,

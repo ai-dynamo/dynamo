@@ -222,6 +222,65 @@ pub struct KvTransferSourceChoice {
     pub prefix_blocks: usize,
 }
 
+/// A fetch the host found for one target worker: the eligible source with the
+/// longest prefix beyond the target's local prefix.
+///
+/// Only the host constructs one, so a worker-selection policy can commit a
+/// candidate only to the source the host offered for that candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvFetchSource {
+    target: WorkerWithDpRank,
+    choice: KvTransferSourceChoice,
+    local_prefix_blocks: usize,
+}
+
+impl KvFetchSource {
+    pub(crate) fn new(
+        target: WorkerWithDpRank,
+        choice: KvTransferSourceChoice,
+        local_prefix_blocks: usize,
+    ) -> Self {
+        Self {
+            target,
+            choice,
+            local_prefix_blocks,
+        }
+    }
+
+    /// The worker and rank that fetches.
+    pub fn target(&self) -> WorkerWithDpRank {
+        self.target
+    }
+
+    /// The worker or cache owner the target fetches from.
+    pub fn source(&self) -> KvTransferCandidateSource {
+        self.choice.source
+    }
+
+    /// Root-aligned prefix, in blocks, that the source holds, and so the
+    /// prefix the target holds after the fetch.
+    pub fn prefix_blocks(&self) -> usize {
+        self.choice.prefix_blocks
+    }
+
+    /// The target's device and host-pinned prefix, in blocks, when the host
+    /// found this source.
+    pub fn local_prefix_blocks(&self) -> usize {
+        self.local_prefix_blocks
+    }
+
+    /// Blocks the fetch adds beyond the target's local prefix; at least one.
+    pub fn additional_blocks(&self) -> usize {
+        self.choice
+            .prefix_blocks
+            .saturating_sub(self.local_prefix_blocks)
+    }
+
+    pub(crate) fn choice(&self) -> KvTransferSourceChoice {
+        self.choice
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RankedSource {
     choice: KvTransferSourceChoice,

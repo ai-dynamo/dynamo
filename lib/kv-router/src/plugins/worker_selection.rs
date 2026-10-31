@@ -21,6 +21,8 @@ pub use inputs::{
     WorkerTransferInput,
 };
 
+pub use crate::kv_hints::KvFetchSource;
+
 pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
@@ -62,6 +64,36 @@ pub trait WorkerScorer: Send {
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError>;
+}
+
+/// Scores like a [`WorkerScorer`] and commits each candidate to the KV fetch its cost assumes.
+///
+/// Use it when a cost credits blocks a worker would fetch from another worker or cache owner.
+/// Only a `KvFetchScorer` receives [`WorkerInputs::KV_TRANSFER`]: the host strips it from
+/// filters, scorers, and pickers, so a policy that credits a fetch always commits to one. A
+/// policy has at most one; it runs after the [`WorkerScorer`]s, and its costs add to theirs.
+pub trait KvFetchScorer: Send {
+    /// Declare the worker-signal groups needed by this scorer. The host adds
+    /// [`WorkerInputs::KV_TRANSFER`].
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
+    /// Score every candidate and choose the fetch each cost assumes.
+    ///
+    /// `costs` follows [`WorkerScorer::score`]: it starts as NaN, and every slot needs one finite,
+    /// lower-is-better contribution. `fetches` starts with the source the host offers each
+    /// candidate, the one behind [`WorkerTransferInput::source_prefix_blocks`], or `None` when it
+    /// offers none. Keep a slot when that candidate's cost assumes the fetch, and set it to
+    /// `None` otherwise; any other value fails selection. Only the picked candidate's fetch leaves
+    /// selection, and the router delivers it with the booking.
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+        fetches: &mut [Option<KvFetchSource>],
     ) -> Result<(), WorkerSelectionPolicyError>;
 }
 

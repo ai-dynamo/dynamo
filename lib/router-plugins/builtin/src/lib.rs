@@ -4,7 +4,7 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
+//! catalog adds the named default, `kvcr`, two-tier, and ThunderAgent providers through `register`. The default
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
@@ -12,8 +12,8 @@ mod default;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
-    startup_policy_parameters,
+    DefaultWorkerSelector, DefaultWorkerSelectorControl, KVCR_POLICY_TYPE, default_factory,
+    default_policy, kvcr_policy, startup_policy_parameters,
 };
 
 /// Registry containing the required default only, without an optional policy catalog.
@@ -91,6 +91,30 @@ worker_selection:
         ] {
             factory(&config, worker_type, partition);
         }
+    }
+
+    /// `kvcr` resolves by type name and takes the default's parameters.
+    #[test]
+    fn resolves_kvcr_by_type_name() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  prefill: kvcr
+  instances:
+    - name: kvcr
+      type: kvcr
+      parameters:
+        shared_cache_multiplier: 0.5
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        factory(
+            &config,
+            WorkerType::Prefill,
+            RoutingPartitionRef::new("model", "default"),
+        );
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

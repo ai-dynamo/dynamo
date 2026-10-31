@@ -10,7 +10,10 @@ use dynamo_kv_router::plugins::{
 };
 use std::sync::Arc;
 
-use super::policy_for_role;
+use super::{Preset, policy_for_role};
+
+/// Policy type of the `kvcr` preset, selected by `worker_selection.instances[].type`.
+pub const KVCR_POLICY_TYPE: &str = "kvcr";
 
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -140,19 +143,26 @@ impl PolicyParameters {
     }
 }
 
+/// Register the named default and the `kvcr` preset, which take the same parameters.
 pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register_worker_selection(
-        "dynamo-default-cost-fn",
-        Arc::new(|parameters| {
-            let parameters: Parameters = parameters.deserialize()?;
-            parameters.validate()?;
-            Ok(Arc::new(
-                move |config: &KvRouterConfig, role, _partition| {
-                    policy_for_role(config.clone(), role, parameters.resolve(config))
-                },
-            ))
-        }),
-    )
+    for (policy_type, preset) in [
+        ("dynamo-default-cost-fn", Preset::Default),
+        (KVCR_POLICY_TYPE, Preset::Kvcr),
+    ] {
+        registry.register_worker_selection(
+            policy_type,
+            Arc::new(move |parameters| {
+                let parameters: Parameters = parameters.deserialize()?;
+                parameters.validate()?;
+                Ok(Arc::new(
+                    move |config: &KvRouterConfig, role, _partition| {
+                        policy_for_role(config.clone(), role, parameters.resolve(config), preset)
+                    },
+                ))
+            }),
+        )?;
+    }
+    Ok(())
 }

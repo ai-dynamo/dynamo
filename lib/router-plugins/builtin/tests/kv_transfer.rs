@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The default policy credits blocks a worker can fetch from a KV transfer source.
+//! The `kvcr` preset credits blocks a worker can fetch from a KV transfer source and commits the
+//! worker to that fetch. The default policy credits no fetch.
 
 mod support;
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
@@ -125,13 +126,25 @@ fn config(multiplier: f64) -> KvRouterConfig {
     }
 }
 
-/// The selected worker and the source its fetch hint would name.
+/// The worker `kvcr` selects and the source its fetch hint would name.
 fn select(
     workers: &HashMap<u64, HintWorker>,
     request: &SchedulingRequest,
     multiplier: f64,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
-    let selected = DefaultWorkerSelector::new(Some(config(multiplier)), "test")
+    select_with(
+        DefaultWorkerSelector::kvcr_seeded(Some(config(multiplier)), "test", 0),
+        workers,
+        request,
+    )
+}
+
+fn select_with(
+    selector: DefaultWorkerSelector,
+    workers: &HashMap<u64, HintWorker>,
+    request: &SchedulingRequest,
+) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
+    let selected = selector
         .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
         .unwrap();
     (
@@ -160,8 +173,17 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     assert_eq!(select(&workers, &request, 0.0), (0, from_c));
     // At half credit A costs 17 and B costs 15: B wins and fetches everything from C.
     assert_eq!(select(&workers, &request, 0.5), (1, from_c));
+    // The default credits no fetch, so A still wins; the router still names C for it.
+    assert_eq!(
+        select_with(
+            DefaultWorkerSelector::new_seeded(Some(config(0.5)), "test", 0),
+            &workers,
+            &request,
+        ),
+        (0, from_c)
+    );
     // Fetch credit only scores; it does not count as cached for prefill booking.
-    let selected = DefaultWorkerSelector::new(Some(config(0.5)), "test")
+    let selected = DefaultWorkerSelector::kvcr_seeded(Some(config(0.5)), "test", 0)
         .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
         .unwrap();
     assert_eq!(selected.cached_tokens, 0);
@@ -221,7 +243,8 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                 "test",
                 42,
             );
-            let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+            // The reference keeps the fetch term the default dropped, which is kvcr's equation.
+            let plugin = DefaultWorkerSelector::kvcr_seeded(Some(config), "test", 42);
             for _ in 0..32 {
                 let expected = reference
                     .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
