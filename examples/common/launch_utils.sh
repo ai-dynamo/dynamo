@@ -32,6 +32,8 @@
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
+#   wait_ready             Wait for a worker /health body to report "status": "ready"
+#                          (stricter than wait_for_ready, which accepts any HTTP 200)
 
 if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
     echo "launch_utils.sh requires bash 4.3+ (for wait -n), found ${BASH_VERSION}" >&2
@@ -323,6 +325,29 @@ wait_for_ready() {
         sleep 1
     done
     echo "WARNING: $_url not ready after ${_timeout}s" >&2
+    return 1
+}
+
+# wait_ready <url> <name> [timeout_seconds=900] [report_url]: poll until the /health body says "status": "ready".
+# A non-empty report_url adds the URL to messages and logs a timeout to stderr.
+wait_ready() {
+    local url="$1" name="$2" timeout_s="${3:-900}" report_url="${4:-}"
+    local deadline=$((SECONDS + timeout_s))
+    if [[ -n "${report_url}" ]]; then
+        echo "Waiting for ${name} at ${url} ..."
+    else
+        echo "Waiting for ${name} ..."
+    fi
+    while (( SECONDS < deadline )); do
+        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
+            echo "${name} is ready"
+            return 0
+        fi
+        sleep 1
+    done
+    if [[ -n "${report_url}" ]]; then
+        echo "Timed out waiting for ${name} (${url})" >&2
+    fi
     return 1
 }
 
