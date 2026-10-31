@@ -23,8 +23,8 @@ pub mod v14 {
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{
-    SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_shutdown,
-    invalid_argument, protocol_error, status_to_dynamo,
+    SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_error,
+    engine_shutdown, invalid_argument, invalid_request, protocol_error, status_to_dynamo,
 };
 pub use json::{json_to_struct, struct_to_json};
 #[cfg(feature = "tonic-v14")]

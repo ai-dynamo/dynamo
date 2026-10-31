@@ -12,13 +12,14 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    PreprocessedRequest, WorkerConfig, usage,
 };
 use dynamo_llm::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_sidecar_common::{
-    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, engine_error, engine_shutdown,
+    invalid_argument, startup_deadline, status_to_dynamo,
 };
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -79,67 +80,29 @@ impl SglangSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    /// Parse CLI arguments without connecting; discovery runs after probe startup.
-    pub fn from_cli() -> Result<
-        (
-            RuntimeConfig,
-            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
-        ),
-        DynamoError,
-    > {
-        let args = <Args as clap::Parser>::parse();
-        Self::validate_args(&args)?;
-        Ok((
-            args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, false),
-        ))
-    }
-
-    /// Parse embedded launcher arguments now, then discover metadata after the
-    /// shared sidecar runner has started probes and connected the runtime.
-    pub fn try_from_args_async(
-        argv: Vec<String>,
-    ) -> Result<
-        (
-            RuntimeConfig,
-            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
-        ),
-        SidecarStartupError,
-    > {
-        let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        Self::validate_args(&args)?;
-        Ok((
-            args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, false),
-        ))
-    }
-
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args, true))
+            .map_err(|error| engine_shutdown(format!("bootstrap runtime: {error}")))?;
+        runtime.block_on(Self::from_parsed_async(args))
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
         if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_arg(
+            return Err(invalid_argument(
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
         Ok(())
     }
 
-    async fn from_parsed_async(
-        args: Args,
-        bootstrap: bool,
-    ) -> Result<(Self, WorkerConfig), DynamoError> {
+    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let discovery = bootstrap_discover(
             &args.sidecar.grpc_endpoint,
             &args.sidecar.grpc.config(),
-            bootstrap,
+            true,
         )
         .await?;
         Self::from_discovered(args, discovery)
@@ -180,11 +143,9 @@ impl SglangSidecarEngine {
         let config = WorkerConfig {
             runtime: common.runtime,
             namespace: common.namespace,
-            component: if disaggregation_mode == DisaggregationMode::Aggregated {
-                common.component
-            } else {
-                disaggregation_mode.discovery_component().to_string()
-            },
+            component: disaggregation_mode
+                .registration_component(&common.component)
+                .to_string(),
             endpoint: common.endpoint,
             endpoint_types: common.endpoint_types,
             custom_jinja_template: common.custom_jinja_template,
@@ -236,7 +197,7 @@ impl SglangSidecarEngine {
                 Err(error) => format!("HealthCheck RPC failed: {error}"),
             };
             if Instant::now() >= deadline {
-                return Err(client::engine_shutdown(format!(
+                return Err(engine_shutdown(format!(
                     "SGLang did not become healthy within {:?}: {retry_message}",
                     self.transport.startup_deadline
                 )));
@@ -269,17 +230,17 @@ impl SglangSidecarEngine {
 impl LLMEngine for SglangSidecarEngine {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
-            return Err(client::engine_shutdown("sglang sidecar already started"));
+            return Err(engine_shutdown("sglang sidecar already started"));
         }
 
-        let deadline = Instant::now() + self.transport.startup_deadline;
+        let deadline = startup_deadline(self.transport.startup_deadline)?;
         let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
         let observed_mode = client::discovery_mode(&discovery.server_info)?;
         if observed_mode != self.disaggregation_mode {
-            return Err(client::invalid_arg(format!(
+            return Err(invalid_argument(format!(
                 "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
                 self.disaggregation_mode, observed_mode
             )));
@@ -334,7 +295,7 @@ impl LLMEngine for SglangSidecarEngine {
                 kv_event_sources,
                 combined_token_limit,
             })
-            .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
+            .map_err(|_| engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
             model = %config.model,
             mode = ?self.disaggregation_mode,
@@ -353,7 +314,7 @@ impl LLMEngine for SglangSidecarEngine {
         let state = self
             .state
             .get()
-            .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+            .ok_or_else(|| engine_shutdown("generate called before start"))?;
         if let Some(native_request) = native_http::request(
             &request,
             ctx.id(),
@@ -362,7 +323,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_port,
         )? {
             let native_http = state.native_http.clone().ok_or_else(|| {
-                client::invalid_arg(
+                invalid_argument(
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
@@ -424,13 +385,13 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(status_to_dynamo("Generate", status));
                     return;
                 }
             };
             if is_prefill {
                 let Some(handoff) = prefill_handoff.take() else {
-                    yield Err(client::protocol_error(
+                    yield Err(engine_error(
                         "SGLang gRPC prefill request is missing disaggregated params",
                     ));
                     return;
@@ -462,13 +423,13 @@ impl LLMEngine for SglangSidecarEngine {
                         let response = match message {
                             Ok(Some(response)) => response,
                             Ok(None) => {
-                                yield Err(client::engine_shutdown(
+                                yield Err(engine_shutdown(
                                     "SGLang closed Generate before a finished response",
                                 ));
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(status_to_dynamo("Generate", status));
                                 break;
                             }
                         };
@@ -611,7 +572,7 @@ impl LLMEngine for SglangSidecarEngine {
         let state = self
             .state
             .get()
-            .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
+            .ok_or_else(|| engine_shutdown("sglang sidecar is not started"))?;
         Ok(state
             .kv_event_sources
             .iter()
@@ -634,7 +595,7 @@ async fn bootstrap_discover(
     match client::bootstrap_discover(endpoint, transport, bootstrap).await? {
         client::StartupDiscovery::Leader(discovery) => Ok(*discovery),
         client::StartupDiscovery::Follower => {
-            Err(client::invalid_arg("inference engine requires node_rank=0"))
+            Err(invalid_argument("inference engine requires node_rank=0"))
         }
     }
 }
@@ -651,7 +612,7 @@ fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, Dynamo
     client::json_u64(&discovery.server_info, "disaggregation_bootstrap_port")
         .map(|port| {
             u16::try_from(port).map_err(|_| {
-                client::protocol_error(format!(
+                engine_error(format!(
                     "SGLang disaggregation_bootstrap_port is out of range: {port}"
                 ))
             })
@@ -660,7 +621,7 @@ fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, Dynamo
         .and_then(|port| {
             port.filter(|port| *port != 0).map_or_else(
                 || {
-                    Err(client::protocol_error(
+                    Err(engine_error(
                         "prefill SGLang server did not report disaggregation_bootstrap_port",
                     ))
                 },
@@ -712,9 +673,7 @@ fn resolve_bootstrap_host_with_local(
         .and_then(|url| url.host_str().map(str::to_string))
         .filter(|host| is_routable_host(host));
     from_endpoint.map(Some).ok_or_else(|| {
-        client::invalid_arg(
-            "could not derive a routable prefill bootstrap host; set --bootstrap-host",
-        )
+        invalid_argument("could not derive a routable prefill bootstrap host; set --bootstrap-host")
     })
 }
 
@@ -750,14 +709,14 @@ async fn local_kv_event_sources(
     let llm = config
         .llm
         .as_ref()
-        .ok_or_else(|| client::invalid_arg("KV sources require LLM registration"))?;
+        .ok_or_else(|| invalid_argument("KV sources require LLM registration"))?;
     metadata
         .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
-        .map_err(|error| client::invalid_arg(error.to_string()))?;
+        .map_err(|error| invalid_argument(error.to_string()))?;
     if let Some(group_id) = metadata
         .worker_group_id(deadline)
         .await
-        .map_err(|error| client::invalid_arg(error.to_string()))?
+        .map_err(|error| invalid_argument(error.to_string()))?
     {
         config
             .runtime_data
@@ -787,7 +746,7 @@ async fn discover_kv_event_sources(
     // An explicit list is authoritative, including an empty list. Only older
     // engines without this field may use the legacy single-node descriptor.
     if let Some(metadata) = NodeMetadata::from_server_info(&discovery.server_info)
-        .map_err(|error| client::protocol_error(error.to_string()))?
+        .map_err(|error| engine_error(error.to_string()))?
     {
         return local_kv_event_sources(&metadata, engine_config, deadline).await;
     }
@@ -797,18 +756,16 @@ async fn discover_kv_event_sources(
     if descriptor.is_null() {
         return Ok(Vec::new());
     }
-    let descriptor = descriptor.as_object().ok_or_else(|| {
-        client::protocol_error("SGLang GetServerInfo.kv_events must be an object or null")
-    })?;
+    let descriptor = descriptor
+        .as_object()
+        .ok_or_else(|| engine_error("SGLang GetServerInfo.kv_events must be an object or null"))?;
 
     let publisher = descriptor
         .get("publisher")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            client::protocol_error("SGLang GetServerInfo.kv_events.publisher must be a string")
-        })?;
+        .ok_or_else(|| engine_error("SGLang GetServerInfo.kv_events.publisher must be a string"))?;
     if publisher != "zmq" {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "unsupported SGLang KV-event publisher `{publisher}`; expected `zmq`"
         )));
     }
@@ -817,9 +774,7 @@ async fn discover_kv_event_sources(
         .and_then(Value::as_str)
         .filter(|host| !host.trim().is_empty())
         .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.endpoint_host must be a non-empty string",
-            )
+            engine_error("SGLang GetServerInfo.kv_events.endpoint_host must be a non-empty string")
         })?;
     let base_port = descriptor
         .get("endpoint_port_base")
@@ -827,25 +782,19 @@ async fn discover_kv_event_sources(
         .and_then(|port| u16::try_from(port).ok())
         .filter(|port| *port != 0)
         .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.endpoint_port_base must be in 1..=65535",
-            )
+            engine_error("SGLang GetServerInfo.kv_events.endpoint_port_base must be in 1..=65535")
         })?;
     let topic = descriptor
         .get("topic")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            client::protocol_error("SGLang GetServerInfo.kv_events.topic must be a string")
-        })?;
+        .ok_or_else(|| engine_error("SGLang GetServerInfo.kv_events.topic must be a string"))?;
     let block_size = descriptor
         .get("block_size")
         .and_then(Value::as_u64)
         .and_then(|size| u32::try_from(size).ok())
         .filter(|size| *size != 0)
         .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.block_size must be a positive uint32",
-            )
+            engine_error("SGLang GetServerInfo.kv_events.block_size must be a positive uint32")
         })?;
     let reported_dp_size = descriptor
         .get("dp_size")
@@ -853,16 +802,15 @@ async fn discover_kv_event_sources(
         .and_then(|size| u32::try_from(size).ok())
         .filter(|size| *size != 0)
         .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.dp_size must be a positive uint32",
-            )
+            engine_error("SGLang GetServerInfo.kv_events.dp_size must be a positive uint32")
         })?;
 
-    let llm = engine_config.llm.as_ref().ok_or_else(|| {
-        client::protocol_error("SGLang KV events require an LLM engine registration")
-    })?;
+    let llm = engine_config
+        .llm
+        .as_ref()
+        .ok_or_else(|| engine_error("SGLang KV events require an LLM engine registration"))?;
     if llm.kv_cache_block_size != Some(block_size) {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "SGLang KV-event block size {block_size} does not match the registered engine block size {:?}",
             llm.kv_cache_block_size
         )));
@@ -870,15 +818,15 @@ async fn discover_kv_event_sources(
     let dp_start = llm.data_parallel_start_rank.unwrap_or(0);
     let dp_size = llm.data_parallel_size.unwrap_or(1);
     if reported_dp_size != dp_size {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "SGLang KV-event discovery reports {reported_dp_size} DP ranks but this sidecar registered {dp_size}"
         )));
     }
-    let dp_end = dp_start.checked_add(dp_size).ok_or_else(|| {
-        client::protocol_error("SGLang data-parallel rank range overflows uint32")
-    })?;
+    let dp_end = dp_start
+        .checked_add(dp_size)
+        .ok_or_else(|| engine_error("SGLang data-parallel rank range overflows uint32"))?;
     if dp_end > reported_dp_size {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "SGLang KV-event discovery does not cover registered DP rank range {dp_start}..{dp_end}"
         )));
     }
@@ -886,7 +834,7 @@ async fn discover_kv_event_sources(
         .unwrap_or(1)
         .max(1);
     if nnodes > 1 && dp_size > 1 {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "SGLang KV events for multi-node DP are unsupported because GetServerInfo does not map DP ranks to publisher hosts (nnodes={nnodes}, dp_size={dp_size})"
         )));
     }
@@ -898,7 +846,7 @@ async fn discover_kv_event_sources(
             .checked_add(dp_rank)
             .filter(|port| *port <= u32::from(u16::MAX))
             .ok_or_else(|| {
-                client::protocol_error(format!(
+                engine_error(format!(
                     "SGLang KV-event port overflows 65535 for base port {base_port} and DP rank {dp_rank}"
                 ))
             })?;
@@ -935,7 +883,7 @@ fn kv_event_connect_host(
         });
     }
     if bare_host.contains([':', '/', '\\']) || bare_host.chars().any(char::is_whitespace) {
-        return Err(client::protocol_error(format!(
+        return Err(engine_error(format!(
             "invalid SGLang KV-event endpoint host `{endpoint_host}`"
         )));
     }
@@ -1126,9 +1074,9 @@ fn build_engine_config(
         .max(1);
     // dp_size describes model DP while attn_dp_size describes the additional
     // attention-DP rank space used by KV event publishers.
-    let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
-        client::invalid_arg("SGLang deployment DP size exceeds the supported range")
-    })?;
+    let deployment_dp_size = model_dp_size
+        .checked_mul(attn_dp_size)
+        .ok_or_else(|| invalid_argument("SGLang deployment DP size exceeds the supported range"))?;
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
             // Releases without attn_dp_size report attention DP as dp_size
@@ -1155,7 +1103,7 @@ fn build_engine_config(
     let data_parallel_size = Some(deployment_dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
-        return Err(client::protocol_error(
+        return Err(engine_error(
             "prefill SGLang discovery did not provide a usable bootstrap address",
         ));
     }

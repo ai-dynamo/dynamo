@@ -61,11 +61,26 @@ pub fn invalid_argument(message: impl Into<String>) -> DynamoError {
     backend(BackendError::InvalidArgument, message)
 }
 
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
+}
+
 pub fn protocol_error(peer: &str, message: impl Into<String>) -> DynamoError {
     backend(
         BackendError::Unknown,
         format!("invalid {peer} gRPC response: {}", message.into()),
     )
+}
+
+/// An engine failure with no more specific class. Unlike [`protocol_error`],
+/// the message is used as-is.
+pub fn engine_error(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::Unknown, message)
 }
 
 pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
