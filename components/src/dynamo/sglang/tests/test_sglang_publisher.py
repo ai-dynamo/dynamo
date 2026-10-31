@@ -570,6 +570,47 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert {call["kv_block_size"] for call in calls} == {32}
 
 
+def test_init_kv_event_publish_skips_legacy_publisher_for_guard_source(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        publisher_mod, "KvEventPublisher", lambda **kwargs: calls.append(kwargs)
+    )
+    guard = {
+        "dp_rank": 0,
+        "capabilities": ["router_hint"],
+        "source_control_endpoint": "tcp://10.0.20.27:19500",
+        "inventory_lifetime": "guard",
+    }
+    engine = SimpleNamespace(
+        port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id=""),
+        _scheduler_init_result=SimpleNamespace(
+            scheduler_infos=[{"kv_hint_sources": [guard]}]
+        ),
+    )
+    config = SimpleNamespace(
+        server_args=SimpleNamespace(
+            kv_events_config='{"endpoint": "tcp://*:5557"}',
+            page_size=16,
+            dp_size=1,
+            nnodes=1,
+            node_rank=0,
+        ),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True, kv_state_endpoint=None, use_kv_events=True
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=engine,
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        kv_worker_id=1234,
+    )
+
+    assert publisher.init_kv_event_publish() == []
+    assert calls == []
+
+
 def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     calls = []
 

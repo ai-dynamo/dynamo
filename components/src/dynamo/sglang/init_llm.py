@@ -13,6 +13,7 @@ from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -68,6 +69,67 @@ def _freeze_gc_after_init(enabled: bool) -> None:
         collected = gc.collect()
         gc.freeze()
         logging.info("Froze SGLang worker GC objects after collecting %d", collected)
+
+
+async def _arm_attach_gate(handler, engine, config, metrics_task, run_deferred):
+    """Create the lifecycle and close the handler's attach gate.
+
+    Misconfiguration raises here, before the serving try block, so tear down
+    the same way the serving failure path does.
+    """
+    state_agent = StateAgentLifecycle()
+    try:
+        state_agent.arm(engine, config)
+    except Exception as e:
+        logging.error(f"Failed to arm the KV state agent attach gate: {e}")
+        await finish_worker_teardown(
+            metrics_task, handler.cleanup, run_deferred, body_failed=True
+        )
+        raise
+    handler.attach_gate = state_agent
+    return state_agent
+
+
+def _guard_health_check_payload(state_agent, payload):
+    # The canary needs generate to work; until the worker is attached its
+    # generate path is gated, so a canary would deadlock readiness.
+    # With health checks off the runtime ignores the canary but a payload-less
+    # endpoint would never turn Ready, so keep the payload then.
+    if not state_agent.requires_attachment or not env_bool("DYN_HEALTH_CHECK_ENABLED"):
+        return payload
+    logging.warning(
+        "Generate health-check canary is disabled for KV state-agent workers because "
+        "readiness must not depend on generation before attachment "
+        "(DYN_HEALTH_CHECK_ENABLED is ignored for generate)"
+    )
+    return None
+
+
+async def _serve_attach_register(state_agent, serve_tasks, register_model):
+    """Serve endpoints, then (Guard) await attachment, then register the model.
+
+    Under Kubernetes discovery the worker's attachment intent is visible only
+    once it is Ready, which needs the endpoints serving; the model card (what
+    the router routes by) is published only after the agent attached.
+    """
+    if not state_agent.requires_attachment:
+        await asyncio.gather(*serve_tasks, register_model())
+        return
+
+    async def attach_then_register():
+        await state_agent.await_attached()
+        await register_model()
+
+    # Drain every branch before an error reaches the teardown that withdraws
+    # the owner: a late ack must not open the gate or register the model then.
+    tasks = [asyncio.ensure_future(t) for t in serve_tasks]
+    tasks.append(asyncio.ensure_future(attach_then_register()))
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def init_decode(
@@ -179,6 +241,11 @@ async def init_decode(
         enable_frontend_decoding=dynamo_args.frontend_decoding,
         first_token_source=first_token_source,
     )
+    # Close the attach gate before any route is registered: the system server
+    # is already up and routes must not act on an unattached Guard worker.
+    state_agent = await _arm_attach_gate(
+        handler, engine, config, metrics_task, run_deferred_handlers
+    )
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
@@ -202,10 +269,12 @@ async def init_decode(
         )
 
     body_failed = True
-    state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        gather_tasks = [
+        health_check_payload = _guard_health_check_payload(
+            state_agent, health_check_payload
+        )
+        serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -228,7 +297,11 @@ async def init_decode(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
-            register_model_with_readiness_gate(
+        ]
+        await _serve_attach_register(
+            state_agent,
+            serve_tasks,
+            lambda: register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -241,10 +314,9 @@ async def init_decode(
                 serves_lora_load=True,
                 forwards_kv_hints=True,
             ),
-        ]
-        await asyncio.gather(*gather_tasks)
+        )
     except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
+        logging.error(f"Failed to serve endpoints or attach to the KV state agent: {e}")
         raise
     else:
         body_failed = False
@@ -351,6 +423,11 @@ async def init_prefill(
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
+    # Close the attach gate before any route is registered: the system server
+    # is already up and routes must not act on an unattached Guard worker.
+    state_agent = await _arm_attach_gate(
+        handler, engine, config, metrics_task, run_deferred_handlers
+    )
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
@@ -360,10 +437,12 @@ async def init_prefill(
     ready_event = asyncio.Event()
 
     body_failed = True
-    state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        await asyncio.gather(
+        health_check_payload = _guard_health_check_payload(
+            state_agent, health_check_payload
+        )
+        serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -386,7 +465,11 @@ async def init_prefill(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
-            register_model_with_readiness_gate(
+        ]
+        await _serve_attach_register(
+            state_agent,
+            serve_tasks,
+            lambda: register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -409,7 +492,7 @@ async def init_prefill(
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
+        logging.error(f"Failed to serve endpoints or attach to the KV state agent: {e}")
         raise
     else:
         body_failed = False

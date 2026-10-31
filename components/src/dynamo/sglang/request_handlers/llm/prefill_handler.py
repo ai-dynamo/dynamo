@@ -101,6 +101,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
+        self._raise_if_not_attached()
         validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         sglang_request_id = new_sglang_request_id()

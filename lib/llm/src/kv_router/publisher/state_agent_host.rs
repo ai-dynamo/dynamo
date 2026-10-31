@@ -1083,40 +1083,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn router_hint_metadata_does_not_change_stable_slot_identity() {
-        let host = instance("kv_state_agent", 1);
-        let owner = owner(4);
-        let original = intent(
-            &host,
-            instance("producer", 2),
-            owner,
-            WorkerWithDpRank::new(17, 3),
-            71,
-        );
-        let slot = HostedSlot {
-            intent_incarnation: None,
-            producer_instance: None,
-            lifecycle: SlotLifecycle::Detached,
-            agent: None,
-            publisher_index: None,
-            global_dp_rank: original.worker.dp_rank,
-            kv_state_endpoint: original.kv_state_endpoint.clone(),
-            indexer_domain_id: original.indexer_domain_id,
-            kv_block_size: original.kv_block_size,
-            ingress_protocol: original.ingress_protocol,
-        };
-        let mut upgraded = original.clone();
-        upgraded.router_hint_source = Some(RouterHintSourceMetadata {
-            source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
-            worker_type: "prefill".to_string(),
-            topology_domains: Default::default(),
-        });
-
-        assert!(slot.matches(&original));
-        assert!(slot.matches(&upgraded));
-    }
-
     fn added(
         host: &Instance,
         publisher_id: u64,
@@ -1264,6 +1230,77 @@ mod tests {
 
         let error = validate_intent(&invalid, &host, 101).unwrap_err();
         assert!(error.to_string().contains("tcp://"));
+    }
+
+    fn hint(endpoint: &str) -> RouterHintSourceMetadata {
+        RouterHintSourceMetadata {
+            source_control_endpoint: endpoint.to_string(),
+            worker_type: "aggregated".to_string(),
+            topology_domains: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reattach_with_different_hint_endpoint_reuses_slot() {
+        let component = test_component().await;
+        let raw = SharedZmqPublisherSocket::bind("raw-kv").unwrap();
+        let mut request = intent(
+            &instance("kv_state_agent", 1),
+            instance("producer", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        request.raw_zmq_endpoint = raw.endpoint().to_string();
+        request.router_hint_source = Some(hint("tcp://10.0.20.27:19500"));
+        let metrics = HostMetrics::new(&component).unwrap();
+        let mut slots = HashMap::new();
+        let mut sockets = HostSockets {
+            slots_per_socket: 1,
+            share_publishers: false,
+            publishers: Vec::new(),
+            raw_pool: None,
+        };
+        let reconcile = |request: &KvStateAttachmentIntent| {
+            let intents = HashMap::from([(
+                request.cache_owner_id,
+                HashMap::from([(request.intent_incarnation, request.clone())]),
+            )]);
+            (request.cache_owner_id, intents)
+        };
+        let (id, intents) = reconcile(&request);
+        reconcile_owner(
+            &component,
+            id,
+            &intents,
+            &mut slots,
+            1,
+            &mut sockets,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        let agent = slots[&id].agent.as_ref().unwrap().clone();
+
+        request.intent_incarnation = 102;
+        request.router_hint_source = Some(hint("tcp://10.0.20.99:19500"));
+        let (id, intents) = reconcile(&request);
+        reconcile_owner(
+            &component,
+            id,
+            &intents,
+            &mut slots,
+            1,
+            &mut sockets,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(slots[&id].lifecycle, SlotLifecycle::Active);
+        assert_eq!(slots[&id].intent_incarnation, Some(102));
+        agent.shutdown().await.unwrap();
     }
 
     #[test]

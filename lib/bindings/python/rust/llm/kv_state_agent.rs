@@ -176,6 +176,24 @@ impl KvStateAttachmentOwner {
         })
     }
 
+    /// Wait for the state agent's attach ack for this incarnation; raises on
+    /// expiry. `timeout_secs=None` uses DYN_KV_STATE_AGENT_ATTACH_TIMEOUT_SECS.
+    #[pyo3(signature = (timeout_secs=None))]
+    fn await_attached<'py>(
+        &self,
+        py: Python<'py>,
+        timeout_secs: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.started()?;
+        let timeout = timeout_secs
+            .map(std::time::Duration::try_from_secs_f64)
+            .transpose()
+            .map_err(to_pyerr)?;
+        crate::future_into_py(py, async move {
+            inner.await_attached(timeout).await.map_err(to_pyerr)
+        })
+    }
+
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         crate::future_into_py(py, async move { inner.close().await.map_err(to_pyerr) })

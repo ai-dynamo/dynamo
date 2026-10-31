@@ -68,7 +68,7 @@ from dynamo.sglang.gateway import (
     gateway_engine_id,
 )
 from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
-from dynamo.sglang.state_agent import inventory_sources
+from dynamo.sglang.state_agent import guard_sources, inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -261,7 +261,7 @@ async def _register_model_with_runtime_config(
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
     if runtime_config is not None and forwards_kv_hints:
         publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
-        if inventory_sources(engine):
+        if inventory_sources(engine) or guard_sources(engine):
             runtime_config.kv_event_source_mode = "state_agent_v2"
 
     if dynamo_args.use_sglang_tokenizer and not (

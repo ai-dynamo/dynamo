@@ -683,6 +683,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        self._raise_if_not_attached()
         if self.serving_mode == DisaggregationMode.DECODE:
             validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
