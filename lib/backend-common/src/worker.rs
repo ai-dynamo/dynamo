@@ -1402,26 +1402,7 @@ impl Worker {
         let serve_result = loop {
             tokio::select! {
                 biased;
-                result = &mut serve_fut => {
-                    break match result {
-                        // Endpoint exited cleanly (e.g. DRT primary token
-                        // cancelled it) — run the orchestrator so drain/cleanup
-                        // don't race transport teardown.
-                        Ok(()) => {
-                            tracing::info!(
-                                "Endpoint completed gracefully; running shutdown orchestration"
-                            );
-                            Ok(())
-                        }
-                        // Serve errored; cleanup_once in run() is the safety net.
-                        Err(e) => {
-                            Err(err(
-                                ErrorType::Backend(BackendError::Unknown),
-                                format!("serve: {e}"),
-                            ))
-                        }
-                    };
-                }
+                result = &mut serve_fut => break endpoint_exit(result),
                 _ = shutdown.cancelled() => {
                     tracing::info!("Received shutdown signal; running graceful orchestration");
                     break Ok(());
@@ -1435,8 +1416,27 @@ impl Worker {
                         }
                         continue;
                     }
+                    self.withdraw_lost_engine(&endpoint).await;
+                    let engine_config = tokio::select! {
+                        biased;
+                        result = &mut serve_fut => break endpoint_exit(result),
+                        _ = shutdown.cancelled() => {
+                            tracing::info!("Received shutdown signal; running graceful orchestration");
+                            break Ok(());
+                        }
+                        result = self.engine.recover() => match result {
+                            Ok(engine_config) => engine_config,
+                            Err(error) => break Err(error),
+                        },
+                    };
                     let recovered = self
-                        .recover_engine(&endpoint, model_type, worker_type, &needs, &shutdown)
+                        .register_recovered_engine(
+                            &endpoint,
+                            engine_config,
+                            model_type,
+                            worker_type,
+                            &needs,
+                        )
                         .await;
                     if let Err(error) = recovered {
                         break Err(error);
@@ -1468,39 +1468,35 @@ impl Worker {
         serve_result
     }
 
-    /// Withdraw the endpoint and model card, reconnect through
-    /// [`LLMEngine::recover`], and register a fresh model card with the caller's
-    /// taints. The endpoint stays withdrawn until the serve loop sees the
-    /// engine `Ready`; in-flight requests keep running throughout.
-    async fn recover_engine(
+    /// Withdraw the endpoint and model card after engine loss; in-flight
+    /// requests keep running.
+    async fn withdraw_lost_engine(&self, endpoint: &dynamo_runtime::component::Endpoint) {
+        tracing::warn!("Engine lost; withdrawing worker from discovery until it recovers");
+        let mut registration = self.registration.lock().await;
+        registration.engine = EngineAvailability::Lost;
+        if let Err(error) = registration.sync_endpoint(endpoint).await {
+            tracing::warn!(%error, "failed to withdraw endpoint after engine loss");
+        }
+        if registration.card != Some(false) {
+            let result = LocalModel::detach_from_endpoint(endpoint, None).await;
+            registration.card = result.is_ok().then_some(false);
+            if let Err(error) = result {
+                tracing::warn!(%error, "failed to withdraw model card after engine loss");
+            }
+        }
+    }
+
+    /// Register a fresh model card from [`LLMEngine::recover`] with the
+    /// caller's taints. The endpoint stays withdrawn until the serve loop sees
+    /// the engine `Ready`.
+    async fn register_recovered_engine(
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
+        engine_config: EngineConfig,
         model_type: ModelType,
         worker_type: WorkerType,
         needs: &[Vec<WorkerType>],
-        shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
-        tracing::warn!("Engine lost; withdrawing worker from discovery until it recovers");
-        {
-            let mut registration = self.registration.lock().await;
-            registration.engine = EngineAvailability::Lost;
-            if let Err(error) = registration.sync_endpoint(endpoint).await {
-                tracing::warn!(%error, "failed to withdraw endpoint after engine loss");
-            }
-            if registration.card != Some(false) {
-                let result = LocalModel::detach_from_endpoint(endpoint, None).await;
-                registration.card = result.is_ok().then_some(false);
-                if let Err(error) = result {
-                    tracing::warn!(%error, "failed to withdraw model card after engine loss");
-                }
-            }
-        }
-
-        let engine_config = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Ok(()),
-            result = self.engine.recover() => result?,
-        };
         let mut local_model =
             build_local_model(&self.config, &engine_config, self.engine.is_raw()).await?;
 
@@ -1636,6 +1632,22 @@ impl Worker {
             }
             tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
         }
+    }
+}
+
+fn endpoint_exit(result: anyhow::Result<()>) -> Result<(), DynamoError> {
+    match result {
+        // Endpoint exited cleanly (e.g. DRT primary token cancelled it) — run
+        // the orchestrator so drain/cleanup don't race transport teardown.
+        Ok(()) => {
+            tracing::info!("Endpoint completed gracefully; running shutdown orchestration");
+            Ok(())
+        }
+        // Serve errored; cleanup_once in run() is the safety net.
+        Err(e) => Err(err(
+            ErrorType::Backend(BackendError::Unknown),
+            format!("serve: {e}"),
+        )),
     }
 }
 
@@ -5042,6 +5054,25 @@ mod handoff_and_lifecycle_tests {
         );
 
         harness.stop().await;
+    }
+
+    /// Regression: a runtime shutdown during engine recovery left the worker
+    /// waiting on `recover()` instead of shutting down.
+    #[tokio::test]
+    async fn runtime_shutdown_stops_engine_recovery() {
+        let harness = RecoveryHarness::start().await;
+        harness
+            .engine
+            .availability
+            .send_replace(EngineAvailability::Lost);
+        harness.wait_for(0, None).await;
+
+        harness.drt.shutdown();
+        tokio::time::timeout(Duration::from_secs(30), harness.run)
+            .await
+            .expect("worker must shut down while recovery is pending")
+            .unwrap()
+            .expect("worker must exit cleanly");
     }
 
     /// Regression: recovery could re-register a worker the operator had paused,
