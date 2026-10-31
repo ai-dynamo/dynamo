@@ -226,6 +226,11 @@ class DynamoRouterSweepConfigProvider:
                     config={
                         "router_mode": public.policy,
                         "router_config": router_config,
+                        **(
+                            {"conversation_affinity": concrete["conversation_affinity"]}
+                            if public.conversation_affinity is not None
+                            else {}
+                        ),
                         "ais_perf_config": _ais_perf_config_from_prediction(
                             context,
                             enabled=public.prefill_load_model.type == "ais",
