@@ -42,11 +42,16 @@ pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 ///
 /// Absence means `false` for compatibility with workers that expect the
 /// frontend's structural tag to model an already-opened reasoning block.
+///
+/// The frontend also reads it for MiniMax M3 top-level `guided_*` grammars, so
+/// a worker that sets it must hold every grammar until reasoning ends.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
 /// A backend consumes the reasoning prefix only when `require_reasoning` is true
 /// on the request. Missing metadata leaves reasoning in the frontend grammar.
+/// As with the key above, the frontend also reads it for MiniMax M3 top-level
+/// `guided_*` grammars.
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
