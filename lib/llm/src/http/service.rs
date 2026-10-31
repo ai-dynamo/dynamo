@@ -227,6 +227,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "glm47" => false,
                             "beam" => false,
                             // Kept on with the Gemma 4 tool-call parser.
                             "gemma4" => thinking != Some(true) && tool.is_none(),

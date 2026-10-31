@@ -283,11 +283,37 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       <Accordion title="GLM-4.5 and GLM-4.7">
         **Parser:** `glm45`
 
-        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+        **Upstream name:** vLLM: `glm45`; SGLang: `glm45`
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+        **Notes:** `<think>...</think>`. With the default V2 parser, `glm45` selects
+        the `glm47` unified family; `glm47` is also accepted as a Dynamo selector.
+        With `DYN_PARSER_VERSION=1`, `glm45` uses the legacy `nemotron_deci`
+        implementation.
+
+        Thinking controls such as `chat_template_kwargs: {"enable_thinking": false}`
+        or `chat_template_kwargs: {"thinking": false}` affect the model's chat
+        template, not response visibility. If a GLM model still generates
+        reasoning, Dynamo keeps it in `reasoning_content` and returns the answer
+        in `content`.
+
+        With Dynamo's `--dyn-reasoning-parser glm45` and the engine's native
+        `--reasoning-parser glm45` configured (SGLang or vLLM), Dynamo reconciles
+        its reasoning state with the rendered generation prompt, even if the
+        request supplied a false thinking flag:
+
+        - An open `<think>` defers JSON answer constraints and required/named-tool
+          constraints until `</think>`.
+        - A closed reasoning block starts in the answer phase, so those
+          constraints apply from the first generated token.
+        - With no generation prompt or no recognized open/closed reasoning
+          suffix, Dynamo retains the request-based decision.
+
+        The same reconciliation applies when a thinking-token budget is present.
+        That budget limits reasoning tokens; it is separate from answer-grammar
+        timing. Plain chat without constraints or a thinking budget does not
+        request this gate.
       </Accordion>
     </AccordionGroup>
   </Accordion>

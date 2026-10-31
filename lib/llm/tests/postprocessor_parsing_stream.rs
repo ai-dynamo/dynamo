@@ -3794,11 +3794,11 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                         .postprocessor_parsing_stream(input, &request, false, false)
                         .unwrap();
                     let out = drain_stream(output).await;
-                    let disabled = if family == "gemma4" {
+                    let disabled = match family {
                         // Kept on with the Gemma 4 tool-call parser.
-                        thinking != Some(true) && tool.is_none()
-                    } else {
-                        thinking == Some(false)
+                        "gemma4" => thinking != Some(true) && tool.is_none(),
+                        "glm47" => false,
+                        _ => thinking == Some(false),
                     };
                     assert_eq!(
                         out.reasoning,
@@ -3819,6 +3819,192 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                 }
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn glm_thinking_off_preserves_generated_reasoning() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_thinking_off_preserves_generated_reasoning"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    for (reasoning, tool) in [
+        (Some("glm45"), None),
+        (None, Some("glm47")),
+        (Some("glm45"), Some("glm47")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning, tool);
+        for controls in [
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking": false}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "glm-model",
+                    "messages": [{"role": "user", "content": "answer"}],
+                    "chat_template_kwargs": controls,
+                    "stream": true
+                }))
+                .unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+
+            for (raw, prefilled, expected_reasoning, expected_content) in [
+                ("<think>private</think>answer", false, "private", "answer"),
+                ("private</think>answer", true, "private", "answer"),
+                ("answer", false, "", "answer"),
+                (
+                    "private</think>{\"answer\":\"hello\"}",
+                    true,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (
+                    "<think>private</think>{\"answer\":\"hello\"}",
+                    false,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (r#"{"answer":"hello"}"#, false, "", r#"{"answer":"hello"}"#),
+            ] {
+                let mut request = request.clone();
+                if expected_content.starts_with('{') {
+                    request.inner.response_format = Some(
+                        serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap(),
+                    );
+                }
+                for split in 0..=raw.len() {
+                    let input = stream::iter(
+                        vec![
+                            mock_content_chunk(&raw[..split]),
+                            mock_content_chunk(&raw[split..]),
+                            mock_final_chunk(),
+                        ]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                    );
+                    let chunks: Vec<_> = preprocessor
+                        .postprocessor_parsing_stream(input, &request, prefilled, false)
+                        .unwrap()
+                        .collect()
+                        .await;
+                    let out = drain_stream(stream::iter(chunks.clone())).await;
+                    assert_eq!(
+                        out.reasoning, expected_reasoning,
+                        "{reasoning:?} {tool:?} {controls} {prefilled} split{split}"
+                    );
+                    assert_eq!(out.content, expected_content);
+                    assert!(out.tool_calls.is_empty());
+                    assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
+
+                    let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter(chunks),
+                        ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned)),
+                    )
+                    .await
+                    .unwrap();
+                    let choice = &batch.inner.choices[0];
+                    assert_eq!(
+                        choice
+                            .message
+                            .reasoning_content
+                            .as_deref()
+                            .unwrap_or_default(),
+                        expected_reasoning
+                    );
+                    assert_eq!(
+                        choice
+                            .message
+                            .content
+                            .as_ref()
+                            .map(get_text)
+                            .unwrap_or_default(),
+                        expected_content
+                    );
+                    assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn glm_thinking_off_preserves_reasoning_and_tool_calls() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_thinking_off_preserves_reasoning_and_tool_calls"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+    request.normalize_reasoning_template_args().unwrap();
+    let raw = "private</think>answer<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
+
+    for split in 0..=raw.len() {
+        let input = stream::iter(
+            vec![
+                mock_content_chunk(&raw[..split]),
+                mock_content_chunk(&raw[split..]),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let chunks: Vec<_> = preprocessor
+            .postprocessor_parsing_stream(input, &request, true, false)
+            .unwrap()
+            .collect()
+            .await;
+        let out = drain_stream(stream::iter(chunks.clone())).await;
+        let case = format!("GLM thinking off + tool call, split {split}");
+        assert_eq!(out.reasoning, "private", "{case}");
+        assert_eq!(out.content, "answer", "{case}");
+        assert_clean_tool_call(&case, &out.content, &out.tool_calls, "San Francisco");
+        assert_eq!(out.finish_reasons, vec![FinishReason::ToolCalls], "{case}");
+
+        let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter(chunks),
+            ParsingOptions::new(Some("glm47".into()), Some("glm45".into())),
+        )
+        .await
+        .unwrap();
+        let choice = &batch.inner.choices[0];
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("private"),
+            "{case}"
+        );
+        assert_eq!(
+            choice.message.content.as_ref().map(get_text),
+            Some("answer"),
+            "{case}"
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1, "{case}");
+        assert_eq!(calls[0].function.name, "get_weather", "{case}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"location": "San Francisco"}),
+            "{case}"
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(FinishReason::ToolCalls),
+            "{case}"
+        );
     }
 }
 
