@@ -402,7 +402,9 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
 
     components: list[Component] = []
     for site in sites:
-        dist_infos = sorted(site.glob("*.dist-info"))
+        # Vendored distributions ship their own licenses too. A parent wheel's
+        # license must not stand in for these nested components.
+        dist_infos = sorted(site.rglob("*.dist-info"))
         for dist_info in dist_infos:
             metadata_path = dist_info / "METADATA"
             if not metadata_path.is_file():

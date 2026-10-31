@@ -1050,3 +1050,13 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # These exact published archives declare license-file rather than license.
+  # Checked against checksum-verified jsonpath-rust 0.5.1 / scoped-env 2.1.0.
+  - { ecosystem: rust, name: jsonpath-rust, license: "MIT", source: "https://static.crates.io/crates/jsonpath-rust/jsonpath-rust-0.5.1.crate (LICENSE)" }
+  - { ecosystem: rust, name: scoped-env, license: "MIT", source: "https://static.crates.io/crates/scoped-env/scoped-env-2.1.0.crate (LICENSE)" }
+  # The flax 0.10.0 wheel ships this local Cargo project and its Apache text.
+  - { ecosystem: rust, name: flaxlib, license: "Apache-2.0", source: "https://pypi.org/project/flax/0.10.0/ (wheel flaxlib/LICENSE)" }
+  # Unpublished local integration-test crate shipped in PyTorch's ittapi tree.
+  # Select BSD-3-Clause from upstream GPL-2.0-only OR BSD-3-Clause.
+  - { ecosystem: rust, name: ittapi-integration-test, license: "BSD-3-Clause", source: "https://github.com/intel/ittapi/blob/54835bb96f1b85f8f21841ce821487f69d95ecce/README.md#license (upstream GPL-2.0-only OR BSD-3-Clause; BSD-3-Clause selected; rust/integration-tests/Cargo.toml declares publish=false and no license)" }

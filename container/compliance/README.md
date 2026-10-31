@@ -126,3 +126,89 @@ linux_<arch>/
 Detection is conservative: only unambiguous matches get an SPDX identifier. `UNKNOWN`
 fails the policy gate, surfacing the package for an explicit override in
 `license_overrides.yaml` or a signed-off `[[exceptions]]` entry in `policy/licenses.toml`.
+
+## Shipped-file completeness
+
+The frontend and vLLM / SGLang / TensorRT-LLM runtime builds supplement the
+ecosystem generators with a pinned Syft scan of the pre-runtime filesystem. `shipped.py` adds components missing from the inventory
+and feeds them through the same NOTICES writers, merged CSV, and license-policy
+gate. The separate CI audit scans the final image again and compares it with the
+build inventory. Discovery is not a license approval.
+
+This covers files that an installed-wheel or dpkg inventory cannot fully describe:
+
+| Shipped material | Attribution and evidence |
+|---|---|
+| Rust dependencies embedded in copied executables, such as `uv` | Discover the executable's auditable dependency graph. Fetch each exact published crate, verify its checksum against the static crates.io index (and Cargo.lock when present), then read that archive's manifest and upstream license/notice files. |
+| Go dependencies in copied executables and shared libraries | Discover Go build information and resolve the exact module's upstream license files. Record each module separately from the executable's top-level native attribution. |
+| Source Cargo.lock dependencies | Retain them in the inventory, including development and foreign-platform dependencies. Shipping source still requires attribution; a source declaration is not evidence that a dependency is linked into a binary. |
+| Nested Python distributions | Walk nested `.dist-info` directories and use each distribution's own metadata and notices. Scan both the runtime venv and shipped system package directories. |
+| Local source projects and synthetic Go main packages | Use a matching local Cargo manifest, including workspace-inherited licensing. When a local project has no independent declaration, require an exact wheel-file ownership record before using the owning project's license. This never covers its registry dependencies. |
+| Bundled launchers, solvers, and test/template fixtures | Require an exact wheel ownership record and a reviewed resource-specific license rule. Keep separate inventory entries; never assume a parent's license covers every bundled file. Unrecognized resources remain `UNKNOWN`. |
+
+For example, PuLP's MIT package license does not cover the bundled CBC solver's
+EPL-1.0 license. The collector reads CBC's adjacent `coin-license.txt`; it does
+not borrow the license of an unrelated Rust crate also named `cbc`. Likewise,
+distlib's launcher uses the BSD-2-Clause notice from its own C source, rather
+than the parent distribution's Python license. The upstream launcher notice is
+retained in `resource_notices/`.
+
+Inventory matching is scoped to the ecosystem. Python distribution names use
+PEP 503 separator normalization (`ruamel.yaml` and `ruamel-yaml`); Go module paths
+and other ecosystem names retain their own identity. The completeness audit
+continues to compare names within an ecosystem, while supplemental generation
+keeps distinct observed versions and validates their licenses individually.
+
+### License evidence and source retention
+
+`/legal/shipped-provenance.json` records the added component, discovery cataloger,
+filesystem locations, license evidence, source URL, and downloaded-source checksum.
+Unfiltered scanner evidence remains available even where license resolution uses
+a more specific declaration. For example, a Go module's license-generation source
+can contain GPL template strings without relicensing that module: resolution uses
+actual LICENSE/COPYING/NOTICE files, rather than treating every `license_*.go`
+string as a governing license. Distinct governing license detections are combined
+with `AND`, not silently converted into an `OR` choice.
+
+`/legal/license-review.json` flags reciprocal, restricted, and unknown licenses
+across the merged above-baseline inventory, including licenses the policy allows.
+An allowed MPL-2.0 dependency remains non-permissive; policy acceptance is not a
+claim that source and notice obligations disappear. SPDX `OR` alternatives stay
+intact for review. The existing policy gate still rejects denied or unknown
+licenses. A component-specific exception permits the native CBC executable under
+EPL-1.0 because it is distributed as a separate program. It does not permit EPL
+for other components, the unrelated Rust `cbc` crate, or an unknown solver license.
+The solver's own notice and provenance remain required, and its EPL license stays
+visible in the license-review artifact. This exception records the distribution
+rationale, not a claim of independent legal sign-off.
+
+Crate sources whose expressions are not wholly recognized as permissive, and Go
+module sources with such expressions, are retained under
+`/sboms/supplemental-sources` in the licenses stage. The existing release
+`sources_collect` stage includes these archives and their provenance in
+`sources.zip`. Source-archival enablement and publication remain the existing
+release pipeline's responsibility; a PR build alone does not publish sources.
+The scanner and registry cache are build helpers, and the runtime image continues
+to copy only `/legal` from this stage.
+
+### Extending collection
+
+Prefer upstream metadata and exact-version source notices over a growing list of
+package names. Add a resource rule only when the file's owning distribution and
+specific resource family have been verified, cite its upstream licensing source,
+and test both the accepted ownership and an unrelated or unowned file. Do not add
+blanket wheel-directory coverage, omit source/test/Windows files because they are
+not executed on Linux, suppress scanner errors, or loosen the license policy to
+make a build pass. A newly discovered denied license is a separate remediation
+or approval decision.
+
+Enable this path only when the licenses stage represents the filesystem being
+shipped. The Planner currently inventories a builder and copies selected paths
+into its distroless runtime, so scanning that builder would falsely attribute
+build-only dependencies; it retains its existing collection path. A new target
+must provide its actual runtime tree before enabling supplemental collection.
+
+Both architectures execute collection against their own build filesystem and
+baseline. The independent CI audit currently covers AMD64; it does not establish
+ARM64 completeness. Collection adds one filesystem scan and cached registry reads
+to the compliance stage, leaving inference code and dependency versions unchanged.

@@ -134,6 +134,7 @@ jobs:
       - sidecar-build
       - sidecar-trtllm-nightly-config-test
       - vllm-build
+      - vllm-compliance-audit
       - vllm-local-dev-build
       - sglang-local-dev-build
       - trtllm-local-dev-build
@@ -142,11 +143,13 @@ jobs:
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
+      - sglang-compliance-audit
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
       - trtllm-build
+      - trtllm-compliance-audit
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
@@ -160,6 +163,7 @@ jobs:
       - planner-test
       - planner-copy-to-acr
       - frontend-build
+      - frontend-compliance-audit
       - frontend-test
       - frontend-copy-to-acr
     if: always()
@@ -1121,8 +1125,9 @@ jobs:
   # they syft-scan the pushed image and diff it against the build's osrb-deps.csv
   # to surface anything shipped-but-unattributed. They need:[<fw>-build] and run
   # in PARALLEL with the test jobs (the slow syft pull+scan stays off the test
-  # critical path). Soft gate: report-only, non-required. EFA-image audits are a
-  # follow-up (same caller pattern).
+  # critical path). Their results feed the required backend-status-check, so
+  # missing attribution blocks merging. EFA-image audits are a follow-up
+  # (same caller pattern).
 
   vllm-compliance-audit:
     name: vllm-runtime # grouped in the UI with other vllm jobs
@@ -1136,7 +1141,7 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
     # No secrets: the audit scans the container's own filesystem (no registry
-    # auth / aws) — don't inherit repo secrets into a report-only job.
+    # auth / aws) — don't inherit repo secrets into the audit job.
 
   sglang-compliance-audit:
     name: sglang-runtime # grouped in the UI with other sglang jobs
@@ -1180,7 +1185,7 @@ jobs:
       framework: dynamo
       target: frontend
       # frontend ships amd64+arm64; the audit scans the amd64 image only,
-      # matching the single-arch framework audits above. Report-only.
+      # matching the single-arch framework audits above.
       cuda_version: ''
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}

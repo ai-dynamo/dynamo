@@ -252,6 +252,21 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.sidecar_backend != '' && github.sha || inputs.source_ref || github.sha }}
+      - name: Install compliance test fixtures
+        if: ${{ inputs.test_suite_name == 'dynamo' && inputs.run_cpu_only_tests }}
+        shell: bash
+        env:
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        run: |
+          set -euo pipefail
+          test -n "${CONTAINER_WORKSPACE}"
+          # Supply source fixtures only to this running test container.
+          if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
+            for path in .github/workflows/shared-compliance-audit.yml container/templates/compliance.Dockerfile; do
+              mkdir -p "${CONTAINER_WORKSPACE}/${path%/*}"
+              cp "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
+            done
+          fi
       - name: Download sidecar binary
         if: ${{ inputs.sidecar_backend != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
