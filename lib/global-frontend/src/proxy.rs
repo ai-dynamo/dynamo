@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::serve::ListenerExt;
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
+use dynamo_global_router::{InFlightTracker, RequestSelector, RoutingRequest, Selection};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -42,7 +42,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 struct Proxy {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
-    selector: Arc<dyn PoolSelector>,
+    selector: Arc<dyn RequestSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
@@ -51,13 +51,14 @@ struct Proxy {
 /// The Global Frontend's routes over the pools `pools` publishes.
 ///
 /// Each request counts in `in_flight` from its pool choice until its
-/// response ends; selectors and signals that weigh this process's own
-/// requests must read the same tracker. `http` must not set a total request
-/// timeout, because a response streams for as long as the pool generates.
-/// `/metrics` serves `metrics`.
+/// response ends, and whatever `selector` holds for it is held as long;
+/// selectors and signals that weigh this process's own requests must read
+/// the same tracker. `http` must not set a total request timeout, because a
+/// response streams for as long as the pool generates. `/metrics` serves
+/// `metrics`.
 pub fn app(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
-    selector: Arc<dyn PoolSelector>,
+    selector: Arc<dyn RequestSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
@@ -151,7 +152,11 @@ async fn forward(
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
     let request = RoutingRequest::new(&model).with_session(session);
-    let Some(target) = proxy.selector.select(&request, &candidates) else {
+    // `lifecycle` is what the selector holds for the request. It is dropped
+    // wherever this handler or the response stream is, which ends the
+    // request for the selector too.
+    let Some(Selection { target, lifecycle }) = proxy.selector.route(&request, &candidates).await
+    else {
         metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);
@@ -212,6 +217,7 @@ async fn forward(
     // ends or the client drops it; dropping it closes the pool connection.
     let body = upstream.bytes_stream().map(move |chunk| {
         let _in_flight = &in_flight;
+        let _lifecycle = &lifecycle;
         if let Some(timing) = &mut timing {
             timing.chunk(&chunk);
         }

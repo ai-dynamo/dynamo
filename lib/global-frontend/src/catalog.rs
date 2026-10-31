@@ -34,6 +34,13 @@ impl PoolSnapshot {
     }
 }
 
+/// The router core follows the catalog as a list of pools.
+impl AsRef<[Pool]> for PoolSnapshot {
+    fn as_ref(&self) -> &[Pool] {
+        &self.pools
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use dynamo_global_common::PoolKey;

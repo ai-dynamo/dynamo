@@ -12,7 +12,15 @@ repository.workspace = true
 
 [dependencies]
 dynamo-global-common = { workspace = true }
+# The embedded router core: pools register as its workers (see `core`).
+dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
+xxhash-rust = { workspace = true }

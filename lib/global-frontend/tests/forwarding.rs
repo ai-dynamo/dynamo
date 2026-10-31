@@ -13,7 +13,8 @@ use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
-    InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+    InFlightTracker, Pool, PoolSelector, PoolTarget, RequestSelector, RoundRobinSelector,
+    RoutingRequest,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -163,7 +164,7 @@ async fn global_frontend(pools: Vec<Pool>) -> GlobalFrontend {
 /// requests in flight in `in_flight`.
 async fn global_frontend_with(
     pools: Vec<Pool>,
-    selector: Arc<dyn PoolSelector>,
+    selector: Arc<dyn RequestSelector>,
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
