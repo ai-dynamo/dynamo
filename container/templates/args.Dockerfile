@@ -65,7 +65,11 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
+{% if "nixl_ucx_ref" in context[framework].get(device_key, {}) -%}
+ARG NIXL_UCX_REF={{ context[framework][device_key].nixl_ucx_ref }}
+{% else -%}
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
+{% endif -%}
 {# Resolved most-specific first: per-target, then per-device, then framework. #}
 {% if "nixl_ref" in context[framework].get(target, {}) -%}
 ARG NIXL_REF={{ context[framework][target].nixl_ref }}

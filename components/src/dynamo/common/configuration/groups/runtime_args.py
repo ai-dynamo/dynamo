@@ -93,8 +93,8 @@ class DynamoRuntimeConfig(ConfigBase):
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
     # Explicit --engine-request-limit for the backend admission gate, per DP
-    # rank. None leaves the gate on its environment settings and automatic
-    # value; validate() exports a set value, which the gate reads from the
+    # rank. None leaves the gate on its environment settings, unlimited by
+    # default; validate() exports a set value, which the gate reads from the
     # process environment when it is created (see
     # lib/llm/src/admission_gate.rs).
     engine_request_limit: Optional[int] = None
@@ -140,6 +140,12 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["DYN_FPM_TRACE"] = "1" if self.fpm_trace else "0"
 
         self._validate_output_modalities()
+
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
 
         if self.engine_request_limit is not None:
             if self.engine_request_limit <= 0:
@@ -450,7 +456,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
 
         # Backend admission full-request limit. Registered without an
         # environment default: the gate itself resolves the canonical variable,
-        # then the legacy alias, then its automatic value, so only an explicit
+        # then the legacy alias, and is otherwise unlimited, so only an explicit
         # flag is set here, and validate() exports it ahead of both variables.
         g.add_argument(
             "--engine-request-limit",
@@ -459,10 +465,11 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Maximum concurrent engine requests admitted by the backend "
             "admission gate per DP rank, each held from admission until the "
-            "request finishes. Takes precedence over both environment variables.\n"
+            "request finishes. Setting it enables backend admission control. "
+            "Takes precedence over both environment variables.\n"
             f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
-            "DYN_ENGINE_REQUEST_LIMIT) | default: the engine's reported "
-            "max_num_seqs, or 10000 until it is reported",
+            "DYN_ENGINE_REQUEST_LIMIT) | default: unlimited; backend admission "
+            "control stays disabled unless an engine limit is set",
         )
 
         add_argument(
