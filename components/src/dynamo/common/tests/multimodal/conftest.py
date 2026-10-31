@@ -31,7 +31,7 @@ _pil_importable: bool | None = None
 
 
 def _can_import_torch() -> bool:
-    """Import torch once and cache the result (multimodal eagerly imports it)."""
+    """Import torch once and cache the result (several multimodal tests import it)."""
     global _torch_importable
     if _torch_importable is None:
         try:
@@ -79,7 +79,7 @@ def pytest_ignore_collect(collection_path, config) -> bool | None:
 def carrier_imports(monkeypatch):
     """Mock media-carrier imports while leaving unrelated imports intact."""
     # Import after collection's optional-dependency guard: the multimodal
-    # package imports torch, which CPU-only runtime images may not ship.
+    # package imports Pillow through ImageLoader.
     from dynamo.common.multimodal import codec_errors
 
     def _set(
