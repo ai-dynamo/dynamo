@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-substrate-client-trust
+rules:
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - clustertrustbundles
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-substrate-client-trust
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-substrate-client-trust
+subjects:
+- kind: ServiceAccount
+  name: ate-env-api
+  namespace: ate-env
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: harbor-runner
+  namespace: ate-env
+  labels:
+    app: harbor-runner
+spec:
+  serviceAccountName: ate-env-api
+  restartPolicy: Never
+  containers:
+  - name: runner
+    image: python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+    command:
+    - sleep
+    - infinity
+    workingDir: /work
+    volumeMounts:
+    - mountPath: /var/run/secrets/ateapi
+      name: ateapi-token
+      readOnly: true
+    - name: substrate-identity
+      mountPath: /run/substrate
+      readOnly: true
+    - name: work
+      mountPath: /work
+    resources:
+      requests:
+        cpu: '1'
+        memory: 2Gi
+      limits:
+        cpu: '4'
+        memory: 8Gi
+    env:
+    - name: PYTHONPATH
+      value: /work/example:/work/pi-plugin/harbor
+    - name: KUBECONFIG
+      value: /work/kubeconfig
+    - name: SUBSTRATE_ENV_API
+      value: ate-env-api.ate-env.svc:7777
+    - name: DYNAMO_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: harbor-model-api
+          key: api-key
+          optional: true
+  volumes:
+  - name: ateapi-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          audience: api.ate-system.svc
+          expirationSeconds: 7200
+          path: token
+  - name: substrate-identity
+    projected:
+      sources:
+      - podCertificate:
+          signerName: podidentity.podcert.ate.dev/identity
+          keyType: ECDSAP256
+          credentialBundlePath: credential-bundle.pem
+      - clusterTrustBundle:
+          signerName: servicedns.podcert.ate.dev/identity
+          labelSelector:
+            matchLabels:
+              podcert.ate.dev/canarying: live
+          path: trust-bundle.pem
+  - name: work
+    emptyDir:
+      sizeLimit: 8Gi

@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+--- a/pi-plugin/harbor/dynamo_pi.py
++++ b/pi-plugin/harbor/dynamo_pi.py
+@@ -19,13 +19,40 @@
+         self,
+         *args,
+         provider_path: str = "/opt/pi-dynamo-provider",
++        preinstalled: bool = False,
+         **kwargs,
+     ):
++        self._preinstalled = preinstalled
+         self._provider_path = provider_path
+         super().__init__(*args, **kwargs)
+ 
+     @override
+     async def install(self, environment: BaseEnvironment) -> None:
++        if self._preinstalled:
++            if not self._version:
++                raise ValueError("preinstalled mode requires an explicit Pi version")
++            # Validate the baked runtime without running the package manager.
++            expected = shlex.quote(self._version)
++            await self.exec_as_agent(
++                environment,
++                command=(
++                    "set -euo pipefail; "
++                    "node -e 'const fs=require(\"fs\"); "
++                    "const m=JSON.parse(fs.readFileSync(\"/opt/pi-runtime.json\")); "
++                    "const p=require(require(\"path\").dirname(process.execPath)+\"/../lib/node_modules/@mariozechner/pi-coding-agent/package.json\"); "
++                    "if(m.pi!==process.argv[1] || p.version!==m.pi || process.version!==m.node) process.exit(1); "
++                    "fs.accessSync(m.extension); console.log(JSON.stringify(m));' "
++                    f"{expected}; "
++                    "cd /root/pi-dynamo-provider; sha256sum -c /opt/pi-provider.sha256; "
++                    "command -v stunnel >/dev/null; command -v uv >/dev/null"
++                ),
++            )
++            tls_config = self._get_env("DYN_TOOL_TRACE_TLS_CONFIG")
++            if tls_config:
++                await self.exec_as_root(
++                    environment, command=f"stunnel {shlex.quote(tls_config)}"
++                )
++            return
+         await super().install(environment)
+         # Optional TLS transport for Substrate's TLS-passthrough egress.
+         tls_config = self._get_env("DYN_TOOL_TRACE_TLS_CONFIG")
+@@ -112,7 +139,7 @@
+         await self.exec_as_agent(
+             environment,
+             command=(
+-                ". ~/.nvm/nvm.sh; "
++                f"{'' if self._preinstalled else '. ~/.nvm/nvm.sh; '}"
+                 "pi --print --mode json --no-session "
+                 f"--provider dynamo --model {shlex.quote(model_name)} {cli_flags}"
+                 f"{shlex.quote(instruction)} "

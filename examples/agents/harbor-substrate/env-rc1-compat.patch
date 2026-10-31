@@ -1,0 +1,222 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+diff --git a/cmd/ate-env-api/main.go b/cmd/ate-env-api/main.go
+index ad1a5f0..76bdeed 100644
+--- a/cmd/ate-env-api/main.go
++++ b/cmd/ate-env-api/main.go
+@@ -16,8 +16,11 @@ package main
+ 
+ import (
+ 	"context"
++	"crypto/tls"
++	"crypto/x509"
+ 	"errors"
+ 	"flag"
++	"fmt"
+ 	"io"
+ 	"log"
+ 	"net/http"
+@@ -35,6 +38,8 @@ import (
+ 
+ func main() {
+ 	var (
++		tlsCAFile         = flag.String("tls-ca-file", "", "CA PEM for Substrate API and router")
++		tlsBundle         = flag.String("tls-credential-bundle", "", "projected pod identity certificate and private key PEM")
+ 		listen            = flag.String("listen", "0.0.0.0:7777", "address to serve the API on")
+ 		ateapi            = flag.String("ateapi", ate.DefaultControlAddr, "address of the ateapi gRPC control plane")
+ 		atenet            = flag.String("atenet", ate.DefaultRouterAddr, "address of the atenet HTTP router")
+@@ -45,9 +50,33 @@ func main() {
+ 		wakeRunningBudget = flag.Duration("wake-running-budget", apiservice.DefaultWakeRunningBudget, "how long a guest call waits when the environment is already RUNNING but the router still answers Unavailable (guest not yet listening vs. path down)")
+ 	)
+ 	flag.Parse()
++	var tlsConfig *tls.Config
++	if *tlsCAFile != "" {
++		ca, err := os.ReadFile(*tlsCAFile)
++		if err != nil {
++			log.Fatal(err)
++		}
++		roots := x509.NewCertPool()
++		if !roots.AppendCertsFromPEM(ca) {
++			log.Fatal("CA file contains no certificates")
++		}
++		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
++		tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
++			pem, err := os.ReadFile(*tlsBundle)
++			if err != nil {
++				return nil, err
++			}
++			cert, err := tls.X509KeyPair(pem, pem)
++			if err != nil {
++				return nil, fmt.Errorf("loading pod identity: %w", err)
++			}
++			return &cert, nil
++		}
++	}
+ 
+ 	client, err := ate.New(ate.Options{
+ 		ControlAddr:     *ateapi,
++		TLSConfig:       tlsConfig,
+ 		RouterAddr:      *atenet,
+ 		HostSuffix:      *hostSuffix,
+ 		SkipVerify:      *skipVerify,
+diff --git a/cmd/ate-env/manifest.go b/cmd/ate-env/manifest.go
+index 56f6848..91bab5b 100644
+--- a/cmd/ate-env/manifest.go
++++ b/cmd/ate-env/manifest.go
+@@ -22,8 +22,8 @@ import (
+ 
+ 	"github.com/agent-substrate/env/internal/apiservice"
+ 	"github.com/spf13/cobra"
+-	atev1alpha1 "go.ate.dev/substrate/pkg/api/v1alpha1"
+-	"go.ate.dev/substrate/pkg/proto/ateapipb"
++	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
++	atev1alpha1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
+ 	"google.golang.org/protobuf/encoding/protojson"
+ 	"google.golang.org/protobuf/proto"
+ 	appsv1 "k8s.io/api/apps/v1"
+@@ -388,6 +388,8 @@ func buildWorkerPool(cfg manifestConfig) *atev1alpha1.WorkerPool {
+ }
+ 
+ func buildActorTemplate(cfg templateConfig) *ateapipb.ActorTemplate {
++	cpu := resource.MustParse(orDefault(cfg.cpu, defaultActorCPU))
++	memory := resource.MustParse(orDefault(cfg.memory, defaultActorMemory))
+ 	atespace := cfg.atespace
+ 	if atespace == "" {
+ 		atespace = apiservice.DefaultAtespace
+@@ -419,13 +421,9 @@ func buildActorTemplate(cfg templateConfig) *ateapipb.ActorTemplate {
+ 			// schema marks the field required, so say it explicitly.
+ 			PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+ 		},
+-		SandboxConfig: &ateapipb.SandboxConfig{
+-			SandboxClass: string(atev1alpha1.SandboxClassGvisor),
+-			ConfigName:   sandboxConfigName,
+-		},
+-		Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{
+-			{Name: "cpu", Quantity: orDefault(cfg.cpu, defaultActorCPU)},
+-			{Name: "memory", Quantity: orDefault(cfg.memory, defaultActorMemory)},
++		Resources: &ateapipb.ResourceRequirements{Limits: &ateapipb.Resources{
++			CpuMillicores: cpu.MilliValue(),
++			MemoryBytes:   memory.Value(),
+ 		}},
+ 	}
+ }
+diff --git a/go.mod b/go.mod
+index f611624..2351067 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,7 +6,7 @@ require (
+ 	github.com/google/uuid v1.6.0
+ 	github.com/modelcontextprotocol/go-sdk v1.8.0
+ 	github.com/spf13/cobra v1.10.2
+-	go.ate.dev/substrate v0.5.1-0.20261016164544-3a2ca6235748
++	go.ate.dev/substrate v1.0.0-rc.1
+ 	google.golang.org/grpc v1.84.0
+ 	google.golang.org/protobuf v1.36.12
+ 	k8s.io/api v0.37.1
+diff --git a/go.sum b/go.sum
+index edf211f..0b11415 100644
+--- a/go.sum
++++ b/go.sum
+@@ -109,8 +109,8 @@ github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
+ github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
+ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+-go.ate.dev/substrate v0.5.1-0.20261016164544-3a2ca6235748 h1:QrTauJhnfn0FL0t/GLzVo4bmeVUYMT6e4x8QSaQF8s0=
+-go.ate.dev/substrate v0.5.1-0.20261016164544-3a2ca6235748/go.mod h1:EktaeScxg724tF4cjtLV8kdz2xN3FH8NOTk/A95jSBY=
++go.ate.dev/substrate v1.0.0-rc.1 h1:davfE1q4OD+I/JyErP5k2ImOYvsE2mm5nG1LvA7bhjI=
++go.ate.dev/substrate v1.0.0-rc.1/go.mod h1:Y4n6FBNsJHYVcc2BerfoWV76KTtOqxLtUHYRtXgrrcQ=
+ go.yaml.in/yaml/v2 v2.4.4 h1:tuyd0P+2Ont/d6e2rl3be67goVK4R6deVxCUX5vyPaQ=
+ go.yaml.in/yaml/v2 v2.4.4/go.mod h1:gMZqIpDtDqOfM0uNfy0SkpRhvUryYH0Z6wdMYcacYXQ=
+ go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
+diff --git a/internal/apiservice/imagetemplate.go b/internal/apiservice/imagetemplate.go
+index a90fde7..adbf054 100644
+--- a/internal/apiservice/imagetemplate.go
++++ b/internal/apiservice/imagetemplate.go
+@@ -21,7 +21,7 @@ import (
+ 	"regexp"
+ 	"strings"
+ 
+-	"go.ate.dev/substrate/pkg/proto/ateapipb"
++	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
+ 	"google.golang.org/protobuf/proto"
+ )
+ 
+diff --git a/internal/apiservice/server.go b/internal/apiservice/server.go
+index aa911b1..fa5c95d 100644
+--- a/internal/apiservice/server.go
++++ b/internal/apiservice/server.go
+@@ -26,10 +26,10 @@ import (
+ 
+ 	"github.com/agent-substrate/env/internal/ate"
+ 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+-	"go.ate.dev/substrate/pkg/proto/ateapipb"
++	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/credentials/insecure"
++
+ 	"google.golang.org/grpc/metadata"
+ 	"google.golang.org/grpc/status"
+ )
+@@ -423,7 +423,7 @@ func (s *Server) guestConn(ctx context.Context, atespace, id string) (*grpc.Clie
+ 	targetActor := atespace + "/" + id
+ 	conn, err := grpc.NewClient(
+ 		s.routerAddr,
+-		grpc.WithTransportCredentials(insecure.NewCredentials()),
++		grpc.WithTransportCredentials(s.client.GuestTransportCredentials()),
+ 		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+ 			ctx = metadata.AppendToOutgoingContext(ctx, ate.TargetActorHeader, targetActor)
+ 			return invoker(ctx, method, req, reply, cc, opts...)
+diff --git a/internal/apiservice/wakeretry.go b/internal/apiservice/wakeretry.go
+index d9c8857..d1ff9f3 100644
+--- a/internal/apiservice/wakeretry.go
++++ b/internal/apiservice/wakeretry.go
+@@ -21,7 +21,7 @@ import (
+ 	"time"
+ 
+ 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+-	"go.ate.dev/substrate/pkg/proto/ateapipb"
++	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+diff --git a/internal/ate/client.go b/internal/ate/client.go
+index d507915..46c5d13 100644
+--- a/internal/ate/client.go
++++ b/internal/ate/client.go
+@@ -35,7 +35,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 
+-	"go.ate.dev/substrate/pkg/proto/ateapipb"
++	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/credentials"
+@@ -326,3 +326,12 @@ func wrapGRPCError(err error) error {
+ 	}
+ 	return err
+ }
++
++// GuestTransportCredentials uses the configured CA and client certificate for actor ingress.
++// Tests without a TLS configuration retain their local plaintext router.
++func (c *Client) GuestTransportCredentials() credentials.TransportCredentials {
++	if c.opts.TLSConfig != nil {
++		return credentials.NewTLS(c.opts.TLSConfig.Clone())
++	}
++	return insecure.NewCredentials()
++}
