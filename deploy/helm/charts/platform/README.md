@@ -173,6 +173,28 @@ sidecar guides.
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init
 container keep running the engine and Dynamo together in `main`.
 
+##### Bundled KAI Queue creation waits for the queue webhook
+
+**Change:** With `global.kai-scheduler.install=true`, a `post-install,post-upgrade` Job holds the
+`dynamo-default` and `dynamo` Queue hooks until KAI's `queue-controller` is Available, the
+`kai-queue-validation-v2` webhook configuration exists, and the webhook admits a server-side
+dry-run Queue. This fixes `helm install --wait` failing with
+`failed calling webhook "queue-validation.kai.scheduler"`.
+
+**Affected:** Bundled KAI installations whose queue-controller is enabled and whose `kai-config`
+is applied by the chart (the default `kaiConfigDeployer`, or `kaiConfig.render=true`).
+
+**Action:** Mirror `kaiQueueWait.image` (`registry.k8s.io/kubectl`) for restricted registries.
+Set `kaiQueueWait.enabled=false` only when the queue webhook is known to be serving, or when
+kai-config disables Queue validation (`spec.queueController.webhooks.enableValidation=false`) or
+changes its webhook name prefix; otherwise the Job waits for a webhook that never appears. The Job
+waits up to `kaiQueueWait.activeDeadlineSeconds` (600), within Helm's `--timeout`.
+
+**Existing deployments:** Successful runs delete the Job and its ServiceAccount, Role,
+ClusterRole, bindings, and ConfigMap. After a failure they persist for diagnosis until the next
+install or upgrade replaces them. `helm uninstall` does not remove them, so delete them manually
+when retiring a failed release.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -615,6 +637,12 @@ Kubernetes: `>=1.30.0-0`
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
+| kaiQueueWait.enabled | bool | `true` | Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving, or when Queue validation is disabled in kai-config. |
+| kaiQueueWait.image | string | `"registry.k8s.io/kubectl:v1.34.12"` | Image providing kubectl 1.31 or later, which can wait for a resource to be created. Override for an internal registry. |
+| kaiQueueWait.imagePullSecrets | list | `[]` | Existing pull secrets for the wait image. |
+| kaiQueueWait.activeDeadlineSeconds | int | `600` | Maximum Job duration in seconds, including retries. The Helm timeout still bounds the hook. |
+| kaiQueueWait.affinity | object | `{}` | Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations. |
+| kaiQueueWait.podSecurityContext | object | `nil` | Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### LPX Integration
