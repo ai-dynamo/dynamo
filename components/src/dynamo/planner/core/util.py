@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
@@ -60,3 +61,32 @@ def deployment_state_changed(
     ):
         return True
     return False
+
+
+def worker_counts_from_deployment_state(
+    state: DeploymentState,
+    *,
+    require_prefill: bool,
+    require_decode: bool,
+) -> WorkerCounts:
+    """Convert a deployment snapshot into the worker counts a tick consumes.
+
+    Ready, expected, and scaling values are reported only for required roles.
+    Pending-startup counts are copied for both roles regardless.
+    """
+    return WorkerCounts(
+        ready_num_prefill=(state.prefill.replicas.active if require_prefill else None),
+        ready_num_decode=(state.decode.replicas.active if require_decode else None),
+        expected_num_prefill=(
+            state.prefill.replicas.expected if require_prefill else None
+        ),
+        expected_num_decode=(
+            state.decode.replicas.expected if require_decode else None
+        ),
+        prefill_scaling_in_progress=(
+            require_prefill and state.prefill.replicas.scaling
+        ),
+        decode_scaling_in_progress=(require_decode and state.decode.replicas.scaling),
+        pending_num_prefill=state.prefill.replicas.pending_startup,
+        pending_num_decode=state.decode.replicas.pending_startup,
+    )

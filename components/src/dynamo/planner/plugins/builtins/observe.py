@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from dynamo.planner.core.types import ScheduledTick, TickInput, WorkerCounts
+from dynamo.planner.core.util import worker_counts_from_deployment_state
 from dynamo.planner.environment.interface import PlannerEnvironment
 
 
@@ -80,28 +81,11 @@ class EnvironmentObservePlugin:
         )
 
     def _collect_worker_counts(self) -> WorkerCounts:
-        state = self.environment.deployment_state()
-        return WorkerCounts(
-            ready_num_prefill=(
-                state.prefill.replicas.active if self.require_prefill else None
-            ),
-            ready_num_decode=(
-                state.decode.replicas.active if self.require_decode else None
-            ),
-            expected_num_prefill=(
-                state.prefill.replicas.expected if self.require_prefill else None
-            ),
-            expected_num_decode=(
-                state.decode.replicas.expected if self.require_decode else None
-            ),
-            prefill_scaling_in_progress=(
-                self.require_prefill and state.prefill.replicas.scaling
-            ),
-            decode_scaling_in_progress=(
-                self.require_decode and state.decode.replicas.scaling
-            ),
-            pending_num_prefill=state.prefill.replicas.pending_startup,
-            pending_num_decode=state.decode.replicas.pending_startup,
+        """Collect deployment counts using this plugin's required roles."""
+        return worker_counts_from_deployment_state(
+            self.environment.deployment_state(),
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
         )
 
 
