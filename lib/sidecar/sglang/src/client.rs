@@ -607,6 +607,16 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     )
 }
 
+/// For a generate stream: a broken stream maps as in
+/// [`dynamo_sidecar_common::stream_status_to_dynamo`]; a status SGLang sent
+/// keeps this module's mapping.
+pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    if dynamo_sidecar_common::is_broken_stream(&status) {
+        return dynamo_sidecar_common::stream_status_to_dynamo(rpc, status);
+    }
+    status_to_dynamo(rpc, status)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

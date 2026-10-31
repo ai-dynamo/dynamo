@@ -20,7 +20,10 @@ use dynamo_backend_common::{
     PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason, usage,
 };
 
-use crate::client::{engine_shutdown, invalid_argument, protocol_error, status_to_dynamo};
+use crate::client::{
+    engine_shutdown, invalid_argument, is_broken_stream, protocol_error, stream_incomplete,
+    stream_status_to_dynamo,
+};
 use crate::handoff;
 use crate::model::{DiscoveredEngine, engine_label};
 use crate::pb;
@@ -362,6 +365,10 @@ impl ResponseState {
         protocol_error(engine_label(&self.engine_name), message)
     }
 
+    pub(crate) fn stream_incomplete(&self, message: &str) -> DynamoError {
+        stream_incomplete(format!("{} {message}", engine_label(&self.engine_name)))
+    }
+
     pub(crate) fn prompt_tokens(&self) -> u32 {
         self.prompt_tokens
     }
@@ -495,12 +502,12 @@ pub(crate) enum DispatchFailure {
 }
 
 /// Only UNAVAILABLE (the engine starting, paused, full or draining, or the
-/// transport down) can succeed elsewhere. Every other status rejects this
-/// request itself.
+/// transport down) or a broken connection can succeed elsewhere. Every other
+/// status rejects this request itself.
 pub(crate) fn dispatch_failure(status: tonic::Status) -> DispatchFailure {
-    let unavailable = status.code() == tonic::Code::Unavailable;
-    let error = status_to_dynamo("Generate", status);
-    if unavailable {
+    let retryable = status.code() == tonic::Code::Unavailable || is_broken_stream(&status);
+    let error = stream_status_to_dynamo("Generate", status);
+    if retryable {
         DispatchFailure::Retryable(error)
     } else {
         DispatchFailure::Rejected(error)
@@ -509,7 +516,8 @@ pub(crate) fn dispatch_failure(status: tonic::Status) -> DispatchFailure {
 
 /// A status that ended an open response stream. An engine ends open streams
 /// with UNAVAILABLE when it restarts, drains or shuts down; the request can
-/// succeed elsewhere, so it is reported as a migratable engine shutdown.
+/// succeed elsewhere, so it is reported as a migratable engine shutdown. A
+/// broken connection is migratable too.
 pub(crate) fn stream_status(status: tonic::Status) -> DynamoError {
     if status.code() == tonic::Code::Unavailable {
         engine_shutdown(format!(
@@ -518,7 +526,7 @@ pub(crate) fn stream_status(status: tonic::Status) -> DynamoError {
             status.code()
         ))
     } else {
-        status_to_dynamo("Generate", status)
+        stream_status_to_dynamo("Generate", status)
     }
 }
 

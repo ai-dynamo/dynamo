@@ -397,7 +397,7 @@ impl LLMEngine for LpxSidecarEngine {
                             }
                         },
                         Ok(None) => {
-                            yield Err(state.protocol_error(
+                            yield Err(state.stream_incomplete(
                                 "Generate ended before a terminal response",
                             ));
                             break;

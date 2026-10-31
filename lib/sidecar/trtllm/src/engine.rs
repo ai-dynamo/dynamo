@@ -590,13 +590,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }
                             },
                             Ok(None) => {
-                                yield Err(client::protocol_error(
-                                    "Generate ended before a terminal response",
+                                yield Err(client::stream_incomplete(
+                                    "TensorRT-LLM Generate ended before a terminal response",
                                 ));
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         }

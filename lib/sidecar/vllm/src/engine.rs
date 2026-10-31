@@ -989,8 +989,8 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Ok(None) => {
-                        yield Err(client::protocol_error(
-                            "GenerateStream ended before a terminal response",
+                        yield Err(client::stream_incomplete(
+                            "vLLM GenerateStream ended before a terminal response",
                         ));
                         break;
                     }
@@ -1003,7 +1003,7 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Err(status) => {
-                        yield Err(client::status_to_dynamo("GenerateStream", status));
+                        yield Err(client::stream_status_to_dynamo("GenerateStream", status));
                         break;
                     }
                 }
