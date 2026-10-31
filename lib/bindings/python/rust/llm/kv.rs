@@ -2845,6 +2845,47 @@ impl KvRouter {
             .collect())
     }
 
+    /// Warm a selected worker's local KV cache without running inference.
+    #[pyo3(signature = (worker_id, token_ids, cache_salt=None))]
+    fn prefetch<'p>(
+        &self,
+        py: Python<'p>,
+        worker_id: u64,
+        token_ids: Vec<u32>,
+        cache_salt: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        if token_ids.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "token_ids must not be empty",
+            ));
+        }
+        let component = self.inner.kv_router().client().endpoint.component().clone();
+        crate::future_into_py(py, async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), async move {
+                let client = component.endpoint("prefetch").client().await?;
+                let mut instances = client.instance_avail_watcher();
+                instances.wait_for(|ids| ids.contains(&worker_id)).await?;
+                let client = rs::pipeline::PushRouter::<
+                    serde_json::Value,
+                    RsAnnotated<serde_json::Value>,
+                >::from_client(client, Default::default())
+                .await?;
+                let request = serde_json::json!({"token_ids": token_ids, "cache_salt": cache_salt});
+                let mut stream = client.direct(SingleIn::new(request), worker_id).await?;
+                stream
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("prefetch returned no response"))?
+                    .into_result()?
+                    .ok_or_else(|| anyhow::anyhow!("prefetch returned no data"))
+            })
+            .await
+            .map_err(to_pyerr)?
+            .map_err(to_pyerr)?;
+            Python::with_gil(|py| Ok(pythonize(py, &result)?.unbind()))
+        })
+    }
+
     fn pin_blocks<'p>(
         &self,
         py: Python<'p>,

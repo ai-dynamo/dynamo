@@ -2930,6 +2930,29 @@ class KvRouter:
         """
         ...
 
+    async def prefetch(self, worker_id: int, token_ids: list[int], cache_salt: Optional[str] = None) -> dict[str, Any]:
+        """Prefetch a full token prefix from Mooncake into a selected SGLang worker's GPU radix tree.
+
+        Requires SGLang's external-linker prefetch control API. The engine owns
+        validation, page alignment, allocation and insertion; this never computes
+        missing KV or generates tokens. Pass the same cache_salt as generation.
+        The command targets the worker's engine (all its DP replicas).
+
+        Returns success, message, prefetched_tokens and cached_tokens. Counts are
+        minima across replicas; check success before using them. A missing tail
+        is a successful partial hit. Cached tokens remain normally evictable.
+        Busy or unsupported engines return success=False. Transport errors raise;
+        a timeout after 60 seconds does not cancel engine-side work. No retry.
+        SGLang currently loads synchronously at idle; new arrivals wait for the
+        transfer. PP, Eagle and Mamba extra-buffer configurations are unsupported.
+
+        Example:
+            result = await router.prefetch(worker_id, full_token_ids)
+            if not result["success"]:
+                raise RuntimeError(result["message"])
+        """
+        ...
+
     async def pin_blocks(self, client: MooncakeClient, block_hashes: list[int], ttl_ms: int) -> list[MooncakeKeyResult]:
         """Resolve SPI/engine hashes to observed Mooncake keys and pin them once each.
 

@@ -166,3 +166,60 @@ async def test_worker_teardown_leaves_sibling_worker_reachable(
     router = KvRouter(survivor_endpoint, 4, KvRouterConfig(use_kv_events=False))
     with pytest.raises(ValueError, match="intentional KV-router failure"):
         await asyncio.wait_for(_generate_and_collect(router, 100), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_prefetch_targets_worker_without_generation(router_runtime, monkeypatch):
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    component = f"prefetch-{uuid.uuid4().hex}.worker"
+    calls = []
+    tasks = []
+    async with contextlib.AsyncExitStack() as stack:
+        workers = [
+            await stack.enter_async_context(_Worker.serve(f"{component}.generate"))
+            for _ in range(2)
+        ]
+        try:
+            for index, worker in enumerate(workers):
+
+                async def prefetch(request, _context=None, index=index):
+                    calls.append((index, request))
+                    if request["token_ids"] == [0]:
+                        raise RuntimeError("intentional prefetch failure")
+                    yield {"success": True, "prefetched_tokens": 4, "cached_tokens": 4}
+
+                endpoint = worker.runtime.endpoint(f"{component}.prefetch")
+                tasks.append(asyncio.ensure_future(endpoint.serve_endpoint(prefetch)))
+            control_client = await router_runtime.endpoint(
+                f"{component}.prefetch"
+            ).client()
+            while len(await control_client.wait_for_instances()) != 2:
+                await asyncio.sleep(0.01)
+            endpoint = router_runtime.endpoint(f"{component}.generate")
+            await (await endpoint.client()).wait_for_instances()
+            router = KvRouter(endpoint, 4, KvRouterConfig(use_kv_events=False))
+            tokens = [1, 2, 3, 4, 5]
+            for index, worker in enumerate(workers):
+                worker_id = worker.runtime.endpoint(
+                    f"{component}.generate"
+                ).connection_id()
+                result = await router.prefetch(worker_id, tokens, cache_salt="tenant-a")
+                assert result == {
+                    "success": True,
+                    "prefetched_tokens": 4,
+                    "cached_tokens": 4,
+                }
+                assert calls[-1] == (
+                    index,
+                    {"token_ids": tokens, "cache_salt": "tenant-a"},
+                )
+            assert len(calls) == 2
+            with pytest.raises(Exception, match="intentional prefetch failure"):
+                await router.prefetch(worker_id, [0])
+            with pytest.raises(ValueError, match="must not be empty"):
+                await router.prefetch(worker_id, [])
+        finally:
+            for worker in workers:
+                worker.runtime.shutdown()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
