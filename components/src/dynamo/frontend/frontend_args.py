@@ -217,6 +217,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    isolate_tool_call_markers: bool
     preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
@@ -294,6 +295,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
+        if self.isolate_tool_call_markers and self.chat_processor != "sglang":
+            raise ValueError(
+                "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
             )
         if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
@@ -778,6 +783,21 @@ class FrontendArgGroup(ArgGroup):
                 "Exclude tool definitions from the chat template when "
                 "tool_choice='none'. Prevents models from generating raw XML "
                 "tool calls in the content field."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--isolate-tool-call-markers",
+            env_var="DYN_ISOLATE_TOOL_CALL_MARKERS",
+            default=False,
+            help=(
+                "Tokenize message content that contains the tool-call parser's "
+                "delimiters (for example a literal <tool_call> in a tool result) as "
+                "plain sub-words instead of the delimiter tokens, so the model cannot "
+                "copy a delimiter token out of untrusted input and have it parsed as "
+                "a real tool call. Requests whose content the chat template rewrites "
+                "are rejected rather than encoded unsafely. Requires "
+                "--dyn-chat-processor=sglang."
             ),
         )
         add_argument(

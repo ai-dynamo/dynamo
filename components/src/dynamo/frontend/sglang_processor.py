@@ -305,6 +305,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
+_w_isolate_tool_call_markers: bool = False
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -359,12 +360,14 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
     global _w_structural_tag_scope, _w_structural_tag_schema
+    global _w_isolate_tool_call_markers
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -376,6 +379,7 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
+    _w_isolate_tool_call_markers = isolate_tool_call_markers
 
 
 def _preprocess_worker(
@@ -395,6 +399,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        isolate_tool_call_markers=_w_isolate_tool_call_markers,
     )
 
     n = request.get("n", 1)
@@ -565,6 +570,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        isolate_tool_call_markers: bool = False,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -592,6 +598,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.isolate_tool_call_markers = isolate_tool_call_markers
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -696,6 +703,7 @@ class SglangProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
+                isolate_tool_call_markers=self.isolate_tool_call_markers,
             )
 
             if self.debug_perf:
@@ -1243,6 +1251,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
                 ),
             )
             futures = [
@@ -1282,6 +1291,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

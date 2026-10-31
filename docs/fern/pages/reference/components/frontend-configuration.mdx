@@ -772,6 +772,12 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_PREPROCESS_WORKERS`
 </ParamField>
 
+<ParamField path="--isolate-tool-call-markers" type="boolean" default="false">
+  Requires `--dyn-chat-processor=sglang`; the frontend refuses to start with it under another chat processor. Tokenize message content that contains the tool-call parser's delimiters (for example a literal `<tool_call>` inside a tool result) as plain sub-words instead of the delimiter tokens, so the model cannot copy a delimiter token out of untrusted input and have it parsed as a real tool call. Requests whose delimiter-bearing content the chat template rewrites are rejected rather than encoded unsafely. See [Echoed delimiters](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md#echoed-delimiters).
+
+  Environment variable: `DYN_ISOLATE_TOOL_CALL_MARKERS`
+</ParamField>
+
 <ParamField path="-i / --interactive" type="boolean" default="false">
   Interactive text chat mode.
 
