@@ -815,6 +815,7 @@ pub(crate) fn to_kv_event_source(
     };
     Ok(KvEventSource::Zmq {
         heartbeat_timeout,
+        recovery: None,
         image_token_id: None,
         endpoint: format!("tcp://{host}:{}", endpoint.port),
         topic: source.topic.clone(),
