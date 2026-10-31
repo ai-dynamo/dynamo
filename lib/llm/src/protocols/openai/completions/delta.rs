@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
+use super::{CompletionEcho, NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
         common::{
             self,
             extensions::{NvExtProvider, NvExtResponseInput},
+            llm_backend::PromptLogprobs,
             timing::RequestTracker,
         },
         openai::{
@@ -16,6 +18,7 @@ use crate::{
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
         },
     },
+    tokenizers::traits::Tokenizer,
     types::TokenIdType,
 };
 
@@ -42,6 +45,122 @@ impl NvCreateCompletionRequest {
 
 pub struct DeltaGenerator {
     state: DeltaGeneratorState,
+    echo: Option<EchoState>,
+}
+
+/// What `echo: true` needs to rebuild the prompt side of a choice: the prompt the
+/// preprocessor sent to the engine and a tokenizer for its per-token text.
+struct EchoState {
+    prompt_token_ids: Arc<Vec<TokenIdType>>,
+    /// The client's prompt verbatim when it was text; token prompts are decoded.
+    prompt_text: Option<String>,
+    tokenizer: Arc<dyn Tokenizer>,
+    skip_special_tokens: bool,
+    /// Choices whose prompt text already went out (once per choice).
+    text_emitted: HashSet<u32>,
+    /// Choices whose prompt logprobs already went out, or were given up on.
+    logprobs_emitted: HashSet<u32>,
+    /// Generated text and logprobs held back per choice while its prompt logprobs are
+    /// still to come, so the prompt positions precede the generated ones on the wire.
+    held: HashMap<u32, (String, Option<dynamo_protocols::types::Logprobs>)>,
+}
+
+fn append_logprobs(
+    into: &mut Option<dynamo_protocols::types::Logprobs>,
+    more: dynamo_protocols::types::Logprobs,
+) {
+    match into {
+        None => *into = Some(more),
+        Some(existing) => {
+            existing.tokens.extend(more.tokens);
+            existing.token_logprobs.extend(more.token_logprobs);
+            existing.top_logprobs.extend(more.top_logprobs);
+            existing.text_offset.extend(more.text_offset);
+        }
+    }
+}
+
+impl EchoState {
+    fn token_text(&self, token_id: TokenIdType, return_as_ids: bool) -> String {
+        if return_as_ids {
+            return format!("token_id:{token_id}");
+        }
+        // Single-token decode on purpose: BPE merge and leading-space rules differ
+        // between single-token and sequence decode (see `Backend`'s top-logprob fill).
+        self.tokenizer
+            .decode(&[token_id], self.skip_special_tokens)
+            .map(String::from)
+            .unwrap_or_default()
+    }
+
+    fn prompt_text(&self) -> String {
+        if let Some(text) = &self.prompt_text {
+            return text.clone();
+        }
+        self.tokenizer
+            .decode(&self.prompt_token_ids, self.skip_special_tokens)
+            .map(String::from)
+            .unwrap_or_default()
+    }
+
+    /// One `logprobs` entry per prompt token from the engine's per-position maps,
+    /// in the completions layout: the token's own logprob (none at position 0) and a
+    /// token-to-logprob object of the alternatives the engine reported.
+    fn logprobs(
+        &self,
+        prompt_logprobs: &PromptLogprobs,
+        return_as_ids: bool,
+    ) -> dynamo_protocols::types::Logprobs {
+        if prompt_logprobs.len() != self.prompt_token_ids.len() {
+            tracing::warn!(
+                positions = prompt_logprobs.len(),
+                prompt_tokens = self.prompt_token_ids.len(),
+                "completions echo: the engine's prompt logprobs do not cover the prompt one-to-one"
+            );
+        }
+        let n = self.prompt_token_ids.len();
+        let mut tokens = Vec::with_capacity(n);
+        let mut token_logprobs = Vec::with_capacity(n);
+        let mut top_logprobs = Vec::with_capacity(n);
+        for (position, &token_id) in self.prompt_token_ids.iter().enumerate() {
+            let text = self.token_text(token_id, return_as_ids);
+            let entries = prompt_logprobs.get(position).and_then(Option::as_ref);
+            let selected = entries
+                .and_then(|entries| entries.get(&token_id))
+                .map(|entry| entry.logprob);
+            top_logprobs.push(match entries {
+                Some(entries) => {
+                    let mut values = serde_json::Map::new();
+                    for (&alternative, entry) in entries {
+                        let key = if return_as_ids {
+                            format!("token_id:{alternative}")
+                        } else {
+                            entry
+                                .decoded_token
+                                .clone()
+                                .unwrap_or_else(|| self.token_text(alternative, false))
+                        };
+                        values.insert(key, serde_json::json!(entry.logprob));
+                    }
+                    // Distinct ids can decode to the same string; the prompt token's
+                    // own probability wins, as on the completion side.
+                    if let Some(logprob) = selected {
+                        values.insert(text.clone(), serde_json::json!(logprob));
+                    }
+                    serde_json::Value::Object(values)
+                }
+                None => serde_json::Value::Null,
+            });
+            token_logprobs.push(selected);
+            tokens.push(text);
+        }
+        dynamo_protocols::types::Logprobs {
+            tokens,
+            token_logprobs,
+            top_logprobs,
+            text_offset: vec![],
+        }
+    }
 }
 
 impl DeltaGenerator {
@@ -53,7 +172,33 @@ impl DeltaGenerator {
                 model,
                 options,
             ),
+            echo: None,
         }
+    }
+
+    /// Echo the prompt back on every choice (`echo: true`). `prompt_text` is the
+    /// client's prompt when it was text; token prompts are decoded with `tokenizer`.
+    /// The prompt text rides the first chunk of each choice, so a streaming client
+    /// sees it before any generated text. When `logprobs` was requested, the prompt
+    /// logprobs ride the chunk that carries the engine's payload (vLLM and SGLang
+    /// attach it to the final chunk), and the choice's generated text and logprobs
+    /// are held back until then, so the wire order stays prompt, then completion.
+    pub fn enable_echo(
+        &mut self,
+        prompt_token_ids: Arc<Vec<TokenIdType>>,
+        prompt_text: Option<String>,
+        tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
+    ) {
+        self.echo = Some(EchoState {
+            prompt_token_ids,
+            prompt_text,
+            tokenizer,
+            skip_special_tokens,
+            text_emitted: HashSet::new(),
+            logprobs_emitted: HashSet::new(),
+            held: HashMap::new(),
+        });
     }
 
     /// Returns the request tracker. Tracking is always enabled. For sharing with PreprocessedRequest.
@@ -165,7 +310,11 @@ impl DeltaGenerator {
             },
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -186,7 +335,11 @@ impl DeltaGenerator {
             usage: Some(usage),
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        }
     }
 
     /// Check if usage tracking is enabled
@@ -259,12 +412,86 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             self.state.tracker_ref().record_finish();
         }
 
+        // The engine's prompt logprobs have two readers: the nvext field when the
+        // client selected it, and `echo`, which rebuilds the prompt side of the choice
+        // from them.
+        let enable_logprobs = self.state.options().enable_logprobs;
+        let (wants_echo_text, wants_echo_logprobs) = match &self.echo {
+            Some(echo) => (
+                !echo.text_emitted.contains(&index),
+                enable_logprobs && !echo.logprobs_emitted.contains(&index),
+            ),
+            None => (false, false),
+        };
+        let prompt_logprobs =
+            if self.state.options().response_fields.prompt_logprobs || wants_echo_logprobs {
+                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            } else {
+                None
+            };
+        if wants_echo_logprobs
+            && let Some(echo) = self.echo.as_mut()
+            && let Some(choice) = response
+                .inner
+                .choices
+                .iter_mut()
+                .find(|choice| choice.index == index)
+        {
+            if prompt_logprobs.is_none() && finish_reason.is_none() {
+                // Hold this chunk's generated side until the prompt logprobs arrive.
+                let held = echo.held.entry(index).or_default();
+                held.0.push_str(&std::mem::take(&mut choice.text));
+                if let Some(logprobs) = choice.logprobs.take() {
+                    append_logprobs(&mut held.1, logprobs);
+                }
+            } else if let Some((text, logprobs)) = echo.held.remove(&index) {
+                // Release what was held ahead of this chunk's own generated side.
+                choice.text.insert_str(0, &text);
+                let mut released = logprobs;
+                if let Some(current) = choice.logprobs.take() {
+                    append_logprobs(&mut released, current);
+                }
+                choice.logprobs = released;
+            }
+        }
+        if wants_echo_text || wants_echo_logprobs {
+            let return_as_ids = self.state.options().return_tokens_as_token_ids;
+            let echo = self.echo.as_mut().expect("checked above");
+            let text = if wants_echo_text {
+                echo.text_emitted.insert(index);
+                echo.prompt_text()
+            } else {
+                String::new()
+            };
+            let logprobs = match &prompt_logprobs {
+                Some(payload) if wants_echo_logprobs => {
+                    echo.logprobs_emitted.insert(index);
+                    Some(echo.logprobs(payload, return_as_ids))
+                }
+                None if wants_echo_logprobs && finish_reason.is_some() => {
+                    tracing::warn!(
+                        "completions echo: the engine reported no prompt logprobs; the prompt was echoed as text only"
+                    );
+                    echo.logprobs_emitted.insert(index);
+                    None
+                }
+                _ => None,
+            };
+            if !text.is_empty() || logprobs.is_some() {
+                response.echo = Some(CompletionEcho {
+                    choice_index: index,
+                    text,
+                    logprobs,
+                });
+            }
+        }
+
         // Build the nvext response payload via the shared gating helper on
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
         let prompt_logprobs_payload = if self.state.options().response_fields.prompt_logprobs {
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            prompt_logprobs
         } else {
             None
         };
@@ -910,5 +1137,213 @@ mod tests {
                 "engine_data should not appear when backend provides None"
             );
         }
+    }
+
+    struct MapTokenizer;
+
+    impl crate::tokenizers::traits::Encoder for MapTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            anyhow::bail!("echo tests never encode")
+        }
+
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            anyhow::bail!("echo tests never encode")
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for MapTokenizer {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            let text: String = token_ids
+                .iter()
+                .map(|id| match id {
+                    1 => "<s>",
+                    5 => "Hello",
+                    7 => " world",
+                    9 => " there",
+                    _ => "?",
+                })
+                .filter(|piece| !(skip_special_tokens && *piece == "<s>"))
+                .collect();
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(text))
+        }
+    }
+
+    impl crate::tokenizers::traits::Tokenizer for MapTokenizer {}
+
+    fn echo_request(logprobs: Option<u8>) -> NvCreateCompletionRequest {
+        let mut request = create_test_request();
+        request.inner.echo = Some(true);
+        request.inner.logprobs = logprobs;
+        request
+    }
+
+    /// A chunk with one generated token and the engine's prompt logprobs for the
+    /// prompt `[1, 5, 7]`: nothing at position 0, two candidates at position 1.
+    fn prompt_logprobs_output(finished: bool) -> BackendOutput {
+        let mut output = final_backend_output();
+        if !finished {
+            output.finish_reason = None;
+        }
+        output.log_probs = Some(vec![-0.1]);
+        output.engine_data = Some(serde_json::json!({
+            "prompt_logprobs": [
+                null,
+                {"5": {"logprob": -0.25}, "9": {"logprob": -1.5, "decoded_token": " there"}},
+                {"7": {"logprob": -0.5}}
+            ]
+        }));
+        output
+    }
+
+    #[test]
+    fn echo_rebuilds_the_prompt_positions_from_the_engine_prompt_logprobs() {
+        let request = echo_request(Some(2));
+        let mut generator = request.response_generator("req-echo".to_string());
+        generator.enable_echo(Arc::new(vec![1, 5, 7]), None, Arc::new(MapTokenizer), false);
+
+        let mut response = generator
+            .choice_from_postprocessor(prompt_logprobs_output(false))
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .clone()
+            .expect("the chunk carrying the prompt logprobs echoes the prompt");
+        assert_eq!(echo.choice_index, 0);
+        assert_eq!(echo.text, "<s>Hello world");
+        let logprobs = echo.logprobs.expect("logprobs were requested");
+        assert_eq!(logprobs.tokens, vec!["<s>", "Hello", " world"]);
+        assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.25), Some(-0.5)]);
+        assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
+        assert_eq!(
+            logprobs.top_logprobs[1],
+            serde_json::json!({"Hello": -0.25, " there": -1.5})
+        );
+        assert_eq!(
+            logprobs.top_logprobs[2],
+            serde_json::json!({" world": -0.5})
+        );
+        assert_eq!(
+            serde_json::to_value(&response)
+                .expect("serialize chunk")
+                .get("echo"),
+            None,
+            "the echo must not leak as a field of its own"
+        );
+
+        response.fold_echo();
+        assert!(response.echo.is_none());
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.text, "<s>Hello worldhello");
+        let folded = choice
+            .logprobs
+            .as_ref()
+            .expect("prompt positions ahead of the completion's");
+        assert_eq!(folded.tokens, vec!["<s>", "Hello", " world", "hello"]);
+        assert_eq!(
+            folded.token_logprobs,
+            vec![None, Some(-0.25), Some(-0.5), Some(-0.1)]
+        );
+
+        let next = generator
+            .choice_from_postprocessor(prompt_logprobs_output(true))
+            .expect("choice generation");
+        assert!(next.echo.is_none(), "a choice echoes its prompt once");
+    }
+
+    #[test]
+    fn echo_falls_back_to_the_prompt_text_when_the_engine_reports_no_prompt_logprobs() {
+        let request = echo_request(Some(1));
+        let mut generator = request.response_generator("req-echo-text".to_string());
+        generator.enable_echo(
+            Arc::new(vec![5, 7]),
+            Some("Hello world".to_string()),
+            Arc::new(MapTokenizer),
+            true,
+        );
+
+        let mut partial = final_backend_output();
+        partial.finish_reason = None;
+        partial.engine_data = None;
+        let response = generator
+            .choice_from_postprocessor(partial)
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .expect("the choice's first chunk echoes the prompt, ahead of any generated text");
+        assert_eq!(echo.text, "Hello world", "a text prompt is echoed verbatim");
+        assert!(echo.logprobs.is_none(), "no prompt logprobs yet");
+
+        let mut last = final_backend_output();
+        last.engine_data = None;
+        let response = generator
+            .choice_from_postprocessor(last)
+            .expect("choice generation");
+        assert!(
+            response.echo.is_none(),
+            "the engine never reported prompt logprobs: nothing more to echo"
+        );
+    }
+
+    #[test]
+    fn echo_logprobs_ride_the_final_chunk_after_the_text() {
+        let request = echo_request(Some(2));
+        let mut generator = request.response_generator("req-echo-split".to_string());
+        generator.enable_echo(Arc::new(vec![1, 5, 7]), None, Arc::new(MapTokenizer), false);
+
+        // First chunk: no prompt logprobs yet (vLLM and SGLang attach them to the
+        // final chunk), so only the text goes out.
+        let mut partial = final_backend_output();
+        partial.finish_reason = None;
+        partial.engine_data = None;
+        let response = generator
+            .choice_from_postprocessor(partial)
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .expect("the first chunk echoes the prompt text");
+        assert_eq!(echo.text, "<s>Hello world");
+        assert!(echo.logprobs.is_none());
+        assert_eq!(
+            response.inner.choices[0].text, "",
+            "the generated side is held until the prompt logprobs arrive"
+        );
+
+        // Final chunk: the prompt logprobs, the held text and this chunk's own, in order.
+        let mut response = generator
+            .choice_from_postprocessor(prompt_logprobs_output(true))
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .clone()
+            .expect("the chunk carrying the prompt logprobs echoes them");
+        assert_eq!(echo.text, "", "the prompt text already went out");
+        let logprobs = echo.logprobs.expect("logprobs were requested");
+        assert_eq!(logprobs.tokens, vec!["<s>", "Hello", " world"]);
+        response.fold_echo();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.text, "hellohello",
+            "held text first, then this chunk's"
+        );
+        let folded = choice.logprobs.as_ref().expect("prompt positions first");
+        assert_eq!(folded.tokens, vec!["<s>", "Hello", " world", "hello"]);
+        assert_eq!(folded.token_logprobs.last(), Some(&Some(-0.1)));
+    }
+
+    #[test]
+    fn echo_is_not_built_unless_requested() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-no-echo".to_string());
+        let response = generator
+            .choice_from_postprocessor(prompt_logprobs_output(true))
+            .expect("choice generation");
+        assert!(response.echo.is_none());
     }
 }

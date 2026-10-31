@@ -38,15 +38,10 @@ from vllm.v1.executor import Executor
 def _resolve_engine_utils(
     vllm_config: VllmConfig, process_count: int
 ) -> tuple[Any, Any]:
-    # vLLM 0.32 replaces address allocation with supervisor-bound listeners.
-    get_addresses = getattr(engine_utils, "get_engine_zmq_addresses", None)
-    if get_addresses is not None:
-        return get_addresses(vllm_config, process_count), None
     bind_listeners = getattr(engine_utils, "bind_engine_zmq_listeners", None)
     if bind_listeners is None:
         raise RuntimeError(
-            f"vLLM {vllm.__version__} provides neither get_engine_zmq_addresses "
-            "nor bind_engine_zmq_listeners"
+            f"vLLM {vllm.__version__} provides no bind_engine_zmq_listeners"
         )
     listeners = bind_listeners(vllm_config, process_count)
     return listeners.addresses, listeners
@@ -72,8 +67,8 @@ _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
 _LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
-# Re-check the launch shape when either supported pin moves.
-_VERIFIED_VLLM_VERSIONS = ("0.31.0", "0.32.0")
+# Re-check the launch shape when the supported pin moves.
+_VERIFIED_VLLM_VERSIONS = ("0.32.0",)
 
 
 def is_embedding_process_child() -> bool:

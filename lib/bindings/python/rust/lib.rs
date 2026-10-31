@@ -836,7 +836,8 @@ fn register_model<'p>(
     // serving.
     let admission_gate = endpoint
         .admission_gate
-        .get_or_create(endpoint.inner.component());
+        .get_or_create(endpoint.inner.component())
+        .map_err(to_pyerr)?;
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -1720,10 +1721,7 @@ impl Endpoint {
         // by `register_model` takes effect from then on, through the gate of
         // the worker this endpoint serves for.
         let backend_role = engine::BackendRole::of(&self.inner);
-        let admission = engine::EndpointAdmission::new(
-            self.admission_gate.clone(),
-            self.inner.component().clone(),
-        );
+        let admission = self.admission_gate.clone();
 
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`

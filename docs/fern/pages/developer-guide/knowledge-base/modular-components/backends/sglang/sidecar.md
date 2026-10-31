@@ -62,8 +62,9 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: sglang` and complete `leader` and
-`worker` role PodTemplates. The templates own the native engine commands and
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: sglang` as the examples do; the operator does not infer a backend from
+a native engine launch. The templates own the native engine commands and
 sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
 [attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
 with matching attention-DP metadata support. Engine-failure KV recovery remains

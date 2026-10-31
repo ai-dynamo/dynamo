@@ -430,7 +430,7 @@ impl Drop for PeerLease {
 }
 
 pub struct VeloResponseService {
-    velo: Arc<Velo>,
+    velo: Velo,
     transport: ResponseTransport,
     heartbeat: Duration,
     /// This service's `ResponseAddress::peer_address`, encoded once.

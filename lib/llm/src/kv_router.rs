@@ -81,7 +81,9 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_host::{
+    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };
@@ -762,6 +764,9 @@ impl KvRouter {
         let session_prefix_index = kv_router_config
             .enable_session_prefix_index
             .then(|| Arc::new(SessionPrefixIndexer::new()));
+        if let (Some(cache), Some(index)) = (shared_cache.as_ref(), session_prefix_index.as_ref()) {
+            cache.attach_session_prefix_index(Arc::clone(index));
+        }
 
         let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
             endpoint: &endpoint,
@@ -1627,7 +1632,7 @@ impl KvRouter {
         self.selection.scheduler().free(request_id).await
     }
 
-    pub(crate) fn affinity_coordinator(
+    pub fn affinity_coordinator(
         &self,
         ttl: std::time::Duration,
         mode: crate::session_affinity::SessionAffinityMode,
