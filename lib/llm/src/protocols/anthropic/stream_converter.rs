@@ -72,13 +72,14 @@ struct ToolCallState {
     name: String,
     /// Each buffered argument fragment paired with the cumulative usage snapshot
     /// taken when its backend chunk was processed. Tool-call blocks are flushed
-    /// lazily (at the finish reason or EOF), long after their chunks were seen,
+    /// lazily (at parser completion, the finish reason or EOF), after their chunks were seen,
     /// so serializing them against the converter's *current* usage would stamp
     /// every `input_json_delta` with the final token count. Snapshotting per
     /// fragment preserves the per-chunk cumulative count instead.
     argument_fragments: Vec<(String, AnthropicUsage)>,
     has_emitted: bool,
     needs_flush: bool,
+    is_complete: bool,
 }
 
 impl ToolCallState {
@@ -154,7 +155,7 @@ impl AnthropicStreamConverter {
         &mut self,
         tool_call: &ChatCompletionMessageToolCallChunk,
         usage_snapshot: &AnthropicUsage,
-    ) {
+    ) -> bool {
         let tool_call_index = tool_call.index as usize;
         while self.tool_call_states.len() <= tool_call_index {
             self.tool_call_states.push(ToolCallState {
@@ -163,12 +164,13 @@ impl AnthropicStreamConverter {
                 argument_fragments: Vec::new(),
                 has_emitted: false,
                 needs_flush: false,
+                is_complete: false,
             });
         }
 
         let state = &mut self.tool_call_states[tool_call_index];
         if state.has_emitted || self.tool_blocks_flushed {
-            return;
+            return false;
         }
         state.needs_flush = true;
         if let Some(id) = &tool_call.id {
@@ -184,6 +186,7 @@ impl AnthropicStreamConverter {
                     .push((arguments.clone(), usage_snapshot.clone()));
             }
         }
+        state.is_complete
     }
 
     fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
@@ -212,6 +215,7 @@ impl AnthropicStreamConverter {
             return Vec::new();
         }
         self.tool_blocks_flushed = is_final;
+        let only_completed = !is_final && !self.tool_flush_requested;
 
         let mut events = Vec::new();
         let mut block_index = self.next_block_index;
@@ -230,13 +234,19 @@ impl AnthropicStreamConverter {
             .as_ref()
             .is_some_and(|ctx| ctx.disable_parallel_tool_use);
 
-        for (call_index, tool_call) in self
-            .tool_call_states
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, tool_call)| tool_call.is_emit_ready())
-            .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
-        {
+        for (call_index, tool_call) in self.tool_call_states.iter_mut().enumerate() {
+            if tool_call.has_emitted {
+                continue;
+            }
+            // Before the turn finishes, preserve call order and require parser evidence.
+            if only_completed
+                && (!tool_call.is_complete || !tool_call.is_emit_ready() || !tool_call.needs_flush)
+            {
+                break;
+            }
+            if !tool_call.is_emit_ready() || (!is_final && !tool_call.needs_flush) {
+                continue;
+            }
             if single_tool && has_emitted {
                 break;
             }
@@ -249,7 +259,7 @@ impl AnthropicStreamConverter {
             // indistinguishable from a parameterless call. Emitting it now would close
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
-            if !is_final && raw.is_empty() {
+            if !is_final && raw.is_empty() && !tool_call.is_complete {
                 if single_tool {
                     break;
                 }
@@ -257,7 +267,11 @@ impl AnthropicStreamConverter {
             }
             let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
             // Keep an earlier incomplete call pending; it may still become valid.
-            if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
+            if single_tool
+                && !is_final
+                && !raw.is_empty()
+                && parsed.as_ref().is_err_and(|error| error.is_eof())
+            {
                 break;
             }
             tool_call.needs_flush = false;
@@ -275,6 +289,9 @@ impl AnthropicStreamConverter {
                 .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
                 .flatten();
             if !arguments_are_valid && repaired_input.is_none() {
+                if only_completed {
+                    break;
+                }
                 continue;
             }
             drain_pending_text(
@@ -466,6 +483,7 @@ impl AnthropicStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        let mut has_completed_tool = false;
         // Replace the initial estimate when the engine reports authoritative
         // usage (typically on the final chunk). This also applies Anthropic's
         // non-overlapping cached-token accounting.
@@ -652,17 +670,28 @@ impl AnthropicStreamConverter {
                 }
 
                 for tool_call in tool_calls {
-                    self.record_tool_call(tool_call, &usage_snapshot);
+                    has_completed_tool |= self.record_tool_call(tool_call, &usage_snapshot);
                 }
             }
         }
 
-        // A tool-call finish reason is the first explicit guarantee that all
-        // argument fragments in this choice are complete. `JailedStream` rewrites
-        // `Stop` to `ToolCalls` after emitting tool-call chunks; interrupted
-        // `Length`/`ContentFilter` streams use the EOF fallback below. Flush only
-        // after every choice and delta in the terminal chunk has been recorded.
-        if self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse) {
+        // Completion-only chunks need not carry another argument or choice delta.
+        for completion in &chunk.tool_call_completion {
+            if completion.choice_index == 0
+                && completion.complete
+                && let Some(call) = self
+                    .tool_call_states
+                    .get_mut(completion.tool_index as usize)
+                && !call.has_emitted
+            {
+                call.is_complete = true;
+                call.needs_flush = true;
+                has_completed_tool = true;
+            }
+        }
+        if has_completed_tool
+            || (self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse))
+        {
             self.append_buffered_tool_events(events, false);
         }
     }
@@ -1186,6 +1215,129 @@ mod tests {
             .filter_map(|line| line.strip_prefix("data: "))
             .map(|data| serde_json::from_str(data).unwrap())
             .collect()
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn parser_completion_waits_for_ordered_valid_calls_and_late_identity(
+        #[case] late_identity: bool,
+    ) {
+        use crate::protocols::openai::chat_completions::ToolCallCompletion;
+
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        assert!(
+            conv.process_chunk(&tool_call_chunk(
+                0,
+                (!late_identity).then_some("call_a"),
+                (!late_identity).then_some("read_a"),
+                Some("{\"path\":")
+            ))
+            .is_empty()
+        );
+        let mut second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
+        second.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 1,
+            complete: true,
+        });
+        assert!(conv.process_chunk(&second).is_empty());
+
+        let mut completion = text_chunk("");
+        completion.inner.choices.clear();
+        completion.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 0,
+            complete: true,
+        });
+        assert!(conv.process_chunk(&completion).is_empty());
+        let mut repeated_second = completion.clone();
+        repeated_second.tool_call_completion[0].tool_index = 1;
+        assert!(conv.process_chunk(&repeated_second).is_empty());
+        let mut events = conv.process_chunk(&tool_call_chunk(0, None, None, Some("\"/a\"}")));
+        if late_identity {
+            assert!(events.is_empty());
+            events = conv.process_chunk(&tool_call_chunk(0, Some("call_a"), Some("read_a"), None));
+        }
+        let values = sse_values(events).await;
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["content_block"]["name"].as_str())
+                .collect::<Vec<_>>(),
+            ["read_a", "read_b"]
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter(|v| v["type"] == "content_block_stop")
+                .count(),
+            2
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["delta"]["partial_json"].as_str())
+                .collect::<String>(),
+            "{\"path\":\"/a\"}{}"
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["usage"]["output_tokens"].as_u64())
+                .collect::<Vec<_>>(),
+            [1, 3, 2]
+        );
+        assert!(conv.process_chunk(&completion).is_empty());
+        assert!(
+            conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn parser_completion_keeps_legacy_fallback_and_single_tool_limit() {
+        use crate::protocols::openai::chat_completions::ToolCallCompletion;
+
+        for single in [false, true] {
+            let mut conv = AnthropicStreamConverter::with_context(
+                "test-model".into(),
+                5,
+                AnthropicContext {
+                    disable_parallel_tool_use: single,
+                    ..Default::default()
+                },
+            );
+            let first =
+                tool_call_chunk(0, Some("call_a"), Some("read_a"), (!single).then_some("{}"));
+            assert!(conv.process_chunk(&first).is_empty());
+            let mut completion = text_chunk("");
+            completion.inner.choices.clear();
+            completion.tool_call_completion.push(ToolCallCompletion {
+                choice_index: 1,
+                tool_index: 0,
+                complete: true,
+            });
+            assert!(conv.process_chunk(&completion).is_empty());
+            completion.tool_call_completion[0].choice_index = 0;
+            let values = sse_values(conv.process_chunk(&completion)).await;
+            assert_eq!(values.len(), if single { 2 } else { 3 });
+            assert_eq!(values[0]["content_block"]["name"], "read_a");
+
+            let second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
+            assert!(conv.process_chunk(&second).is_empty());
+            let values =
+                sse_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))).await;
+            assert_eq!(values.len(), if single { 0 } else { 3 });
+            let final_values = sse_values(conv.emit_end_events()).await;
+            assert!(
+                final_values
+                    .iter()
+                    .all(|v| v["type"] != "content_block_start")
+            );
+            assert_eq!(final_values[0]["delta"]["stop_reason"], "tool_use");
+        }
     }
 
     #[tokio::test]
