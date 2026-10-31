@@ -173,7 +173,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the perf model at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
-| `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
+| `load_scaling_down_sensitivity` | int | `80` | SLA-mode scale-down sensitivity 0–100 (100=aggressive). 0 blocks model-based scale-down, but a fully idle pool still shrinks one replica at a time to its endpoint floor (minimum 1); see [Unavailable Scaling Inputs](#unavailable-scaling-inputs). Ignored unless `optimization_target` is `sla`. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
