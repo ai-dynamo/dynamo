@@ -64,6 +64,16 @@ pub(crate) enum SelectedStructuralTagBuilder {
 }
 
 impl SelectedStructuralTagBuilder {
+    fn defaults_to_structured_output_composition(self, parser_name: &str) -> bool {
+        matches!(self, Self::V2(_))
+            && matches!(
+                crate::protocols::openai::chat_completions::unified_parser::canonical_family(
+                    parser_name
+                ),
+                Some("qwen3" | "deepseek_v4" | "glm47")
+            )
+    }
+
     fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
         if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
             return Some(builder);
@@ -263,24 +273,6 @@ pub(crate) fn structural_tag_decision(
         return Ok(StructuralTagDecision::NotApplicable);
     }
 
-    let requires_tool_calls_with_structured_output = if has_structured_output {
-        match tool_choice {
-            ToolChoice::Auto => {
-                if config.is_some_and(|config| config.allow_tool_calls_with_structured_output)
-                    && !tools.is_empty()
-                {
-                    true
-                } else {
-                    return Ok(StructuralTagDecision::NotApplicable);
-                }
-            }
-            ToolChoice::None => return Ok(StructuralTagDecision::NotApplicable),
-            ToolChoice::Required | ToolChoice::Named(_) => false,
-        }
-    } else {
-        false
-    };
-
     if should_skip_tool_call_ban(exclude_tools_when_tool_choice_none, tool_choice) {
         // The prompt formatter already omits tools for this request. Avoid
         // sending a redundant AnyTokens structural tag: vLLM cannot
@@ -299,6 +291,26 @@ pub(crate) fn structural_tag_decision(
     let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name, reasoning_parser)
     else {
         return Ok(StructuralTagDecision::NotApplicable);
+    };
+
+    let requires_tool_calls_with_structured_output = if has_structured_output {
+        match tool_choice {
+            ToolChoice::Auto => {
+                let enabled = config
+                    .and_then(|config| config.allow_tool_calls_with_structured_output)
+                    .unwrap_or_else(|| {
+                        builder.defaults_to_structured_output_composition(parser_name)
+                    });
+                if !enabled || tools.is_empty() {
+                    return Ok(StructuralTagDecision::NotApplicable);
+                }
+                true
+            }
+            ToolChoice::None => return Ok(StructuralTagDecision::NotApplicable),
+            ToolChoice::Required | ToolChoice::Named(_) => false,
+        }
+    } else {
+        false
     };
 
     if matches!(tool_choice, ToolChoice::None) {
@@ -353,6 +365,7 @@ impl OpenAIPreprocessor {
                 starts_in_reasoning,
                 structured_output_schema: Some(schema),
             }),
+            false,
             request,
         )?;
         if applied {
@@ -413,9 +426,8 @@ impl OpenAIPreprocessor {
         };
         let parser_name = parser_name.expect("Required decision implies a parser name");
 
-        let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto)
-            && config.allow_tool_calls_with_structured_output
-        {
+        // The shared decision already resolved composition for auto + response_format.
+        let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto) {
             match response_format {
                 Some(ResponseFormat::JsonSchema { json_schema }) => {
                     Some(Cow::Borrowed(&json_schema.schema))
@@ -451,22 +463,13 @@ impl OpenAIPreprocessor {
                     .message(format!("cannot constrain native Muse Spark tools: {error}"))
                     .build());
             }
-            Err(error)
-                if !(matches!(tool_choice, ToolChoice::None)
-                    || (is_muse_spark_parser(Some(parser_name))
-                        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))))
-                    && structured_output_schema.is_none() =>
-            {
-                tracing::warn!(
-                    parser = parser_name,
-                    %error,
-                    "Failed to build structural tag; using compatibility fallback"
-                );
-                return Ok(false);
-            }
             result => result,
         };
-        let applied = apply_structural_tag(parser_name, built_tag, preprocessed_request)?;
+        let allow_fallback = !matches!(tool_choice, ToolChoice::None)
+            && (structured_output_schema.is_none()
+                || config.allow_tool_calls_with_structured_output.is_none());
+        let applied =
+            apply_structural_tag(parser_name, built_tag, allow_fallback, preprocessed_request)?;
         if applied && structured_output_schema.is_some() {
             // Request preprocessing materializes `response_format` as guided JSON.
             // The composite structural tag now owns that schema.
@@ -527,11 +530,20 @@ impl OpenAIPreprocessor {
 fn apply_structural_tag(
     parser_name: &str,
     structural_tag: anyhow::Result<Option<serde_json::Value>>,
+    allow_fallback: bool,
     request: &mut PreprocessedRequest,
 ) -> Result<bool, DynamoError> {
     let structural_tag = match structural_tag {
         Ok(Some(tag)) => tag,
         Ok(None) => return Ok(false),
+        Err(error) if allow_fallback => {
+            tracing::warn!(
+                parser = parser_name,
+                %error,
+                "Failed to build structural tag; using compatibility fallback"
+            );
+            return Ok(false);
+        }
         Err(error) => {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::Unknown)
@@ -616,6 +628,7 @@ pub(super) fn validate_runtime_config(
 
     let v2_only_option = config
         .allow_tool_calls_with_structured_output
+        .is_some_and(|enabled| enabled)
         .then_some("allow_tool_calls_with_structured_output")
         .or(config
             .exclude_special_tokens
@@ -1097,7 +1110,7 @@ mod tests {
         }];
         let config = StructuralTagConfig {
             scope: StructuralTagScope::Auto,
-            allow_tool_calls_with_structured_output: true,
+            allow_tool_calls_with_structured_output: Some(true),
             ..Default::default()
         };
 
@@ -1116,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_output_requires_explicit_tool_call_composition_opt_in() {
+    fn structured_output_respects_explicit_composition_opt_out() {
         let tools = [ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
@@ -1126,7 +1139,7 @@ mod tests {
         for scope in [StructuralTagScope::Auto, StructuralTagScope::Always] {
             let config = StructuralTagConfig {
                 scope,
-                allow_tool_calls_with_structured_output: false,
+                allow_tool_calls_with_structured_output: Some(false),
                 ..Default::default()
             };
             let decision = structural_tag_decision(
@@ -1145,7 +1158,7 @@ mod tests {
 
         let config = StructuralTagConfig {
             scope: StructuralTagScope::Auto,
-            allow_tool_calls_with_structured_output: true,
+            allow_tool_calls_with_structured_output: Some(true),
             ..Default::default()
         };
         let decision = structural_tag_decision(
@@ -1183,6 +1196,116 @@ mod tests {
         .unwrap();
 
         assert!(!decision.is_required());
+    }
+
+    #[test]
+    fn structured_output_composition_defaults_only_on_validated_v2_routes() {
+        const CHILD: &str = "DYNAMO_STRUCTURED_OUTPUT_DEFAULT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for version in ["1", "2", "auto"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "preprocessor::structural_tag::tests::structured_output_composition_defaults_only_on_validated_v2_routes",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, version)
+                    .env(env_llm::DYN_PARSER_VERSION, version)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+        for (parser, reasoning, validated) in [
+            ("qwen3_coder", Some("qwen3"), true),
+            ("deepseek_v4", None, true),
+            ("deepseek-v4", None, true),
+            ("deepseekv4", None, true),
+            ("glm47", Some("glm45"), true),
+            ("glm45", None, true),
+            ("kimi_k2", None, false),
+            ("gemma4", None, false),
+            ("hermes", None, false),
+            ("qwen3_coder", Some("deepseek_v4"), false),
+        ] {
+            for setting in [None, Some(false), Some(true)] {
+                let config = StructuralTagConfig {
+                    allow_tool_calls_with_structured_output: setting,
+                    ..Default::default()
+                };
+                let runtime = ModelRuntimeConfig {
+                    tool_call_parser: Some(parser.into()),
+                    reasoning_parser: reasoning.map(str::to_string),
+                    structural_tag: Some(config.clone()),
+                    ..Default::default()
+                };
+                let supported = matches!(
+                    SelectedStructuralTagBuilder::for_parser(parser, reasoning),
+                    Some(SelectedStructuralTagBuilder::V2(_))
+                );
+                assert_eq!(
+                    validate_runtime_config(&runtime).is_ok(),
+                    setting != Some(true) || supported
+                );
+                if setting == Some(true) && !supported {
+                    continue;
+                }
+                let decision = structural_tag_decision(
+                    (Some(parser), reasoning),
+                    &ToolChoice::Auto,
+                    &tools,
+                    None,
+                    Some(&config),
+                    true,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    decision.is_required(),
+                    setting.unwrap_or(validated && supported),
+                    "parser={parser}, reasoning={reasoning:?}, setting={setting:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structural_tag_build_failure_preserves_json_only_when_fallback_is_allowed() {
+        let schema = serde_json::json!({"type": "object"});
+        for allow_fallback in [true, false] {
+            let mut request = preprocessed_request();
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = Some(schema.clone());
+            let result = apply_structural_tag(
+                "qwen3_coder",
+                Err(anyhow::anyhow!("builder failed")),
+                allow_fallback,
+                &mut request,
+            );
+            if allow_fallback {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("builder failed"));
+            }
+            let guided = request.sampling_options.guided_decoding.unwrap();
+            assert_eq!(guided.json, Some(schema.clone()));
+            assert!(guided.structural_tag.is_none());
+        }
     }
 
     #[test]

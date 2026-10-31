@@ -207,13 +207,32 @@ def test_structural_tag_flag_uses_default_config(monkeypatch):
     assert config.structural_tag == {
         "scope": "always",
         "schema": "auto",
-        "allow_tool_calls_with_structured_output": False,
         "exclude_special_tokens": None,
         "reasoning_boundary": "auto",
         "tool_arguments_any_order": False,
     }
     assert "DYN_STRUCTURAL_TAG" in help_text
     assert "--dyn-enable-structural-tag" not in help_text
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_structured_output_composition_preserves_explicit_setting(monkeypatch, enabled):
+    _clear_structural_tag_env(monkeypatch)
+    config, _ = _parse_runtime_args(
+        [
+            "--dyn-structural-tag",
+            '{"allow_tool_calls_with_structured_output":' + str(enabled).lower() + "}",
+        ]
+    )
+    assert config.structural_tag["allow_tool_calls_with_structured_output"] is enabled
+
+
+@pytest.mark.parametrize("value", ["true", "{}", '{"scope":"auto"}'])
+def test_structured_output_composition_omits_unset_setting(monkeypatch, value):
+    _clear_structural_tag_env(monkeypatch)
+    config, _ = _parse_runtime_args(["--dyn-structural-tag", value])
+    assert "allow_tool_calls_with_structured_output" not in config.structural_tag
+    assert config.structural_tag["scope"] == ("auto" if "auto" in value else "always")
 
 
 @pytest.mark.parametrize(

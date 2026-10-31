@@ -313,7 +313,7 @@ impl OpenAIPreprocessor {
             .runtime_config
             .structural_tag
             .as_ref()
-            .is_some_and(|config| config.allow_tool_calls_with_structured_output);
+            .is_some_and(|config| config.allow_tool_calls_with_structured_output == Some(true));
 
         if matches!(tool_choice, ChatCompletionToolChoiceOption::Auto)
             && !tools.is_empty()
@@ -335,7 +335,7 @@ impl OpenAIPreprocessor {
 
 /// Whether top-level `guided_*` fields install a grammar; mirrors
 /// `GuidedDecodingOptions::from_optional`.
-pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+pub(crate) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
     request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
@@ -1015,6 +1015,100 @@ mod tests {
                 assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
                 assert!(guided.json.is_some() || guided.regex.is_some());
                 assert!(guided.structural_tag.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn auto_tools_compose_response_schema_by_default() {
+        for parser in ["qwen3_coder", "deepseek_v4", "glm47"] {
+            let preprocessor = preprocessor(parser, StructuralTagMode::On);
+            let schema = json!({"type": "object", "properties": {
+                "forecast": {"type": "string"}
+            }, "required": ["forecast"], "additionalProperties": false});
+            for (format, schema) in [
+                (json!({"type": "json_object"}), json!({"type": "object"})),
+                (
+                    json!({"type": "json_schema", "json_schema": {
+                        "name": "record", "schema": schema
+                    }}),
+                    schema,
+                ),
+            ] {
+                let request = request(json!({
+                    "tools": tools(), "tool_choice": "auto", "response_format": format,
+                }));
+                let mut prepared = preprocessed_request();
+                prepared
+                    .sampling_options
+                    .guided_decoding
+                    .get_or_insert_default()
+                    .json = Some(schema.clone());
+                assert_eq!(
+                    preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut prepared, false)
+                        .unwrap(),
+                    GuidedToolConstraint::StructuralTag
+                );
+                let guided = prepared.sampling_options.guided_decoding.unwrap();
+                assert!(
+                    guided.json.is_none(),
+                    "only the combined grammar should reach the engine"
+                );
+                let tag = guided.structural_tag.unwrap();
+                assert_eq!(tag["format"]["type"], "or");
+                assert_eq!(tag["format"]["elements"][1]["json_schema"], schema);
+                assert!(
+                    tag["format"]["elements"][0]
+                        .to_string()
+                        .contains("get_weather")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_composition_preserves_explicit_guidance_but_opt_in_rejects_conflicts() {
+        for guided in [
+            json!({"guided_json": {"type": "object"}}),
+            json!({"guided_regex": "[a-z]+"}),
+            json!({"guided_choice": ["a", "b"]}),
+            json!({"guided_grammar": "root ::= 'a'"}),
+        ] {
+            let mut extra = json!({
+                "tools": tools(), "tool_choice": "auto", "response_format": {"type": "json_object"},
+            });
+            extra
+                .as_object_mut()
+                .unwrap()
+                .extend(guided.as_object().unwrap().clone());
+            let request = request(extra);
+            for setting in [None, Some(false), Some(true)] {
+                let mut preprocessor = preprocessor("qwen3_coder", StructuralTagMode::On);
+                Arc::get_mut(&mut preprocessor)
+                    .unwrap()
+                    .runtime_config
+                    .structural_tag
+                    .as_mut()
+                    .unwrap()
+                    .allow_tool_calls_with_structured_output = setting;
+                let mut prepared = preprocessed_request();
+                let schema = json!({"type": "object"});
+                prepared
+                    .sampling_options
+                    .guided_decoding
+                    .get_or_insert_default()
+                    .json = Some(schema.clone());
+                let result =
+                    preprocessor.apply_tool_choice_guided_decoding(&request, &mut prepared, false);
+                if setting == Some(true) {
+                    assert_eq!(result.unwrap_err().error_type(), ErrorType::InvalidArgument);
+                } else {
+                    assert_eq!(result.unwrap(), GuidedToolConstraint::None);
+                    let guided = prepared.sampling_options.guided_decoding.unwrap();
+                    assert_eq!(guided.json, Some(schema.clone()));
+                    assert!(guided.structural_tag.is_none());
+                }
             }
         }
     }
