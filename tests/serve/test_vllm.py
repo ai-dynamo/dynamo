@@ -21,7 +21,7 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
@@ -45,6 +45,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.port_utils import reserved_ports
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,9 @@ class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
+    # Env vars the launch script reads as extra listen ports. The fixture
+    # reserves one free port per name so fixed defaults cannot collide.
+    dynamic_port_env: list[str] = field(default_factory=list)
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
@@ -293,6 +297,9 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={"LMCACHE_L1_SIZE_GB": "8"},
+        # `lmcache server` exits if its ZMQ or HTTP port (default 5555/8080)
+        # is taken.
+        dynamic_port_env=["LMCACHE_PORT", "LMCACHE_HTTP_PORT"],
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -836,7 +843,21 @@ vllm_configs = {
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):
     """Fixture that provides different vLLM test configurations"""
-    return vllm_configs[request.param]
+    config = vllm_configs[request.param]
+    if not config.dynamic_port_env:
+        yield config
+        return
+
+    # Hold the ports until the deployment is torn down.
+    names = config.dynamic_port_env
+    with reserved_ports(len(names), DynamoPortRange.SERVE.value) as ports:
+        yield dataclasses.replace(
+            config,
+            env={
+                **config.env,
+                **{name: str(port) for name, port in zip(names, ports)},
+            },
+        )
 
 
 @pytest.mark.vllm
