@@ -2516,6 +2516,20 @@ dependencies = [
 [[package]]
 name = "dynamo-global-discovery-service"
 version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "dynamo-global-common",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-frontend"
