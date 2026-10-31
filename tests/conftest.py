@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -26,7 +27,7 @@ from tests.utils.collection_env_guard import (
 )
 from tests.utils.constants import TEST_MODELS, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.output_paths import resolve_test_output_path
+from tests.utils.output_paths import prepare_test_output_dir, resolve_test_output_path
 from tests.utils.port_utils import (
     ServicePorts,
     allocate_contiguous_ports,
@@ -44,6 +45,8 @@ _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
 _collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
+# Session start time; the logger fixture removes test output older than this.
+_output_session_start_key: pytest.StashKey[float] = pytest.StashKey()
 # Controller-side accumulator for collection-env changes reported by xdist workers.
 _collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
@@ -56,6 +59,7 @@ def _is_xdist_worker(config: pytest.Config) -> bool:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session: pytest.Session) -> None:
+    session.stash[_output_session_start_key] = time.time()
     if not collection_env_guard_disabled():
         session.config.stash[_collection_env_snapshot_key] = snapshot_collection_env()
 
@@ -624,8 +628,10 @@ def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
     log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(log_dir, ignore_errors=True)
-    os.makedirs(log_dir, exist_ok=True)
+    session_start = request.session.stash.setdefault(
+        _output_session_start_key, time.time()
+    )
+    prepare_test_output_dir(log_dir, session_start)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

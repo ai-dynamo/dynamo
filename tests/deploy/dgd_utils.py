@@ -66,6 +66,7 @@ MIN_RESPONSE_CONTENT_LENGTH = 100
 PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
 DISCOVERY_SNAPSHOT_TIMEOUT = 15
 DISCOVERY_RESOURCE_TIMEOUT = 3
+READINESS_DIAGNOSTICS_TIMEOUT = 30
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
 
 
@@ -1055,7 +1056,48 @@ class ManagedDeployment:
         desired_state_val: str = "successful",
     ):
         start_time = time.time()
+        # One deadline for the whole wait, so a stalled Kubernetes request
+        # cannot run past it and skip the pod diagnostics below.
+        try:
+            async with asyncio.timeout(timeout):
+                if await self._poll_for_condition(
+                    start_time,
+                    timeout,
+                    sleep,
+                    log_interval,
+                    desired_ready_condition_val,
+                    desired_state_val,
+                ):
+                    return True
+        except TimeoutError:
+            pass
 
+        # Collect pod diagnostics before raising
+        try:
+            async with asyncio.timeout(READINESS_DIAGNOSTICS_TIMEOUT):
+                pod_details = await self._get_pod_status_details()
+        except TimeoutError:
+            pod_details = []
+        elapsed = time.time() - start_time
+        msg = (
+            f"Deployment {self._deployment_name} failed to reach "
+            f"Ready={desired_ready_condition_val}, state={desired_state_val} "
+            f"within {elapsed:.0f}s (timeout={timeout}s)"
+        )
+        if pod_details:
+            detail_lines = "\n".join(f"  {d.format()}" for d in pod_details)
+            msg += f"\n\nPod status at timeout:\n{detail_lines}"
+        raise TimeoutError(msg)
+
+    async def _poll_for_condition(
+        self,
+        start_time: float,
+        timeout: int,
+        sleep,
+        log_interval,
+        desired_ready_condition_val: bool,
+        desired_state_val: str,
+    ) -> bool:
         self._logger.info(
             f"Waiting for Deployment {self._deployment_name} to have Ready condition {desired_ready_condition_val} and state {desired_state_val}"
         )
@@ -1172,19 +1214,7 @@ class ManagedDeployment:
                     f"Unexpected exception while checking deployment status: {e}"
                 )
             await asyncio.sleep(sleep)
-
-        # Collect pod diagnostics before raising
-        pod_details = await self._get_pod_status_details()
-        elapsed = time.time() - start_time
-        msg = (
-            f"Deployment {self._deployment_name} failed to reach "
-            f"Ready={desired_ready_condition_val}, state={desired_state_val} "
-            f"within {elapsed:.0f}s (timeout={timeout}s)"
-        )
-        if pod_details:
-            detail_lines = "\n".join(f"  {d.format()}" for d in pod_details)
-            msg += f"\n\nPod status at timeout:\n{detail_lines}"
-        raise TimeoutError(msg)
+        return False
 
     async def _get_pod_status_details(self) -> List[PodStatusDetail]:
         """Collect container-level status for all pods owned by this deployment.
@@ -1941,6 +1971,8 @@ class ManagedDeployment:
             ),
         )
         # DWM ownership is through Pod UIDs; a DGD label selector can miss it.
+        # Read raw JSON: client models reject `endpoints: null`, which the API
+        # returns for an EndpointSlice with no ready endpoints.
         for name, read in resources:
             record = {
                 "namespace": self.namespace,
@@ -1949,8 +1981,19 @@ class ManagedDeployment:
             }
             try:
                 async with asyncio.timeout(DISCOVERY_RESOURCE_TIMEOUT):
-                    response = await read(_request_timeout=DISCOVERY_RESOURCE_TIMEOUT)
-                record["response"] = api_client.sanitize_for_serialization(response)
+                    response = await read(
+                        _request_timeout=DISCOVERY_RESOURCE_TIMEOUT,
+                        _preload_content=False,
+                    )
+                    try:
+                        body = await response.text()
+                    finally:
+                        response.release()
+                if not 200 <= response.status <= 299:
+                    raise exceptions.ApiException(
+                        status=response.status, reason=f"{response.reason}: {body}"
+                    )
+                record["response"] = json.loads(body)
             except Exception as error:
                 record["error"] = f"{type(error).__name__}: {error}"
                 self._logger.warning(
