@@ -380,6 +380,28 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def _use_router_pad_values(mm_items: Any, mm_hashes: Any) -> None:
+    """Restore Dynamo's scalar routing pads for caller-hashed items."""
+    from dynamo.common.multimodal.routing_utils import pad_value_for_mm_hash
+
+    if not isinstance(mm_hashes, list) or len(mm_hashes) != len(mm_items):
+        return
+
+    hash_mask = (1 << 64) - 1
+    for item, value in zip(mm_items, mm_hashes):
+        try:
+            caller_hash = int(value, 16) & hash_mask
+        except (TypeError, ValueError):
+            continue
+        if getattr(item, "hash", None) != caller_hash:
+            continue
+
+        pad_value = pad_value_for_mm_hash(caller_hash)
+        if hasattr(item, "pad_values"):
+            item.pad_values = (pad_value,)
+        item.pad_value = pad_value
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -394,6 +416,10 @@ def supports_external_mm_hashes(engine: Any) -> bool:
         return False
 
     tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+    if getattr(mm_processor, "uses_wide_image_identity", False):
+        return False
+
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
@@ -407,6 +433,7 @@ def supports_external_mm_hashes(engine: Any) -> bool:
         tokenized = await tokenize_one(obj)
         mm_inputs = getattr(tokenized, "mm_inputs", None)
         if getattr(obj, "mm_hashes", None) and mm_inputs is not None:
+            _use_router_pad_values(mm_inputs.mm_items, obj.mm_hashes)
             padded_input_ids = MultimodalProcessorOutput.build_padded_input_ids(
                 tokenized.input_ids,
                 mm_inputs.mm_items,

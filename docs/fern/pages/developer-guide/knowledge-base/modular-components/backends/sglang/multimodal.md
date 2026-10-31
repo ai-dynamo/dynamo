@@ -97,7 +97,9 @@ SGLang RadixAttention includes a per-media `pad_value` token in its prefix-cache
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
 3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
-5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
+5. Dynamo's worker compatibility layer applies the router's scalar `pad_value`
+   to the caller-hashed item, keeping the router and RadixAttention cache keys
+   aligned across supported SGLang releases.
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
@@ -108,7 +110,12 @@ discovery cohort publishes the same compatible contract. Unsupported models,
 legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
-Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
+Step 4 needs an SGLang build and processor that accept `mm_hashes`. Dynamo's
+SGLang image carries the upstream support. Kimi processors use processor-owned
+wide identities and reject caller hashes, so Dynamo does not forward them.
+Kimi requests still serve, but image-aware cache routing is unsupported and KV
+event batches containing wide pad IDs may be omitted. A custom build without
+hash forwarding is supported with text-prefix routing.
 
 Launch an aggregated deployment with multimodal KV routing:
 
@@ -134,7 +141,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.22.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support.
 - The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
@@ -564,7 +571,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.22/python/sglang/srt/disaggregation/encoder/server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.23/python/sglang/srt/disaggregation/encoder/server.py) internally).
 
 ## Profiling
 
