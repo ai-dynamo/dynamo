@@ -1171,6 +1171,34 @@ async fn test_all_unified_batch_request_policies_for_each_selector_shape() {
 }
 
 #[tokio::test]
+async fn auto_rejects_unavailable_parser_pairs_before_batch_output() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::auto_rejects_unavailable_parser_pairs_before_batch_output"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "auto")],
+    ) {
+        return;
+    }
+
+    let options = ParsingOptions::new(Some("muse_glimmer".to_string()), Some("qwen3".to_string()));
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some("raw tool markup"), None)]),
+        options,
+    )
+    .await;
+    let error = result.expect_err("invalid parser selection must not return raw content");
+    assert_eq!(
+        error.class(),
+        dynamo_runtime::error::ErrorClass::InvalidRequest
+    );
+    let message = error.to_string();
+    assert!(message.contains("muse_glimmer"), "{message}");
+    assert!(message.contains("--dyn-"), "{message}");
+}
+
+#[tokio::test]
 async fn explicit_v2_rejects_unconfigured_forced_tool_batch() {
     if test_utils::run_isolated(
         concat!(

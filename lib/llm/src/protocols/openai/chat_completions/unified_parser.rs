@@ -160,13 +160,29 @@ pub(crate) fn selected_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
-    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; both
-    // keep the legacy path unless V2 is selected explicitly.
-    let selected = if tool_call_parser.is_none()
+    let selected = selected_family_for_selection(tool_call_parser, reasoning_parser, selection);
+    tracing::debug!(
+        target: "dynamo_unified",
+        ?tool_call_parser,
+        ?reasoning_parser,
+        ?selection,
+        ?selected,
+        "unified parser path decision"
+    );
+    selected
+}
+
+pub(crate) fn selected_family_for_selection(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    selection: dynamo_runtime::config::ParserVersion,
+) -> Option<&'static str> {
+    let configured = configured_family(tool_call_parser, reasoning_parser);
+    // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
+    // do not identify their tool grammar. Auto keeps both on the legacy path.
+    if tool_call_parser.is_none()
         && matches!(
             reasoning_parser,
             Some("qwen3" | "nemotron_v3" | "nemotron3")
@@ -175,28 +191,11 @@ pub(crate) fn selected_family(
     {
         None
     } else {
-        selected_family_for_selection(configured, selection)
-    };
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        "unified parser path decision"
-    );
-    selected
-}
-
-fn selected_family_for_selection(
-    configured: Option<&'static str>,
-    selection: dynamo_runtime::config::ParserVersion,
-) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
-            configured
+        match selection {
+            dynamo_runtime::config::ParserVersion::Auto
+            | dynamo_runtime::config::ParserVersion::V2 => configured,
+            dynamo_runtime::config::ParserVersion::V1 => None,
         }
-        dynamo_runtime::config::ParserVersion::V1 => None,
     }
 }
 
@@ -4549,7 +4548,10 @@ pub(crate) mod tests {
                 (ParserVersion::V1, None),
                 (ParserVersion::V2, Some("gpt_oss")),
             ] {
-                assert_eq!(selected_family_for_selection(family, version), expected);
+                assert_eq!(
+                    selected_family_for_selection(tool, reasoning, version),
+                    expected
+                );
             }
         }
     }
@@ -13630,18 +13632,30 @@ mod beam_routing_tests {
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::Auto),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::Auto,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V2),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V2,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         // There is no v1 Beam parser to fall back to: an explicit `1` selects nothing
         // here (and `validate_parser_version` rejects it), and half a pair under `auto`
         // is rejected by the same validation before this choice is made.
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V1),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V1,
+            ),
             None
         );
         assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));

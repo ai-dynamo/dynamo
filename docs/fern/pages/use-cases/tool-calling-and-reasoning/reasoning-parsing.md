@@ -7,6 +7,8 @@ subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thi
 
 Some models emit reasoning separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant `content` by configuring `--dyn-reasoning-parser` on the backend worker. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-reasoning-parser`, `--dyn-chat-processor`, and `--dyn-tool-call-parser`.
 
+See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection and compatible names.
+
 ## Configure Reasoning Parsing
 
 <Steps>
@@ -49,7 +51,7 @@ Some models emit reasoning separately from their final response. Dynamo can spli
 
     </details>
 
-    Reasoning parsing happens before tool call parsing. See [Tool Call Parsing (Dynamo)](tool-call-parsing.mdx) for supported `--dyn-tool-call-parser` values.
+    On Unified routes one parser preserves reasoning, text, and tool order. The legacy split route extracts reasoning before tool parsing. See [Tool Call Parsing (Dynamo)](tool-call-parsing.mdx) for supported `--dyn-tool-call-parser` values.
   </Step>
 
   <Step title="Start the Frontend">
@@ -142,6 +144,8 @@ Thinking controls use this precedence order:
 2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
 3. The model or chat template's native default
 
+Kimi K3 overrides this precedence for named calls: `--dyn-tool-call-parser kimi_k3` (or `kimi-k3`) forces thinking off, even if requested. The reasoning selector alone does not apply this override.
+
 Explicit request controls include root-level `thinking`, top-level
 `reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or
 `reasoning_effort` fields in `chat_template_args` or
@@ -174,21 +178,27 @@ deployment default.
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo's. This is relevant for engine fallback and when configuring the native structured-output reasoning gate. A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
+The **Upstream name** column lists engine names that differ from Dynamo's, for engine fallback and native reasoning gates. Names vary by engine version; `Dynamo-only` describes this catalog, not every engine release.
 
-Parsers marked **Force-reasoning: Yes** emit reasoning content from token one without requiring an explicit opening tag such as `<think>`. All others require the opening tag in the model output.
+Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. Other parsers can start from a generated opener or supported prompt-prefilled state. Prompt prefill and force-reasoning are separate mechanisms.
 
 <AccordionGroup>
   <Accordion title="Kimi">
     <AccordionGroup>
+      <Accordion title="Kimi K3">
+        **Parser:** `kimi_k3` (Unified alias `kimi-k3`)
+
+        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. See [Tool Call Parsing](tool-call-parsing.mdx) for the K3 named-tool thinking override.
+      </Accordion>
+
       <Accordion title="Kimi K2.5 / Kimi K2.6 format-compatible thinking models">
         **Parser:** `kimi_k25`
 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-        **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
+        **Force-reasoning:** <Badge intent="success" minimal>Yes (V1)</Badge>
 
-        **Notes:** `<think>...</think>` with force-reasoning
+        **Notes:** V1 forces reasoning from the start. The default Unified Kimi K2 route begins as visible text unless an opening marker or supported prompt-prefilled reasoning state selects reasoning.
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct / Thinking with Unicode delimiters">
@@ -225,7 +235,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener
+        **Notes:** `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener. Alias: `minimax-m3`
       </Accordion>
 
       <Accordion title="MiniMax M2 / M2.1 (legacy)">
@@ -242,6 +252,12 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
   <Accordion title="DeepSeek">
     <AccordionGroup>
+      <Accordion title="DeepSeek V4.1">
+        **Parser:** `deepseek_v41`
+
+        **Notes:** Unified V4.1 reasoning and tool grammar; use V2/auto with matching selectors. Not available in V1.
+      </Accordion>
+
       <Accordion title="DeepSeek V4 Pro / Flash">
         **Parser:** `deepseek_v4`
 
@@ -259,7 +275,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** Pass explicitly for V3.1/V3.2 (no alias)
+        **Notes:** V1 also accepts `deepseek_v3`, `deepseek_v3_1`, and `deepseek_v3_2` as reasoning aliases. These names do not identify a Unified family.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -287,7 +303,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+        **Notes:** V1 aliases `nemotron_deci` for `<think>...</think>`. Auto/V2 resolves `glm45` to the Unified `glm47` family.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -301,7 +317,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** Alias for `deepseek_r1`. Also accepts `nemotron_v3`
+        **Notes:** Auto pairs `qwen3_coder` tools with `nemotron_v3` / `nemotron3` reasoning on Unified; reasoning-only auto stays on V1. Explicit V2 selects Unified. V1 forces think-tag reasoning with tool boundaries.
       </Accordion>
 
       <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron">
@@ -408,6 +424,24 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
         **Notes:** `<think>...</think>`
       </Accordion>
     </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Muse Glimmer">
+    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+
+    **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists.
+  </Accordion>
+
+  <Accordion title="Muse Spark">
+    **Parser:** `muse_spark` (alias `muse_spark_open`)
+
+    **Notes:** Unified recipient-routed channels: `to=self` carries reasoning and `commentary` remains visible text. No V1 reasoning parser exists.
+  </Accordion>
+
+  <Accordion title="Inkling">
+    **Parser:** `inkling`
+
+    **Notes:** V1 block/channel reasoning parser. This name does not select a Unified family; auto uses the legacy route and explicit V2 rejects it.
   </Accordion>
 
   <Accordion title="Generic">

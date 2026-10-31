@@ -747,6 +747,8 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
 
+The `dynamo` chat processor runs Rust parsing in the frontend; workers publish parser choices through `--dyn-tool-call-parser` and `--dyn-reasoning-parser`. See [Parser Generation Routing](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION`, aliases, fallback, and migration settings.
+
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
 

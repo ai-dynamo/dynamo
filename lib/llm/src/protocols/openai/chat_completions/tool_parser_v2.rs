@@ -5,7 +5,8 @@
 //! Compatible families use `unified_parser` for streaming and batch.
 
 #[cfg(test)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::{collections::HashSet, sync::LazyLock};
 
 #[cfg(test)]
 use async_stream::stream;
@@ -35,6 +36,12 @@ use dynamo_parsers_v2::{
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
+
+static V1_REASONING_PARSER_NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    dynamo_parsers::reasoning::get_available_reasoning_parsers()
+        .into_iter()
+        .collect()
+});
 
 #[cfg(test)]
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
@@ -87,7 +94,7 @@ pub(crate) fn enabled() -> bool {
     }
 }
 
-/// Validate that an explicit parser generation exists for the configured family.
+/// Reject unavailable parsers before model setup or raw-output parsing can fall back.
 pub(crate) fn validate_parser_version(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
@@ -117,29 +124,59 @@ fn validate_parser_version_for_mode(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> anyhow::Result<()> {
+    if tool_call_parser.is_none() && reasoning_parser.is_none() {
+        return Ok(());
+    }
+
+    if version == ParserVersion::Auto {
+        // Beam needs both selectors for its rendering, stop-token and reasoning handling.
+        let beam = crate::preprocessor::structural_tag::is_beam_parser;
+        if beam(tool_call_parser) != beam(reasoning_parser) {
+            anyhow::bail!(
+                "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser:?} / {reasoning_parser:?})",
+                env_llm::DYN_PARSER_VERSION
+            );
+        }
+    }
     match version {
-        ParserVersion::Auto => {
-            // Beam is a unified-only family that `auto` routes when BOTH slots name it;
-            // one slot alone would install the Beam turn grammar without the Beam
-            // route's rendering, stop-token and reasoning handling.
-            let beam = crate::preprocessor::structural_tag::is_beam_parser;
-            if beam(tool_call_parser) != beam(reasoning_parser) {
-                anyhow::bail!(
-                    "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser:?} / {reasoning_parser:?})",
-                    env_llm::DYN_PARSER_VERSION
-                );
-            }
+        ParserVersion::Auto
+            if super::unified_parser::selected_family_for_selection(
+                tool_call_parser,
+                reasoning_parser,
+                version,
+            )
+            .is_some() =>
+        {
             Ok(())
         }
-        ParserVersion::V1 => {
-            let tools = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
-            let reasoning = dynamo_parsers::reasoning::get_available_reasoning_parsers();
-            if tool_call_parser.is_some_and(|name| !tools.contains(&name))
-                || reasoning_parser.is_some_and(|name| !reasoning.contains(&name))
+        ParserVersion::Auto | ParserVersion::V1 => {
+            let mut unavailable = Vec::new();
+            if let Some(name) = tool_call_parser
+                && !name.is_empty()
+                && !dynamo_parsers::tool_calling::parsers::get_tool_parser_map().contains_key(name)
             {
+                unavailable.push(format!("--dyn-tool-call-parser={name:?}"));
+            }
+            if let Some(name) = reasoning_parser
+                && !V1_REASONING_PARSER_NAMES
+                    .iter()
+                    .any(|parser| parser.eq_ignore_ascii_case(name))
+            {
+                unavailable.push(format!("--dyn-reasoning-parser={name:?}"));
+            }
+            if !unavailable.is_empty() {
+                let mode = if version == ParserVersion::Auto {
+                    "auto"
+                } else {
+                    "1"
+                };
                 anyhow::bail!(
-                    "{}=1 was requested, but the configured parser has no compatible v1 parser",
+                    "{}={mode}: configured selectors --dyn-tool-call-parser={tool_call_parser:?}, \
+                    --dyn-reasoning-parser={reasoning_parser:?} select V1, which has no compatible v1 parser for {}. \
+                     Use names supported by V1 in each selector, or use auto/2 with selectors for \
+                     the same Unified V2 family (one selector may be omitted).",
                     env_llm::DYN_PARSER_VERSION,
+                    unavailable.join(", "),
                 );
             }
             Ok(())
@@ -152,7 +189,10 @@ fn validate_parser_version_for_mode(
                 )
             {
                 anyhow::bail!(
-                    "{}=2 was requested, but the configured parser pair has no compatible unified v2 implementation",
+                    "{}=2 was requested, but the configured parser pair has no compatible unified v2 implementation: \
+                    --dyn-tool-call-parser={tool_call_parser:?}, --dyn-reasoning-parser={reasoning_parser:?}. \
+                     Select names for the same Unified V2 family (one selector may be omitted), \
+                     or use auto/1 with names supported by V1 in each selector.",
                     env_llm::DYN_PARSER_VERSION,
                 );
             }
@@ -1688,6 +1728,70 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parser_validation_preserves_supported_split_and_unified_configurations() {
+        for version in [ParserVersion::Auto, ParserVersion::V1] {
+            for (tool, reasoning) in [(Some("hermes"), Some("qwen3")), (None, Some("qwen3"))] {
+                assert!(
+                    validate_parser_version_for_mode(version, tool, reasoning).is_ok(),
+                    "{version:?} {tool:?} {reasoning:?}"
+                );
+            }
+        }
+        for version in [ParserVersion::Auto, ParserVersion::V2] {
+            assert!(validate_parser_version_for_mode(version, Some("muse_glimmer"), None).is_ok());
+        }
+    }
+
+    #[test]
+    fn auto_rejects_unavailable_split_parser_combinations() {
+        for (tool, reasoning, missing_flag, missing_name) in [
+            (
+                "muse_glimmer",
+                "qwen3",
+                "--dyn-tool-call-parser",
+                "muse_glimmer",
+            ),
+            (
+                "hermes",
+                "muse_glimmer",
+                "--dyn-reasoning-parser",
+                "muse_glimmer",
+            ),
+            (
+                "unknown_tool",
+                "qwen3",
+                "--dyn-tool-call-parser",
+                "unknown_tool",
+            ),
+        ] {
+            let error =
+                validate_parser_version_for_mode(ParserVersion::Auto, Some(tool), Some(reasoning))
+                    .expect_err("an unavailable V1 fallback must fail before parsing")
+                    .to_string();
+            for expected in [
+                "DYN_PARSER_VERSION=auto",
+                missing_flag,
+                missing_name,
+                "Unified",
+            ] {
+                assert!(error.contains(expected), "missing {expected:?}: {error}");
+            }
+        }
+        let error =
+            validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), Some("qwen3"))
+                .unwrap_err()
+                .to_string();
+        for expected in [
+            "DYN_PARSER_VERSION=2",
+            "--dyn-tool-call-parser=Some(\"hermes\")",
+            "--dyn-reasoning-parser=Some(\"qwen3\")",
+            "same Unified V2 family",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
     }
 
     #[test]
