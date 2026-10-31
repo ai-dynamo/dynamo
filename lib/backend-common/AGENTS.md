@@ -29,7 +29,7 @@ parse args,    start engine,    wire Prometheus    serve requests drain-poll  sh
 return engine  return metadata  (optional)         (concurrent)   predicate   release
 ```
 
-The trait has twelve methods. `from_args` is NOT on the trait — each
+The trait has seventeen methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -123,6 +123,20 @@ opt-out and lets `run.rs` stay non-generic.
   startup**. Engines that publish their own discovery records stash it
   (e.g. vLLM dynamic LoRA via `register_model` / `unregister_model`).
   Mirrors the `on_publisher_ready` handoff idiom.
+- `availability()` / `recover()` / `on_recovered()` — optional, for
+  engines that can fail while the worker lives (e.g. a sidecar's separate
+  engine process). `availability()` returns a `watch` of `Ready` /
+  `NotReady` / `Lost`; the default `None` keeps today's behavior. On
+  `NotReady` the Worker withdraws the endpoint; on `Lost` it also
+  withdraws the model card, calls `recover()`, registers the returned
+  metadata with the caller's taints, then calls `on_recovered()` so the
+  engine can restore records that need the card (e.g. LoRA adapters). It
+  re-registers the endpoint only while the engine is `Ready` and no
+  operator pause is in effect. In-flight requests are
+  never cancelled, and a `recover()` error stops the worker. Discovery
+  writes for pause, resume, taints, engine state and shutdown go through
+  one lock and are never cancelled mid-write; endpoint writes are skipped
+  when discovery already matches.
 
 ## Contract for `generate`
 

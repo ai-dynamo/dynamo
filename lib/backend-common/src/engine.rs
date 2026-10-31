@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
-use crate::error::DynamoError;
+use crate::error::{BackendError, DynamoError, ErrorType};
 
 pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -182,6 +182,17 @@ pub struct EngineConfig {
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
     /// `Some` for [`LLMEngine`]s; `None` for [`RawEngine`]s.
     pub llm: Option<LlmRegistration>,
+}
+
+/// Whether the engine behind an [`LLMEngine`] can serve, as reported by
+/// [`LLMEngine::availability`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineAvailability {
+    Ready,
+    /// Alive but not accepting work, for example while paused or asleep.
+    NotReady,
+    /// Gone or unreachable until [`LLMEngine::recover`] reconnects.
+    Lost,
 }
 
 /// Inference engine trait.
@@ -420,6 +431,35 @@ pub trait LLMEngine: Send + Sync + 'static {
         &self,
         _endpoint: dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
+    /// Live availability of an engine that can fail independently of the
+    /// worker. `None` (default) keeps the worker registered until shutdown.
+    /// On `NotReady` the worker withdraws its endpoint; on `Lost` it also
+    /// withdraws the model card and calls [`recover`](LLMEngine::recover).
+    /// `generate` must reject new requests while `Lost`.
+    fn availability(&self) -> Option<watch::Receiver<EngineAvailability>> {
+        None
+    }
+
+    /// Reconnect after [`EngineAvailability::Lost`] and return fresh
+    /// registration metadata once the engine serves again, with availability
+    /// no longer `Lost`. Runs while the worker is out of discovery and is
+    /// dropped if the worker shuts down; in-flight requests are not cancelled.
+    /// An error stops the worker, so the engine bounds its own retries. KV event
+    /// sources and metrics bindings from `start` are kept.
+    async fn recover(&self) -> Result<EngineConfig, DynamoError> {
+        Err(DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine does not support recovery")
+            .build())
+    }
+
+    /// Called after recovery re-registers the model card and before the
+    /// endpoint is routable again, to restore discovery records that depend on
+    /// the card (for example LoRA adapters). An error is logged.
+    async fn on_recovered(&self) -> Result<(), DynamoError> {
         Ok(())
     }
 }
