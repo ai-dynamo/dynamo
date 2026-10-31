@@ -62,13 +62,22 @@ EOF
     esac
 done
 
-# Hybrid GDN families (Qwen3.5/Qwen3.6) need extra_buffer scheduling for
-# MambaRadixCache to engage; default no_buffer silently disables prefix
-# cache. Evaluated after CLI parsing so --model overrides take effect.
-MAMBA_ARGS=()
-case "${MODEL}" in
-    *Qwen3.5*|*Qwen3.6*) MAMBA_ARGS=(--mamba-scheduler-strategy extra_buffer) ;;
-esac
+# Validate every managed rendezvous port before starting any worker. Falling back
+# to SGLang's free-port probe here would reintroduce the bind race.
+NCCL_PORTS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    for i in $(seq 1 "${NUM_WORKERS}"); do
+        NCCL_PORT_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + i))"
+        NCCL_PORT="${!NCCL_PORT_VAR:-}"
+        # Bound the digit count before arithmetic to avoid integer overflow.
+        if [[ ! "${NCCL_PORT}" =~ ^[0-9]{1,5}$ ]] \
+            || (( 10#${NCCL_PORT} < 1 || 10#${NCCL_PORT} > 65535 )); then
+            echo "Invalid managed NCCL port ${NCCL_PORT_VAR}: ${NCCL_PORT:-<unset>}; expected 1-5 decimal digits in 1..65535" >&2
+            exit 1
+        fi
+        NCCL_PORTS+=("$((10#${NCCL_PORT}))")
+    done
+fi
 
 print_launch_banner --multimodal --no-curl \
     "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
@@ -102,11 +111,10 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-# Per-worker DYN_SYSTEM_PORT{i} is set by xdist for parallel test runs; fall
-# back to script defaults otherwise. KV-event ports always come from the
-# script's own KV_EVENTS_PORT_BASE block (29090+) — xdist only reserves one
-# DYN_VLLM_KV_EVENT_PORT so deriving `base + (i-1)` from it would collide
-# with adjacent test slots.
+# Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
+# harness for parallel runs; standalone runs fall back to the script's port bases.
+# Under DYN_MANAGED_PORTS, worker i uses spare DYN_SYSTEM_PORT{NUM_WORKERS+i} as --nccl-port;
+# SGLang's own free-port probe races torch.distributed's bind (sporadic EADDRINUSE).
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -114,13 +122,20 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
     WORKER_PORT="${!HARNESS_VAR:-${DEFAULT_WORKER_PORT}}"
     WORKER_PORTS+=("${WORKER_PORT}")
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
     KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
 
-    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}) ---"
+    NCCL_PORT="sglang-default"
+    NCCL_PORT_ARGS=()
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        NCCL_PORT="${NCCL_PORTS[i-1]}"
+        NCCL_PORT_ARGS=(--nccl-port "${NCCL_PORT}")
+    fi
+
+    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}, nccl_port=${NCCL_PORT}) ---"
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${WORKER_PORT}" \
         "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
@@ -135,7 +150,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
-        "${MAMBA_ARGS[@]}" \
+        ${NCCL_PORT_ARGS[@]+"${NCCL_PORT_ARGS[@]}"} \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 
@@ -173,7 +188,7 @@ echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
     # Use the actual port values from the launch loop above so the
-    # summary reflects DYN_SYSTEM_PORT{i} / KV_EVENTS_PORT_BASE overrides
+    # summary reflects DYN_SYSTEM_PORT{i} / DYN_VLLM_KV_EVENT_PORT{i} overrides
     # the harness may have applied (instead of the default formula).
     echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
     echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"

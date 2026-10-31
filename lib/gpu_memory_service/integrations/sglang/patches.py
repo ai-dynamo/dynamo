@@ -4,13 +4,15 @@
 """SGLang-specific patches for GPU Memory Service integration.
 
 - patch_torch_memory_saver: Routes weights and kv_cache to GMS
-- patch_model_runner: Fixes memory accounting with pre-loaded weights
+- patch_xpu_kv_cache_sizing_for_gms: Makes the XPU KV sizing probe see GMS weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
+import sys
 from contextlib import contextmanager
 from typing import Optional
 
@@ -23,7 +25,7 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
 logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
-_model_runner_patched = False
+_xpu_kv_cache_sizing_patched = False
 _static_state_patched = False
 
 
@@ -59,7 +61,20 @@ def patch_torch_memory_saver() -> None:
         hook_mode = self._impl_ctor_kwargs.get("hook_mode")
         logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
-        if hook_mode is None or hook_mode == "gms":
+        if hook_mode == "torch":
+            # SGLang forces hook_mode="torch" at import time on Intel XPU
+            # (srt/utils/torch_memory_saver_adapter.py) because the LD_PRELOAD
+            # preload mode is CUDA/HIP-only. That leaves no way to request
+            # "gms" on XPU, so claim the saver here rather than falling through
+            # to upstream, which would leave GMSModelLoader with no impl and
+            # fail the load. On CUDA an explicit "torch" stays a real opt-out.
+            from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+            use_gms = get_vmm_device_type() == VMMDeviceType.XPU
+        else:
+            use_gms = hook_mode is None or hook_mode == "gms"
+
+        if use_gms:
             # In GMS mode we install only the strict GMS implementation:
             # weights + kv_cache go through GMS, generic unsupported tags stay
             # no-ops/warnings, and cuda_graph remains unsupported.
@@ -139,57 +154,109 @@ def patch_torch_memory_saver() -> None:
     logger.debug("[GMS] Patched torch_memory_saver")
 
 
-def patch_model_runner() -> None:
-    """Patch SGLang's ModelRunner to size KV cache with GMS-resident weights.
+def patch_xpu_kv_cache_sizing_for_gms() -> None:
+    """Make the XPU KV sizing probe account for GMS-resident weights.
 
-    SGLang's KV sizing formula reserves dynamic headroom from a free-memory
-    snapshot taken before its own model load. In GMS read mode, the committed
-    weight handles already exist in the GMS server before that snapshot, so the
-    snapshot is lower by those weights. Add just those preloaded weight bytes
-    back to the baseline. Do not adjust write mode: weights are loaded after
-    the snapshot there, so upstream's formula already subtracts them correctly.
+    On CUDA sglang's ``get_available_gpu_memory()`` calls ``torch.cuda.mem_get_info()``,
+    which is device-wide, so GMS-resident weights are visible to writer and reader
+    alike and no adjustment is needed.
+
+    On XPU it returns ``total_memory - torch.xpu.memory_allocated(gpu_id)``,
+    which only sees allocations made through this process's torch caching
+    allocator.  A writer allocates weights through the GMS mempool and is
+    therefore charged for them; a reader materialises them as VMM mappings
+    outside the allocator and is not.  memory_allocated() also cannot see
+    another process's allocations at all, so once the writer exits the GMS
+    server still holds W bytes resident on the card.
+
+    GMSModelLoader reports preloaded_weights_bytes = 0 on XPU: sglang's
+    add-back exists to undo a depressed *pre-load* reading,
+    and on XPU that reading was never depressed in the first place.
+
+    SGLang binds the helper with ``from ... import get_available_gpu_memory``
+    in many modules, so patching by module name would miss new call sites.
+    Instead, wrap it at its definition (sglang.srt.utils.common), which late
+    importers resolve through, and rebind every already-loaded module
+    attribute that *is* the original function object. The wrapper is a no-op
+    until a reader sets impl.preloaded_weights_bytes during load_model(), so
+    the pre-load baseline sampled by distributed.bootstrap is unaffected.
     """
-    global _model_runner_patched
+    global _xpu_kv_cache_sizing_patched
 
-    if _model_runner_patched:
+    if _xpu_kv_cache_sizing_patched:
         return
+
+    from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+    if get_vmm_device_type() != VMMDeviceType.XPU:
+        # CUDA's probe is device-wide; nothing to correct.
+        _xpu_kv_cache_sizing_patched = True
+        return
+
+    def make_gms_aware_probe(original):
+        def patched_get_available_gpu_memory(*args, **kwargs):
+            available_gb = original(*args, **kwargs)
+
+            impl = get_gms_memory_saver_impl()
+            if impl is None:
+                return available_gb
+
+            # Non-zero only on the import path: _finalize_pending_write()
+            # resets this to 0 after a writer commits, so a writer (which
+            # reconnects as RO and is already charged for its weights) is
+            # never adjusted.
+            preloaded_bytes = getattr(impl, "preloaded_weights_bytes", 0)
+            if preloaded_bytes <= 0:
+                return available_gb
+
+            adjusted_gb = available_gb - preloaded_bytes / (1 << 30)
+            logger.info(
+                "[GMS] Adjusted avail-mem probe for GMS-resident weights: "
+                "%.2f GiB - %.2f GiB = %.2f GiB",
+                available_gb,
+                preloaded_bytes / (1 << 30),
+                adjusted_gb,
+            )
+            return adjusted_gb
+
+        return patched_get_available_gpu_memory
 
     try:
-        from sglang.srt.model_executor.model_runner import ModelRunner
+        common = importlib.import_module("sglang.srt.utils.common")
     except ImportError:
-        logger.warning("[GMS] Could not import ModelRunner, skipping patch")
+        logger.warning(
+            "[GMS] Could not import sglang.srt.utils.common, KV pool sizing "
+            "will not account for GMS-resident weights"
+        )
         return
 
-    if hasattr(ModelRunner, "_gms_patched"):
+    original = getattr(common, "get_available_gpu_memory", None)
+    if original is None:
+        logger.warning(
+            "[GMS] sglang.srt.utils.common has no get_available_gpu_memory, "
+            "KV pool sizing will not account for GMS-resident weights"
+        )
         return
 
-    original_alloc_memory_pool = ModelRunner.alloc_memory_pool
+    wrapped = make_gms_aware_probe(original)
 
-    def patched_alloc_memory_pool(self, *args, **kwargs):
-        impl = get_gms_memory_saver_impl()
-        if (
-            impl is not None
-            and impl.preloaded_weights_bytes > 0
-            and not self.__dict__.get("_gms_memory_baseline_adjusted", False)
-        ):
-            preloaded_weights_gib = impl.preloaded_weights_bytes / (1 << 30)
-            old_value = self.pre_model_load_memory
-            self.pre_model_load_memory += preloaded_weights_gib
-            self._gms_memory_baseline_adjusted = True
-            logger.info(
-                "[GMS] Adjusted pre_model_load_memory for preloaded weights: "
-                "%.2f GiB + %.2f GiB = %.2f GiB",
-                old_value,
-                preloaded_weights_gib,
-                self.pre_model_load_memory,
-            )
+    # Read module __dict__ directly so lazy module __getattr__ hooks are not
+    # triggered. The definition site is included, so late importers resolve
+    # to the wrapper too.
+    rebound = []
+    for name, module in list(sys.modules.items()):
+        namespace = getattr(module, "__dict__", None)
+        if namespace and namespace.get("get_available_gpu_memory") is original:
+            module.get_available_gpu_memory = wrapped
+            rebound.append(name)
 
-        return original_alloc_memory_pool(self, *args, **kwargs)
+    logger.info(
+        "[GMS] Patched get_available_gpu_memory in %d modules: %s",
+        len(rebound),
+        ", ".join(sorted(rebound)),
+    )
 
-    ModelRunner.alloc_memory_pool = patched_alloc_memory_pool
-    ModelRunner._gms_patched = True
-    _model_runner_patched = True
-    logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
+    _xpu_kv_cache_sizing_patched = True
 
 
 def patch_static_state_for_gms() -> None:
@@ -214,7 +281,14 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        try:
+            # SGLang >=0.5.21.
+            from sglang.srt.managers.scheduler_components import weight_updater
+        except ImportError:
+            # SGLang <0.5.21 kept these on the scheduler mixin module.
+            from sglang.srt.managers import (
+                scheduler_update_weights_mixin as weight_updater,  # type: ignore[no-redef]
+            )
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
@@ -224,8 +298,8 @@ def patch_static_state_for_gms() -> None:
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
             pass
 
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
+        weight_updater._export_static_state = _export_noop
+        weight_updater._import_static_state = _import_noop
         _static_state_patched = True
         logger.info(
             "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
@@ -233,6 +307,6 @@ def patch_static_state_for_gms() -> None:
         )
     except Exception:
         logger.warning(
-            "[GMS] Could not patch scheduler_update_weights_mixin: ",
+            "[GMS] Could not patch SGLang weight_updater static state: ",
             exc_info=True,
         )

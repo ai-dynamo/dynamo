@@ -496,8 +496,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     f"decode_min_endpoint={decode_min_endpoint} at {d_watts}W "
                     "per replica) exceeds "
                     f"total_gpu_power_limit={budget}W. Raise the budget or lower "
-                    "the endpoint minimums or per-GPU caps on the worker "
-                    "podTemplate annotations."
+                    "the endpoint minimums or per-GPU caps authored on the "
+                    "worker components."
                 ]
             )
 

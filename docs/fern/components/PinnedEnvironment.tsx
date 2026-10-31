@@ -4,7 +4,8 @@
  *
  * PinnedEnvironment — one copy-paste block that pins every install path
  * (backend runtime container, frontend + operator images, Helm chart, and
- * wheel) to the current release. Every command string is assembled from the
+ * wheel) to one release: the current release, or the `version` a historical
+ * release page passes. Every command string is assembled from the
  * ARTIFACTS clipboard payloads and CURRENT_* consts in releases.data.ts —
  * no registry or version literals live here.
  *
@@ -21,7 +22,24 @@
  * this component. Only the .dynref-pe-* layout classes are defined here.
  */
 
-import { ARTIFACTS, CURRENT_VERSION, CURRENT_WHEEL, CURRENT_TAG } from "./releases.data";
+import { ARTIFACTS, CURRENT_VERSION, CURRENT_WHEEL, CURRENT_TAG, RELEASES } from "./releases.data";
+
+/** Release the block pins: tag for images and chart, wheel for pip. */
+interface Pin {
+  version: string;
+  tag: string;
+  wheel: string;
+}
+
+/** Historical pages pass their own version; the inventory only holds current tags, so their refs are re-tagged. */
+function resolvePin(version?: string): Pin {
+  if (!version || version === CURRENT_VERSION) {
+    return { version: CURRENT_VERSION, tag: CURRENT_TAG, wheel: CURRENT_WHEEL };
+  }
+  const tag = version.replace(/^v/, "");
+  const release = RELEASES.find((r) => r.version === version);
+  return { version, tag, wheel: release?.wheel ?? tag };
+}
 
 const PE_CSS = `
 /* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
@@ -143,11 +161,11 @@ const BACKENDS: Backend[] = [
   { id: "vllm", label: "vLLM", runtime: "vllm-runtime", extra: "vllm" },
 ];
 
-/** docker pull line for a container artifact's CURRENT_TAG image reference. */
-function containerPull(name: string): string | null {
+/** docker pull line for a container artifact, re-tagged to the pinned release. */
+function containerPull(name: string, pin: Pin): string | null {
   const artifact = ARTIFACTS.find((a) => a.category === "container" && a.name === name);
   const tag = artifact?.tags.find((t) => t.label === CURRENT_TAG);
-  return tag ? `docker pull ${tag.clipboard}` : null;
+  return tag ? `docker pull ${tag.clipboard.replace(`:${CURRENT_TAG}`, `:${pin.tag}`)}` : null;
 }
 
 /** Break the long helm install one-liner with a shell line continuation so
@@ -159,23 +177,24 @@ function wrapHelmInstall(line: string): string {
 }
 
 /** Full multi-line pinned-install script for one backend. */
-function buildScript(backend: Backend): string {
+function buildScript(backend: Backend, pin: Pin): string {
   const helm = ARTIFACTS.find((a) => a.category === "helm" && a.name === "dynamo-platform");
-  const helmLine = helm?.tags[0]?.clipboard;
+  const helmLine = helm?.tags[0]?.clipboard.replace(`-${CURRENT_TAG}.tgz`, `-${pin.tag}.tgz`);
   const lines: (string | null)[] = [
-    containerPull(backend.runtime),
-    containerPull("dynamo-frontend"),
-    containerPull("kubernetes-operator"),
+    containerPull(backend.runtime, pin),
+    containerPull("dynamo-frontend", pin),
+    containerPull("kubernetes-operator", pin),
     helmLine ? wrapHelmInstall(helmLine) : null,
     backend.extra
-      ? `uv pip install "ai-dynamo[${backend.extra}]==${CURRENT_WHEEL}"`
+      ? `uv pip install "ai-dynamo[${backend.extra}]==${pin.wheel}"`
       : "# TensorRT-LLM ships via the NGC container",
   ];
   return lines.filter((line): line is string => line !== null).join("\n");
 }
 
-export function PinnedEnvironment() {
-  const scripts = BACKENDS.map((backend) => ({ backend, script: buildScript(backend) }));
+export function PinnedEnvironment({ version }: { version?: string } = {}) {
+  const pin = resolvePin(version);
+  const scripts = BACKENDS.map((backend) => ({ backend, script: buildScript(backend, pin) }));
 
   return (
     <>
@@ -188,7 +207,7 @@ export function PinnedEnvironment() {
         <div className="dynref-panel-header">
           <div>
             <p className="dynref-eyebrow">Pinned environment</p>
-            <h3 className="dynref-h">Everything pinned to {CURRENT_VERSION}</h3>
+            <h3 className="dynref-h">Everything pinned to {pin.version}</h3>
           </div>
           {scripts.map(({ backend, script }) => (
             <button
@@ -219,7 +238,7 @@ export function PinnedEnvironment() {
           </pre>
         ))}
 
-        <p className="dynref-grid-note">Assembled from the current release&apos;s artifact inventory.</p>
+        <p className="dynref-grid-note">Assembled from the artifact inventory, pinned to {pin.version}.</p>
       </section>
     </>
   );

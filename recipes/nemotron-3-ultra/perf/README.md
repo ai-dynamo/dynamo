@@ -11,5 +11,6 @@ The 12 optimized profiles use the shared AIPerf Job in `perf.yaml` and the runne
 Before applying a Job, update its environment block for the selected deployment.
 
 See the [Nemotron-3-Ultra Fern recipe](../../../docs/fern/pages/recipes/model-recipes/nemotron-3-ultra.mdx#benchmark)
-for the benchmark procedure. Benchmark results and release-review evidence are maintained outside
-the recipe source tree.
+for the benchmark procedure and the
+[Expected Performance](../../../docs/fern/pages/recipes/model-recipes/nemotron-3-ultra.mdx#expected-performance)
+section for published results.

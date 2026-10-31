@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +16,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -36,16 +40,18 @@ type defaultModelRegistry struct {
 	mxClient    modelpb.ModelServiceClient
 }
 
-// ModelRegistry resolves build references and acquires their compiler metadata.
+// ModelRegistry resolves build references, acquires their compiler metadata,
+// and ensures builds and checkpoints are downloaded.
 type ModelRegistry interface {
 	BuildURL(id string) (*url.URL, error)
 	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
-	AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error)
+	EnsureCheckpointDownloaded(ctx context.Context, checkpoint *Checkpoint) (bool, error)
+	AcquireBuild(ctx context.Context, id string) (*Build, error)
 }
 
 // NewModelRegistry constructs a registry rooted at modelRegistryURL. An empty
 // URL is supported for absolute build references. mxClient may be nil when GCS
-// downloads are not required.
+// build and checkpoint downloads are not required.
 func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClient) (ModelRegistry, error) {
 	var registryURL *url.URL
 
@@ -79,45 +85,90 @@ func (r *defaultModelRegistry) EnsureDownloaded(ctx context.Context, buildURL ur
 		if r.mxClient == nil {
 			return false, fmt.Errorf("Model Express client is required for GCS model downloads")
 		}
-
-		// Request the GCS build through the current Model Express client and classify its first status.
-		rpcCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		modelName := buildURL.String()
-
-		stream, err := r.mxClient.EnsureModelDownloaded(rpcCtx, &modelpb.ModelDownloadRequest{
-			ModelName: modelName,
+		downloaded, _, err := r.ensureModelExpressDownload(ctx, &modelpb.ModelDownloadRequest{
+			ModelName: buildURL.String(),
 			Provider:  modelpb.ModelProvider_GCS,
 		})
-		if err != nil {
-			return false, fmt.Errorf("ensure model express download for %q: %w", modelName, err)
-		}
-
-		update, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return false, fmt.Errorf("model express returned no status for %q", modelName)
-			}
-			return false, fmt.Errorf("receive model express download status for %q: %w", modelName, err)
-		}
-
-		switch update.GetStatus() {
-		case modelpb.ModelStatus_DOWNLOADED:
-			return true, nil
-		case modelpb.ModelStatus_DOWNLOADING:
-			return false, nil
-		case modelpb.ModelStatus_ERROR:
-			message := update.GetMessage()
-			if message == "" {
-				message = "model express reported download error"
-			}
-			return false, fmt.Errorf("model express download failed for %q: %s", modelName, message)
-		default:
-			return false, fmt.Errorf("model express returned unexpected status %s for %q", update.GetStatus(), modelName)
-		}
+		return downloaded, err
 	default:
 		return false, fmt.Errorf("unsupported build download scheme %q", buildURL.Scheme)
+	}
+}
+
+// EnsureCheckpointDownloaded ensures the non-nil validated checkpoint is in model
+// storage and reports whether the download is complete. It may initiate or
+// advance a Model Express download pinned to the checkpoint revision, and fails
+// unless Model Express confirms that exact revision. The receiver must be
+// non-nil and is not mutated.
+func (r *defaultModelRegistry) EnsureCheckpointDownloaded(
+	ctx context.Context,
+	checkpoint *Checkpoint,
+) (bool, error) {
+	if r.mxClient == nil {
+		return false, fmt.Errorf("checkpoint %q requires Model Express; configure infrastructure.modelExpressURL", CheckpointKey(checkpoint))
+	}
+
+	// Request the pinned revision; Model Express resolves it before claiming a download.
+	downloaded, update, err := r.ensureModelExpressDownload(ctx, &modelpb.ModelDownloadRequest{
+		ModelName: checkpoint.Model,
+		Provider:  modelpb.ModelProvider_HUGGING_FACE,
+		Revision:  &checkpoint.Revision,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// Servers before Model Express 0.6.0 ignore the revision and report none.
+	if update.ResolvedRevision == nil {
+		return false, fmt.Errorf(
+			"model express did not report a resolved revision for %q; checkpoint downloads require Model Express 0.6.0 or later",
+			CheckpointKey(checkpoint),
+		)
+	}
+	if resolved := update.GetResolvedRevision(); resolved != checkpoint.Revision {
+		return false, fmt.Errorf("model express resolved %q to revision %q, want %q", checkpoint.Model, resolved, checkpoint.Revision)
+	}
+	return downloaded, nil
+}
+
+// ensureModelExpressDownload sends one download request and classifies the first
+// status update. It returns the update when the status is DOWNLOADED or
+// DOWNLOADING. The receiver must have a non-nil Model Express client.
+func (r *defaultModelRegistry) ensureModelExpressDownload(
+	ctx context.Context,
+	request *modelpb.ModelDownloadRequest,
+) (bool, *modelpb.ModelStatusUpdate, error) {
+	rpcCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	modelName := request.GetModelName()
+
+	stream, err := r.mxClient.EnsureModelDownloaded(rpcCtx, request)
+	if err != nil {
+		return false, nil, fmt.Errorf("ensure model express download for %q: %w", modelName, err)
+	}
+
+	update, err := stream.Recv()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil, fmt.Errorf("model express returned no status for %q", modelName)
+		}
+		return false, nil, fmt.Errorf("receive model express download status for %q: %w", modelName, err)
+	}
+
+	switch update.GetStatus() {
+	case modelpb.ModelStatus_DOWNLOADED:
+		return true, update, nil
+	case modelpb.ModelStatus_DOWNLOADING:
+		return false, update, nil
+	case modelpb.ModelStatus_ERROR:
+		message := update.GetMessage()
+		if message == "" {
+			message = "model express reported download error"
+		}
+		return false, nil, fmt.Errorf("model express download failed for %q: %s", modelName, message)
+	default:
+		return false, nil, fmt.Errorf("model express returned unexpected status %s for %q", update.GetStatus(), modelName)
 	}
 }
 
@@ -193,6 +244,7 @@ func parseBuildRef(ref string) (*url.URL, error) {
 
 // readBuildFileBounded reads one relative file. The receiver and buildURL must
 // be non-nil, and maxBytes must be non-negative.
+// A missing remote file wraps os.ErrNotExist only before any chunks arrive.
 func (r *defaultModelRegistry) readBuildFileBounded(
 	ctx context.Context,
 	buildURL *url.URL,
@@ -259,6 +311,9 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 			},
 		})
 		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
+			}
 			return nil, fmt.Errorf("streaming %s from %q with Model Express: %w", relativePath, modelName, err)
 		}
 
@@ -272,6 +327,9 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 				break
 			}
 			if err != nil {
+				if !receivedChunk && status.Code(err) == codes.NotFound {
+					err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
+				}
 				return nil, fmt.Errorf("receiving %s from %q with Model Express: %w", relativePath, modelName, err)
 			}
 			if completedFile {
@@ -318,122 +376,112 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 	}
 }
 
-func (r *defaultModelRegistry) listBuildFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
-	var (
-		paths []string
-		err   error
-	)
-	switch buildURL.Scheme {
-	case BuildSchemeFile:
-		paths, err = localBuildFilePaths(ctx, buildURL.Path, maxBuildSnapshotMetadataBytes)
-	case BuildSchemeGCS:
-		if r.mxClient == nil {
-			return nil, fmt.Errorf("Model Express client is required for GCS model registry reads of %q", buildURL.String())
-		}
+var errInvalidBuildManifest = errors.New("invalid build manifest")
 
-		// List the GCS build files through Model Express before validating the inventory.
-		modelName := buildURL.String()
-		list, listErr := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
-			ModelName: modelName,
-			Provider:  modelpb.ModelProvider_GCS,
-		})
-		if listErr != nil {
-			return nil, fmt.Errorf("listing files from %q with Model Express: %w", modelName, listErr)
-		}
-		paths = make([]string, 0, len(list.GetFiles()))
-		for _, file := range list.GetFiles() {
-			if path := file.GetRelativePath(); path != "" {
-				paths = append(paths, path)
-			}
-		}
-	default:
-		err = fmt.Errorf("unsupported build metadata scheme %q", buildURL.Scheme)
-	}
+const (
+	// This domain identifies snapshots of manifest bytes without a file inventory.
+	buildSnapshotIdentityVersion = "dynamo-lpx-compiler-snapshot/v4"
+	// Bound the single manifest to the Model Express transport's metadata ceiling.
+	maxBuildSnapshotMetadataBytes = modelExpressMaxMessageSize
+	buildSnapshotTimeout          = 30 * time.Second
+)
+
+// AcquireBuild reads and validates the immutable compiler manifest once.
+// The receiver must be non-nil and is not mutated. Payload files are not inspected.
+func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Build, error) {
+	ctx, cancel := context.WithTimeout(ctx, buildSnapshotTimeout)
+	defer cancel()
+	refURL, err := r.BuildURL(id)
 	if err != nil {
 		return nil, err
 	}
-	return normalizeBuildFilePaths(ctx, paths)
+
+	format, manifestData, err := r.readBuildContract(ctx, refURL)
+	if err != nil {
+		return nil, err
+	}
+	manifestPath, err := format.filename()
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the selected contract exactly once, without fallback on invalid split bytes.
+	var build *Build
+	switch format {
+	case buildContractManifestV2:
+		manifest, decodeErr := decodeGbuildManifestV2(manifestData)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			build, err = buildFromGbuildManifestV2(refURL.String(), manifest)
+		}
+	case buildContractDeploymentV1:
+		deployment, decodeErr := decodeGbuildDeploymentV1(manifestData)
+		if decodeErr != nil {
+			err = decodeErr
+		} else {
+			build, err = buildFromGbuildDeploymentV1(refURL.String(), deployment)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
+	}
+
+	// Hash the exact manifest bytes in their own domain, bound to the schema filename and independent of the locator.
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(buildSnapshotIdentityVersion + "\x00"))
+	_, _ = hash.Write([]byte(manifestPath + "\x00"))
+	_, _ = hash.Write(manifestData)
+	build.contentID = fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	build.contractFormat = format
+	return build, nil
 }
 
-// localBuildFilePaths bounds visited relative path bytes; maxBytes must be non-negative.
-// Cancellation is cooperative and cannot interrupt an in-flight filesystem call.
-func localBuildFilePaths(ctx context.Context, root string, maxBytes int) ([]string, error) {
-	// Resolve a symlinked build root only while acquisition is still active.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
-	if err != nil {
-		return nil, fmt.Errorf("resolving build directory %q: %w", root, err)
-	}
-
-	// Reject non-directory roots without opening a potentially blocking FIFO.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(resolvedRoot)
-	if err != nil {
-		return nil, fmt.Errorf("checking build directory %q: %w", root, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("build root %q is not a directory", root)
-	}
-
-	// Charge directories as well as files so pending traversal cannot grow without bound.
-	paths := make([]string, 0)
-	pending := []string{""}
-	remaining := maxBytes
-	for len(pending) > 0 {
-		relativeDir := pending[len(pending)-1]
-		pending[len(pending)-1] = ""
-		pending = pending[:len(pending)-1]
-
-		// Finish and close one directory before opening another, including on failure.
-		err := func() error {
+// readBuildContract selects one supported entry point and returns its bounded bytes.
+// The receiver and buildURL must be non-nil.
+func (r *defaultModelRegistry) readBuildContract(ctx context.Context, buildURL *url.URL) (buildContractFormat, []byte, error) {
+	candidates := []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}
+	paths := make([]string, 0, len(candidates))
+	var manifestData []byte
+	for _, name := range candidates {
+		if buildURL.Scheme == BuildSchemeFile {
+			// Inspect local entries first so broken symlinks still count as published contracts.
 			if err := ctx.Err(); err != nil {
-				return err
+				return buildContractUnknown, nil, err
 			}
-			dir, err := os.Open(filepath.Join(resolvedRoot, relativeDir))
+			_, err := os.Lstat(buildURL.JoinPath(name).Path)
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				continue
+			}
 			if err != nil {
-				return err
+				return buildContractUnknown, nil, err
 			}
-			defer func() { _ = dir.Close() }()
-
-			// Batches avoid WalkDir's whole-directory allocation before entry callbacks.
-			for {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				entries, err := dir.ReadDir(128)
-				if err != nil && !errors.Is(err, io.EOF) {
-					return err
-				}
-
-				// Budget each path before retaining it, without following child symlinks.
-				for _, entry := range entries {
-					relativePath := filepath.Join(relativeDir, entry.Name())
-					if len(relativePath) > remaining {
-						return fmt.Errorf("build inventory exceeds its %d-byte path limit", maxBytes)
-					}
-					remaining -= len(relativePath)
-
-					// Retain malformed manifest directories so the required file read fails.
-					if entry.IsDir() {
-						pending = append(pending, relativePath)
-						if relativePath != gbuildManifestV2CapnpFile {
-							continue
-						}
-					}
-					paths = append(paths, filepath.ToSlash(relativePath))
-				}
-				if errors.Is(err, io.EOF) {
-					return ctx.Err()
-				}
+		} else {
+			// Read alternatives separately because Model Express requires every selected path to exist.
+			data, err := r.readBuildFileBounded(ctx, buildURL, name, maxBuildSnapshotMetadataBytes)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
 			}
-		}()
+			if err != nil {
+				return buildContractUnknown, nil, err
+			}
+			manifestData = data
+		}
+		paths = append(paths, name)
+	}
+
+	if len(paths) == 0 {
+		return buildContractUnknown, nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
+	}
+	format, err := selectBuildContract(paths)
+	if err != nil {
+		return buildContractUnknown, nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
+	}
+	if buildURL.Scheme == BuildSchemeFile {
+		manifestData, err = r.readBuildFileBounded(ctx, buildURL, paths[0], maxBuildSnapshotMetadataBytes)
 		if err != nil {
-			return nil, fmt.Errorf("listing build files under %q: %w", root, err)
+			return buildContractUnknown, nil, err
 		}
 	}
-	return paths, nil
+	return format, manifestData, nil
 }

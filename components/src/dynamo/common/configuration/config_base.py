@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
-# typing.Self is 3.11+; pyproject declares requires-python>=3.10 so use the
-# typing_extensions back-port (added as an explicit dep in pyproject.toml).
+# Keep Self aligned with the typing_extensions helpers used across Dynamo.
 from typing_extensions import Self
 
 

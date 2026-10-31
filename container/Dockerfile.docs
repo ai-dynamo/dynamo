@@ -23,7 +23,7 @@ ARG DYNAMO_DOCS_VERSION=dev
 ENV DYNAMO_DOCS_VERSION=$DYNAMO_DOCS_VERSION
 
 # Keep in sync with container/context.yaml `uv_version`.
-COPY --from=ghcr.io/astral-sh/uv:0.12.0 /uv /uvx /opt/uv/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
 RUN apt-get update && \

@@ -240,8 +240,8 @@ def _request(url: str) -> str:
         "stream": False,
     }
     response = send_request(url, payload, timeout=120, log_level=logging.DEBUG)
-    data = validate_chat_response(response, MODEL, min_content_length=1)
-    return data["choices"][0]["message"]["content"]
+    completion = validate_chat_response(response, MODEL, min_content_length=1)
+    return completion.choices[0].message.content or ""
 
 
 @pytest.mark.pre_merge

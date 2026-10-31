@@ -42,6 +42,7 @@ type groveWatchSetup struct {
 }
 
 // newGroveWatchSetup wires Grove-owned watch predicates and request mapping.
+// All inputs must be non-nil.
 func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 	return &groveWatchSetup{reader: reader}
 }
@@ -211,9 +212,7 @@ func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request
 	}
 
 	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      pcsOwnerRef.Name,
-			Namespace: pcs.Namespace,
-		},
+		Name:      pcsOwnerRef.Name,
+		Namespace: pcs.Namespace,
 	}}
 }

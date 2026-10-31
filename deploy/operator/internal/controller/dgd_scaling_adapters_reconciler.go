@@ -64,10 +64,8 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		componentName := component.ComponentName
 		adapterName := generateAdapterName(dgd.Name, componentName)
 		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      adapterName,
-				Namespace: dgd.Namespace,
-			},
+			Name:      adapterName,
+			Namespace: dgd.Namespace,
 		}
 
 		// Remove the adapter when component-level scaling is no longer enabled.
