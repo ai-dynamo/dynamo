@@ -3,8 +3,6 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use std::ops::BitOr;
-
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::shared_cache::SharedCacheHits;
@@ -197,46 +195,6 @@ pub struct ScoredWorkerCandidate {
     pub(crate) preferred_taint_multiplier: Option<f64>,
 }
 
-/// Optional worker-signal groups requested by scorers and pickers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WorkerInputs(u8);
-
-impl WorkerInputs {
-    /// Request no optional worker inputs.
-    pub const NONE: Self = Self(0);
-    /// Request worker KV-cache overlaps and shared-cache lookup results.
-    pub const CACHE: Self = Self(1 << 0);
-    /// Request active-load inputs.
-    pub const LOAD: Self = Self(1 << 1);
-    /// Request preferred-taint routing metadata.
-    pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request host-owned active-request counts.
-    pub const OCCUPANCY: Self = Self(1 << 5);
-    /// Request the KV prefix each worker could fetch from another worker or cache.
-    pub const KV_TRANSFER: Self = Self(1 << 6);
-    /// Every optional column but the fetch column, which only scorers may declare.
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
-
-    #[inline]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    #[inline]
-    pub(crate) fn without(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
-    }
-}
-
-impl BitOr for WorkerInputs {
-    type Output = Self;
-
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self(self.0 | rhs.0)
-    }
-}
-
 /// Request-wide facts borrowed once for all cache views in a selection.
 pub struct CacheSnapshot<'a> {
     pub shared_hits: Option<&'a SharedCacheHits>,
@@ -394,49 +352,8 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<CandidateData>() == 128);
 
+pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
 pub use dynamo_router_protocol::load::WorkerCapacity;
-
-/// Static facts about one worker rank: its identity and the capacity its runtime config
-/// advertises. Every component can read it without declaring an input group. It changes
-/// only when the worker registers again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkerInfo {
-    worker: WorkerWithDpRank,
-    capacity: WorkerCapacity,
-}
-
-impl WorkerInfo {
-    #[inline]
-    pub fn new(worker: WorkerWithDpRank, capacity: WorkerCapacity) -> Self {
-        Self { worker, capacity }
-    }
-
-    /// Worker ID and data-parallel rank.
-    #[inline]
-    pub fn worker(&self) -> WorkerWithDpRank {
-        self.worker
-    }
-
-    /// Prefill tokens the rank batches per engine step, when reported.
-    #[inline]
-    pub fn max_num_batched_tokens(&self) -> Option<u64> {
-        self.capacity.max_num_batched_tokens()
-    }
-
-    /// Total KV blocks the worker advertises for this rank, when reported: capacity, not free
-    /// blocks. Some adapters derive it from aggregate data (vLLM data parallelism publishes
-    /// the process total divided by the rank count), so treat it as approximate.
-    #[inline]
-    pub fn total_kv_blocks(&self) -> Option<u64> {
-        self.capacity.total_kv_blocks()
-    }
-
-    /// Both advertised values, as a fullness check takes them.
-    #[inline]
-    pub fn capacity(&self) -> WorkerCapacity {
-        self.capacity
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerTransferInput {

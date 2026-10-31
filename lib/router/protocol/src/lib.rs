@@ -15,6 +15,7 @@
 
 pub mod attempt;
 pub mod block_hash;
+pub mod columns;
 pub mod identity;
 pub mod kv_hints;
 pub mod load;
