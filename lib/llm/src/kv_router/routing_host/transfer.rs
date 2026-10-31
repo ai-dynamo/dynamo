@@ -377,7 +377,7 @@ mod integration_tests {
         DistributedRuntime, Runtime,
         component::Instance,
         distributed::DistributedConfig,
-        pipeline::{AddressedRequest, Context, ManyIn, StreamingDispatch},
+        pipeline::{AddressedRequest, Context, ManyIn, RouterMode, StreamingDispatch},
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -574,18 +574,13 @@ mod integration_tests {
             assert!(!chooser.kv_router_config().enable_decode_to_prefill_reuse);
         }
         let dispatch = Arc::new(HintDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
-            client,
-            RouterMode::KV,
-            dispatch.clone() as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        (
-            RoutingHost::new(inner, Arc::new(chooser), None).unwrap(),
-            worker_id,
-            dispatch,
-        )
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(Arc::new(chooser))
+            .dispatch(dispatch.clone() as Arc<dyn StreamingDispatch<_, _>>)
+            .build()
+            .await
+            .unwrap();
+        (router, worker_id, dispatch)
     }
 
     fn request() -> SingleIn<PreprocessedRequest> {
