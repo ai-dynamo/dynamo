@@ -65,6 +65,14 @@ inputs:
     description: 'Enable operator checkpoint/restore injection'
     required: false
     default: 'false'
+  dgdr_v1beta2_enabled:
+    description: 'Enable DGDR v1beta2 schemas and controllers through the operator Helm chart'
+    required: false
+    default: 'false'
+  planner_image:
+    description: 'Planner image configured on the operator for DGDR execution'
+    required: false
+    default: ''
 
 outputs:
   namespace:
@@ -490,6 +498,8 @@ runs:
         REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+        DGDR_V1BETA2_ENABLED: ${{ inputs.dgdr_v1beta2_enabled }}
+        PLANNER_IMAGE: ${{ inputs.planner_image }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -euo pipefail
@@ -518,6 +528,9 @@ runs:
         else
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
         fi
+        if [ -n "${PLANNER_IMAGE}" ]; then
+          IMAGE_ARGS+=(--set-string dynamo-operator.controllerManager.manager.dgdrDefaultImage="${PLANNER_IMAGE}")
+        fi
 
         CHECKPOINT_HELM_ARGS=(
           --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
@@ -530,6 +543,7 @@ runs:
              helm upgrade --install dynamo-platform . --namespace default \
                "${IMAGE_ARGS[@]}" \
                --set dynamo-operator.gpuDiscovery.enabled=false \
+               --set dynamo-operator.dgdrV1Beta2.enabled="${DGDR_V1BETA2_ENABLED}" \
                "${CHECKPOINT_HELM_ARGS[@]}" \
                --set global.grove.install=true \
                --set global.kai-scheduler.install=false \
