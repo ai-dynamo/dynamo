@@ -136,7 +136,7 @@ Content-Type: application/json
 `data_parallel_size` is 1; a multi-rank worker that sets it stays `incomplete`
 because the replay protocol carries no rank.
 
-For raw SGLang sources using the [wide-token event format](../backends/sglang/multimodal.md#newer-sglang-image-identities), set the boolean `engine_owned_mm_identity` to `true` in the worker record on each selector replica. It applies to all of that worker's DP ranks and defaults to `false`. To update an already registered SGLang worker:
+For raw sources using [wide-token SGLang builds](../backends/sglang/multimodal.md#wide-token-sglang-builds), set the boolean `engine_owned_mm_identity` to `true` in the worker record on each selector replica. It applies to all of that worker's DP ranks and defaults to `false`. To update an already registered SGLang worker:
 
 ```http
 PATCH /workers/1

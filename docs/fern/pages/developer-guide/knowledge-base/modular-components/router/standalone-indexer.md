@@ -250,7 +250,7 @@ behavior applies. Responses never include `tenant_id`.
 
 #### Multimodal Event Sources
 
-For direct SGLang sources using the [wide-token event format](../backends/sglang/multimodal.md#newer-sglang-image-identities), set `engine_owned_mm_identity` to `true` in each source's registration. The indexer then excludes media blocks and their descendants from predicted cache hits. Leave it `false` for legacy sources whose media tokens already match Dynamo's routing tokens.
+For direct sources using [wide-token SGLang builds](../backends/sglang/multimodal.md#wide-token-sglang-builds), set `engine_owned_mm_identity` to `true` in each source's registration. The indexer then excludes media blocks and their descendants from predicted cache hits. Leave it `false` for legacy sources whose media tokens already match Dynamo's routing tokens.
 
 ```bash
 curl -X POST http://localhost:8090/register \

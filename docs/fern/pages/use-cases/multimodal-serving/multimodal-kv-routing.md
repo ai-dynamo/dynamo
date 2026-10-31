@@ -75,7 +75,7 @@ The selected worker receives the same per-video hash, and its KV events use that
 
     Dynamo's SGLang image includes the required hash-forwarding support. Exact video routing fails closed to text-prefix routing when a worker lacks support, the discovery cohort contains legacy or mismatched contracts, or the installed processor behavior is incompatible.
 
-    SGLang's [wide-token builds](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#newer-sglang-image-identities) use text-prefix routing for both images and videos, including with `--frontend-decoding`. Accepting caller hashes is not sufficient to enable media-aware routing on those builds.
+    [Wide-token SGLang builds](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds) use text-prefix routing for both images and videos, including with `--frontend-decoding`.
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     The frontend hashes each image, represents that identity in its routing token view, and forwards the hash as `multi_modal_uuids`. TensorRT-LLM workers publish matching KV events so the router can identify cached image blocks.
@@ -187,7 +187,7 @@ The default Rust frontend supports exact video routing for:
 
 - vLLM Qwen3-VL and Qwen3.5 dense and mixture-of-experts models. Video pruning is not supported on this path.
 - vLLM Nemotron 3 Nano Omni. The adapter reproduces temporal grouping, frame separators, dynamic resolution, and optional EVS pruning.
-- Aggregated SGLang Qwen3-VL and Qwen3.5 dense and mixture-of-experts models on CUDA with `--frontend-decoding` and a [compatible event format](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#newer-sglang-image-identities).
+- Aggregated SGLang Qwen3-VL and Qwen3.5 dense and mixture-of-experts models on CUDA with `--frontend-decoding` and a [compatible event format](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
 Exact video routing falls back to text-prefix routing for unsupported models, opaque client-provided UUIDs, non-empty `mm_processor_kwargs`, audio in the same request, or adjacent video objects. SGLang also falls back when workers publish missing, incompatible, or different processor contracts. Nemotron uses the same `<image>` placeholder for image and video features, so its exact path currently supports one video-only media object per request; mixed image-and-video or multiple-video Nemotron requests fall back.
 
@@ -197,7 +197,7 @@ Exact video routing falls back to text-prefix routing for unsupported models, op
 |---------|--------------|--------|-------|
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, Qwen3.6, and Nemotron 3 Nano Omni. Exact video routing requires frontend decoding and supports Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. Other media layouts use text-prefix routing. |
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM's multimodal processor to derive image and video feature hashes and positions for models supported by vLLM. |
-| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Requires compatible media identities; [wide-token builds](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#newer-sglang-image-identities) use text-prefix routing. Exact video routing supports aggregated Qwen3-VL and Qwen3.5 workers on CUDA with frontend decoding; other video requests use text-prefix routing. |
+| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Requires compatible media identities; [wide-token SGLang builds](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds) use text-prefix routing. Exact video routing supports aggregated Qwen3-VL and Qwen3.5 workers on CUDA with frontend decoding. |
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Images</Badge> | Exact image routing supports the Qwen2-VL family and Kimi K2.5/K2.6. Video requests and other models use text-prefix routing. |
 
 Nemotron 3 Nano Omni exact image and video routing currently requires the vLLM backend. Other backends fall back to text-prefix routing for this model.
