@@ -62,6 +62,7 @@ pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
+pub mod mooncake_client;
 pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
@@ -995,6 +996,16 @@ impl KvRouter {
 
     pub fn indexer(&self) -> &Indexer {
         &self.indexer
+    }
+
+    /// Shared-store observations for custom KV control policies.
+    pub fn shared_cache(&self) -> Option<&Arc<dyn SharedKvCache>> {
+        self.shared_cache.as_ref()
+    }
+
+    /// Session lineage observations; pin/unpin decisions belong to the caller.
+    pub fn session_prefix_index(&self) -> Option<&Arc<SessionPrefixIndexer>> {
+        self.session_prefix_index.as_ref()
     }
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {

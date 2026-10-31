@@ -87,6 +87,9 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    prefetch_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.prefetch"
+    )
     clear_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
     )
@@ -224,6 +227,10 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            prefetch_endpoint.serve_endpoint(
+                handler.prefetch,
+                metrics_labels=metrics_labels,
+            ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
@@ -276,6 +283,9 @@ async def init_prefill(
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    prefetch_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.prefetch"
     )
     clear_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
@@ -380,6 +390,10 @@ async def init_prefill(
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            prefetch_endpoint.serve_endpoint(
+                handler.prefetch,
                 metrics_labels=metrics_labels,
             ),
             clear_endpoint.serve_endpoint(

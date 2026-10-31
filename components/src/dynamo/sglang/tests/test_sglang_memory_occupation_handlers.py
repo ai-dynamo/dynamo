@@ -80,6 +80,31 @@ def _make_native_manager_methods_routable(manager):
 
 
 @pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize("success", [True, False])
+async def test_prefetch_forwards_full_prefix_and_engine_result(handler, success):
+    result = {
+        "success": success,
+        "message": "" if success else "worker is busy",
+        "prefetched_tokens": 4 if success else 0,
+        "cached_tokens": 8 if success else 0,
+    }
+    manager = handler.engine.tokenizer_manager
+    manager.prefetch = AsyncMock(return_value=result)
+    request = {"token_ids": list(range(9)), "cache_salt": "tenant-a"}
+    assert [chunk async for chunk in handler.prefetch(request)] == [result]
+    manager.prefetch.assert_awaited_once_with(**request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.core
+async def test_prefetch_reports_unsupported_engine(handler):
+    result = [chunk async for chunk in handler.prefetch({"token_ids": [1, 2]})]
+    assert not result[0]["success"]
+    assert "not supported" in result[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_native_memory_routes_follow_sglang_pause_state(handler):
     manager = handler.engine.tokenizer_manager
     method_mocks = _make_native_manager_methods_routable(manager)
