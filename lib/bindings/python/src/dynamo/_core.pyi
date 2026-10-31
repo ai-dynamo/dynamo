@@ -42,11 +42,7 @@ def get_reasoning_parser_names() -> list[str]:
     ...
 
 def get_structural_tag_parser_names() -> list[str]:
-    """Selectable families with registered grammar builders across parser generations.
-
-    A selectable output parser alone does not imply guided-decoding support.
-    Parser-version and model compatibility are validated separately.
-    """
+    """Get selectable parser names with registered structural-tag builders."""
     ...
 
 def run_kv_indexer(args: List[str]) -> None:

@@ -209,11 +209,11 @@ therefore differ by backend and engine version.
 Output-parser availability does not guarantee structural-tag support. Query the registered grammar builders separately:
 
 ```python
-from dynamo._core import get_structural_tag_parser_names, get_tool_parser_names
+from dynamo._core import get_structural_tag_parser_names
 
-assert "deepseek_v41" in get_tool_parser_names()
-assert "deepseek_v41" in get_structural_tag_parser_names()
-assert "gemma4" not in get_structural_tag_parser_names()
+parser_name = "deepseek_v41"
+if parser_name not in get_structural_tag_parser_names():
+    raise ValueError(f"No structural-tag grammar registered for {parser_name}")
 ```
 
 `get_structural_tag_parser_names()` returns a sorted, deduplicated inventory across the V1 and V2 registries. It does not select a parser generation, validate a tool/reasoning parser pair, or qualify the backend's installed XGrammar version. Check those deployment requirements separately.
