@@ -38,7 +38,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
-| `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
+| `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. See [Proposed Generation Artifact Delivery](../../reference/general/generation-artifact-delivery.md) for planned extensions; those extensions are not available on main. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
