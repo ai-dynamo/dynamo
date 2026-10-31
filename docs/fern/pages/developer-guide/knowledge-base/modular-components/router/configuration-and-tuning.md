@@ -604,7 +604,8 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 ## Runtime Policy Updates
 
 **Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
-thresholds on the frontend HTTP port (8000 by default).
+thresholds. It is served on the frontend admin listener (`127.0.0.1:8002` by default), which is
+off unless `DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
 
 | Resource | Methods | Scope |
 | --- | --- | --- |
@@ -628,7 +629,7 @@ Routers that have stopped or do not respond within five seconds are omitted; hea
 remain available in the listing.
 
 ```bash
-curl --get http://localhost:8000/router_policy --data-urlencode model=qwen
+curl --get http://localhost:8002/router_policy --data-urlencode model=qwen
 ```
 
 Use a returned `router_id` and revision in `PATCH /router_policy`:
@@ -689,7 +690,7 @@ resets use these effective values; host-owned cache accounting settings are unch
 one or more threshold fields with `POST /router_policy/busy_threshold` to update them:
 
 ```bash
-curl -X POST http://localhost:8000/router_policy/busy_threshold \
+curl -X POST http://localhost:8002/router_policy/busy_threshold \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold":1000,"active_prefill_tokens_threshold_frac":0.8}'
 ```
@@ -712,15 +713,18 @@ reset. Updating thresholds and selection parameters is not one atomic transactio
 
 ### Scope and Access
 
-The frontend admin API remains enabled by default on the HTTP port, with no separate admin
-authentication. `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables `/router_policy`, its busy-threshold
-subresource, and the legacy `/busy_threshold` routes. Restrict access to these management
-routes at the deployment's gateway or network boundary.
+The admin listener has no authentication and is never served on the inference port. If you
+widen its bind address with `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port at the network
+boundary. See [Admin](../../../../reference/components/frontend-configuration.mdx#admin) for the
+listener settings.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,
 retain the desired settings, and reapply them to new router instances; a load-balanced request
-does not update every replica. The standalone Python router does not expose this HTTP API.
+does not update every replica. With the default loopback bind, the admin port is reachable only
+from inside the pod or through `kubectl port-forward`. An out-of-pod controller needs
+`DYN_FRONTEND_ADMIN_HOST` set to a reachable address, such as the pod IP, and a network policy
+that limits the admin port to that controller. The standalone Python router does not expose this HTTP API.
 Rust hosts can use `KvRouter::policy_control()` or `LocalScheduler::policy_control()` to access
 the same actor-serialized control handle.
 

@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use crate::client::ModelLimits;
 use crate::proto as pb;
 use dynamo_backend_common::{
-    DisaggregationMode, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
+    DisaggregationMode, MultimodalData, OutputOptions, PreprocessedRequest, SamplingOptions,
+    StopConditions,
 };
 use serde_json::json;
 
@@ -52,7 +55,30 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
         max_output_tokens: None,
+        ..Default::default()
     })
+}
+
+pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
+    Some(ModelLimits {
+        context_length: Some(context_length),
+        engine_context_length: Some(context_length),
+        supports_image: Some(true),
+        ..Default::default()
+    })
+}
+
+pub(crate) fn add_images(
+    request: &mut PreprocessedRequest,
+    images: impl IntoIterator<Item = &'static str>,
+) {
+    request.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        images
+            .into_iter()
+            .map(|image| MultimodalData::RawUrl(image.to_string()))
+            .collect(),
+    )]));
 }
 
 /// The handoff a context worker returns, shaped like TensorRT-LLM's: the
