@@ -36,7 +36,9 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 
 use tokio::sync::mpsc;
 
-use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, ResponseOutput};
+use dynamo_llm::admission_gate::{
+    AdmissionRequest, AdmissionResponse, ResponseOutput, WorkerAdmissionGate,
+};
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -677,7 +679,7 @@ pub(crate) struct PythonPushEngine {
     /// The role its endpoint serves as a model backend, once one is recorded.
     backend_role: engine::BackendRole,
     /// The admission gate of the worker its endpoint serves for.
-    admission: engine::EndpointAdmission,
+    admission: WorkerAdmissionGate,
 }
 
 impl PythonPushEngine {
@@ -685,7 +687,7 @@ impl PythonPushEngine {
         handler: PyObject,
         event_loop: PyObject,
         backend_role: engine::BackendRole,
-        admission: engine::EndpointAdmission,
+        admission: WorkerAdmissionGate,
     ) -> Self {
         Self {
             handler: Arc::new(handler),
@@ -709,7 +711,7 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonP
             let context = request.context();
             let dp_rank = request.dp_rank();
             self.admission
-                .gate()
+                .get()?
                 .admit(&context, dp_rank, self.push(request, true))
                 .await
         } else {
