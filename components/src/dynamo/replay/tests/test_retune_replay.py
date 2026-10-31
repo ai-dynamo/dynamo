@@ -688,6 +688,7 @@ _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "_deterministic",
 }
 _REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "conversation_affinity",  # rejected before constructing the Planner
     "replay_concurrency",
     "agentic_lanes",
     "agentic_snapshot",

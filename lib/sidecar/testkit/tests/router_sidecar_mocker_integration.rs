@@ -244,29 +244,25 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
     let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
     let router = env.ready("backend").await;
     let frontend = Frontend::start(&env).await;
-    for (index, is_streaming) in [false, true].into_iter().enumerate() {
-        let id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 1);
-        let handle = control.request(
-            &id,
-            if is_streaming {
-                RequestPlan {
-                    stream: Some(StreamFault {
-                        at: StreamPoint::TokenResponse(1),
-                        action: StreamAction::Fail,
-                        pause: true,
-                    }),
-                    ..Default::default()
-                }
-            } else {
-                RequestPlan {
-                    open: OpenAction::Reject,
-                    ..Default::default()
-                }
-            },
-        );
+    for is_streaming in [false, true] {
+        let handle = control.next_request(if is_streaming {
+            RequestPlan {
+                stream: Some(StreamFault {
+                    at: StreamPoint::TokenResponse(1),
+                    action: StreamAction::Fail,
+                    pause: true,
+                }),
+                ..Default::default()
+            }
+        } else {
+            RequestPlan {
+                open: OpenAction::Reject,
+                ..Default::default()
+            }
+        });
         let mut response = bounded(
             "HTTP native failure response",
-            frontend.generate(&env.model, &id, is_streaming).send(),
+            frontend.generate(&env.model, is_streaming).send(),
         )
         .await
         .unwrap();
@@ -331,13 +327,12 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
         .await;
         peer.scheduler_idle().await;
 
-        let recovery_id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 2);
-        let recovered = control.request(&recovery_id, RequestPlan::default());
+        let recovered = control.next_request(RequestPlan::default());
         let response = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let response = bounded(
                     "HTTP recovery response",
-                    frontend.generate(&env.model, &recovery_id, false).send(),
+                    frontend.generate(&env.model, false).send(),
                 )
                 .await
                 .unwrap();
