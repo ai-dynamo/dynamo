@@ -5,6 +5,13 @@ title: Size a Kubernetes Deployment with AIConfigurator
 subtitle: Generate a tensor- and pipeline-parallel layout for your DGD worker from a latency target
 ---
 
+<Note>
+**AISimulate compatibility path.** This guide uses the retained `aiconfigurator` sizing command
+shipped by AISimulate. Install AISimulate as shown below and keep these command names and arguments.
+See [AISimulate ownership and compatibility](../../developer-guide/additional-resources/aiconfigurator-reference.md#aisimulate-ownership-and-compatibility)
+for the distinction between analytical sizing and the unified prediction and recommendation CLI.
+</Note>
+
 This page is a detour from the **Determine topology and parallelism** step of [Deploy with DGD](../model-deployment/deploy-with-dgd.md). Rather than hand-pick tensor- and pipeline-parallel sizes, run AIConfigurator to search layouts against a latency target, then copy the recommended parallelism into your worker. It covers parallelism sizing only. For the full workflow — aggregated versus disaggregated comparison, generating complete manifests, and validating with AIPerf — see the [AIConfigurator](../../developer-guide/additional-resources/aiconfigurator-reference.md) reference.
 
 <Note>
