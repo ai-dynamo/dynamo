@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::classifier_rows::ClassifierRows;
 #[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
@@ -465,9 +466,10 @@ where
         // one entry per worker; the actor projects load again before selection.
         request.worker_loads = FxHashMap::default();
         classifier
-            .classify_with(classification, workers)
+            .classify_with(classification, &ClassifierRows(workers))
             .await
             .map(Some)
+            .map_err(KvSchedulerError::from)
     }
 
     /// Install the request classifier plugin. Must be called from within a
@@ -492,7 +494,11 @@ where
     ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
         self.request_classifier
             .get()
-            .map(|classifier| classifier.begin_request(request_id))
+            .map(|classifier| {
+                classifier
+                    .begin_request(request_id)
+                    .map_err(KvSchedulerError::from)
+            })
             .transpose()
     }
 

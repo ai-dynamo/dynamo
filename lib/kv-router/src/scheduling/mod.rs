@@ -44,7 +44,7 @@ pub use prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use queue_admission::WorkerPlacement;
-pub use request_classifier::RequestLifecycle;
+pub use request_classifier::{ClassificationError, RequestLifecycle};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,

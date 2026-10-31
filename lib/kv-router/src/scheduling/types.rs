@@ -514,6 +514,24 @@ impl SchedulingRequest {
     }
 }
 
+impl From<super::request_classifier::ClassificationError> for KvSchedulerError {
+    fn from(error: super::request_classifier::ClassificationError) -> Self {
+        use super::request_classifier::ClassificationError;
+        match error {
+            ClassificationError::Panicked(message) => Self::RequestClassifierPanicked(message),
+            ClassificationError::Failed(error) => Self::RequestClassifierFailed(error),
+            ClassificationError::DuplicateRequestId(id) => {
+                Self::DuplicateClassificationRequestId(id)
+            }
+            ClassificationError::InvalidMetadata(message) => {
+                Self::InvalidClassificationMetadata(message)
+            }
+            ClassificationError::LifecycleEnded(id) => Self::ClassificationLifecycleEnded(id),
+            ClassificationError::Shutdown => Self::SubscriberShutdown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

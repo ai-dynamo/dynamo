@@ -9,10 +9,11 @@ use dynamo_router_protocol::columns::WorkerInfo;
 use dynamo_router_protocol::load::RankLoad;
 
 /// Every worker rank eligible for one request, lent to [`super::RequestClassifier::classify`]
-/// for the duration of the call. Rows are in unspecified order. A column group the
+/// for the duration of the call. Views are read-only snapshots, so they are `Sync` and a
+/// classification future that borrows one stays `Send`. Rows are in unspecified order. A column group the
 /// classifier did not declare through [`super::RequestClassifier::required_worker_inputs`]
 /// reads as `None` on every row.
-pub trait WorkerView {
+pub trait WorkerView: Sync {
     /// The number of rows.
     fn len(&self) -> usize;
 

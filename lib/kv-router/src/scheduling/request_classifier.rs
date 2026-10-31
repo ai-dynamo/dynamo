@@ -15,10 +15,32 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::classifier_rows::ClassifierRows;
-use super::types::KvSchedulerError;
-use crate::plugins::worker_selection::{WorkerInputRows, WorkerInputs};
+use crate::plugins::request_classifier::WorkerView;
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::WorkerWithDpRank;
+
+/// Why classification did not produce a classified request. The kernel maps each variant
+/// to its own error; the stage never names the kernel's.
+#[derive(Debug, thiserror::Error)]
+pub enum ClassificationError {
+    #[error("request classifier panicked: {0}")]
+    Panicked(String),
+
+    #[error("request classifier failed: {0}")]
+    Failed(Arc<ClassifierError>),
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidMetadata(String),
+
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    LifecycleEnded(String),
+
+    #[error("request classifier runtime shut down")]
+    Shutdown,
+}
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -174,19 +196,19 @@ impl RequestClassifierRuntime {
     pub(crate) async fn classify_with(
         &self,
         mut request: ClassifyRequest,
-        workers: WorkerInputRows,
-    ) -> Result<ClassifyRequest, KvSchedulerError> {
+        workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, ClassificationError> {
         if self.shutdown.is_cancelled() {
-            return Err(KvSchedulerError::SubscriberShutdown);
+            return Err(ClassificationError::Shutdown);
         }
 
         // Capture the lifecycle before waiting: an id re-registered while we
         // wait belongs to a different request, even before the plugin runs.
         let generation = if let Some(request_id) = request.request_id() {
             let live_requests = self.live_requests.lock();
-            let live = live_requests.get(request_id).ok_or_else(|| {
-                KvSchedulerError::ClassificationLifecycleEnded(request_id.to_owned())
-            })?;
+            let live = live_requests
+                .get(request_id)
+                .ok_or_else(|| ClassificationError::LifecycleEnded(request_id.to_owned()))?;
             live.progress_updater
                 .update_context_tokens(request.isl_tokens());
             request.progress = live.progress.clone();
@@ -214,31 +236,24 @@ impl RequestClassifierRuntime {
                     .get(request_id)
                     .is_none_or(|live| live.generation != generation)
             {
-                return Err(KvSchedulerError::ClassificationLifecycleEnded(
-                    request_id.to_owned(),
-                ));
+                return Err(ClassificationError::LifecycleEnded(request_id.to_owned()));
             }
-            let workers = ClassifierRows(workers);
-            let classification =
-                catch_unwind(AssertUnwindSafe(|| classifier.classify(request, &workers))).map_err(
-                    |panic| KvSchedulerError::RequestClassifierPanicked(panic_message(panic)),
-                )?;
-            drop(workers);
-            classification
+            catch_unwind(AssertUnwindSafe(|| classifier.classify(request, workers)))
+                .map_err(|panic| ClassificationError::Panicked(panic_message(panic)))?
         };
         let classification = AssertUnwindSafe(classification).catch_unwind();
 
         let result = tokio::select! {
             biased;
-            _ = self.shutdown.cancelled() => return Err(KvSchedulerError::SubscriberShutdown),
+            _ = self.shutdown.cancelled() => return Err(ClassificationError::Shutdown),
             result = classification => result,
         };
         let classified = result
-            .map_err(|panic| KvSchedulerError::RequestClassifierPanicked(panic_message(panic)))?
-            .map_err(|error| KvSchedulerError::RequestClassifierFailed(Arc::from(error)))?;
+            .map_err(|panic| ClassificationError::Panicked(panic_message(panic)))?
+            .map_err(|error| ClassificationError::Failed(Arc::from(error)))?;
 
         if classified.classification_id != classification_id {
-            return Err(KvSchedulerError::InvalidClassificationMetadata(
+            return Err(ClassificationError::InvalidMetadata(
                 "classifier replaced the logical request".to_string(),
             ));
         }
@@ -253,9 +268,7 @@ impl RequestClassifierRuntime {
                     live.overrides = Some(classified.overrides.clone());
                 }
                 _ => {
-                    return Err(KvSchedulerError::ClassificationLifecycleEnded(
-                        request_id.to_owned(),
-                    ));
+                    return Err(ClassificationError::LifecycleEnded(request_id.to_owned()));
                 }
             }
         }
@@ -265,13 +278,13 @@ impl RequestClassifierRuntime {
     pub(crate) fn begin_request(
         self: &Arc<Self>,
         request_id: &str,
-    ) -> Result<RequestLifecycle, KvSchedulerError> {
+    ) -> Result<RequestLifecycle, ClassificationError> {
         if self.shutdown.is_cancelled() {
-            return Err(KvSchedulerError::SubscriberShutdown);
+            return Err(ClassificationError::Shutdown);
         }
         let progress_updater = match self.live_requests.lock().entry(request_id.to_owned()) {
             std::collections::hash_map::Entry::Occupied(_) => {
-                return Err(KvSchedulerError::DuplicateClassificationRequestId(
+                return Err(ClassificationError::DuplicateRequestId(
                     request_id.to_owned(),
                 ));
             }
@@ -314,7 +327,7 @@ impl RequestClassifierRuntime {
     async fn lock_classifier_for(
         &self,
         request_id: Option<&str>,
-    ) -> Result<tokio::sync::MutexGuard<'_, Box<dyn RequestClassifier>>, KvSchedulerError> {
+    ) -> Result<tokio::sync::MutexGuard<'_, Box<dyn RequestClassifier>>, ClassificationError> {
         loop {
             if let Some(request_id) = request_id {
                 self.await_terminal_delivery(request_id).await?;
@@ -328,7 +341,7 @@ impl RequestClassifierRuntime {
     }
 
     /// Wait until no terminal event for `request_id` is queued undelivered.
-    async fn await_terminal_delivery(&self, request_id: &str) -> Result<(), KvSchedulerError> {
+    async fn await_terminal_delivery(&self, request_id: &str) -> Result<(), ClassificationError> {
         loop {
             // Register before checking so a release between the check and the
             // await still wakes this waiter.
@@ -338,7 +351,7 @@ impl RequestClassifierRuntime {
             }
             tokio::select! {
                 biased;
-                _ = self.shutdown.cancelled() => return Err(KvSchedulerError::SubscriberShutdown),
+                _ = self.shutdown.cancelled() => return Err(ClassificationError::Shutdown),
                 _ = delivered => {}
             }
         }
@@ -549,7 +562,6 @@ mod tests {
     use super::*;
     use crate::plugins::request_classifier::{NoWorkers, WorkerView};
     use crate::protocols::WorkerWithDpRank;
-    use crate::scheduling::KvSchedulerError;
 
     struct PassThrough;
 
@@ -583,16 +595,16 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
-            KvSchedulerError::RequestClassifierPanicked(message)
+            ClassificationError::Panicked(message)
                 if message == "synchronous classifier panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(2, 0), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -627,16 +639,16 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
-            KvSchedulerError::RequestClassifierPanicked(message)
+            ClassificationError::Panicked(message)
                 if message == "classifier future panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(2, 0), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -664,12 +676,12 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
-            KvSchedulerError::RequestClassifierFailed(source)
+            ClassificationError::Failed(source)
                 if source.to_string() == "classifier rejected request"
         ));
     }
@@ -692,12 +704,12 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
-            KvSchedulerError::InvalidClassificationMetadata(message)
+            ClassificationError::InvalidMetadata(message)
                 if message == "classifier replaced the logical request"
         ));
     }
@@ -711,7 +723,7 @@ mod tests {
         let error = runtime.begin_request("request-1").unwrap_err();
         assert!(matches!(
             error,
-            KvSchedulerError::DuplicateClassificationRequestId(request_id)
+            ClassificationError::DuplicateRequestId(request_id)
                 if request_id == "request-1"
         ));
 
@@ -780,7 +792,7 @@ mod tests {
         let pending_runtime = Arc::clone(&runtime);
         let pending = tokio::spawn(async move {
             pending_runtime
-                .classify_with(ClassifyRequest::new(1, 1), WorkerInputRows::empty())
+                .classify_with(ClassifyRequest::new(1, 1), &NoWorkers)
                 .await
         });
         entered.notified().await;
@@ -831,7 +843,7 @@ mod tests {
             cancelled_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("cancelled"),
-                    WorkerInputRows::empty(),
+                    &NoWorkers,
                 )
                 .await
         });
@@ -871,7 +883,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -913,7 +925,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -946,7 +958,7 @@ mod tests {
         let first = runtime
             .classify_with(
                 ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -958,7 +970,7 @@ mod tests {
         let retry = runtime
             .classify_with(
                 ClassifyRequest::new(20, 20).with_request_id("request-1"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -982,7 +994,7 @@ mod tests {
         let next = runtime
             .classify_with(
                 ClassifyRequest::new(3, 0).with_request_id("request-1"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -1012,13 +1024,13 @@ mod tests {
         let result = runtime
             .classify_with(
                 ClassifyRequest::new(4, 0).with_request_id("ghost"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await;
 
         assert!(matches!(
             result,
-            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+            Err(ClassificationError::LifecycleEnded(_))
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
@@ -1067,7 +1079,7 @@ mod tests {
             stale_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("reused"),
-                    WorkerInputRows::empty(),
+                    &NoWorkers,
                 )
                 .await
         });
@@ -1081,7 +1093,7 @@ mod tests {
         // The stale lifecycle may not enter Order.
         assert!(matches!(
             stale.await.unwrap(),
-            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+            Err(ClassificationError::LifecycleEnded(_))
         ));
 
         // The stale result must not be cached onto the new lifecycle: its
@@ -1090,7 +1102,7 @@ mod tests {
         let second = runtime
             .classify_with(
                 ClassifyRequest::new(1, 0).with_request_id("reused"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -1111,7 +1123,7 @@ mod tests {
         let guard = runtime.classifier.lock().await;
         let mut stale = Box::pin(runtime.classify_with(
             ClassifyRequest::new(1, 0).with_request_id("reused"),
-            WorkerInputRows::empty(),
+            &NoWorkers,
         ));
 
         // Poll once to guarantee the old call is waiting for the lock, then
@@ -1123,7 +1135,7 @@ mod tests {
 
         assert!(matches!(
             stale.await,
-            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+            Err(ClassificationError::LifecycleEnded(_))
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
 
@@ -1131,7 +1143,7 @@ mod tests {
         let replacement = runtime
             .classify_with(
                 ClassifyRequest::new(100, 0).with_request_id("reused"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -1159,7 +1171,7 @@ mod tests {
             ended_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("ended"),
-                    WorkerInputRows::empty(),
+                    &NoWorkers,
                 )
                 .await
         });
@@ -1169,7 +1181,7 @@ mod tests {
 
         assert!(matches!(
             ended.await.unwrap(),
-            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+            Err(ClassificationError::LifecycleEnded(_))
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
@@ -1192,7 +1204,7 @@ mod tests {
             ended_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("ended"),
-                    WorkerInputRows::empty(),
+                    &NoWorkers,
                 )
                 .await
         });
@@ -1205,7 +1217,7 @@ mod tests {
 
         assert!(matches!(
             ended.await.unwrap(),
-            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+            Err(ClassificationError::LifecycleEnded(_))
         ));
         assert_eq!(runtime.cached_overrides("ended"), None);
     }
@@ -1256,7 +1268,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(40, 0).with_request_id("request-1"),
-                WorkerInputRows::empty(),
+                &NoWorkers,
             )
             .await
             .unwrap();
@@ -1409,7 +1421,7 @@ mod tests {
             classify_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("reused"),
-                    WorkerInputRows::empty(),
+                    &NoWorkers,
                 )
                 .await
         });
