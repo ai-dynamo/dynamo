@@ -40,11 +40,12 @@ impl QueueSnapshot {
 pub struct QueueMetadata {
     pub class_index: usize,
     pub snapshot: QueueSnapshot,
-    /// Trusted absolute deadline. It takes precedence over the class due time, and it is the
-    /// only due time the queue indexes for expiry.
+    /// Trusted absolute deadline. It takes precedence over the class due time, and it always
+    /// expires.
     pub due_at: Option<Instant>,
     /// Router ingress plus the class TTFT budget, from
-    /// [`PolicyClassConfig::slo_ttft_due_at`]. Only EDF classes order by it; it never expires.
+    /// [`PolicyClassConfig::slo_ttft_due_at`]. Only EDF classes order by it, and it expires
+    /// only in a queue built by [`PolicyQueue::with_class_budget_expiry`].
     pub class_due_at: Option<Instant>,
     /// Seconds from the queue's arrival origin to router ingress. FCFS and LCFS order by it.
     pub arrival_offset_secs: f64,
@@ -188,7 +189,8 @@ pub struct PolicyQueueEntry<T> {
     class_index: usize,
     snapshot: QueueEntrySnapshot,
     due_at: Option<Instant>,
-    /// Whether `due_at` is an explicit deadline, indexed for expiry.
+    /// Whether `due_at` expires: an explicit deadline always does, a class due time only in a
+    /// class with head expiry.
     expires: bool,
     /// Boxed because class trees shift entries within a node on every insert and removal;
     /// an inline payload would make each shift move it.
@@ -269,6 +271,14 @@ struct PolicyClassQueue<T> {
     /// Every queued entry of the class in one dispatch order, whatever worker constraints
     /// its payload carries; the last entry dispatches first.
     pending: BTreeSet<PolicyQueueEntry<T>>,
+    /// Every finite due time expires, and the head carries the earliest: an EDF class that
+    /// enables controlled delay, in a queue built by [`PolicyQueue::with_class_budget_expiry`].
+    /// Otherwise only explicit deadlines expire, found through `deadlines`.
+    head_expiry: bool,
+    /// Explicit deadlines, earliest first, of a class without head expiry. They may sit
+    /// behind the head: in a non-EDF order, or behind an EDF head whose earlier class due
+    /// time only orders the class.
+    deadlines: BTreeMap<(Instant, u64), QueueOrder>,
     stats: PolicyQueueStats,
     deficit: usize,
 }
@@ -293,11 +303,38 @@ impl<T> PolicyClassQueue<T> {
             .map(|entry| entry.snapshot.scheduling_cost_tokens)
     }
 
-    /// Removes the entry with `order`. Returns the entry and whether it was the class head.
+    /// Removes the entry with `order`, with its deadline and accounting. Returns the entry and
+    /// whether it was the class head.
     fn remove(&mut self, order: &QueueOrder) -> Option<(PolicyQueueEntry<T>, bool)> {
         let was_head = self.pending.last().is_some_and(|head| head.order == *order);
-        self.pending.take(order).map(|entry| (entry, was_head))
+        let entry = self.pending.take(order)?;
+        self.forget(&entry);
+        Some((entry, was_head))
     }
+
+    /// Drops the deadline and accounting of an entry that left `pending`. Emptying the class
+    /// resets its credit.
+    fn forget(&mut self, entry: &PolicyQueueEntry<T>) {
+        if !self.head_expiry
+            && let Some(due_at) = entry.deadline()
+        {
+            let removed = self.deadlines.remove(&(due_at, entry.order.enqueue_seq));
+            debug_assert!(removed.is_some());
+        }
+        subtract_stats(&mut self.stats, entry.snapshot());
+        if self.ready_is_empty() {
+            self.deficit = 0;
+        }
+    }
+}
+
+/// The DRR charge of an entry [`PolicyQueue::extract_next`] took from its class, unpaid until
+/// [`PolicyQueue::settle`] consumes it with the admission outcome.
+#[must_use = "settle the extracted entry's DRR charge"]
+#[derive(Debug)]
+pub(crate) struct DispatchCharge {
+    class_index: usize,
+    cost: usize,
 }
 
 pub struct PolicyQueue<T> {
@@ -306,14 +343,27 @@ pub struct PolicyQueue<T> {
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
-    /// Explicit deadlines, earliest first, for expiry. Class due times never enter it.
-    deadlines: BTreeMap<(Instant, u64), QueueEntryHandle>,
-    /// Per class, the cost of its dispatchable head during one `pop_next` call.
+    /// Per class, the cost of its dispatchable head during one `extract_next` call.
     head_costs: Vec<Option<usize>>,
 }
 
 impl<T> PolicyQueue<T> {
+    /// A queue that expires only explicit deadlines; class due times order EDF classes but
+    /// never expire, even in a class that enables controlled delay. For callers without an
+    /// expiry timer, such as offline replay.
     pub fn new(profile: &PolicyProfile) -> Self {
+        Self::with_expiry(profile, false)
+    }
+
+    /// A queue that also expires class due times in each class that enables controlled delay.
+    /// That needs EDF, the only order whose head always carries the class's earliest due time:
+    /// strict priority or a policy score outranks due times in FCFS, LCFS, and WSPT, which
+    /// expire only explicit deadlines.
+    pub fn with_class_budget_expiry(profile: &PolicyProfile) -> Self {
+        Self::with_expiry(profile, true)
+    }
+
+    fn with_expiry(profile: &PolicyProfile, class_budget_expiry: bool) -> Self {
         let class_count = profile.classes().len();
         Self {
             classes: profile
@@ -321,8 +371,10 @@ impl<T> PolicyQueue<T> {
                 .iter()
                 .cloned()
                 .map(|config| PolicyClassQueue {
+                    head_expiry: class_budget_expiry && config.expires_class_budget(),
                     config,
                     pending: BTreeSet::new(),
+                    deadlines: BTreeMap::new(),
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                 })
@@ -331,7 +383,6 @@ impl<T> PolicyQueue<T> {
             carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
-            deadlines: BTreeMap::new(),
             head_costs: vec![None; class_count],
         }
     }
@@ -356,10 +407,22 @@ impl<T> PolicyQueue<T> {
         })
     }
 
-    pub(crate) fn next_due_at(&self) -> Option<Instant> {
-        self.deadlines
-            .first_key_value()
-            .map(|(&(due_at, _), _)| due_at)
+    /// The earliest due time at which an entry of the class expires.
+    pub(crate) fn next_due_at(&self, class_index: usize) -> Option<Instant> {
+        let class = &self.classes[class_index];
+        if class.head_expiry {
+            class.pending.last().and_then(PolicyQueueEntry::deadline)
+        } else {
+            class
+                .deadlines
+                .first_key_value()
+                .map(|(&(due_at, _), _)| due_at)
+        }
+    }
+
+    /// The due time at which an entry enqueued with `metadata` would expire.
+    pub(crate) fn enforced_due_at(&self, metadata: &QueueMetadata) -> Option<Instant> {
+        enforced_due_at(metadata, self.classes[metadata.class_index].head_expiry)
     }
 
     pub fn class_count(&self) -> usize {
@@ -452,6 +515,7 @@ impl<T> PolicyQueue<T> {
         let entry = make_entry(
             metadata,
             class.config.queue_policy,
+            class.head_expiry,
             priority_jump,
             strict_priority,
             enqueue_seq,
@@ -461,8 +525,10 @@ impl<T> PolicyQueue<T> {
             class_index,
             order: entry.order,
         };
-        if let Some(due_at) = entry.deadline() {
-            self.deadlines.insert((due_at, enqueue_seq), handle);
+        if !class.head_expiry
+            && let Some(due_at) = entry.deadline()
+        {
+            class.deadlines.insert((due_at, enqueue_seq), entry.order);
         }
         add_stats(&mut class.stats, metadata.snapshot);
         let inserted = class.pending.insert(entry);
@@ -475,46 +541,70 @@ impl<T> PolicyQueue<T> {
     /// O(log n). Returns the entry and whether it headed its class, or `None` once the
     /// entry has left the queue. A removed entry spends no DRR credit.
     pub fn remove(&mut self, handle: QueueEntryHandle) -> Option<(PolicyQueueEntry<T>, bool)> {
-        let (entry, was_head) = self.remove_located(handle)?;
-        remove_deadline(&mut self.deadlines, &entry);
-        Some((entry, was_head))
-    }
-
-    fn remove_located(&mut self, handle: QueueEntryHandle) -> Option<(PolicyQueueEntry<T>, bool)> {
-        let class = self.classes.get_mut(handle.class_index)?;
-        let (entry, was_head) = class.remove(&handle.order)?;
-        subtract_stats(&mut class.stats, entry.snapshot());
+        let removed = self
+            .classes
+            .get_mut(handle.class_index)?
+            .remove(&handle.order)?;
         self.pending_count -= 1;
-        if class.ready_is_empty() {
-            class.deficit = 0;
-        }
-        Some((entry, was_head))
+        Some(removed)
     }
 
-    /// Removes and returns every entry whose explicit deadline is at or before `now`,
-    /// earliest first, in O(k log n) for k expired entries. Class due times never expire.
-    pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
-        let mut expired = Vec::new();
-        while let Some(deadline) = self.deadlines.first_entry()
-            && deadline.key().0 <= now
-        {
-            let handle = deadline.remove();
-            let (entry, _) = self
-                .remove_located(handle)
-                .expect("deadline index outlived its entry");
-            expired.push(entry);
-        }
-        expired
+    /// Removes and returns the class entry that expires first, if its due time is at or
+    /// before `now`, in O(log n). Repeat until `None` to remove the class's whole overdue
+    /// set, earliest first. An expired entry spends no DRR credit.
+    pub(crate) fn pop_expired(
+        &mut self,
+        class_index: usize,
+        now: Instant,
+    ) -> Option<PolicyQueueEntry<T>> {
+        let class = &mut self.classes[class_index];
+        let entry = if class.head_expiry {
+            // The head carries the class's earliest due time, so the overdue set is a prefix.
+            if class
+                .pending
+                .last()?
+                .deadline()
+                .is_none_or(|due_at| due_at > now)
+            {
+                return None;
+            }
+            class.pending.pop_last()?
+        } else {
+            let (&(due_at, _), &order) = class.deadlines.first_key_value()?;
+            if due_at > now {
+                return None;
+            }
+            class
+                .pending
+                .take(&order)
+                .expect("deadline index outlived its entry")
+        };
+        class.forget(&entry);
+        self.pending_count -= 1;
+        Some(entry)
+    }
+
+    /// Runs one DRR ring pass over dispatchable class heads, as [`Self::extract_next`]
+    /// does, and charges the dispatched entry's cost at once.
+    pub fn pop_next(
+        &mut self,
+        is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> Option<PolicyQueueEntry<T>> {
+        let (entry, charge) = self.extract_next(is_dispatchable)?;
+        self.settle(charge, true);
+        Some(entry)
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
     /// enough credit, bulk-adds the minimum complete rounds needed for progress.
     /// `is_dispatchable` may be evaluated more than once for the same entry
     /// during one call; callers must not rely on an exact invocation count.
-    pub fn pop_next(
+    /// Returns the chosen head with its cost still unpaid: pass the charge to
+    /// [`Self::settle`] once the admission outcome is known.
+    pub(crate) fn extract_next(
         &mut self,
         mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
-    ) -> Option<PolicyQueueEntry<T>> {
+    ) -> Option<(PolicyQueueEntry<T>, DispatchCharge)> {
         if self.pending_count == 0 {
             self.carry_class = None;
             return None;
@@ -529,7 +619,7 @@ impl<T> PolicyQueue<T> {
             if let Some(cost) = cost
                 && cost <= class.deficit
             {
-                return Some(self.pop_head(class_index));
+                return Some(self.extract_head(class_index));
             }
             self.head_costs[class_index] = cost;
             if class.ready_is_empty() {
@@ -557,12 +647,12 @@ impl<T> PolicyQueue<T> {
             if cost <= class.deficit {
                 // Quantum is granted per ring round, not per request. Spend
                 // carried credit before granting this class another quantum.
-                return Some(self.pop_head(class_index));
+                return Some(self.extract_head(class_index));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
             if cost <= class.deficit {
                 // The normal single-round visit made this head affordable.
-                return Some(self.pop_head(class_index));
+                return Some(self.extract_head(class_index));
             }
         }
 
@@ -600,7 +690,7 @@ impl<T> PolicyQueue<T> {
             if let Some(cost) = self.head_costs[class_index]
                 && cost <= class.deficit
             {
-                return Some(self.pop_head(class_index));
+                return Some(self.extract_head(class_index));
             }
         }
 
@@ -613,46 +703,56 @@ impl<T> PolicyQueue<T> {
             .flat_map(|class| class.pending.into_iter())
     }
 
-    fn pop_head(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
+    /// Settles the charge of an entry [`Self::extract_next`] returned. An admitted entry
+    /// spends its cost from the class credit; any other outcome spends nothing. A class with
+    /// entries left then spends any remaining credit before the ring moves on.
+    pub(crate) fn settle(&mut self, charge: DispatchCharge, admitted: bool) {
+        let DispatchCharge { class_index, cost } = charge;
+        let class = &mut self.classes[class_index];
+        if admitted {
+            class.deficit = class.deficit.saturating_sub(cost);
+        }
+        if class.ready_is_empty() {
+            class.deficit = 0;
+        } else {
+            self.carry_class = (class.deficit > 0).then_some(class_index);
+        }
+    }
+
+    fn extract_head(&mut self, class_index: usize) -> (PolicyQueueEntry<T>, DispatchCharge) {
         self.round_cursor = (class_index + 1) % self.classes.len();
         let class = &mut self.classes[class_index];
         let entry = class
             .pending
             .pop_last()
             .expect("policy class head vanished");
-        class.deficit = class
-            .deficit
-            .saturating_sub(entry.snapshot.scheduling_cost_tokens);
-        subtract_stats(&mut class.stats, entry.snapshot());
+        class.forget(&entry);
         self.pending_count -= 1;
-        remove_deadline(&mut self.deadlines, &entry);
-        if class.ready_is_empty() {
-            class.deficit = 0;
-        } else {
-            self.carry_class = (class.deficit > 0).then_some(class_index);
-        }
-        entry
+        let charge = DispatchCharge {
+            class_index,
+            cost: entry.snapshot.scheduling_cost_tokens,
+        };
+        (entry, charge)
     }
 }
 
-fn remove_deadline<T>(
-    deadlines: &mut BTreeMap<(Instant, u64), QueueEntryHandle>,
-    entry: &PolicyQueueEntry<T>,
-) {
-    if let Some(due_at) = entry.deadline() {
-        let removed = deadlines.remove(&(due_at, entry.order.enqueue_seq));
-        debug_assert!(removed.is_some());
-    }
+/// An explicit deadline always expires; a class due time only in a class with head expiry.
+fn enforced_due_at(metadata: &QueueMetadata, head_expiry: bool) -> Option<Instant> {
+    metadata
+        .due_at
+        .or(metadata.class_due_at.filter(|_| head_expiry))
 }
 
 fn make_entry<T>(
     metadata: QueueMetadata,
     queue_policy: RouterQueuePolicy,
+    head_expiry: bool,
     priority_jump: f64,
     strict_priority: u32,
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
+    let expires = enforced_due_at(&metadata, head_expiry).is_some();
     let QueueMetadata {
         class_index,
         snapshot,
@@ -686,7 +786,7 @@ fn make_entry<T>(
         class_index,
         snapshot: snapshot.into(),
         due_at: resolved_due_at,
-        expires: due_at.is_some(),
+        expires,
         payload: Box::new(payload),
     }
 }
@@ -766,12 +866,15 @@ mod tests {
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
     }
 
+    /// An EDF class that enables controlled delay. A queue built with `PolicyQueue::new` still
+    /// expires only its explicit deadlines.
     fn edf_profile() -> PolicyProfile {
         profile(
             r#"
 policy_classes:
   - name: edf
     quantum: 1000
+    controlled_delay: true
 "#,
         )
     }
@@ -805,24 +908,32 @@ policy_classes:
     /// Every index holds exactly the queued entries: no tombstones or duplicates.
     fn assert_indexes_match_entries<T>(queue: &PolicyQueue<T>) {
         let mut queued = 0;
-        let mut deadlines = 0;
         for class in &queue.classes {
-            for entry in &class.pending {
-                queued += 1;
-                deadlines += usize::from(entry.deadline().is_some());
-            }
+            queued += class.pending.len();
             assert_eq!(class.stats.requests, class.pending.len());
+            let indexed = class
+                .pending
+                .iter()
+                .filter(|entry| !class.head_expiry && entry.deadline().is_some())
+                .count();
+            assert_eq!(class.deadlines.len(), indexed);
+            for (&(due_at, enqueue_seq), order) in &class.deadlines {
+                assert_eq!(order.enqueue_seq, enqueue_seq);
+                let entry = class
+                    .pending
+                    .get(order)
+                    .expect("deadline index names a queued entry");
+                assert_eq!(entry.deadline(), Some(due_at));
+            }
         }
         assert_eq!(queue.pending_count(), queued);
-        assert_eq!(queue.deadlines.len(), deadlines);
-        for (&(due_at, enqueue_seq), handle) in &queue.deadlines {
-            assert_eq!(handle.order.enqueue_seq, enqueue_seq);
-            let entry = queue.classes[handle.class_index]
-                .pending
-                .get(&handle.order)
-                .expect("deadline index names a queued entry");
-            assert_eq!(entry.deadline(), Some(due_at));
-        }
+    }
+
+    /// Every entry of the class that expires by `now`, earliest first.
+    fn take_expired<T>(queue: &mut PolicyQueue<T>, class_index: usize, now: Instant) -> Vec<T> {
+        std::iter::from_fn(|| queue.pop_expired(class_index, now))
+            .map(PolicyQueueEntry::into_payload)
+            .collect()
     }
 
     fn admission_profile() -> PolicyProfile {
@@ -834,6 +945,79 @@ policy_classes:
     quantum: 10
 "#,
         )
+    }
+
+    #[test]
+    fn class_budgets_expire_per_class_and_only_in_online_queues() {
+        let profile = profile(
+            r#"
+default_policy_class: disabled
+policy_classes:
+  - name: enabled
+    quantum: 1
+    slo_ttft_ms: 100
+    controlled_delay: true
+  - name: disabled
+    quantum: 1
+    slo_ttft_ms: 100
+"#,
+        );
+        let start = Instant::now();
+        let budget = start + Duration::from_millis(100);
+        let explicit = start + Duration::from_millis(200);
+        let metadata = |class_index, due_at| QueueMetadata {
+            class_index,
+            snapshot: QueueSnapshot::new(1, 0),
+            due_at,
+            class_due_at: Some(budget),
+            arrival_offset_secs: 0.0,
+        };
+        let mut online = PolicyQueue::with_class_budget_expiry(&profile);
+        let mut offline = PolicyQueue::new(&profile);
+        // Online, only the opted-in class enforces its budget; offline replay enforces none.
+        assert_eq!(online.enforced_due_at(&metadata(0, None)), Some(budget));
+        assert_eq!(online.enforced_due_at(&metadata(1, None)), None);
+        assert_eq!(offline.enforced_due_at(&metadata(0, None)), None);
+        // An explicit deadline wins in every class, even when later than the budget.
+        for class_index in [0, 1] {
+            for queue in [&online, &offline] {
+                assert_eq!(
+                    queue.enforced_due_at(&metadata(class_index, Some(explicit))),
+                    Some(explicit)
+                );
+            }
+        }
+
+        // The opted-in class finds every due time at its head. Elsewhere the budgeted head
+        // only orders, and the explicit deadline behind it stays in the class index.
+        for queue in [&mut online, &mut offline] {
+            for class_index in [0, 1] {
+                push(queue, metadata(class_index, None), class_index);
+                push(queue, metadata(class_index, Some(explicit)), class_index);
+            }
+            assert_indexes_match_entries(queue);
+        }
+        assert_eq!(online.next_due_at(0), Some(budget));
+        assert_eq!(online.next_due_at(1), Some(explicit));
+        assert_eq!(offline.next_due_at(0), Some(explicit));
+        assert_eq!(offline.next_due_at(1), Some(explicit));
+        let after_budget = budget + Duration::from_millis(1);
+        assert_eq!(take_expired(&mut online, 0, after_budget), [0]);
+        assert!(take_expired(&mut online, 1, after_budget).is_empty());
+        assert!(take_expired(&mut offline, 0, after_budget).is_empty());
+        let after_explicit = explicit + Duration::from_millis(1);
+        for class_index in [0, 1] {
+            for queue in [&mut online, &mut offline] {
+                assert_eq!(
+                    take_expired(queue, class_index, after_explicit),
+                    [class_index]
+                );
+                assert_indexes_match_entries(queue);
+            }
+        }
+        // What remains is each budgeted entry that nothing expires.
+        assert_eq!(drain_payloads(&mut online), [1]);
+        assert_eq!(drain_payloads(&mut offline).len(), 2);
     }
 
     #[test]
@@ -914,24 +1098,24 @@ policy_classes:
             .unwrap();
 
         assert_eq!(
-            queue.next_due_at(),
+            queue.next_due_at(0),
             Some(now + std::time::Duration::from_secs(10))
         );
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "earlier-due"
         );
-        assert_eq!(queue.deadlines.len(), 1);
+        assert_eq!(queue.classes[0].deadlines.len(), 1);
         assert_eq!(
-            queue.next_due_at(),
+            queue.next_due_at(0),
             Some(now + std::time::Duration::from_secs(20))
         );
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "later-due"
         );
-        assert!(queue.deadlines.is_empty());
-        assert_eq!(queue.next_due_at(), None);
+        assert!(queue.classes[0].deadlines.is_empty());
+        assert_eq!(queue.next_due_at(0), None);
     }
 
     #[test]
@@ -998,10 +1182,10 @@ policy_classes:
             )
             .unwrap();
 
-        assert_eq!(queue.next_due_at(), Some(due_at));
+        assert_eq!(queue.next_due_at(0), Some(due_at));
         queue.retain(|payload| *payload != "deadline");
-        assert!(queue.deadlines.is_empty());
-        assert_eq!(queue.next_due_at(), None);
+        assert!(queue.classes[0].deadlines.is_empty());
+        assert_eq!(queue.next_due_at(0), None);
         assert_eq!(queue.pending_count(), 1);
     }
 
@@ -1026,15 +1210,10 @@ policy_classes:
             .unwrap();
 
         assert!(queue.pop_next(|_, _, _| false).is_none());
-        assert_eq!(queue.next_due_at(), Some(due_at));
+        assert_eq!(queue.next_due_at(0), Some(due_at));
 
-        let expired = queue.take_expired(due_at);
-        assert_eq!(expired.len(), 1);
-        assert_eq!(
-            expired.into_iter().next().unwrap().into_payload(),
-            "blocked"
-        );
-        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(take_expired(&mut queue, 0, due_at), ["blocked"]);
+        assert_eq!(queue.next_due_at(0), None);
         assert!(
             queue
                 .pop_next(|_, _, _| panic!("expired head revisited"))
@@ -1849,9 +2028,9 @@ policy_classes:
             timed(1, Some(now + Duration::from_secs(5)), None),
             "explicit",
         );
-        assert_eq!(queue.next_due_at(), Some(now + Duration::from_secs(5)));
+        assert_eq!(queue.next_due_at(0), Some(now + Duration::from_secs(5)));
         assert_eq!(queue.remove(explicit).unwrap().0.into_payload(), "explicit");
-        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(queue.next_due_at(0), None);
         push(&mut queue, timed(1, None, ago(3)), "past-3ms");
         push(&mut queue, timed(1, None, None), "absent");
         push(
@@ -1862,8 +2041,8 @@ policy_classes:
         push(&mut queue, timed(1, None, Some(now + century)), "far");
 
         // Class due times never enter the deadline index, even once they have passed.
-        assert_eq!(queue.next_due_at(), None);
-        assert!(queue.take_expired(now + century * 2).is_empty());
+        assert_eq!(queue.next_due_at(0), None);
+        assert!(take_expired(&mut queue, 0, now + century * 2).is_empty());
         assert_indexes_match_entries(&queue);
         assert_eq!(
             drain_payloads(&mut queue),
@@ -2016,84 +2195,263 @@ policy_classes:
         push(&mut queue, timed(1, at(2000), None), "explicit-2s");
         push(&mut queue, timed(1, None, at(500)), "class-500ms");
         let last = push(&mut queue, timed(1, at(3000), None), "explicit-3s");
-        assert_eq!(queue.next_due_at(), at(1000));
+        assert_eq!(queue.next_due_at(0), at(1000));
 
-        let expired = queue
-            .take_expired(now + Duration::from_millis(2000))
-            .into_iter()
-            .map(PolicyQueueEntry::into_payload)
-            .collect::<Vec<_>>();
+        let expired = take_expired(&mut queue, 0, now + Duration::from_millis(2000));
         assert_eq!(expired, ["explicit-1s", "explicit-2s"]);
-        assert_eq!(queue.next_due_at(), at(3000));
+        assert_eq!(queue.next_due_at(0), at(3000));
         assert_indexes_match_entries(&queue);
         assert!(queue.remove(first).is_none());
 
         assert_eq!(queue.remove(last).unwrap().0.into_payload(), "explicit-3s");
-        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(queue.next_due_at(0), None);
         assert_indexes_match_entries(&queue);
         // A class due time that has passed still dispatches.
         assert_eq!(drain_payloads(&mut queue), ["class-500ms"]);
     }
 
     #[test]
-    fn single_entry_operations_compare_logarithmically_many_orders() {
+    fn class_budget_expiry_takes_the_overdue_edf_prefix_without_spending_credit() {
+        let mut queue = PolicyQueue::with_class_budget_expiry(&edf_profile());
         let now = Instant::now();
-        let mut previous = None;
-        for exponent in [8_u32, 12, 16] {
-            let size = 1_usize << exponent;
-            let mut queue = PolicyQueue::new(&edf_profile());
-            let mut handles = Vec::with_capacity(size);
-            for index in 0..size {
-                let due_at = now + Duration::from_millis((index * 7919 % size) as u64);
-                let explicit = index.is_multiple_of(3);
-                handles.push(push(
-                    &mut queue,
-                    timed(1, explicit.then_some(due_at), Some(due_at)),
-                    index,
-                ));
-            }
+        let at = |millis| Some(now + Duration::from_millis(millis));
+        push(&mut queue, timed(400, None, at(1)), "dispatched");
+        push(&mut queue, timed(1, None, at(100)), "class-100");
+        let explicit = push(&mut queue, timed(1, at(150), at(50)), "explicit-150");
+        push(&mut queue, timed(1, None, at(200)), "class-200");
+        push(&mut queue, timed(1, None, None), "unbounded");
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "dispatched"
+        );
+        assert_eq!(queue.classes[0].deficit, 600);
+        // Nothing is indexed: a blocked head still carries the class's earliest due time.
+        assert!(queue.classes[0].deadlines.is_empty());
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        assert_eq!(queue.next_due_at(0), at(100));
 
-            let bound = 12 * (u64::from(exponent) + 1);
-            let insert = order_comparisons(|| {
+        // A due time equal to now expires. The explicit deadline outranks its earlier class
+        // due time and leaves the queue once, in order.
+        assert_eq!(
+            take_expired(&mut queue, 0, now + Duration::from_millis(150)),
+            ["class-100", "explicit-150"]
+        );
+        assert!(queue.remove(explicit).is_none());
+        assert_eq!(queue.classes[0].deficit, 600);
+        assert_eq!(queue.next_due_at(0), at(200));
+        assert_indexes_match_entries(&queue);
+        assert_eq!(
+            take_expired(&mut queue, 0, now + Duration::from_secs(3600)),
+            ["class-200"]
+        );
+        assert_eq!(queue.next_due_at(0), None);
+        assert_eq!(drain_payloads(&mut queue), ["unbounded"]);
+    }
+
+    #[test]
+    fn class_budget_expiry_leaves_other_orders_to_explicit_deadlines() {
+        let now = Instant::now();
+        let at = |millis| Some(now + Duration::from_millis(millis));
+        for policy in [
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Wspt,
+            RouterQueuePolicy::Lcfs,
+        ] {
+            let mut queue =
+                PolicyQueue::with_class_budget_expiry(&PolicyProfile::synthetic(None, policy));
+            assert_eq!(queue.enforced_due_at(&timed(1, None, at(1))), None);
+            // A strict-priority head hides the explicit deadline behind it.
+            queue
+                .enqueue_with_due_at(timed(1, None, at(1)), 1, 0.0, 1, "strict-head")
+                .unwrap();
+            push(&mut queue, timed(1, at(100), None), "hidden-explicit");
+            push(&mut queue, timed(1, None, at(2)), "class-due");
+            assert_eq!(queue.next_due_at(0), at(100), "{policy}");
+            assert_eq!(
+                take_expired(&mut queue, 0, now + Duration::from_secs(60)),
+                ["hidden-explicit"],
+                "{policy}"
+            );
+            assert_eq!(queue.next_due_at(0), None, "{policy}");
+            assert_indexes_match_entries(&queue);
+            assert_eq!(queue.pending_count(), 2, "{policy}");
+        }
+
+        let edf = PolicyQueue::<()>::with_class_budget_expiry(&edf_profile());
+        assert_eq!(edf.enforced_due_at(&timed(1, None, at(1))), at(1));
+        assert_eq!(edf.enforced_due_at(&timed(1, at(5), None)), at(5));
+        assert_eq!(edf.enforced_due_at(&timed(1, None, None)), None);
+        let explicit_only = PolicyQueue::<()>::new(&edf_profile());
+        assert_eq!(explicit_only.enforced_due_at(&timed(1, None, at(1))), None);
+    }
+
+    #[test]
+    fn next_due_at_follows_each_class_through_insert_remove_and_refill() {
+        let mut queue = PolicyQueue::with_class_budget_expiry(&profile(
+            r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    quantum: 10
+    controlled_delay: true
+  - name: second
+    quantum: 10
+    controlled_delay: true
+"#,
+        ));
+        let now = Instant::now();
+        let at = |millis| Some(now + Duration::from_millis(millis));
+        let in_class = |class_index, millis| QueueMetadata {
+            class_index,
+            ..timed(1, None, at(millis))
+        };
+        let later = push(&mut queue, in_class(0, 300), "later");
+        assert_eq!(queue.next_due_at(0), at(300));
+        let earlier = push(&mut queue, in_class(0, 100), "earlier");
+        push(&mut queue, in_class(1, 200), "second");
+        assert_eq!(
+            (queue.next_due_at(0), queue.next_due_at(1)),
+            (at(100), at(200))
+        );
+        queue.remove(earlier).unwrap();
+        assert_eq!(queue.next_due_at(0), at(300));
+        queue.remove(later).unwrap();
+        assert_eq!(queue.next_due_at(0), None);
+        push(&mut queue, in_class(0, 400), "refill");
+        assert_eq!(
+            (queue.next_due_at(0), queue.next_due_at(1)),
+            (at(400), at(200))
+        );
+        // Expiring one class leaves the other's due time alone.
+        assert_eq!(
+            take_expired(&mut queue, 1, now + Duration::from_millis(500)),
+            ["second"]
+        );
+        assert_eq!(
+            (queue.next_due_at(0), queue.next_due_at(1)),
+            (at(400), None)
+        );
+    }
+
+    #[test]
+    fn refused_extraction_spends_no_credit_and_its_successor_runs_next() {
+        let entries = [
+            (0, 6, "refused"),
+            (0, 6, "successor"),
+            (0, 1, "last"),
+            (1, 4, "other"),
+        ];
+        let fill = || {
+            let mut queue = PolicyQueue::new(&profile(
+                r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    quantum: 10
+  - name: second
+    quantum: 10
+"#,
+            ));
+            for (class_index, cost, payload) in entries {
                 push(
                     &mut queue,
-                    timed(1, None, Some(now + Duration::from_millis(size as u64 / 2))),
-                    size,
-                );
-            });
-            let cancel_middle = order_comparisons(|| {
-                queue.remove(handles[size / 2]).unwrap();
-            });
-            let cancel_neighbor = order_comparisons(|| {
-                queue.remove(handles[size / 2 + 1]).unwrap();
-            });
-            let pop = order_comparisons(|| {
-                queue.pop_next(|_, _, _| true).unwrap();
-            });
-            let expire = order_comparisons(|| {
-                let deadline = queue.next_due_at().unwrap();
-                assert_eq!(queue.take_expired(deadline).len(), 1);
-            });
-            for (operation, comparisons) in [
-                ("insert", insert),
-                ("cancel middle", cancel_middle),
-                ("cancel neighbor", cancel_neighbor),
-                ("pop", pop),
-                ("expire", expire),
-            ] {
-                assert!(
-                    comparisons <= bound,
-                    "{operation} compared {comparisons} orders in a queue of {size}"
+                    QueueMetadata {
+                        class_index,
+                        ..timed(cost, None, None)
+                    },
+                    payload,
                 );
             }
-            assert_indexes_match_entries(&queue);
+            queue
+        };
 
-            let total = insert + cancel_middle + cancel_neighbor + pop + expire;
-            if let Some(previous) = previous {
-                // 256 times more entries cost a bounded number of extra tree levels.
-                assert!(total <= previous * 3, "{previous} -> {total}");
+        let mut queue = fill();
+        let mut order = Vec::new();
+        while let Some((entry, charge)) = queue.extract_next(|_, _, _| true) {
+            let payload = entry.into_payload();
+            queue.settle(charge, payload != "refused");
+            if payload == "refused" {
+                // The quantum that made the head affordable stays with the class.
+                assert_eq!(queue.classes[0].deficit, 10);
             }
-            previous = Some(total.max(1));
+            order.push(payload);
+        }
+        assert_eq!(order, ["refused", "successor", "last", "other"]);
+        assert_eq!(queue.classes[0].deficit, 0);
+
+        // Charged, the first head would leave 4 credit, too little for its successor, and
+        // hand the next turn to the other class.
+        assert_eq!(
+            drain_payloads(&mut fill()),
+            ["refused", "other", "successor", "last"]
+        );
+    }
+
+    #[test]
+    fn single_entry_operations_compare_logarithmically_many_orders() {
+        let now = Instant::now();
+        for class_budget_expiry in [false, true] {
+            let mut previous = None;
+            for exponent in [8_u32, 12, 16] {
+                let size = 1_usize << exponent;
+                let mut queue = if class_budget_expiry {
+                    PolicyQueue::with_class_budget_expiry(&edf_profile())
+                } else {
+                    PolicyQueue::new(&edf_profile())
+                };
+                let mut handles = Vec::with_capacity(size);
+                for index in 0..size {
+                    let due_at = now + Duration::from_millis((index * 7919 % size) as u64);
+                    let explicit = index.is_multiple_of(3);
+                    handles.push(push(
+                        &mut queue,
+                        timed(1, explicit.then_some(due_at), Some(due_at)),
+                        index,
+                    ));
+                }
+
+                let bound = 12 * (u64::from(exponent) + 1);
+                let insert = order_comparisons(|| {
+                    push(
+                        &mut queue,
+                        timed(1, None, Some(now + Duration::from_millis(size as u64 / 2))),
+                        size,
+                    );
+                });
+                let cancel_middle = order_comparisons(|| {
+                    queue.remove(handles[size / 2]).unwrap();
+                });
+                let cancel_neighbor = order_comparisons(|| {
+                    queue.remove(handles[size / 2 + 1]).unwrap();
+                });
+                let pop = order_comparisons(|| {
+                    queue.pop_next(|_, _, _| true).unwrap();
+                });
+                let expire = order_comparisons(|| {
+                    let deadline = queue.next_due_at(0).unwrap();
+                    assert_eq!(take_expired(&mut queue, 0, deadline).len(), 1);
+                });
+                for (operation, comparisons) in [
+                    ("insert", insert),
+                    ("cancel middle", cancel_middle),
+                    ("cancel neighbor", cancel_neighbor),
+                    ("pop", pop),
+                    ("expire", expire),
+                ] {
+                    assert!(
+                        comparisons <= bound,
+                        "{operation} compared {comparisons} orders in a queue of {size}"
+                    );
+                }
+                assert_indexes_match_entries(&queue);
+
+                let total = insert + cancel_middle + cancel_neighbor + pop + expire;
+                if let Some(previous) = previous {
+                    // 256 times more entries cost a bounded number of extra tree levels.
+                    assert!(total <= previous * 3, "{previous} -> {total}");
+                }
+                previous = Some(total.max(1));
+            }
         }
     }
 }

@@ -6,12 +6,15 @@
 # backlogged, the 800:200 quanta split uncached-token scheduling credit 80/20.
 # Within a class, the default edf queue_policy dispatches the earliest due time
 # first: router ingress plus slo_ttft_ms, unless a request classifier sets a
-# deadline. Equal budgets keep arrival order. A passed budget does not reject.
+# deadline. Equal budgets keep arrival order. With controlled_delay, priority
+# also rejects a request still waiting when its due time passes; standard's
+# budget only orders it. An explicit deadline expires in every class.
 default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
     slo_ttft_ms: 1000
+    controlled_delay: true
     prefill_busy_threshold_frac: 1.0
     request_queue_limit_per_worker: 256
   - name: standard
