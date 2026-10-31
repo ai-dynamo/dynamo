@@ -1,7 +1,7 @@
 name: Lightweight DEP
 description: Quick proposal for smaller changes
 title: "DEP (light): "
-labels: ["dep:draft", "dep:lightweight"]
+labels: ["dep:draft"]
 body:
   - type: dropdown
     id: area
