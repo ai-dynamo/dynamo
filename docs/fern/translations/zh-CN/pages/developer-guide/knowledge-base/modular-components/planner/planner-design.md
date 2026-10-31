@@ -22,7 +22,7 @@ Planner 是 Dynamo 的自动扩缩容控制器。它支持两种扩缩容模式�
 
 为了兼容现有配置和 DGDR 生成的 planner payload，`load_adjustment_interval_seconds` 和 `throughput_adjustment_interval_seconds` 仍然定义 builtin plugin 的 fire interval。基础 `scheduling.scale_interval_seconds` 默认是已启用 interval 的最大公约数，因此现有 load 和 throughput 的 fire time 会保持不变。
 
-![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../../../../../../../assets/img/planner-plugin-pipeline.png)
+![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../../../../../assets/img/planner-plugin-pipeline.png)
 
 ### 为什么需要两个 Scaling Loop
 

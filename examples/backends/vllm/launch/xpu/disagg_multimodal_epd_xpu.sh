@@ -146,14 +146,14 @@ echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREF
 DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL \
 env $DEVICE_AFFINITY_ENV=$DYN_PREFILL_WORKER_GPU \
-python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
+python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE \
 env $DEVICE_AFFINITY_ENV=$DYN_DECODE_WORKER_GPU \
-python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
+python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
 
 
 echo "=================================================="

@@ -19,6 +19,7 @@ package validation
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -31,19 +32,18 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		return field.ErrorList{field.Required(field.NewPath(""), "operator configuration is required")}
 	}
 
-	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, validateServer(&config.Server, field.NewPath("server"))...)
-	allErrs = append(allErrs, validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection"))...)
-	allErrs = append(allErrs, validateNamespace(&config.Namespace, field.NewPath("namespace"))...)
-	allErrs = append(allErrs, validateMPI(&config.MPI, field.NewPath("mpi"))...)
-	allErrs = append(allErrs, validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure"))...)
-	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
-	allErrs = append(allErrs, validateRBAC(config)...)
-	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
-	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
-	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
-
-	return allErrs
+	return slices.Concat(
+		validateServer(&config.Server, field.NewPath("server")),
+		validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection")),
+		validateNamespace(&config.Namespace, field.NewPath("namespace")),
+		validateMPI(&config.MPI, field.NewPath("mpi")),
+		validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure")),
+		validateDiscovery(&config.Discovery, field.NewPath("discovery")),
+		validateRBAC(config),
+		validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators")),
+		validateIngress(&config.Ingress, field.NewPath("ingress")),
+		validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh")),
+	)
 }
 
 func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {

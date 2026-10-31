@@ -310,17 +310,6 @@ async fn the_first_tokens_logprob_survives_only_if_the_context_phase_computed_it
     );
 }
 
-fn decode_service() -> TrtllmMockerService {
-    TrtllmMockerService::new(
-        MockerServerConfig {
-            mode: ServerMode::Decode,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap()
-}
-
 /// The handoff's logprob is replayed, not recomputed. Regenerating it from the
 /// token id would agree with the handoff on every honest run and hide a
 /// corrupted one, so overwrite the value in the session and require the decode

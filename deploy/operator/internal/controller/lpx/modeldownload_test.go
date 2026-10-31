@@ -100,7 +100,7 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 			require.True(t, slices.Equal(builds, tt.wantBuilds), "downloaded builds = %v, want %v", builds, tt.wantBuilds)
 			if registry, ok := tt.registry.(*fakeModelDownloadRegistry); ok {
 				require.Equal(t, tt.wantCalls, registry.calls)
-				require.Zero(t, registry.acquireBuildSnapshotCalls)
+				require.Zero(t, registry.acquireBuildCalls)
 			}
 		})
 	}
@@ -124,7 +124,7 @@ func TestEnsureModelsDownloadedSharesDeadlineAcrossBuilds(t *testing.T) {
 	require.Zero(t, result)
 	require.Equal(t, []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID}, registry.calls)
 	require.Equal(t, []string{modelDownloadTestSecondBuildID}, builds)
-	require.Zero(t, registry.acquireBuildSnapshotCalls)
+	require.Zero(t, registry.acquireBuildCalls)
 
 	t.Log("Each download receives a bounded share of the total check budget")
 	require.Len(t, registry.deadlines, 2)
@@ -201,7 +201,7 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Refresh a running workload while preserving its downloaded builds")
 			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 1}
 			child.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{
 				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &metav1.Time{Time: tt.checkedAt},
 			}
@@ -273,7 +273,7 @@ func TestModelDownloadCacheAcrossRevisions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Retain a previous build's successful download while changing the desired input")
 			dgd := newModelDownloadDGD(tc.build)
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 1}
 			if tc.observed {
 				child.Status.ObservedGeneration = child.Generation
 			}
@@ -307,16 +307,17 @@ func TestModelDownloadCacheAcrossRevisions(t *testing.T) {
 
 type fakeModelDownloadRegistry struct {
 	lpx.ModelRegistry
-	ready                     map[string]bool
-	err                       map[string]error
-	calls                     []string
-	deadlines                 []time.Time
-	acquireBuildSnapshotCalls int
+	ready             map[string]bool
+	err               map[string]error
+	calls             []string
+	checkpointCalls   []string
+	deadlines         []time.Time
+	acquireBuildCalls int
 }
 
-func (r *fakeModelDownloadRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*lpx.BuildSnapshot, error) {
-	r.acquireBuildSnapshotCalls++
-	return r.ModelRegistry.AcquireBuildSnapshot(ctx, id)
+func (r *fakeModelDownloadRegistry) AcquireBuild(ctx context.Context, id string) (*lpx.Build, error) {
+	r.acquireBuildCalls++
+	return r.ModelRegistry.AcquireBuild(ctx, id)
 }
 
 func (r *fakeModelDownloadRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error) {

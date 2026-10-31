@@ -26,6 +26,7 @@ from typing import Any, Optional
 import sglang as sgl
 
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.engine_generate import native_generate_payload
 
 # Matches the prior in-tree value. Long enough for the slowest cold-start
@@ -159,7 +160,7 @@ async def warmup_prefill_engine(engine: sgl.Engine, bootstrap_port: int) -> None
     from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
     server_args = engine.tokenizer_manager.server_args
-    dp_size = server_args.dp_size
+    dp_size, _ = sglang_dp_layout(server_args)
     sampling_params = {
         "temperature": 0.0,
         "max_new_tokens": 8,

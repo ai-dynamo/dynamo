@@ -33,7 +33,7 @@ from tests.utils.payload_builder import (
     make_images_health_check,
 )
 from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 DEFAULT_TIMEOUT = 10
 
@@ -127,7 +127,7 @@ class _PreparedDeployment:
     merged_env: dict
     frontend_port: int
     system_ports: list
-    disagg_bootstrap_port: Optional[int]
+    disagg_bootstrap_ports: list[int]
 
 
 def _prepare_deployment(
@@ -249,6 +249,15 @@ def _prepare_deployment(
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
+        # Per-worker listeners of out-of-process engines (sidecar launches).
+        for prefix, engine_ports in (
+            ("DYN_ENGINE_HTTP_PORT", ports.engine_http_ports),
+            ("DYN_ENGINE_GRPC_PORT", ports.engine_grpc_ports),
+            ("DYN_VLLM_KV_REPLAY_PORT", ports.engine_kv_replay_ports),
+        ):
+            for idx, port in enumerate(engine_ports, start=1):
+                merged_env[f"{prefix}{idx}"] = str(port)
+
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
 
@@ -272,24 +281,29 @@ def _prepare_deployment(
     if ports is not None:
         merged_env["DYN_MANAGED_PORTS"] = "1"
 
-    # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
-    disagg_bootstrap_port: int | None = None
+    # Disagg scripts need unique bootstrap ports so parallel runs don't collide;
+    # scripts with several prefill workers read one per worker index.
+    disagg_bootstrap_ports: list[int] = []
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
-        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
+        disagg_bootstrap_ports = allocate_ports(
+            max(len(dynamic_system_ports), 1), DynamoPortRange.BOOTSTRAP.value
+        )
+        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_ports[0])
+        for idx, port in enumerate(disagg_bootstrap_ports, start=1):
+            merged_env[f"DYN_DISAGG_BOOTSTRAP_PORT{idx}"] = str(port)
 
     return _PreparedDeployment(
         config=config,
         merged_env=merged_env,
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
-        disagg_bootstrap_port=disagg_bootstrap_port,
+        disagg_bootstrap_ports=disagg_bootstrap_ports,
     )
 
 
 def _cleanup_prepared_deployment(prep: _PreparedDeployment) -> None:
-    if prep.disagg_bootstrap_port is not None:
-        deallocate_port(prep.disagg_bootstrap_port)
+    if prep.disagg_bootstrap_ports:
+        deallocate_ports(prep.disagg_bootstrap_ports)
 
 
 @contextmanager
@@ -428,6 +442,8 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
+                payload.bind_environment(server_process.env)
+
                 # Default behavior: requests go to the frontend port. Metrics
                 # may target either the frontend or worker system ports; map
                 # each DefaultPort placeholder to its per-test allocation.
@@ -488,14 +504,15 @@ def run_serve_deployment(
                     try:
                         for attempt in range(payload.max_attempts):
                             try:
-                                response = send_request(
+                                payload.before_request()
+                                with send_request(
                                     url=payload.url(),
                                     payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
-                                )
-                                server_process.check_response(payload, response)
+                                ) as response:
+                                    server_process.check_response(payload, response)
                                 last_err = None
                                 break
                             except ResponseValidationError as e:

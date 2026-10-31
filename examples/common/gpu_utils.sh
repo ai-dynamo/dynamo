@@ -19,6 +19,8 @@
 #
 #       Note: TensorRT-LLM uses build_trtllm_override_args_with_mem() instead (requires JSON merging)
 #
+#   inherited_gpu_id  → first inherited CUDA_VISIBLE_DEVICES entry; fails if missing
+#
 # Usage:
 #   GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 #   python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
@@ -47,6 +49,18 @@ build_vllm_gpu_mem_args() {
     fi
 
     echo ""
+}
+
+
+# The parallel test runner pins each test's card in CUDA_VISIBLE_DEVICES; a literal 0 overcommits GPU 0.
+inherited_gpu_id() {
+    local devices="${CUDA_VISIBLE_DEVICES:-}"
+    local device="${devices%%,*}"
+    if [[ -z "$device" ]]; then
+        echo "CUDA_VISIBLE_DEVICES must name a GPU for single-GPU mode" >&2
+        return 1
+    fi
+    printf '%s\n' "$device"
 }
 
 
@@ -107,31 +121,26 @@ build_trtllm_override_args_with_mem() {
         esac
     done
 
-    local gpu_mem_json=""
-
-    # Token-based (preferred, simpler to reason about)
+    local memory_key="" memory_limit=""
     if [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS:-}" ]]; then
-        gpu_mem_json='"kv_cache_config": {"max_tokens": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS}"'}'
-    # Byte-based (alternative, more precise)
+        memory_key=max_tokens
+        memory_limit="$_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"
     elif [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES:-}" ]]; then
-        gpu_mem_json='"kv_cache_config": {"max_gpu_total_bytes": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES}"'}'
+        memory_key=max_gpu_total_bytes
+        memory_limit="$_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES"
     fi
 
-    if [[ -n "$gpu_mem_json" ]]; then
-        if [[ -n "$merge_json" ]]; then
-            # Merge: GPU mem config first, then existing config
-            # Strip outer braces from existing JSON
-            local existing="${merge_json#\{}"
-            existing="${existing%\}}"
-            if [[ -n "${existing//[[:space:]]/}" ]]; then
-                echo "{${gpu_mem_json}, ${existing}}"
-            else
-                echo "{${gpu_mem_json}}"
-            fi
-        else
-            # Just GPU mem config
-            echo "{${gpu_mem_json}}"
-        fi
+    if [[ -n "$memory_key" ]]; then
+        python3 - "$merge_json" "$memory_key" "$memory_limit" <<'PYTHON'
+import json
+import sys
+
+existing_json, memory_key, memory_limit = sys.argv[1:]
+config = {"kv_cache_config": {}}
+config.update(json.loads(existing_json or "{}"))
+config["kv_cache_config"][memory_key] = int(memory_limit)
+print(json.dumps(config))
+PYTHON
     elif [[ -n "$merge_json" ]]; then
         # No GPU override, return existing JSON as-is
         echo "$merge_json"
@@ -238,6 +247,19 @@ _gpu_utils_self_test() {
     echo "=== trtllm: no GPU override, but pass through existing JSON ==="
     result=$(build_trtllm_override_args_with_mem --merge-with-json '{"return_perf_metrics": true}')
     _assert "trtllm passthrough" '{"return_perf_metrics": true}' "$result"
+
+    # Regression: nested event settings must not discard profiling memory limits.
+    echo ""
+    echo "=== trtllm: merge token cap with KV events ==="
+    result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
+        build_trtllm_override_args_with_mem --merge-with-json '{"kv_cache_config": {"max_tokens": 4096, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}')
+    _assert "trtllm nested token merge" '{"kv_cache_config": {"max_tokens": 2048, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}' "$result"
+
+    echo ""
+    echo "=== trtllm: merge byte cap with KV events ==="
+    result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES=2048 \
+        build_trtllm_override_args_with_mem --merge-with-json '{"kv_cache_config": {"max_gpu_total_bytes": 4096, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}')
+    _assert "trtllm nested byte merge" '{"kv_cache_config": {"max_gpu_total_bytes": 2048, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}' "$result"
 
     echo ""
     echo "=========================================="

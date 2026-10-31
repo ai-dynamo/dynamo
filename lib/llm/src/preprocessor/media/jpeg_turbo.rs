@@ -17,6 +17,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use libloading::{Library, Symbol};
 
 type TjHandle = *mut c_void;
@@ -139,6 +140,18 @@ pub(crate) fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
 }
 
+/// The buffer is within the configured limits, so failing to reserve it is a host
+/// fault (memory pressure), not bad client input; keep it a 500.
+fn reserve_error(nbytes: usize, error: std::collections::TryReserveError) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::Internal)
+        .message(format!(
+            "Image allocation {nbytes} bytes could not be reserved: {error:?}"
+        ))
+        .build()
+        .into()
+}
+
 /// Decode JPEG bytes to HWC UINT8 using libjpeg-turbo defaults.
 ///
 /// Returns `Ok(None)` for non-JPEG inputs, missing libturbojpeg, or decoder
@@ -222,7 +235,7 @@ pub(crate) fn decode_jpeg(
         };
         let mut buf = Vec::new();
         if let Err(err) = buf.try_reserve_exact(nbytes) {
-            bail!("Image allocation {nbytes} bytes could not be reserved: {err:?}");
+            return Err(reserve_error(nbytes, err));
         }
         let rc = (tj.decompress)(
             handle.as_ptr(),
@@ -246,5 +259,22 @@ pub(crate) fn decode_jpeg(
             channels,
             data: buf,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_failure_is_internal() {
+        let err = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("reserving usize::MAX bytes must fail");
+        let error = reserve_error(usize::MAX, err);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("reserve failure is classified");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
     }
 }
