@@ -37,6 +37,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
+| `disable_caching` | `bool` or `string` | `None` | Supported backends | Best-effort hint to not keep the cache entries that this request creates: `"decode-only"`, `"new-blocks"`, or `true` (same as `"new-blocks"`). See [Disable caching](#disable-caching). |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
@@ -67,6 +68,7 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dynamo-dp-rank` | `dp_rank` |
 | `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
 | `x-tenant-id` | `cache_salt` |
+| `x-dynamo-disable-caching` | `disable_caching` |
 
 > [!WARNING]
 > The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
@@ -121,8 +123,9 @@ cache-reuse behavior. Responses and Anthropic Messages accept the first two inpu
 pooling requests accept only their independent top-level `cache_salt` field. Embeddings requests do
 not accept a cache salt.
 
-`DYN_DISABLE_FRONTEND_NVEXT=true` disables non-salt NvExt fields, non-salt routing headers, and
-response `extra_fields` on endpoints that support those features. Cache isolation is exempt.
+`DYN_DISABLE_FRONTEND_NVEXT=true` disables NvExt fields other than `cache_salt` and
+`disable_caching`, non-salt routing headers, and response `extra_fields` on endpoints that support
+those features. Cache isolation is exempt, and so is [`disable_caching`](#disable-caching).
 Dynamo continues to use `nvext.cache_salt` and `x-tenant-id` on chat completions, completions,
 Responses, and Anthropic Messages. Top-level cache salts remain active on chat completions,
 completions, classify, and pooling. On embeddings, classify, and pooling, the switch only drops the
@@ -142,6 +145,48 @@ for routing behavior and TTL settings.
 
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../use-cases/agents/agent-tracing.md).
+
+### Disable caching
+
+`disable_caching` tells the backend to not keep the cache entries that this request creates. As a
+result, a one-off request does not evict entries that other requests reuse. It is a best-effort
+hint. Dynamo forwards it to the backend worker, and a backend that cannot apply it caches the
+request as usual.
+
+| Value | Effect |
+|-------|--------|
+| `"decode-only"` | The backend keeps the KV blocks of the prompt. It does not keep the blocks that decode creates. This mode is for many requests that share one prompt but use each output once, for example best-of-n sampling. |
+| `"new-blocks"` | The backend reuses and keeps the blocks that are already in the cache. It does not keep any block that this request creates in prefill or decode. |
+| `true` | Same as `"new-blocks"`. |
+| `false` or absent | Normal caching. |
+
+```json
+{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "nvext": {
+        "disable_caching": "decode-only"
+    }
+}
+```
+
+You can also set it with the `x-dynamo-disable-caching` header. The header accepts `decode-only`,
+`new-blocks`, or a truthy value (`1`, `true`, `yes`, or `on`, case-insensitive), which means
+`new-blocks`. Any other header value means normal caching. The header takes priority over the
+body value. As a result, `x-dynamo-disable-caching: false` cancels a body value. Dynamo rejects a
+body value that is not in the table.
+
+A backend that cannot apply `"new-blocks"` can apply `"decode-only"` instead. It must not do the
+opposite. The opposite drops prompt blocks that the client wants to keep.
+
+Dynamo applies `disable_caching` on chat completions, completions, Responses, and Anthropic
+Messages. This is also true when `DYN_DISABLE_FRONTEND_NVEXT=true`.
+
+> [!NOTE]
+> No backend applies `disable_caching` yet. The default frontend preprocessor forwards it to
+> workers in the `disable_caching` field of the preprocessed request. Backends can add support when
+> their engines get a per-request option. The vLLM and SGLang chat processors that
+> `--dyn-chat-processor` selects do not forward it yet.
 
 ## Agent Hints
 
