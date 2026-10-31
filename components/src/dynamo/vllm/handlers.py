@@ -9,6 +9,7 @@ import inspect
 import logging
 import math
 import os
+import sqlite3
 import struct
 import tempfile
 import time
@@ -16,7 +17,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing, nullcontext
 from typing import (
     Any,
     AsyncIterator,
@@ -35,6 +36,7 @@ import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -49,10 +51,12 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
+from dynamo.common.backend.health_check import is_probe
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
@@ -85,7 +89,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -95,6 +99,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 from .args import Config
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
@@ -120,6 +125,7 @@ from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
     MissingMultimodalHandoffError,
+    MultimodalTransferError,
     VllmMultimodalRequestProcessor,
 )
 from .state_agent import state_agent_settings
@@ -157,6 +163,11 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+# vLLM fills these extra_args keys from dedicated request fields; never from
+# client-supplied `vllm_xargs`.
+_RESERVED_VLLM_XARGS_KEYS: Final = frozenset(
+    {_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, "ec_transfer_params"}
+)
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -817,6 +828,18 @@ def build_sampling_params(
         passthrough_sampling_options = extra_args.get("sampling_options")
         if isinstance(passthrough_sampling_options, dict):
             sampling_options.update(passthrough_sampling_options)
+    # `vllm_xargs` becomes SamplingParams.extra_args, as in vLLM's OpenAI server.
+    # Connector inputs stay excluded: only the router hint below may set them.
+    vllm_xargs = sampling_options.pop("vllm_xargs", None)
+    if isinstance(vllm_xargs, dict) and vllm_xargs:
+        sampling_params.extra_args = {
+            **(sampling_params.extra_args or {}),
+            **{
+                key: value
+                for key, value in vllm_xargs.items()
+                if key not in _RESERVED_VLLM_XARGS_KEYS
+            },
+        }
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
@@ -837,6 +860,11 @@ def build_sampling_params(
     for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
+            continue
+        if key == "logit_bias" and value is not None:
+            sampling_params.logit_bias = {
+                int(token_id): float(bias) for token_id, bias in value.items()
+            }
             continue
         if key == "bad_words_token_ids" and value is not None:
             # vLLM has no public setter for token-id bad words; we write the
@@ -860,6 +888,9 @@ def build_sampling_params(
     if reps is not None and (
         isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
     ):
+        artifact = _backend_metadata_upload_settings(request)
+        if artifact is not None and "kind" in artifact:
+            raise InvalidArgument("invalid artifact route token start")
         logger.warning(
             "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
             reps,
@@ -923,15 +954,22 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
-    # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if model_max_len is not None and provided_max_tokens is None:
-        # Ensure at least 1 token generation by default when possible
-        dynamic_default = max(1, model_max_len - input_length)
-        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
-        sampling_params.max_tokens = min(configured_default, dynamic_default)
+    if model_max_len is not None:
+        # vLLM caps prompt + output but rejects output alone above the model length.
+        if provided_max_tokens is not None and provided_max_tokens > model_max_len:
+            raise InvalidArgument(
+                f"max_tokens={provided_max_tokens} cannot be greater than "
+                f"max_model_len={model_max_len}. Please request fewer output tokens."
+            )
+        sampling_params.max_tokens = get_max_tokens(
+            max_model_len=model_max_len,
+            max_tokens=provided_max_tokens,
+            input_length=input_length,
+            default_sampling_params=default_sampling_params,
+        )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -1277,6 +1315,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_name = config.served_model_name or config.model
         self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
+        self.artifact_router_profile = _configured_artifact_router_profile(
+            config.artifact_router_profile
+        )
         self._lora_state = LoRAState()
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
@@ -1354,6 +1395,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger_=logger,
             world_size=rl_world_size,
         )
+        if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+            self.runtime.register_engine_route(
+                "artifact_operations", self.artifact_operation_status
+            )
 
         # Load the custom encoder last. If a later init step raised, executor
         # GC would eventually reap the idle actor thread — but only once the
@@ -1959,6 +2004,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Request-plane dispatcher for the worker's ``rl`` endpoint."""
         async for response in self.rl_route_registry.dispatch_stream(request):
             yield response
+
+    async def artifact_operation_status(self, body: dict) -> dict:
+        """Read receipts on the worker's trusted administrative plane."""
+        from dynamo.artifacts.runtime import configured_artifact_runtime
+
+        authority = configured_artifact_runtime()
+        if authority is None or not isinstance(body, dict):
+            return {"status": "error", "message": "artifact authority unavailable"}
+        operation_id = body.get("operation_id")
+        if not isinstance(operation_id, str) or len(operation_id) > 128:
+            return {"status": "error", "message": "invalid operation identifier"}
+        try:
+            return await asyncio.to_thread(authority.status, operation_id)
+        except KeyError:
+            return {"status": "error", "message": "operation not found"}
+        except sqlite3.Error as exc:
+            logger.warning(
+                "Artifact operation status unavailable (%s)", type(exc).__name__
+            )
+            return {"status": "error", "message": "artifact status unavailable"}
 
     async def liveness_probe(self, body: dict) -> dict:
         """Engine event-loop liveness probe."""
@@ -3340,16 +3405,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
-        completion_token_counts: dict[int, int] | None = None,
+        completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """
         Build completion usage statistics.
 
         Args:
             request_output: vLLM RequestOutput object
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
+            completion_tokens: Optional cumulative request-wide generated-token
+                               count. DELTA-mode streams maintain this total because
+                               each vLLM chunk contains only newly generated tokens.
 
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
@@ -3360,9 +3425,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             else None
         )
 
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
+        if completion_tokens is None:
             completion_tokens = sum(
                 len(output.token_ids) for output in request_output.outputs
             )
@@ -3452,6 +3515,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         report_kv_cache_hit=True,
         want_engine_data=False,
         kv_hints=None,
+        artifact_session=None,
+        emit_routed_experts=True,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3481,6 +3546,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            total_output_tokens = 0
+            usage_metadata_by_index: dict[int, tuple[int | None, int | None]] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
             raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
@@ -3531,6 +3598,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         (output, output_idx, token_ids, finish_reason, stop_reason)
                     )
 
+                usage_metadata = (
+                    len(res.prompt_token_ids) if res.prompt_token_ids else None,
+                    getattr(res, "num_cached_tokens", None),
+                )
                 for (
                     output,
                     output_idx,
@@ -3538,6 +3609,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
+                    total_output_tokens += len(token_ids)
                     out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
@@ -3547,7 +3619,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # every streamed chunk would be wasted work, since only the
                     # final value is emitted).
                     raw_routed_experts = getattr(output, "routed_experts", None)
-                    if raw_routed_experts is not None:
+                    normalized_finish_reason = (
+                        normalize_finish_reason(finish_reason)
+                        if finish_reason
+                        else None
+                    )
+                    failed_artifact_terminal = normalized_finish_reason in (
+                        "cancelled",
+                        "error",
+                    ) or (normalized_finish_reason or "").startswith("error:")
+                    if artifact_session is not None and not failed_artifact_terminal:
+                        await artifact_session.observe_async(
+                            output, res.prompt_token_ids
+                        )
+                    if raw_routed_experts is not None and emit_routed_experts:
                         raw_routed_experts_by_output[output_idx] = raw_routed_experts
                     raw_sampling_mask = getattr(output, "sampling_mask", None)
                     if raw_sampling_mask is not None:
@@ -3563,18 +3648,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                    if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        if engine_prompt_token_ids is not None:
-                            out["engine_data"] = {
-                                "prompt_token_ids": list(engine_prompt_token_ids)
-                            }
+                    # The frontend retains prompt/cache metadata and counts output
+                    # tokens itself. Send changes and final totals, not per-token usage.
+                    if (
+                        finish_reason
+                        or usage_metadata_by_index.get(output_idx) != usage_metadata
+                    ):
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
+                            completion_tokens=total_output_tokens,
                         )
+                        usage_metadata_by_index[output_idx] = usage_metadata
+
+                    if finish_reason:
+                        out["finish_reason"] = normalized_finish_reason
+                        if engine_prompt_token_ids is not None:
+                            out["engine_data"] = {
+                                "prompt_token_ids": list(engine_prompt_token_ids)
+                            }
                         # With n > 1, later samples hit the prompt blocks earlier
                         # ones just cached, and vLLM keeps the first buffered
                         # sample's count when it merges outputs, so no sample's
@@ -3633,6 +3726,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     f"completion token count {output_token_count}"
                                 )
                             _attach_sampling_mask_engine_data(out, normalized_rows)
+
+                        if artifact_session is not None:
+                            raw_routed_experts_by_output.pop(output_idx, None)
+                            output.routed_experts = None
+                            raw_routed_experts = None
+                            if not failed_artifact_terminal:
+                                out.setdefault("engine_data", {})[
+                                    "metadata_upload"
+                                ] = await artifact_session.finalize(
+                                    release_capture=False
+                                )
 
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
@@ -3694,6 +3798,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request, context):
         normalize_request_token_ids(request)
+        settings = _backend_metadata_upload_settings(request)
+        if settings is not None and "kind" in settings and self.use_vllm_tokenizer:
+            raise InvalidArgument("artifact capture requires token-in/token-out mode")
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
@@ -3817,12 +3924,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Log with the traceback here — this is the last frame that knows
             # which request and which encoder — then re-raise unchanged.
             #
-            # Deliberately not converted to `InvalidArgument`. The adapters
-            # raise `ValueError`/`TypeError` for genuine input faults, which the
-            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
-            # the message, so the actionable case needs no help. Coercing the
-            # rest would relabel timeouts, CUDA faults, batcher shutdown and
-            # cancellations as client errors, suppressing retries — and since
+            # Deliberately not converted to `InvalidArgument`: adapter
+            # `ValueError`/`TypeError` map to 400, but with a generic
+            # body — only `InvalidArgument` carries its message to the client.
+            # Coercing the rest would relabel timeouts, CUDA faults, batcher shutdown
+            # and cancellations as client errors, suppressing retries — and since
             # `encode()` is co-batched, it could blame a caller for a failure
             # that originated in someone else's request.
             logger.exception("Request %s: CustomEncoder failed", request_id)
@@ -3957,7 +4063,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     mode,
                 )
-            except MissingMultimodalHandoffError as exc:
+            except (MissingMultimodalHandoffError, MultimodalTransferError) as exc:
                 logger.error("Request %s: %s", request_id, exc)
                 yield {
                     "finish_reason": f"error: {exc}",
@@ -4044,77 +4150,206 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # For P/D, apply hints only to prefill workers (kv_params is None).
         kv_hints = _build_vllm_kv_hints(request) if kv_params is None else None
 
+        client_logprob_width = sampling_params.logprobs
+        artifact_forced_logprobs = False
+        artifact_session = None
+        artifact_settings = _backend_metadata_upload_settings(request)
+        if artifact_settings is not None and "kind" in artifact_settings:
+            from dynamo.artifacts.vllm.capture import (
+                CaptureCapacityError,
+                VllmArtifactSession,
+            )
+
+            if (
+                mode != DisaggregationMode.AGGREGATED
+                or engine_generate_input is not None
+            ):
+                raise InvalidArgument(
+                    "artifact capture currently requires aggregated token-mode generation"
+                )
+            contents = artifact_settings.get("contents", [])
+            requested_contents = contents if isinstance(contents, list) else []
+            needs_logprobs = any(
+                name in requested_contents
+                for name in ("selected_logprobs", "topk_logprobs")
+            )
+            if needs_logprobs:
+                if sampling_params.logprobs == -1 or getattr(
+                    sampling_params, "logprob_token_ids", None
+                ):
+                    raise InvalidArgument(
+                        "artifact logprobs do not support full-vocabulary or custom-token selection"
+                    )
+                sampling_params.logprobs = max(1, sampling_params.logprobs or 0)
+                sampling_params.__post_init__()
+                artifact_forced_logprobs = (
+                    sampling_params.logprobs != client_logprob_width
+                )
+            prompt_ids = (
+                prompt.get("prompt_token_ids") if isinstance(prompt, dict) else None
+            )
+            if prompt_ids is None or has_mm_data or has_external_encoder_result:
+                raise InvalidArgument("artifact capture requires an exact token prompt")
+            artifact_runtime = None
+            if artifact_settings.get("mode") != "inline_base64":
+                # Object-store delivery needs opendal from the optional
+                # artifact-delivery extra, so load it only for these requests.
+                from dynamo.artifacts.runtime import (
+                    ArtifactAuthorityClosed,
+                    configured_artifact_runtime,
+                )
+                from dynamo.artifacts.storage import ArtifactStorageError
+
+                artifact_runtime = configured_artifact_runtime()
+                if artifact_runtime is None:
+                    raise InvalidArgument(
+                        "artifact delivery authority is not configured"
+                    )
+            try:
+                artifact_session = VllmArtifactSession.from_request(
+                    request,
+                    prompt_token_count=len(prompt_ids),
+                    max_tokens=sampling_params.max_tokens,
+                    choice_count=sampling_params.n,
+                    route_capture_enabled=bool(
+                        getattr(self.engine_args, "enable_return_routed_experts", False)
+                    ),
+                    router_profile=self.artifact_router_profile,
+                    token_start=(
+                        getattr(sampling_params, "routed_experts_prompt_start", 0)
+                        if "moe_routes" in requested_contents
+                        and getattr(
+                            sampling_params, "routed_experts_prompt_start", None
+                        )
+                        is not None
+                        else 0
+                    ),
+                    logprob_width=(
+                        max(1, sampling_params.logprobs or 0) if needs_logprobs else 1
+                    ),
+                    runtime=artifact_runtime,
+                )
+            except CaptureCapacityError as exc:
+                raise WorkerOverloaded(str(exc)) from None
+            except ValueError as exc:
+                if artifact_runtime is not None and isinstance(
+                    exc, ArtifactAuthorityClosed
+                ):
+                    raise WorkerOverloaded(str(exc)) from None
+                raise InvalidArgument(str(exc)) from None
+            except RuntimeError as exc:
+                # Storage policy rejects the requested destination before
+                # inference with a credential-safe message. A provider without
+                # conditional creation is a server fault and stays one.
+                if (
+                    artifact_runtime is not None
+                    and isinstance(exc, ArtifactStorageError)
+                    and exc.code in ("invalid_target", "destination_denied", "expired")
+                ):
+                    raise InvalidArgument(str(exc)) from None
+                raise
+
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
         # on the decode worker (which can crash EngineCore). The guard's
         # cleanup runs after _abort_monitor tears down its monitor task, so
         # any deferred-abort waiter spawned by the monitor is in a stable
         # state when close() is awaited.
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard:
-            async with self._abort_monitor(
-                context, request_id, abort_guard=abort_guard
-            ):
-                # nvext.engine_data opt-in: if the client requested
-                # `nvext.extra_fields=["engine_data"]`, we accumulate
-                # per-chunk token_ids and logprobs and attach them to the
-                # FINAL chunk (the one carrying `finish_reason`). The Rust
-                # frontend's response builder (delta.rs) gates emission via
-                # `NvExtResponseFieldSelection.engine_data` so this payload
-                # only reaches clients that asked for it.
-                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
-                # Fallback when the engine does not report prompt IDs. MITO
-                # image expansion can change these during engine preprocessing.
-                request_prompt_token_ids = (
-                    _prompt_token_ids_for_engine_data(request, prompt)
-                    if want_engine_data
-                    else None
-                )
-                accumulated_token_ids: dict[int, list[int]] = {}
-                accumulated_log_probs: dict[int, list[float]] = {}
-                try:
-                    async for tok in self.generate_tokens(
-                        prompt,
-                        sampling_params,
-                        request_id,
-                        data_parallel_rank=dp_rank,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=priority,
-                        reasoning_ended=reasoning_ended,
-                        reasoning_parser_kwargs=reasoning_parser_kwargs,
-                        session_id=session_id,
-                        # Transferred prefill KV counts as cached in vLLM, so a
-                        # decode attempt's count would not be local reuse.
-                        report_kv_cache_hit=kv_params is None,
-                        want_engine_data=want_engine_data,
-                        kv_hints=kv_hints,
-                    ):
-                        if abort_guard is not None:
-                            abort_guard.signal_first_token()
-                        if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"][
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+        with (
+            closing(artifact_session) if artifact_session is not None else nullcontext()
+        ):
+            async with _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard:
+                async with self._abort_monitor(
+                    context, request_id, abort_guard=abort_guard
+                ):
+                    # nvext.engine_data opt-in: if the client requested
+                    # `nvext.extra_fields=["engine_data"]`, we accumulate
+                    # per-chunk token_ids and logprobs and attach them to the
+                    # FINAL chunk (the one carrying `finish_reason`). The Rust
+                    # frontend's response builder (delta.rs) gates emission via
+                    # `NvExtResponseFieldSelection.engine_data` so this payload
+                    # only reaches clients that asked for it.
+                    want_engine_data = _nvext_extra_field_requested(
+                        request, "engine_data"
+                    )
+                    # Fallback when the engine does not report prompt IDs. MITO
+                    # image expansion can change these during engine preprocessing.
+                    request_prompt_token_ids = (
+                        _prompt_token_ids_for_engine_data(request, prompt)
+                        if want_engine_data
+                        else None
+                    )
+                    accumulated_token_ids: dict[int, list[int]] = {}
+                    accumulated_log_probs: dict[int, list[float]] = {}
+                    try:
+                        async for tok in self.generate_tokens(
+                            prompt,
+                            sampling_params,
+                            request_id,
+                            data_parallel_rank=dp_rank,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=priority,
+                            reasoning_ended=reasoning_ended,
+                            reasoning_parser_kwargs=reasoning_parser_kwargs,
+                            session_id=session_id,
+                            # Transferred prefill KV counts as cached in vLLM, so a
+                            # decode attempt's count would not be local reuse.
+                            report_kv_cache_hit=kv_params is None,
+                            want_engine_data=want_engine_data,
+                            kv_hints=kv_hints,
+                            artifact_session=artifact_session,
+                            emit_routed_experts=(
+                                artifact_session is None
+                                or want_engine_data
+                                or _nvext_extra_field_requested(
+                                    request, "routed_experts"
+                                )
+                            ),
+                        ):
+                            if abort_guard is not None:
+                                abort_guard.signal_first_token()
+                            if artifact_forced_logprobs:
+                                if client_logprob_width is None:
+                                    tok = {
+                                        key: value
+                                        for key, value in tok.items()
+                                        if key not in ("log_probs", "top_logprobs")
+                                    }
+                                elif (
+                                    client_logprob_width == 0 and "top_logprobs" in tok
+                                ):
+                                    tok = {
+                                        **tok,
+                                        "top_logprobs": [[] for _ in tok["token_ids"]],
+                                    }
+                            if prefill_result is not None and "completion_usage" in tok:
+                                tok["completion_usage"][
+                                    "prompt_tokens_details"
+                                ] = prefill_prompt_tokens_details
 
-                        if want_engine_data:
-                            _accumulate_engine_data(
-                                tok,
-                                request_prompt_token_ids,
-                                accumulated_token_ids,
-                                accumulated_log_probs,
-                            )
-                        yield tok
-                except EngineDeadError as e:
-                    logger.error(f"vLLM EngineDeadError: {e}")
-                    logger.warning("Initiating Dynamo Runtime shutdown.")
-                    self.runtime.shutdown()
-                    os._exit(1)
+                            if want_engine_data:
+                                _accumulate_engine_data(
+                                    tok,
+                                    request_prompt_token_ids,
+                                    accumulated_token_ids,
+                                    accumulated_log_probs,
+                                )
+                            yield tok
+                    except EngineDeadError as e:
+                        logger.error(f"vLLM EngineDeadError: {e}")
+                        logger.warning("Initiating Dynamo Runtime shutdown.")
+                        self.runtime.shutdown()
+                        os._exit(1)
+                    finally:
+                        if artifact_session is not None:
+                            artifact_session.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
@@ -4283,6 +4518,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def generate(self, request, context):
         normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
+        settings = _backend_metadata_upload_settings(request)
+        if settings is not None and "kind" in settings:
+            raise InvalidArgument(
+                "artifact capture is unavailable on a prefill-only worker"
+            )
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
         self._multimodal_request_processor.validate_multimodal_request(request)
@@ -4293,8 +4533,58 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             async for chunk in _translate_vllm_client_errors(generator):
                 yield chunk
 
+    def _prefill_kv_protocol(
+        self, is_local_probe: bool, sampling_params
+    ) -> "KvConnectorProtocol | None":
+        """The KV connector for this request, or None for a local health probe.
+
+        A probe runs on this worker and no decode worker consumes it, so it must
+        not ask for a handoff. Any caller-supplied transfer parameters are
+        dropped as well.
+        """
+        if is_local_probe:
+            if sampling_params.extra_args is not None:
+                sampling_params.extra_args = dict(sampling_params.extra_args)
+                sampling_params.extra_args.pop(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, None)
+            return None
+
+        # One protocol instance per request; carries per-request state
+        # (e.g. Mooncake's transfer_id) into the response loop.
+        kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
+        _update_kv_transfer_params(
+            sampling_params,
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
+        return kv_protocol
+
+    def _prefill_disaggregated_params(
+        self,
+        kv_protocol: "KvConnectorProtocol | None",
+        res,
+        multi_modal_data,
+        mm_processor_kwargs,
+    ) -> "Dict[str, Any] | None":
+        """The handoff field for the response, or None when there is no handoff.
+
+        Only one result is generated per prefill request, so the embedding
+        params are built here without further conditionals.
+        """
+        if kv_protocol is None:
+            return None
+        embedding_params = self._multimodal_request_processor.build_prefill_handoff(
+            multi_modal_data=multi_modal_data,
+            prompt_token_ids=list(res.prompt_token_ids or []),
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        return self._build_disaggregated_params(
+            kv_protocol.decode_request_kv_transfer_params(res),
+            embedding_params,
+        )
+
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        # Read the marker first: input preparation below can replace the request.
+        is_local_probe = is_probe(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
@@ -4330,15 +4620,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        # One protocol instance per request; carries per-request state
-        # (e.g. Mooncake's transfer_id) into the response loop below.
-        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
-            self.engine_client.vllm_config
-        )
-        _update_kv_transfer_params(
-            sampling_params,
-            kv_protocol.prefill_request_kv_transfer_params(),
-        )
+        kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -4394,21 +4676,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                # For prefill worker, only one res will be generated,
-                # so we can always build embedding params here without conditionals
-                embedding_params = (
-                    self._multimodal_request_processor.build_prefill_handoff(
-                        multi_modal_data=multi_modal_data,
-                        prompt_token_ids=list(res.prompt_token_ids or []),
-                        mm_processor_kwargs=mm_processor_kwargs,
-                    )
-                )
-
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
+                    "disaggregated_params": self._prefill_disaggregated_params(
+                        kv_protocol,
+                        res,
+                        multi_modal_data,
+                        mm_processor_kwargs,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,

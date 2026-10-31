@@ -22,7 +22,7 @@ use super::{
     start_subscriber,
 };
 use crate::discovery::KvSourceMembershipWatch;
-use crate::kv_router::KvEventSourceRequirement;
+use crate::kv_router::{KvEventSourceRequirement, needs_kv_index};
 
 pub(crate) struct RuntimeIngressArgs<'a> {
     pub endpoint: &'a Endpoint,
@@ -61,8 +61,8 @@ impl RuntimeIngress {
             session_prefix_index,
         } = args;
         let component = endpoint.component();
-        let cache_required = worker_inputs.contains(WorkerInputs::CACHE);
-        let indexer = if cache_required {
+        let index_required = needs_kv_index(worker_inputs);
+        let indexer = if index_required {
             super::build(
                 component,
                 kv_router_config,
@@ -76,7 +76,7 @@ impl RuntimeIngress {
             Indexer::None
         };
 
-        let subscription = if cache_required && kv_event_source_requirement.should_subscribe() {
+        let subscription = if index_required && kv_event_source_requirement.should_subscribe() {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
@@ -99,7 +99,7 @@ impl RuntimeIngress {
         } else {
             tracing::info!(
                 requirement = %kv_event_source_requirement,
-                cache_required = cache_required,
+                index_required = index_required,
                 use_kv_events = kv_router_config.use_kv_events,
                 use_remote_indexer = kv_router_config.use_remote_indexer,
                 "Skipping KV event subscription"

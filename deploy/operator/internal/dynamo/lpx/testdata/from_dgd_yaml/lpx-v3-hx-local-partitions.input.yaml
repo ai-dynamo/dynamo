@@ -85,7 +85,6 @@ spec:
               - start
               resources:
                 limits:
-                  lpu.nvidia.com/devices: '1'
                   hugepages-2Mi: 4Gi
                 requests:
                   cpu: '62'

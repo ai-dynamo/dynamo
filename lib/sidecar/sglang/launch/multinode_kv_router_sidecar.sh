@@ -30,6 +30,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "          DYN_HTTP_PORT=8000 is the separately launched frontend's port."
     echo "Other:    SGLANG_PYTHON=python3, SGLANG_HOST=0.0.0.0, SGLANG_PAGE_SIZE=64"
     echo "          CUDA_VISIBLE_DEVICES is inherited. Extra arguments go to SGLang only."
+    echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
     exit 0
 fi
 
@@ -86,6 +87,8 @@ case "$ROLE" in
         ;;
     *) echo "ROLE must be aggregated, prefill or decode" >&2; exit 1 ;;
 esac
+resolve_sidecar sglang SIDECAR_CMD
+
 print_launch_banner --no-curl "SGLang multinode KV sidecar ($ROLE, node $NODE_RANK)" "$MODEL" "$HTTP_PORT" \
     "Topology: NNODES=$NNODES, TP_SIZE=$TP_SIZE, DP_SIZE=$DP_SIZE (attention DP)" \
     "Rendezvous: $DIST_INIT_ADDR; local gRPC: $SGLANG_GRPC_PORT" \
@@ -108,7 +111,7 @@ trap dynamo_exit_trap EXIT
     "${ENGINE_ROLE_ARGS[@]}" $GPU_MEM_ARGS "$@" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-    python3 -m dynamo.sglang.sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "http://$SIDECAR_HOST:$SGLANG_GRPC_PORT" "${SIDECAR_ARGS[@]}" &
 
 wait_any_exit

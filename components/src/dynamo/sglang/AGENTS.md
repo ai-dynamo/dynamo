@@ -25,13 +25,21 @@ support the current version plus 1 version back (N and N-1). The pattern:
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
 
-The CUDA support window is 0.5.20/0.5.21. The separately pinned XPU image still
-uses 0.5.11; retain only the older fallbacks it needs until that pin is upgraded.
+The CUDA support window is the current release plus one version back. The
+separately pinned XPU image may be older; retain only the fallbacks it needs
+until that pin is upgraded.
 
 **When you encounter a new SGLang API breakage**: add the affected imports to
 `_compat.py` following the existing pattern. Do not scatter try/except blocks across
 component files. Do not version-check with `sglang.__version__` -- import probing is
 more reliable since SGLang's internal layout doesn't always match the version string.
+
+**When you bump SGLang**: the frontend joins native `/generate` responses (streamed
+chunks into one unary response, prefill's prompt-side outputs into decode's) with rules
+in `lib/llm/src/protocols/sglang/merge_rules.json`. Those rules copy SGLang code listed
+in the header of `lib/llm/src/protocols/sglang/merge.rs`. Re-check that code, and run
+`tests/test_sglang_generate_merge_contract.py`, which fails on any unclassified response
+field or request flag.
 
 ## Multi-process gateway (`--gateway-workers N`)
 
@@ -50,8 +58,9 @@ engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it inst
 facade.
 
 Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
-before snapshot preparation and runtime creation): `--gateway-workers N` sets
-`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
+before snapshot preparation and runtime creation): `--gateway-workers N` sets the raw
+`tokenizer_worker_num` to N in `args.py` before `ServerArgs.from_cli_args`, because SGLang's
+`PortArgs.init_new` reads the raw field; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
 above 1 that differs from `--gateway-workers` is an error. Gateway mode is rejected for the direct-engine workers
 (embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
 live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
@@ -123,8 +132,8 @@ Worker dispatch (main.py:60-132):
    have `max_running_requests`, `dllm_algorithm_config`, or other LLM-specific fields.
    Use `getattr()` when accessing fields that may not exist on the stub.
 
-The supported SGLang 0.5.20/0.5.21 releases keep raw input on `ServerArgs` and
-publish the resolved configuration separately. Apply Dynamo's post-resolution startup
+The supported CUDA releases keep raw input on `ServerArgs` and publish the resolved
+configuration separately. Apply Dynamo's post-resolution startup
 overrides through `_compat.override_server_args()`; control-plane updates after engine
 creation should use the tokenizer manager's update API instead of assigning fields on
 `server_args`.
@@ -311,11 +320,11 @@ absolute sequence position where logprob computation starts: `-1` (default) = ou
 only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
 is requested.
 
-**Top-logprobs gate**: `logprobs >= 1` (or `prompt_logprobs >= 1`) raises `ValueError`
-by default. SGLang's tokenizer manager detokenizes top-k tokens per-position serially,
-causing severe latency degradation (O(N) per generated token). Callers must use
-`logprobs=0` for chosen-token-only logprobs. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` to
-override once upstream batches `detokenize_top_logprobs_tokens`.
+**Top-k logprobs**: `logprobs >= 1` and `prompt_logprobs >= 1` are supported. Dynamo
+does not set `return_text_in_logprobs` on its own requests, so SGLang returns top-k
+token ids without text and skips its per-position top-k detokenization; the frontend
+fills candidate text. Clients of the engine-native `/generate` passthrough can set
+`return_text_in_logprobs: true` explicitly and invoke that detokenization path.
 
 **Streaming behavior** (`_extract_logprobs`):
 

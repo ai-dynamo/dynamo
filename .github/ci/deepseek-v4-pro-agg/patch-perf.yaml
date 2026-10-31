@@ -20,12 +20,27 @@ spec:
         effect: NoExecute
       containers:
       - name: bench
+        resources:
+          requests:
+            ephemeral-storage: 2Gi
+          limits:
+            ephemeral-storage: 16Gi
         env:
+        - name: AIPERF_OUTPUT_DIR
+          value: /aiperf
+        - name: ARTIFACT_ROOT
+          value: /aiperf/results
         - name: ENDPOINT
           value: dsv4-pro-agg-frontend:8000
         - name: CONCURRENCIES
           value: "128"
+        volumeMounts:
+        - name: aiperf-output
+          mountPath: /aiperf
       volumes:
+      - name: aiperf-output
+        emptyDir:
+          sizeLimit: 16Gi
       - name: model-cache
         persistentVolumeClaim:
           claimName: shared-model-cache

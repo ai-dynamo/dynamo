@@ -24,7 +24,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 

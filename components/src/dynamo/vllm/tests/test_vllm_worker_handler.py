@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import json
+import sqlite3
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -24,6 +25,8 @@ import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
@@ -106,6 +109,7 @@ def _make_config(
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.enable_rl = False
+    config.artifact_router_profile = None
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
@@ -1019,6 +1023,513 @@ async def test_engine_data_uses_effective_engine_prompt(
         assert "engine_data" not in chunks[-1]
 
 
+@pytest.mark.asyncio
+async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatch):
+    from dynamo.artifacts.vllm import capture as artifact_capture
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ((3, 8, 2),)
+    handler.config.engine_args.enable_return_routed_experts = True
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["moe_routes", "selected_logprobs"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    routed = np.asarray([[[1, 2]], [[3, 4]]], dtype=np.int64)
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["logprobs"] = args[1].logprobs
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[{12: Logprob(logprob=-0.2)}],
+                    routed_experts=routed,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert len(chunks) == 1
+    assert observed["logprobs"] == 1
+    assert chunks[0]["token_ids"] == [12]
+    assert "routed_experts" not in chunks[0].get("engine_data", {})
+    artifact = chunks[0]["engine_data"]["metadata_upload"]
+    assert artifact["kind"] == "generation_artifact"
+    assert artifact["mode"] == "inline_base64"
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
+    assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12]
+    assert {type(component).__name__ for component in choice.components} == {
+        "MoeRoutes",
+        "SelectedLogprobs",
+    }
+
+    monkeypatch.setattr(
+        artifact_capture,
+        "process_capture_budget",
+        lambda: artifact_capture.CaptureBudget(1),
+    )
+    with pytest.raises(mod.WorkerOverloaded, match="capture capacity"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "engine_finish_reason",
+        "expected_finish_reason",
+        "should_submit",
+        "submit_error",
+        "client_logprobs",
+    ),
+    [
+        ("abort", "cancelled", False, None, None),
+        ("error: engine failed", "error: engine failed", False, None, None),
+        ("stop", "stop", True, None, None),
+        ("stop", "stop", True, sqlite3.OperationalError("database is locked"), None),
+        ("stop", "stop", True, None, 1025),
+    ],
+)
+async def test_artifact_terminal_delivery_only_on_success(
+    monkeypatch,
+    engine_finish_reason,
+    expected_finish_reason,
+    should_submit,
+    submit_error,
+    client_logprobs,
+):
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": (
+            {"logprobs": client_logprobs} if client_logprobs is not None else {}
+        ),
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"url": "https://example.invalid/upload"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    receipt = {
+        "kind": "generation_artifact",
+        "mode": "object_store",
+        "format": "generation_artifact_v1",
+        "contents": [],
+        "state": "pending",
+        "operation_id": "test-operation",
+    }
+    runtime = SimpleNamespace(
+        validate=MagicMock(), submit=AsyncMock(return_value=receipt)
+    )
+    if submit_error is not None:
+        runtime.submit.side_effect = submit_error
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: runtime
+    )
+    observations = []
+    observe_async = artifact_capture.VllmArtifactSession.observe_async
+
+    async def track_observation(self, output, prompt_token_ids):
+        observations.append(output.finish_reason)
+        await observe_async(self, output, prompt_token_ids)
+
+    monkeypatch.setattr(
+        artifact_capture.VllmArtifactSession, "observe_async", track_observation
+    )
+
+    async def fake_generate(*args, **kwargs):
+        for token, reason in ((12, None), (13, engine_finish_reason)):
+            yield SimpleNamespace(
+                prompt_token_ids=[10, 11],
+                prompt_logprobs=None,
+                num_cached_tokens=None,
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[token],
+                        logprobs=None,
+                        routed_experts=None,
+                        finish_reason=reason,
+                        stop_reason=None,
+                    )
+                ],
+            )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert chunks[-1]["finish_reason"] == expected_finish_reason
+    if should_submit:
+        delivered = chunks[-1]["engine_data"]["metadata_upload"]
+        if submit_error is None:
+            assert delivered == receipt
+        else:
+            assert delivered["state"] == "failed"
+            assert delivered["error_code"] == "delivery_rejected"
+        runtime.submit.assert_awaited_once()
+        assert observations == [None, "stop"]
+    else:
+        assert "metadata_upload" not in chunks[-1].get("engine_data", {})
+        runtime.submit.assert_not_awaited()
+        assert observations == [None]
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_options", "expected_top_count", "route_start"),
+    [({}, None, None), ({"logprobs": 0}, 0, None), ({"logprobs": 1}, 2, 99)],
+)
+async def test_artifact_logprobs_do_not_widen_client_output(
+    monkeypatch, output_options, expected_top_count, route_start
+):
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": output_options,
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["selected_logprobs"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["logprobs"] = args[1].logprobs
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[
+                        {
+                            12: Logprob(logprob=-0.2),
+                            13: Logprob(logprob=-0.3),
+                        }
+                    ],
+                    routed_experts=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    if route_start is not None:
+        build = mod.build_sampling_params
+
+        def with_route_start(*args, **kwargs):
+            sampling = build(*args, **kwargs)
+            sampling.routed_experts_prompt_start = route_start
+            return sampling
+
+        monkeypatch.setattr(mod, "build_sampling_params", with_route_start)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert observed["logprobs"] == 1
+    assert chunks[-1]["token_ids"] == [12]
+    artifact = chunks[-1]["engine_data"]["metadata_upload"]
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
+    assert choice.components[0].logprobs.as_array().tolist() == pytest.approx([-0.2])
+    if expected_top_count is None:
+        assert "log_probs" not in chunks[-1]
+        assert "top_logprobs" not in chunks[-1]
+    else:
+        assert chunks[-1]["log_probs"] == pytest.approx([-0.2])
+        assert len(chunks[-1]["top_logprobs"][0]) == expected_top_count
+
+
+@pytest.mark.asyncio
+async def test_artifact_operation_status_validates_identifier_and_hides_store_errors(
+    monkeypatch,
+):
+    authority = SimpleNamespace(status=MagicMock(return_value={"state": "ready"}))
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+
+    for body in ({}, {"operation_id": 3}, {"operation_id": "x" * 129}):
+        assert await handler.artifact_operation_status(body) == {
+            "status": "error",
+            "message": "invalid operation identifier",
+        }
+    authority.status.assert_not_called()
+
+    assert await handler.artifact_operation_status({"operation_id": "known"}) == {
+        "state": "ready"
+    }
+    authority.status.assert_called_once_with("known")
+
+    authority.status.side_effect = KeyError("missing")
+    assert await handler.artifact_operation_status({"operation_id": "missing"}) == {
+        "status": "error",
+        "message": "operation not found",
+    }
+
+    authority.status.side_effect = sqlite3.OperationalError("database is locked")
+    assert await handler.artifact_operation_status({"operation_id": "known"}) == {
+        "status": "error",
+        "message": "artifact status unavailable",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_state", ["missing", "closing"])
+async def test_artifact_authority_unavailable_returns_typed_error(
+    monkeypatch, authority_state
+):
+    from dynamo.artifacts.runtime import ArtifactAuthorityClosed
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = None
+    if authority_state == "closing":
+        authority = SimpleNamespace(
+            validate=MagicMock(side_effect=ArtifactAuthorityClosed("closed"))
+        )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    expected = (
+        mod.InvalidArgument if authority_state == "missing" else mod.WorkerOverloaded
+    )
+    with pytest.raises(expected):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "client_error"),
+    [
+        ("destination_denied", True),
+        ("invalid_target", True),
+        ("expired", True),
+        ("unsupported", False),
+    ],
+)
+async def test_artifact_destination_rejection_is_invalid_argument(
+    monkeypatch, code, client_error
+):
+    from dynamo.artifacts.storage import ArtifactStorageError
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = SimpleNamespace(
+        validate=MagicMock(side_effect=ArtifactStorageError(code, "policy says no")),
+        submit=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    handler.engine_client = SimpleNamespace(generate=MagicMock(), tokenizer=None)
+
+    expected = mod.InvalidArgument if client_error else ArtifactStorageError
+    with pytest.raises(expected, match="policy says no"):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+    handler.engine_client.generate.assert_not_called()
+    authority.submit.assert_not_called()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_mode", "message"),
+    [
+        ("text", "token-in/token-out"),
+        ("prefill", "prefill-only worker"),
+    ],
+)
+async def test_artifact_request_rejects_unsupported_worker_mode(worker_mode, message):
+    request = {
+        "token_ids": [10, 11],
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": [],
+                }
+            }
+        },
+    }
+    if worker_mode == "text":
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.use_vllm_tokenizer = True
+        generate = handler.generate(request, MagicMock())
+    else:
+        generate = mod.PrefillWorkerHandler.generate(MagicMock(), request, MagicMock())
+
+    with pytest.raises(mod.InvalidArgument, match=message):
+        async for _ in generate:
+            pass
+
+
 @pytest.mark.asyncio(loop_scope="function")
 class TestDecodeWorkerMultimodalBranching:
     """Tests for the mode-aware multimodal branching in _generate_token_mode."""
@@ -1097,6 +1608,37 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["token_ids"] == []
         assert "embedding metadata" in chunks[0]["finish_reason"]
+
+    async def test_aggregated_transfer_failure_returns_actionable_error(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        transfer_error = mod.MultimodalTransferError(
+            "shm", "the worker could not open the shared-memory segment"
+        )
+        handler._multimodal_request_processor.prepare_input = AsyncMock(
+            side_effect=transfer_error
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request, MagicMock(), "req-transfer-error"
+            )
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": f"error: {transfer_error}",
+                "index": 0,
+                "token_ids": [],
+            }
+        ]
+        assert "use DYNAMO_MM_TRANSFER=nixl" in chunks[0]["finish_reason"]
 
     async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
         """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
@@ -1307,6 +1849,136 @@ class TestDecodeWorkerMultimodalBranching:
             )
 
         assert exc_info.value is server_error
+
+
+@pytest.fixture
+def prefill_probe_handler():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    handler.config = _make_config(disaggregation_mode="PREFILL")
+    handler.default_sampling_params = {}
+    handler.model_max_len = 4096
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": [1]}
+    )
+
+    async def prepare_input(request, *args):
+        # Input preparation may replace the request without internal markers.
+        prepared = dict(request)
+        prepared.pop(HEALTH_CHECK_KEY, None)
+        return PreparedMultimodalInput(
+            request=prepared, multi_modal_data=None, mm_processor_kwargs=None
+        )
+
+    handler._multimodal_request_processor = SimpleNamespace(
+        validate_multimodal_request=MagicMock(),
+        prepare_input=AsyncMock(side_effect=prepare_input),
+        build_prefill_handoff=MagicMock(return_value={"embeddings": "handoff"}),
+    )
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler._abort_monitor = abort_monitor
+    response = _make_engine_response()
+    response.prompt_token_ids = [1]
+    response.outputs = [SimpleNamespace(token_ids=[2])]
+    response.num_cached_tokens = 0
+
+    async def generate(*args, **kwargs):
+        yield response
+
+    handler.engine_client = SimpleNamespace(
+        generate=MagicMock(side_effect=generate), vllm_config=object()
+    )
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_payload", [False, True])
+async def test_prefill_probe_runs_locally_without_handoff(
+    prefill_probe_handler, monkeypatch, custom_payload
+):
+    handler = prefill_probe_handler
+    extra_args = {"kv_transfer_params": {"do_remote_decode": True}, "other": 7}
+    if custom_payload:
+        monkeypatch.setenv(
+            "DYN_HEALTH_CHECK_PAYLOAD",
+            json.dumps(
+                {
+                    "token_ids": [1],
+                    "sampling_options": {"extra_args": extra_args},
+                    "stop_conditions": {"max_tokens": 8},
+                }
+            ),
+        )
+    else:
+        monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    request = VllmPrefillHealthCheckPayload().to_dict()
+    original_extra_args = request.get("sampling_options", {}).get("extra_args")
+
+    with patch.object(mod, "make_kv_connector_protocol") as make_protocol:
+        chunks = [chunk async for chunk in handler.generate(request, MagicMock())]
+
+    make_protocol.assert_not_called()
+    handler.engine_client.generate.assert_called_once()
+    sampling = handler.engine_client.generate.call_args.args[1]
+    assert sampling.max_tokens == sampling.min_tokens == 1
+    assert "kv_transfer_params" not in (sampling.extra_args or {})
+    if custom_payload:
+        assert sampling.extra_args == {"other": 7}
+        assert sampling.extra_args is not original_extra_args
+        assert original_extra_args == extra_args
+    assert chunks[0]["token_ids"] == [2]
+    assert chunks[0]["completion_usage"]["completion_tokens"] == 1
+    assert chunks[0]["disaggregated_params"] is None
+    handler._multimodal_request_processor.build_prefill_handoff.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker, decode_params",
+    [
+        (None, {"remote_block_ids": [1]}),
+        (1, {}),
+    ],
+    ids=["no_marker", "truthy_marker_empty_params"],
+)
+async def test_prefill_non_probe_keeps_protocol_handoff(
+    prefill_probe_handler, marker, decode_params
+):
+    handler = prefill_probe_handler
+    request = _make_raw_frontend_request()
+    if marker is not None:
+        request[HEALTH_CHECK_KEY] = marker
+    protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.prefill_request_kv_transfer_params.return_value = {
+        "do_remote_decode": True
+    }
+    protocol.decode_request_kv_transfer_params.return_value = decode_params
+    with patch.object(mod, "make_kv_connector_protocol", return_value=protocol):
+        chunks = [chunk async for chunk in handler.generate(request, MagicMock())]
+
+    sampling = handler.engine_client.generate.call_args.args[1]
+    assert sampling.extra_args["kv_transfer_params"] == {"do_remote_decode": True}
+    protocol.prefill_request_kv_transfer_params.assert_called_once_with()
+    protocol.decode_request_kv_transfer_params.assert_called_once()
+    assert chunks[0]["disaggregated_params"] == {
+        "kv_transfer_params": decode_params,
+        "embedding_params": {"embeddings": "handoff"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_prefill_probe_preserves_engine_error(prefill_probe_handler):
+    handler = prefill_probe_handler
+    handler.engine_client.generate.side_effect = RuntimeError("engine failed")
+    with pytest.raises(RuntimeError, match="engine failed"):
+        async for _ in handler.generate(
+            {"token_ids": [1], HEALTH_CHECK_KEY: True}, MagicMock()
+        ):
+            pass
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,11 @@ processing time. It then sends `--requests` requests at that rate. It prints
 one table for each pair, and one grid for each request rate that lists all of
 its pairs.
 
+The media server runs on localhost, and the fetch path refuses private
+addresses by default. So the sweep sets DYN_MM_ALLOW_INTERNAL=1 when the
+variable is not set. If every request of a pair fails, the sweep exits with
+status 1.
+
 Usage:
   python -m benchmarks.multimodal.http.sweep \\
       --server-processing-time-means-ms 50,100,200,300,400 \\
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import resource
 import sys
 
@@ -101,6 +107,7 @@ async def _run_sweep(args: argparse.Namespace) -> int:
     peak_inflight = int(max(rates) * (max(means) / 1000.0)) + args.requests // 10
     _check_ulimit(peak_inflight)
 
+    failed_pairs: list[str] = []
     for rate in rates:
         print_batch_header(request_rate=rate, requests=args.requests)
         grid_rows: list[tuple[float, Summary]] = []
@@ -115,15 +122,29 @@ async def _run_sweep(args: argparse.Namespace) -> int:
             summary = summarize(result)
             print_iteration(mean_ms, summary)
             grid_rows.append((mean_ms, summary))
+            # A pair with no success measured nothing: its latencies print as 0.
+            if summary.n and not summary.outcomes.get("success"):
+                outcomes = ", ".join(
+                    f"{name}={count}"
+                    for name, count in sorted(summary.outcomes.items())
+                )
+                failed_pairs.append(
+                    f"request_rate={rate:g} mean_ms={mean_ms:g}: {outcomes}"
+                )
 
         print_grid(grid_rows)
         print()
 
-    return 0
+    for pair in failed_pairs:
+        print(f"[sweep] every request failed at {pair}", file=sys.stderr)
+    return 1 if failed_pairs else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # Here and not in _run_sweep, so that tests that call it do not change
+    # the environment of the shared test process.
+    os.environ.setdefault("DYN_MM_ALLOW_INTERNAL", "1")
     return asyncio.run(_run_sweep(args))
 
 

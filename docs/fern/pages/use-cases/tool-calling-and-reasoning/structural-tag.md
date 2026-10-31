@@ -19,8 +19,8 @@ Benefits:
   JSON schema.
 - **Single-call enforcement** — `parallel_tool_calls=false` is enforced via
   `stop_after_first` in the grammar, not just by convention.
-- **Tool call ban** — when `tool_choice="none"`, specific tokenizer tokens can be
-  banned so the model cannot start native tool-call syntax (see
+- **Tool call ban** — when `tool_choice="none"`, parser-specific strings can be
+  excluded so the model cannot complete native tool-call syntax (see
   [trade-offs](#tool_choicenone-and-token-banning)).
 
 ## Prerequisites
@@ -40,7 +40,9 @@ Structural tags are enabled by default. Configure the tool-call parser on the
 > Its `--guided-decoding-backend` default is unset, so default deployments ignore
 > structural tags and do not enforce their tool argument schemas. For affected
 > deployments using `--guided-decoding-backend xgrammar`, pass
-> `--no-dyn-enable-structural-tag` until a supported upgrade resolves the issue.
+> `--dyn-structural-tag false` until a supported upgrade resolves the issue.
+> The TensorRT-LLM sidecar publishes no structural tags unless you pass
+> `--dyn-structural-tag`.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -88,30 +90,61 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--dyn-enable-structural-tag` | bool | `true` | Enables tool-call structural tags in Rust, Python vLLM, and Python SGLang preprocessing. Rust retains native forced-tool tags for Kimi K2 required/named and Kimi K3 named choices when disabled. |
-| `--dyn-structural-tag-scope` | `auto`, `always` | `always` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
-| `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
+| `--dyn-structural-tag` | boolean or JSON object | enabled | Configure structural tags, or pass `false` to disable optional guidance. |
+
+Custom `--dyn-structural-tag` config example:
+
+```json
+{
+  "scope": "always",
+  "schema": "strict",
+  "allow_tool_calls_with_structured_output": true,
+  "exclude_special_tokens": false,
+  "reasoning_boundary": "backend",
+  "tool_arguments_any_order": true
+}
+```
+
+The flag without a value uses the defaults below. Every field is optional:
+
+| Field | Values | Default | Description |
+|---|---|---|---|
+| `scope` | `auto`, `always` | `always` | Selects eligible tool-calling requests. |
+| `schema` | `auto`, `strict` | `auto` | Selects which tool argument schemas are enforced. |
+| `allow_tool_calls_with_structured_output` | boolean | `false` | Lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Requires parsers v2. |
+| `exclude_special_tokens` | boolean, `null` | `null` | Controls reasoning and tool-call marker exclusions. `null` preserves the model-family default. Requires parsers v2. |
+| `reasoning_boundary` | `auto`, `structural_tag`, `backend` | `auto` | Selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `auto` follows the backend's advertised policy. `backend` requires parsers v2 and a reasoning parser. |
+| `tool_arguments_any_order` | boolean | `false` | Allows tool argument properties in any order. This weakens required-property and duplicate-key validation and requires parsers v2 with XGrammar >= 0.2.3. Structured-output schemas are unaffected. |
+
+If the backend advertises that it owns reasoning-aware grammar activation,
+explicitly selecting `structural_tag` is rejected to avoid applying both
+reasoning gates. Explicit `backend` selection assumes the inference engine is
+configured accordingly.
+
+`DYN_STRUCTURAL_TAG` accepts `true`, `false`, or the same JSON object. Unknown
+fields and invalid values are rejected during worker startup.
 
 ## Preserve Previous Behavior
 
-To disable optional structural guidance, pass the negated flag to the worker:
+To disable optional structural guidance, pass `false` to the worker:
 
 ```bash
-python3 -m dynamo.vllm ... --no-dyn-enable-structural-tag
-python3 -m dynamo.sglang ... --no-dyn-enable-structural-tag
-python3 -m dynamo.trtllm ... --no-dyn-enable-structural-tag
+python3 -m dynamo.vllm ... --dyn-structural-tag false
+python3 -m dynamo.sglang ... --dyn-structural-tag false
+python3 -m dynamo.trtllm ... --dyn-structural-tag false
+dynamo-sglang-sidecar ... --dyn-structural-tag false
 ```
 
 Or set the equivalent environment variable before starting the worker:
 
 ```bash
-export DYN_ENABLE_STRUCTURAL_TAG=false
+export DYN_STRUCTURAL_TAG=false
 ```
 
-Rust preprocessing still applies native tags to Kimi K2 `required`/named
-choices and Kimi K3 named choices when structural tags are disabled. Kimi K3
-named tags use the new argument-schema enforcement; the opt-out does not
-restore main's grammar. A lookahead pattern can still be rejected by XGrammar
+Rust preprocessing, including the native sidecars, still applies native tags to
+Kimi K2 `required`/named choices and Kimi K3 named choices when optional
+structural tags are disabled.
+A lookahead pattern can still be rejected by XGrammar
 0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
 Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
 choices and Kimi K3 `required` do not use this exception. Python vLLM and SGLang
@@ -121,12 +154,24 @@ To keep structural tags enabled but preserve the previous conditional activation
 policy, set the scope to `auto`:
 
 ```bash
-export DYN_STRUCTURAL_TAG_SCOPE=auto
+export DYN_STRUCTURAL_TAG='{"scope":"auto"}'
 ```
 
 With this scope, required and named tool choices remain eligible. Automatic tool
 choice uses structural tags only when a tool sets `strict: true` or the request
 sets `parallel_tool_calls` to `false`.
+
+The legacy `--dyn-enable-structural-tag`, `--no-dyn-enable-structural-tag`,
+`--dyn-structural-tag-scope`, and `--dyn-structural-tag-schema` flags and their
+environment variables remain accepted with a deprecation warning.
+
+The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
+as described in [CLI Flags](#cli-flags), but not the legacy flags or their
+environment variables. The SGLang sidecar uses the same default-on policy. The
+vLLM and TensorRT-LLM sidecars default to `false`: vLLM's gRPC server compiles
+structured outputs with guidance, which rejects these tags until
+vllm-project/vllm#61892, and the xgrammar version TensorRT-LLM pins rejects
+several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
 0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
@@ -147,6 +192,10 @@ Currently tested and supported:
 - `deepseek_v3_2`, `deepseek_v4`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
+- `glm47` with parsers v2
+
+The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
+a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
 
 Contributions adding structural tag support for new parsers are welcome.
 
@@ -155,16 +204,9 @@ frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
 
-> [!NOTE]
-> Native Rust sidecars retain their existing conservative `off`/`auto`
-> settings, including the native Kimi forced-tool exception described above,
-> and are not included in this default change. The default-on policy
-> applies when regular vLLM, SGLang, or TensorRT-LLM workers publish the
-> deployment runtime configuration consumed by frontend preprocessing.
-
 ## Activation Scope
 
-The `--dyn-structural-tag-scope` flag controls when structural tags are used
+The `scope` field controls when structural tags are used
 based on the request's `tool_choice`:
 
 ### `always` (default)
@@ -181,11 +223,44 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag on the Rust path only (see [below](#tool_choicenone-and-token-banning)) |
+| `none` | Exclusion tag only when tools remain in the prompt (see [below](#tool_choicenone-and-token-banning)) |
+
+## Request Validation
+
+By default, Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Strict client tools converted from `/v1/messages` use the same check. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+
+To retain legacy request admission during an upgrade, set `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` on the frontend. This skips strict function-schema preflight without requiring client changes, including definitions with optional properties, open objects, or `oneOf`. It applies to every model in the frontend process, including strict tools converted from `/v1/messages`, and preserves the submitted schema and `strict` declaration. Schema reference and complexity preflight checks are also skipped; basic tool validation, HTTP body limits, and downstream processor and backend checks remain active. This mode does not guarantee that a backend can enforce or compile the schema. See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#frontend-feature-switches).
+
+Use an object-only root. Close each object with `additionalProperties: false` and include every named property in `required`. These object checks also apply to nullable nested objects and schemas that declare `properties` or `patternProperties`. For example:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string", "minLength": 1}
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}
+```
+
+Preflight checks schema shapes, object constraints, nesting depth, and size budgets. It rejects root `anyOf`, the composition keywords `allOf`, `oneOf`, `not`, `dependentRequired`, `dependentSchemas`, `if`, `then`, and `else`, and the array keywords `uniqueItems`, `contains`, `minContains`, `maxContains`, and `unevaluatedItems` at any schema location. String patterns and formats, numeric bounds, `minItems`, and `maxItems` can pass preflight.
+
+Each supplied schema can declare at most 5,000 properties and 1,000 enum entries. Property names, definition names, string enum values, and string const values together can contain at most 120,000 Unicode characters. An all-string enum with more than 250 entries has a separate 15,000-character limit. Unused definitions count toward these budgets; repeated references do not add counts.
+
+Object schemas can be nested at most 10 levels below the root object. Only object schemas add a level; array, `anyOf`, and other schema-bearing keywords add none of their own. Dynamo counts literal nesting in the submitted document: a recursive reference does not add levels, and an object under `$defs` starts one level below the root, like a root property. OpenAI documents the same ten-level limit without stating whether the root counts; Dynamo does not count the root.
+
+Dynamo supports `#` and URI-fragment JSON Pointers to schema locations in the same document, including recursive object schemas. A `$ref` that also declares an object type must reach a target that closes the object with `additionalProperties: false`. Remote references, named-anchor references, `$dynamicRef`, `$recursiveRef`, direct reference cycles (a `$ref` chain that returns to itself without passing through a child schema), and references in schemas with nested identifier scopes are outside Dynamo's reference support. Root types that require broader composition analysis are also unsupported. These are Dynamo support limits, not a claim that OpenAI rejects those representations.
+
+Omitted, `null`, or `false` strictness retains existing behavior. Omitted or `null` parameters also retain existing behavior; an explicit `{}` is a supplied schema and fails the object-root check. Dynamo does not normalize or fill in the submitted schema.
+
+Passing preflight does not establish complete OpenAI compatibility or guarantee backend enforcement of every constraint. Structural-tag activation and the deployment schema mode remain separate controls.
+
+The keyword and reference exclusions above are the complete list of keywords rejected solely because they are present. Traversing a keyword such as `propertyNames`, `unevaluatedProperties`, or `prefixItems` checks its nested schemas; it does not establish OpenAI support for that keyword. Backend schema compilation can still reject a schema that passes these checks.
 
 ## Schema Modes
 
-The `--dyn-structural-tag-schema` flag controls what JSON schema is used for
+The `schema` field controls what JSON schema is used for
 tool arguments inside the structural tag:
 
 ### `auto` (default)
@@ -202,7 +277,7 @@ tool arguments inside the structural tag:
 
 If a model-native builder cannot safely represent part of a schema, it keeps
 the strongest safe tool envelope and relaxes that argument section. If the
-builder cannot produce a structural tag at all, Dynamo uses the existing
+builder cannot produce an automatically added tool-call tag, Dynamo uses the existing
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
 
@@ -246,19 +321,18 @@ This interacts with the `--exclude-tools-when-tool-choice-none` flag (default:
 | `exclude-tools-when-tool-choice-none` | Structural tag | Effect |
 |---|---|---|
 | `true` (default) | off | Tools removed from prompt. Model doesn't know about tools. Prompt changes break KV cache prefix sharing. |
-| `true` | on | Tools removed from prompt; tokens also banned. Prompt changes break KV cache prefix sharing. |
-| `false` | on | Tools stay in prompt; guided decoding bans tokens. Model sees tools but cannot emit banned openings. Stable KV cache prefix across different `tool_choice` values. |
+| `true` | on | Tools removed from prompt. Prompt changes break KV cache prefix sharing. |
+| `false` | on | Tools stay in prompt; guided decoding excludes tool-call markers. Model sees tools but cannot complete a native tool-call opening. Stable KV cache prefix across different `tool_choice` values. |
 | `false` | off | Tools stay in prompt; no token ban. Same response shaping as above: no structured `tool_calls` for explicit `none`. Tool-like text may still appear in `content`. |
 
 For multi-turn conversations where `tool_choice` changes between turns,
 consider `--no-exclude-tools-when-tool-choice-none` combined with
-`--dyn-enable-structural-tag` to keep the prompt stable and benefit from
+`--dyn-structural-tag` to keep the prompt stable and benefit from
 KV cache reuse.
 
 ## Example
 
-To pin the enabled state, scope, and schema explicitly, add the following flags
-to the worker `args:` alongside the parser:
+To pin the scope and schema, pass a JSON value to `--dyn-structural-tag`:
 
 ```yaml
   - name: SGLangWorker
@@ -283,11 +357,8 @@ to the worker `args:` alongside the parser:
           - Qwen/Qwen3.5-4B
           - --dyn-tool-call-parser
           - qwen3_coder
-          - --dyn-enable-structural-tag
-          - --dyn-structural-tag-scope
-          - always
-          - --dyn-structural-tag-schema
-          - strict
+          - --dyn-structural-tag
+          - '{"scope":"always","schema":"strict"}'
 ```
 
 ## See Also

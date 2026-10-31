@@ -128,6 +128,12 @@ fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
     Err(format!("{field} must be greater than or equal to {min}"))
 }
 
+fn validate_duration_secs(field: &str, value: f64) -> Result<(), String> {
+    Duration::try_from_secs_f64(value)
+        .map(|_| ())
+        .map_err(|error| format!("{field} is not a valid duration: {error}"))
+}
+
 fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {
     if value.is_finite() && value >= 0.0 {
         return Ok(());
@@ -1456,7 +1462,7 @@ impl KvRouterConfig {
             1.0,
         )?;
         validate_finite_non_negative("router_temperature", self.router_temperature)?;
-        validate_min("router_ttl_secs", self.router_ttl_secs, 0.0)?;
+        validate_duration_secs("router_ttl_secs", self.router_ttl_secs)?;
         if let Some(value) = self.router_queue_threshold {
             validate_min("router_queue_threshold", value, 0.0)?;
         }
@@ -1467,7 +1473,7 @@ impl KvRouterConfig {
             validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
         }
         if let Some(value) = self.router_predicted_ttl_secs {
-            validate_min("router_predicted_ttl_secs", value, 0.0)?;
+            validate_duration_secs("router_predicted_ttl_secs", value)?;
         }
         validate_range(
             "conditional_disagg_eff_isl_ratio_threshold",
@@ -1943,6 +1949,34 @@ mod tests {
         assert!(error.contains("expected 'none' or 'ais'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
+    }
+
+    #[test]
+    fn dynamo_env_config_validates_ttl_durations() {
+        for (variable, field) in [
+            ("DYN_ROUTER_TTL_SECS", "router_ttl_secs"),
+            ("DYN_ROUTER_PREDICTED_TTL_SECS", "router_predicted_ttl_secs"),
+        ] {
+            for value in ["-1", "NaN", "inf", "1e100"] {
+                let config = config_from_values(&[(variable, value)]);
+                let error = config.validate_config().unwrap_err();
+                assert!(error.contains(field), "{variable}={value}: {error}");
+            }
+            for value in ["0", "0.125", "120"] {
+                let config = config_from_values(&[(variable, value)]);
+                assert!(config.validate_config().is_ok(), "{variable}={value}");
+            }
+        }
+    }
+
+    #[test]
+    fn serde_rejects_unrepresentable_ttl_durations() {
+        for field in ["router_ttl_secs", "router_predicted_ttl_secs"] {
+            let mut value = serde_json::to_value(KvRouterConfig::default()).unwrap();
+            value[field] = serde_json::json!(1e100);
+            let error = serde_json::from_value::<KvRouterConfig>(value).unwrap_err();
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
     }
 
     #[test]

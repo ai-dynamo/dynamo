@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -20,6 +21,7 @@ import (
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 )
 
 func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
@@ -31,15 +33,22 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1 to scheme: %v", err)
 	}
+	if err := v1beta2.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta2 to scheme: %v", err)
+	}
 	handler := webhookconversion.NewWebhookHandler(scheme, webhookconversion.NewRegistry())
 
-	alphaVersion, betaVersion := v1alpha1.GroupVersion.String(), v1beta1.GroupVersion.String()
+	alphaVersion := v1alpha1.GroupVersion.String()
+	betaVersion := v1beta1.GroupVersion.String()
+	beta2Version := v1beta2.GroupVersion.String()
 	for _, test := range []struct {
 		kind, sourceVersion, destinationVersion string
 	}{
 		{"DynamoGraphDeployment", alphaVersion, betaVersion},
 		{"DynamoComponentDeployment", alphaVersion, betaVersion},
 		{"DynamoGraphDeploymentRequest", alphaVersion, betaVersion},
+		{"DynamoGraphDeploymentRequest", beta2Version, alphaVersion},
+		{"DynamoGraphDeploymentRequest", alphaVersion, beta2Version},
 		{"DynamoGraphDeployment", betaVersion, alphaVersion},
 	} {
 		t.Run(test.kind+"/"+test.destinationVersion, func(t *testing.T) {
@@ -56,10 +65,8 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 
 			t.Log("Submit the partial object to the conversion webhook")
 			review := apiextensionsv1.ConversionReview{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiextensionsv1.SchemeGroupVersion.String(),
-					Kind:       "ConversionReview",
-				},
+				APIVersion: apiextensionsv1.SchemeGroupVersion.String(),
+				Kind:       "ConversionReview",
 				Request: &apiextensionsv1.ConversionRequest{
 					UID:               types.UID("partial-" + test.kind),
 					DesiredAPIVersion: test.destinationVersion,
@@ -115,5 +122,84 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 				t.Fatalf("converted metadata = %v, want empty object", metadataMap)
 			}
 		})
+	}
+}
+
+func TestV1Beta2EnvelopeRoundTripsThroughV1Alpha1(t *testing.T) {
+	t.Log("Create a native v1beta2 request and move it into the v1beta1 storage envelope")
+	src := &v1beta2.DynamoGraphDeploymentRequest{
+		Name:      "structural-alpha-carrier",
+		Namespace: "default",
+		Spec: v1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: v1beta2.NativeSearchInput{
+				Model: &v1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+			},
+		},
+		Status: v1beta2.DynamoGraphDeploymentRequestStatus{ObservedGeneration: 4},
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("convert v1beta2 to storage: %v", err)
+	}
+
+	t.Log("Convert storage to v1alpha1 and require public structural envelopes")
+	alpha := &v1alpha1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertFrom(hub); err != nil {
+		t.Fatalf("convert storage to v1alpha1: %v", err)
+	}
+	if alpha.Spec.V1Beta2 == nil || alpha.Status.V1Beta2 == nil {
+		t.Fatalf("v1alpha1 carrier is missing structural envelopes: %#v", alpha)
+	}
+	if len(alpha.Annotations) != 0 {
+		t.Fatalf("v1alpha1 carrier leaked private conversion annotations: %v", alpha.Annotations)
+	}
+
+	t.Log("Write the v1alpha1 carrier back and restore the complete native v1beta2 payload")
+	roundTripHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertTo(roundTripHub); err != nil {
+		t.Fatalf("convert v1alpha1 to storage: %v", err)
+	}
+	dst := &v1beta2.DynamoGraphDeploymentRequest{}
+	if err := dst.ConvertFrom(roundTripHub); err != nil {
+		t.Fatalf("restore v1beta2: %v", err)
+	}
+	if !reflect.DeepEqual(src.Spec, dst.Spec) || !reflect.DeepEqual(src.Status, dst.Status) {
+		t.Fatalf("v1beta2 payload changed through v1alpha1\nwant: %#v\n got: %#v", src, dst)
+	}
+}
+
+func TestV1Beta2EmptyStatusRoundTripsThroughV1Alpha1(t *testing.T) {
+	t.Log("Create a native v1beta2 request with an empty status")
+	src := &v1beta2.DynamoGraphDeploymentRequest{
+		Spec: v1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: v1beta2.NativeSearchInput{
+				Model: &v1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("convert v1beta2 to storage: %v", err)
+	}
+
+	t.Log("Read and write the request through v1alpha1 without manufacturing native status")
+	alpha := &v1alpha1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertFrom(hub); err != nil {
+		t.Fatalf("convert storage to v1alpha1: %v", err)
+	}
+	if !reflect.DeepEqual(alpha.Status, v1alpha1.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("v1alpha1 status = %#v, want empty", alpha.Status)
+	}
+	roundTripHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertTo(roundTripHub); err != nil {
+		t.Fatalf("convert v1alpha1 to storage: %v", err)
+	}
+
+	dst := &v1beta2.DynamoGraphDeploymentRequest{}
+	if err := dst.ConvertFrom(roundTripHub); err != nil {
+		t.Fatalf("restore v1beta2: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Status, v1beta2.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("v1beta2 status = %#v, want empty", dst.Status)
 	}
 }

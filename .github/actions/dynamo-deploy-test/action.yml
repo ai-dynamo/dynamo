@@ -61,6 +61,14 @@ inputs:
     description: 'Name of a pre-existing PVC to mount as a shared model cache on worker pods (sets HF_HOME). Empty downloads from HuggingFace.'
     required: false
     default: ''
+  dd_api_key:
+    description: 'Datadog API key for Test Optimization. Optional — without it the tests run exactly as before, just unreported.'
+    required: false
+    default: ''
+  dd_env:
+    description: 'Datadog env tag for test sessions (DD_ENV). Scopes Test Optimization settings per (service, env).'
+    required: false
+    default: 'ci'
   extra_pytest_args:
     description: 'Additional pytest arguments (e.g., -m framework_only)'
     required: false
@@ -119,6 +127,22 @@ runs:
         DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
         DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+        # Datadog Test Optimization. ddtrace is already installed — the step
+        # above installs container/deps/requirements.test.txt, which pins it —
+        # so this is configuration only, matching shared-test.yml.
+        DD_SERVICE: ai-dynamo
+        DD_ENV: ${{ inputs.dd_env }}
+        DD_API_KEY: ${{ inputs.dd_api_key }}
+        DD_SITE: datadoghq.com
+        DD_CIVISIBILITY_ENABLED: 'true'
+        # Upload straight to the Datadog intake using DD_API_KEY. The deploy runner
+        # has no Datadog Agent to relay through, so without this ddtrace would
+        # look for one on localhost:8126 and the results would never arrive.
+        DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
+        DD_CIVISIBILITY_ITR_ENABLED: 'false'
+        DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
+        # Links the test session to this job in the Datadog UI.
+        JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
       run: |
         mkdir -p test-results
 
@@ -143,8 +167,35 @@ runs:
           TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
         fi
 
+        # Datadog takes ci.job.name from $GITHUB_JOB, which for the callers that
+        # route through shared-deploy-test.yml is the inner job id, so every
+        # deploy lane would land under one name. Tag the lane explicitly.
+        # Composed here rather than inline in DD_TAGS because that value is
+        # comma-separated and the parts may contain commas and spaces.
+        slug() {
+          printf '%s' "$1" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -c 'a-z0-9._-' '-' \
+            | tr -s '-' \
+            | sed 's/^-//; s/-$//'
+        }
+        LANE="$(slug "deploy-${TEST_NAME}-${DYNAMO_TEST_PLATFORM}")"
+        export DD_TAGS="team:dynamo,lane:${LANE},test_suite:$(slug "${FRAMEWORK:-deploy}")"
+
+        # Only enable the plugin when a key is present; without it ddtrace
+        # computes a session and silently drops it, which is how the last
+        # reporting gap went unnoticed.
+        DD_ARGS=""
+        if [ -n "${DD_API_KEY:-}" ]; then
+          DD_ARGS="--ddtrace"
+          echo "Datadog lane tag: ${LANE}"
+        else
+          echo "DD_API_KEY unset - deploy test runs unreported to Datadog."
+        fi
+
         python -m pytest "${TEST_FILE}" \
           --namespace="${NAMESPACE}" \
+          ${DD_ARGS} \
           ${PYTEST_ARGS} \
           ${EXTRA_PYTEST_ARGS} \
           -v -s \

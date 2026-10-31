@@ -18,11 +18,16 @@ import json
 import logging
 import math
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
+import uuid
 import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
+from fractions import Fraction
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
@@ -30,14 +35,17 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.engine_metrics import EngineMetrics
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import (
     RouterNvextExpectation,
+    parse_sse_json_chunks,
     require_router_worker_id,
     validate_router_nvext,
 )
+from tests.utils.sglang_generate import assert_native_stream
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +97,12 @@ class BasePayload:
     def body_for_iteration(self, _iteration: int) -> Dict[str, Any]:
         """Return the request body for one repeat_count iteration."""
         return self.body
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        """Bind deployment-specific connection settings before requests run."""
+
+    def before_request(self) -> None:
+        """Prepare observations immediately before each HTTP request attempt."""
 
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
@@ -145,6 +159,157 @@ class HttpErrorPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return response.text
+
+
+@dataclass
+class HttpCancellationPayload(BasePayload):
+    """Disconnect an HTTP stream after its first content, before completion.
+
+    Follow this with a normal chat payload to verify public recovery behavior.
+    With metrics, also require early engine cleanup. Without metrics this does
+    not assert that the engine stopped generating or reclaimed resources.
+    """
+
+    metrics: EngineMetrics | None = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    timeout: int = 30
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
+
+    def _sampling_params(self) -> dict:
+        return self.body
+
+    def _generated_content(self, chunk: dict) -> str:
+        for choice in chunk.get("choices", []):
+            assert choice.get("finish_reason") is None, (
+                "Generation finished before cancellation",
+                choice,
+            )
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or delta.get("reasoning_content") or ""
+            if content:
+                return content
+        return ""
+
+    def before_request(self) -> None:
+        params = self._sampling_params()
+        if not self.http_stream or self.body.get("stream") is not True:
+            raise ValueError("Cancellation requires a streaming request")
+        if params.get("ignore_eos") is not True or params.get("n", 1) != 1:
+            raise ValueError("Cancellation requires ignore_eos=True and n=1")
+        max_tokens = params.get("max_tokens")
+        if type(max_tokens) is not int or max_tokens <= 1:
+            raise ValueError("Cancellation requires max_tokens > 1")
+        if self.max_attempts != 1:
+            raise ValueError("Cancellation checks must not retry failed assertions")
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(max_tokens)
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
+
+    def response_handler(self, response: requests.Response) -> str:
+        try:
+            if self.metrics is not None and self._before is None:
+                raise RuntimeError("before_request must run before cancellation")
+            response.raise_for_status()
+            deadline = time.monotonic() + self.timeout
+            content = ""
+            # Keep the stream iterator alive until the explicit response.close().
+            lines = response.iter_lines(chunk_size=1)
+            for line in lines:
+                assert time.monotonic() < deadline, "No content before cancellation"
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                assert data != b"[DONE]", "Generation finished before cancellation"
+                chunk = json.loads(data)
+                assert "error" not in chunk, chunk
+                content = self._generated_content(chunk)
+                if content:
+                    break
+            assert content, "Stream ended without generated content"
+            if self.metrics is not None:
+                self.metrics.wait_for_scheduler(is_active=True)
+        finally:
+            response.close()
+        if self.metrics is not None:
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
+        return content
+
+
+@dataclass
+class SGLangGenerateCancellationPayload(HttpCancellationPayload):
+    """Cancel native SGLang generation through the Dynamo HTTP frontend."""
+
+    endpoint: str = "/generate"
+
+    def with_model(self, model):
+        return deepcopy(self)
+
+    def _sampling_params(self) -> dict:
+        params = self.body["sampling_params"]
+        return {**params, "max_tokens": params["max_new_tokens"]}
+
+    def _generated_content(self, chunk: dict) -> str:
+        assert chunk["meta_info"].get("finish_reason") is None, chunk
+        output_ids = chunk["output_ids"]
+        return json.dumps(output_ids) if output_ids else ""
+
+
+@dataclass
+class SGLangGenerateRecoveryPayload(BasePayload):
+    """Validate native streaming output and engine progress after cancellation."""
+
+    metrics: EngineMetrics = field(kw_only=True)
+    endpoint: str = "/generate"
+    http_stream: bool = True
+    _before: float | None = field(default=None, init=False, repr=False)
+
+    def with_model(self, model):
+        return deepcopy(self)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self.metrics.bind_environment(env)
+
+    def before_request(self) -> None:
+        self.metrics.wait_for_scheduler()
+        self._before = self.metrics.progress()
+
+    def response_handler(self, response: requests.Response) -> str:
+        assert self._before is not None, "before_request must run before recovery"
+        events = []
+        is_finished = False
+        for line in response.iter_lines():
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            assert not is_finished, "Response continued after [DONE]"
+            if data == b"[DONE]":
+                is_finished = True
+                continue
+            event = json.loads(data)
+            assert not event.get("error"), event
+            events.append(event)
+        assert is_finished, "Native stream ended without [DONE]"
+        output_ids = assert_native_stream(
+            events, prompt_tokens=len(self.body["input_ids"])
+        )
+        max_tokens = self.body["sampling_params"]["max_new_tokens"]
+        assert len(output_ids) == max_tokens, events
+        assert all(
+            event["meta_info"].get("finish_reason") is None for event in events[:-1]
+        ), events
+        assert events[-1]["meta_info"]["finish_reason"]["type"] == "length", events[-1]
+        self.metrics.wait_for_scheduler()
+        self.metrics.assert_recovered(before=self._before, max_tokens=max_tokens)
+        return json.dumps(events)
 
 
 @dataclass
@@ -219,8 +384,73 @@ class ChatPayload(BasePayload):
         )
 
 
+@dataclass
+class StopStringChatPayload(ChatPayload):
+    """End a chat completion on its single stop string.
+
+    Checks the finish reason and that the output ends at the stop string,
+    keeping it only with include_stop_str_in_output. With metrics, also
+    requires the engine to stop at the match instead of running to max_tokens.
+    """
+
+    metrics: EngineMetrics | None = field(default=None, kw_only=True)
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
+
+    def before_request(self) -> None:
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(
+                self.body["max_tokens"]
+            )
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        (stop,) = self.body["stop"]
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop", choice
+        if self.body.get("include_stop_str_in_output") is True:
+            assert content.endswith(stop), f"Expected output to end with {stop!r}"
+        else:
+            assert stop not in content, f"Expected {stop!r} trimmed from output"
+        if self.metrics is not None:
+            assert self._before is not None, "before_request must run first"
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
+
+
+def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
+    usage = result.get("usage")
+    assert isinstance(usage, dict), f"Missing usage: {result!r}"
+    nvext = result.get("nvext") or {}
+    for kind in ("completion", "prompt"):
+        count = usage.get(f"{kind}_tokens")
+        assert type(count) is int and count > 0, usage
+        field = f"{kind}_token_ids"
+        token_ids = nvext.get(field)
+        assert isinstance(token_ids, list) and all(
+            type(token) is int and token >= 0 for token in token_ids
+        ), f"Missing or invalid {field}: {token_ids!r}"
+        assert (
+            len(token_ids) == count
+        ), f"{field} count does not match usage: {token_ids!r}, {usage!r}"
+    assert usage.get("total_tokens") == (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    ), f"Inconsistent total token usage: {usage!r}"
+
+
+@dataclass
 class DisaggregatedChatPayload(ChatPayload):
     """Require a completed chat request served by distinct prefill and decode workers."""
+
+    expected_finish_reason: str | None = None
+    expected_completion_tokens: int | None = None
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -232,6 +462,10 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError("Completion is empty")
         if choices[0].get("finish_reason") not in {"stop", "length"}:
             raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+        if self.expected_finish_reason is not None:
+            assert (
+                choices[0]["finish_reason"] == self.expected_finish_reason
+            ), f"Expected finish reason {self.expected_finish_reason!r}: {choices[0]!r}"
 
         usage = result.get("usage")
         if not isinstance(usage, dict):
@@ -244,6 +478,17 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected decode to generate more than the prefill token: {usage!r}"
             )
+        if self.expected_completion_tokens is not None:
+            assert (
+                completion_tokens == self.expected_completion_tokens
+            ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
+            _validate_chat_token_usage(result)
+        if self.body.get("logprobs"):
+            logprobs = (choices[0].get("logprobs") or {}).get("content")
+            _validate_chat_logprobs(logprobs)
+            assert [item["token_id"] for item in logprobs] == result["nvext"][
+                "completion_token_ids"
+            ], "Handoff logprobs do not match completion token positions"
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
@@ -253,6 +498,324 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected distinct prefill and decode workers: {dict(workers)!r}"
             )
+
+
+@dataclass
+class KvTransferPayload(DisaggregatedChatPayload):
+    """Require a fresh completed KV transfer for this frontend request."""
+
+    prefill_metrics: EngineMetrics = field(kw_only=True)
+    decode_metrics: EngineMetrics = field(kw_only=True)
+    transfer_metrics: EngineMetrics = field(kw_only=True)
+    _transfer_before: float | None = field(default=None, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        for metrics in (
+            self.prefill_metrics,
+            self.decode_metrics,
+            self.transfer_metrics,
+        ):
+            metrics.bind_environment(env)
+
+    def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        body = deepcopy(super().body_for_iteration(iteration))
+        message = body["messages"][0]
+        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+        return body
+
+    def before_request(self) -> None:
+        self.prefill_metrics.wait_for_scheduler()
+        self.decode_metrics.wait_for_scheduler()
+        self._transfer_before = self.transfer_metrics.transfer_progress()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        assert (
+            self._transfer_before is not None
+        ), "Missing pre-request transfer baseline"
+        self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
+        self.decode_metrics.wait_for_scheduler()
+        self.prefill_metrics.wait_for_scheduler()
+
+
+_KV_ROUTING_PROMPTS = (
+    "Amber rabbits explore quiet meadows. " * 96,
+    "Violet submarines navigate distant oceans. " * 96,
+)
+
+
+@dataclass
+class _KvRoutingPayload(ChatPayload):
+    """Warm two routing targets, then require their cached prefixes to route back."""
+
+    routed_workers: tuple[int, ...] = field(kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _targets: list[tuple[int, int]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._env = env
+
+    def _generate_instances(self, counts: dict[str, int]) -> dict[str, list[int]]:
+        """Return frontend-discovered generate instance IDs once each component has its count."""
+        deadline = time.monotonic() + 60
+        instances: dict[str, list[int]] = {component: [] for component in counts}
+        while time.monotonic() < deadline:
+            try:
+                response = requests.get(
+                    f"http://{self.host}:{self.port}/health?instances=true", timeout=5
+                )
+                if response.status_code == 200:
+                    health = response.json()
+                    instances = {
+                        component: sorted(
+                            {
+                                instance["instance_id"]
+                                for instance in health["instances"]
+                                if instance["namespace"] == self._env["DYN_NAMESPACE"]
+                                and instance["endpoint"] == "generate"
+                                and instance["component"] == component
+                            }
+                        )
+                        for component in counts
+                    }
+                    if all(
+                        len(instances[component]) >= count
+                        for component, count in counts.items()
+                    ):
+                        break
+            except requests.RequestException:
+                pass
+            time.sleep(0.25)
+        for component, count in counts.items():
+            assert len(instances[component]) == count, instances
+        return instances
+
+    def _stored_event_counts(self) -> dict[int, tuple[float, float]]:
+        """Read each routed worker's received and accepted Stored-event counters."""
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        counts = {}
+        for worker in self.routed_workers:
+            port = self._env[f"DYN_SYSTEM_PORT{worker}"]
+            response = requests.get(f"http://{self.host}:{port}/metrics", timeout=5)
+            response.raise_for_status()
+            received, accepted = (
+                sum_metric_samples(
+                    response.text, metric_name, {"stage": stage, "event_type": "stored"}
+                )
+                for stage in ("received", "accepted")
+            )
+            counts[worker] = (received, accepted)
+        return counts
+
+    def _send_routed(
+        self,
+        prompt: str,
+        *,
+        headers: dict[str, str] | None = None,
+        is_query_only: bool = False,
+    ) -> tuple[Any, dict[str, Any], bool]:
+        """Send one streamed request and return its router selection, nvext and text flag."""
+        response = requests.post(
+            self.url(),
+            json={
+                "model": self.body["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 8,
+                "temperature": 0,
+                "stream": True,
+                "nvext": {
+                    "extra_fields": ["worker_id", "timing"],
+                    "annotations": ["query_instance_id:"] if is_query_only else [],
+                },
+            },
+            headers=headers,
+            timeout=30,
+        )
+        assert response.status_code == 200, response.text
+        assert "data: [DONE]" in response.text, response.text
+        nvext: dict[str, Any] = {}
+        has_generated_text = False
+        for chunk in parse_sse_json_chunks(response.text):
+            assert "error" not in chunk, chunk
+            nvext.update(chunk.get("nvext") or {})
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta") or {}
+                has_generated_text |= any(
+                    delta.get(name)
+                    for name in ("content", "reasoning_content", "reasoning")
+                )
+        return require_router_worker_id({"nvext": nvext}), nvext, has_generated_text
+
+    @staticmethod
+    def _hit_rate(nvext: dict[str, Any], has_generated_text: bool) -> float:
+        assert has_generated_text, "Request completed without generating text"
+        hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+        assert isinstance(hit_rate, (int, float)), nvext
+        assert 0 <= hit_rate <= 1, nvext
+        return hit_rate
+
+    def _send(self, prompt: str, target: tuple[int, int] | None = None):
+        raise NotImplementedError
+
+    def _warm_and_wait_for_kv_events(self) -> None:
+        """Warm each target with its prompt until its Stored events reach the router."""
+        targets = self._targets
+        baselines = self._stored_event_counts()
+        for prompt, target in zip(_KV_ROUTING_PROMPTS, targets):
+            selected, _ = self._send(prompt, target)
+            assert selected == target, (selected, target)
+        deadline = time.monotonic() + 60
+        observed: list[tuple[tuple[int, int], float]] = []
+        counts: dict[int, tuple[float, float]] = {}
+        while time.monotonic() < deadline:
+            # Pinned completions expose timing without warming the other target.
+            observed = [
+                self._send(prompt, target)
+                for prompt, target in zip(_KV_ROUTING_PROMPTS, targets)
+            ]
+            counts = self._stored_event_counts()
+            if all(
+                selected == expected and hit_rate >= 0.5
+                for (selected, hit_rate), expected in zip(observed, targets)
+            ) and all(
+                all(
+                    current > baseline
+                    for current, baseline in zip(counts[worker], baselines[worker])
+                )
+                for worker in self.routed_workers
+            ):
+                return
+            time.sleep(0.1)
+        raise AssertionError(
+            f"KV events did not converge: expected targets={targets}, "
+            f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+        )
+
+    def _assert_prefixes_route_to_cache(self) -> None:
+        for prompt_index in (0, 0, 1, 0, 1, 1):
+            selected, hit_rate = self._send(_KV_ROUTING_PROMPTS[prompt_index])
+            expected = self._targets[prompt_index]
+            assert selected == expected, (prompt_index, selected, self._targets)
+            assert hit_rate >= 0.5, (prompt_index, selected, hit_rate)
+
+
+@dataclass
+class KvRoutingPayload(_KvRoutingPayload):
+    """Require engine KV events to route repeated prefixes to the cached worker or DP rank."""
+
+    block_size: int = field(kw_only=True)
+    dp_ranks: tuple[int, ...] = field(default=(0,), kw_only=True)
+
+    def _send(
+        self,
+        prompt: str,
+        target: tuple[int, int] | None = None,
+        *,
+        is_query_only: bool = False,
+    ) -> tuple[tuple[int, int], float | None]:
+        headers = None
+        if target is not None:
+            headers = {
+                "x-dynamo-worker-instance-id": str(target[0]),
+                "x-dynamo-dp-rank": str(target[1]),
+            }
+        selected, nvext, has_generated_text = self._send_routed(
+            prompt, headers=headers, is_query_only=is_query_only
+        )
+        selected_target = (selected["prefill_worker_id"], selected["prefill_dp_rank"])
+        assert selected_target in self._targets, selected
+        assert (
+            selected["decode_worker_id"],
+            selected["decode_dp_rank"],
+        ) == selected_target, selected
+        if is_query_only:
+            assert not has_generated_text, nvext
+            assert len(nvext.get("token_ids", [])) >= self.block_size * 4, nvext
+            return selected_target, None
+        return selected_target, self._hit_rate(nvext, has_generated_text)
+
+    def final_validation(self) -> None:
+        assert len(self.routed_workers) * len(self.dp_ranks) == 2
+        workers = self._generate_instances({"backend": len(self.routed_workers)})
+        self._targets = [
+            (worker_id, rank)
+            for worker_id in workers["backend"]
+            for rank in self.dp_ranks
+        ]
+        for prompt in _KV_ROUTING_PROMPTS:
+            self._send(prompt, is_query_only=True)
+        self._warm_and_wait_for_kv_events()
+        for prompt, target in zip(_KV_ROUTING_PROMPTS, self._targets):
+            selected, _ = self._send(prompt, is_query_only=True)
+            assert selected == target, (selected, target)
+        self._assert_prefixes_route_to_cache()
+
+
+@dataclass
+class DisaggregatedKvRoutingPayload(_KvRoutingPayload):
+    """Require routing to the cached prefill worker and a fresh KV transfer to decode."""
+
+    # vLLM counts KV transfers on decode engines and SGLang on prefill engines.
+    transfer_metrics: tuple[EngineMetrics, ...] = field(kw_only=True)
+    _decode_ids: list[int] = field(default_factory=list, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        super().bind_environment(env)
+        for metrics in self.transfer_metrics:
+            metrics.bind_environment(env)
+
+    def _transfer_total(self) -> float:
+        return sum(metrics.transfer_progress() for metrics in self.transfer_metrics)
+
+    def _send(
+        self, prompt: str, target: tuple[int, int] | None = None
+    ) -> tuple[tuple[int, int], float]:
+        # Keep the cached prefix while forcing at least one fresh KV block.
+        prompt += f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
+        headers = None
+        if target is not None:
+            headers = {
+                "x-dynamo-prefill-instance-id": str(target[0]),
+                "x-dynamo-prefill-dp-rank": str(target[1]),
+            }
+        # Pinned requests warm both prefill engines; routed requests must transfer.
+        before = None if target is not None else self._transfer_total()
+        selected, nvext, has_generated_text = self._send_routed(prompt, headers=headers)
+        selected_target = (selected["prefill_worker_id"], selected["prefill_dp_rank"])
+        assert selected_target in self._targets, selected
+        assert selected["decode_worker_id"] in self._decode_ids, selected
+        if before is not None:
+            deadline = time.monotonic() + 10
+            while self._transfer_total() <= before:
+                assert time.monotonic() < deadline, (
+                    "No completed KV transfer for routed request",
+                    selected,
+                )
+                time.sleep(0.05)
+        return selected_target, self._hit_rate(nvext, has_generated_text)
+
+    def final_validation(self) -> None:
+        assert len(self.routed_workers) == 2
+        workers = self._generate_instances({"prefill": 2, "backend": 2})
+        self._decode_ids = workers["backend"]
+        assert set(workers["prefill"]).isdisjoint(self._decode_ids), workers
+        self._targets = [(worker_id, 0) for worker_id in workers["prefill"]]
+        self._warm_and_wait_for_kv_events()
+        self._assert_prefixes_route_to_cache()
+
+
+class OmittedMaxTokensChatPayload(ChatPayload):
+    """Require more output than SGLang's 128-token default when `max_tokens` is omitted."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        usage = response.json()["usage"]
+        assert usage["completion_tokens"] > 128, usage
 
 
 class RouterNvextChatPayload(ChatPayload):
@@ -276,6 +839,21 @@ class RouterNvextChatPayload(ChatPayload):
         )
 
 
+def _validate_chat_logprobs(content_logprobs) -> None:
+    assert content_logprobs, "Missing or empty requested output logprobs"
+    for item in content_logprobs:
+        candidates = item["top_logprobs"]
+        for entry in [item, *candidates]:
+            value = entry["logprob"]
+            assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
+            assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
+            assert "bytes" in entry, f"Missing token bytes: {entry!r}"
+            if entry["bytes"] is not None:
+                assert isinstance(
+                    entry["bytes"], list
+                ), f"Invalid token bytes: {entry!r}"
+
+
 @dataclass
 class ChatPayloadWithLogprobs(ChatPayload):
     """Chat payload that validates logprobs in response."""
@@ -291,9 +869,18 @@ class ChatPayloadWithLogprobs(ChatPayload):
         assert "logprobs" in choice, "Missing 'logprobs' in choice"
 
         logprobs_data = choice["logprobs"]
+        requested_top_logprobs = self.body.get("top_logprobs") or 0
+        if requested_top_logprobs > 0:
+            assert (
+                logprobs_data is not None
+            ), "Expected logprobs for top_logprobs request"
         if logprobs_data is not None:
             assert "content" in logprobs_data, "Missing 'content' in logprobs"
             content_logprobs = logprobs_data["content"]
+            if requested_top_logprobs > 0:
+                assert (
+                    content_logprobs
+                ), "Expected logprobs content for top_logprobs request"
 
             if content_logprobs:
                 # Validate structure of logprobs
@@ -303,6 +890,11 @@ class ChatPayloadWithLogprobs(ChatPayload):
                     assert (
                         "top_logprobs" in item
                     ), "Missing 'top_logprobs' in logprobs content"
+
+                    if requested_top_logprobs > 0:
+                        assert item[
+                            "top_logprobs"
+                        ], "Expected top_logprobs alternatives"
 
                     # Sanity check: logprob should be valid (not nan/inf/positive)
                     logprob_val = item["logprob"]
@@ -340,8 +932,156 @@ class ChatPayloadWithLogprobs(ChatPayload):
                             ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
 
                 logger.info(
-                    f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                    f"Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
+
+
+@dataclass
+class StreamingChatPayload(BasePayload):
+    """Validate a complete chat SSE stream, including requested token metadata."""
+
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    expected_finish_reason: str | None = None
+    expected_completion_tokens: int | None = None
+    min_token_chunks: int = 0
+
+    def process_response(self, response: Any) -> str:
+        try:
+            return super().process_response(response)
+        finally:
+            response.close()
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_parts = []
+        output_logprobs = []
+        completion_ids = []
+        terminal_nvext = {}
+        finish_reason = None
+        usage = None
+        is_done = False
+        token_chunks = 0
+        fields = self.body.get("nvext", {}).get("extra_fields", [])
+        deadline = time.monotonic() + self.timeout
+        for line in response.iter_lines(chunk_size=1):
+            assert (
+                time.monotonic() < deadline
+            ), f"Chat stream exceeded its {self.timeout}s deadline"
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if not line.startswith("data:"):
+                continue
+            assert not is_done, "Received data after [DONE]"
+            data = line[5:].strip()
+            if data == "[DONE]":
+                is_done = True
+                continue
+            chunk = json.loads(data)
+            assert "error" not in chunk, f"Stream error: {chunk!r}"
+            choices = chunk["choices"]
+            nvext = chunk.get("nvext") or {}
+            chunk_ids = nvext.get("completion_token_ids") or []
+            chunk_logprobs = []
+            completion_ids.extend(chunk_ids)
+            if choices:
+                assert finish_reason is None, "Received choices after terminal chunk"
+                assert len(choices) == 1 and choices[0]["index"] == 0, chunk
+                choice = choices[0]
+                content_parts.append(choice["delta"].get("content") or "")
+                logprobs = choice.get("logprobs") or {}
+                chunk_logprobs = logprobs.get("content") or []
+                output_logprobs.extend(chunk_logprobs)
+                finish_reason = choice.get("finish_reason")
+                if finish_reason is not None:
+                    terminal_nvext = nvext
+                else:
+                    assert (
+                        nvext.get("prompt_logprobs") is None
+                    ), "Prompt logprobs must appear only on the terminal chunk"
+            if chunk_ids or chunk_logprobs:
+                token_chunks += 1
+            if "completion_token_ids" in fields and self.body.get("logprobs"):
+                assert [
+                    item["token_id"] for item in chunk_logprobs
+                ] == chunk_ids, "Output logprobs do not match this chunk's completion token positions"
+            if chunk.get("usage") is not None:
+                assert finish_reason is not None, "Usage arrived before completion"
+                assert usage is None, "Duplicate terminal usage"
+                usage = chunk["usage"]
+
+        assert is_done, "Stream ended without [DONE]"
+        assert (
+            token_chunks >= self.min_token_chunks
+        ), f"Expected at least {self.min_token_chunks} token-bearing chunks, got {token_chunks}"
+        assert finish_reason in {
+            "stop",
+            "length",
+        }, f"Missing or unexpected finish reason: {finish_reason!r}"
+        if self.expected_finish_reason is not None:
+            assert finish_reason == self.expected_finish_reason
+        content = "".join(content_parts)
+        assert content.strip(), "Stream returned no content"
+        if self.body.get("stream_options", {}).get("include_usage"):
+            assert usage is not None, "Missing terminal usage"
+            for key in ("prompt_tokens", "completion_tokens"):
+                assert type(usage[key]) is int and usage[key] > 0, usage
+            assert usage["total_tokens"] == (
+                usage["prompt_tokens"] + usage["completion_tokens"]
+            ), usage
+            if self.expected_completion_tokens is not None:
+                assert usage["completion_tokens"] == self.expected_completion_tokens
+        if self.body.get("logprobs"):
+            _validate_chat_logprobs(output_logprobs)
+            if (self.body.get("top_logprobs") or 0) > 0:
+                assert all(
+                    item["top_logprobs"] for item in output_logprobs
+                ), "Expected top_logprobs alternatives"
+        if "completion_token_ids" in fields:
+            assert completion_ids, "Missing requested completion token IDs"
+            assert all(type(token) is int and token >= 0 for token in completion_ids)
+            if usage is not None:
+                assert len(completion_ids) == usage["completion_tokens"]
+            if self.body.get("logprobs") and self.body.get(
+                "return_tokens_as_token_ids"
+            ):
+                for item in output_logprobs:
+                    assert item["token"] == f"token_id:{item['token_id']}"
+                    candidates = item["top_logprobs"]
+                    for entry in candidates:
+                        assert entry["token"].startswith("token_id:")
+                        assert int(entry["token"].removeprefix("token_id:")) >= 0
+                        if entry["token"] == item["token"]:
+                            assert entry["logprob"] == item["logprob"]
+        if "prompt_token_ids" in fields:
+            prompt_ids = terminal_nvext.get("prompt_token_ids")
+            assert prompt_ids, "Missing requested prompt token IDs"
+            assert all(type(token) is int and token >= 0 for token in prompt_ids)
+            if usage is not None:
+                assert (
+                    len(prompt_ids) == usage["prompt_tokens"]
+                ), "Incorrect prompt usage"
+        if "prompt_logprobs" in fields:
+            prompt_ids = terminal_nvext.get("prompt_token_ids")
+            prompt_logprobs = terminal_nvext.get("prompt_logprobs")
+            assert prompt_ids, "Missing requested prompt token IDs"
+            assert prompt_logprobs, "Missing requested prompt logprobs"
+            assert len(prompt_logprobs) == len(prompt_ids)
+            if usage is not None:
+                assert len(prompt_ids) == usage["prompt_tokens"]
+            assert prompt_logprobs[0] is None, "First prompt token must have no logprob"
+            for token, entries in zip(prompt_ids[1:], prompt_logprobs[1:], strict=True):
+                assert entries and str(token) in entries, "Missing prompt token logprob"
+                assert len(entries) >= (self.body.get("prompt_logprobs") or 0)
+                for candidate, entry in entries.items():
+                    assert (
+                        int(candidate) >= 0
+                    ), f"Invalid prompt token ID: {candidate!r}"
+                    value = entry["logprob"]
+                    assert math.isfinite(value) and -9999 < value <= 0, entry
+                    if entry.get("rank") is not None:
+                        assert type(entry["rank"]) is int and entry["rank"] > 0, entry
+        return content
 
 
 @dataclass
@@ -415,9 +1155,20 @@ class ToolCallingChatPayload(ChatPayload):
 class GuidedDecodingChatPayload(ChatPayload):
     """ChatPayload that validates a json_schema response_format produces valid JSON."""
 
-    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        required_keys: Optional[List[str]] = None,
+        expected_json: Optional[Dict[str, Any]] = None,
+        expected_finish_reason: Optional[str] = None,
+        needs_token_ids: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.required_keys = required_keys or []
+        self.expected_json = expected_json
+        self.expected_finish_reason = expected_finish_reason
+        self.needs_token_ids = needs_token_ids
 
     def validate(self, response, content: str) -> None:
         try:
@@ -439,7 +1190,26 @@ class GuidedDecodingChatPayload(ChatPayload):
                 f"Parsed: {parsed}"
             )
 
-        logger.info(f"Guided decoding validation passed: {parsed}")
+        if self.expected_json is not None:
+            assert json.dumps(parsed, sort_keys=True) == json.dumps(
+                self.expected_json, sort_keys=True
+            ), f"Expected JSON {self.expected_json!r}, got {parsed!r}"
+        if self.needs_token_ids:
+            _validate_chat_token_usage(response.json())
+        elif self.expected_json is not None:
+            usage = response.json().get("usage")
+            assert usage, "Missing structured-output usage"
+            for key in ("prompt_tokens", "completion_tokens"):
+                assert type(usage[key]) is int and usage[key] > 0, usage
+            assert usage["total_tokens"] == (
+                usage["prompt_tokens"] + usage["completion_tokens"]
+            ), usage
+        if self.expected_finish_reason is not None:
+            assert response.json()["choices"][0]["finish_reason"] == (
+                self.expected_finish_reason
+            )
+
+        logger.info("Guided decoding validation passed: %s", parsed)
 
 
 @dataclass
@@ -959,6 +1729,35 @@ class ImagesPayload(BasePayload):
 
 
 @dataclass
+class ImagesAccountingPayload(ImagesPayload):
+    """Image-generation payload that also checks the accounting the sample
+    diffusion engine reports: every requested image in ``data``, null token
+    ``usage``, and ``nvext.usage`` counting the images returned and echoing
+    the step count the request asked for."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        requested = int(self.body.get("n", 1))
+        assert (
+            len(result["data"]) == requested
+        ), f"Expected {requested} images in 'data': {len(result['data'])}"
+        assert (
+            result.get("usage") is None
+        ), f"Token usage must stay null without backend token counts: {result['usage']!r}"
+        assert result.get("size") == "1x1", f"Unexpected size: {result.get('size')!r}"
+        assert (
+            result.get("output_format") == "png"
+        ), f"Unexpected output_format: {result.get('output_format')!r}"
+        expected = {"output_images": requested, "input_images": 0}
+        requested_steps = (self.body.get("nvext") or {}).get("num_inference_steps")
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        accounting = (result.get("nvext") or {}).get("usage")
+        assert accounting == expected, f"Unexpected nvext.usage: {accounting!r}"
+
+
+@dataclass
 class CompletionPayloadWithLogprobs(CompletionPayload):
     """Completion payload that validates logprobs in response."""
 
@@ -973,6 +1772,9 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
         assert "logprobs" in choice, "Missing 'logprobs' in choice"
 
         logprobs_data = choice["logprobs"]
+        requested_logprobs = self.body.get("logprobs") or 0
+        if requested_logprobs > 0:
+            assert logprobs_data is not None, "Expected logprobs for logprobs request"
         if logprobs_data is not None:
             assert (
                 "token_logprobs" in logprobs_data
@@ -981,6 +1783,16 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
 
             token_logprobs = logprobs_data["token_logprobs"]
             tokens = logprobs_data["tokens"]
+            if requested_logprobs > 0:
+                assert token_logprobs, "Expected token_logprobs for logprobs request"
+                top_logprobs = logprobs_data.get("top_logprobs")
+                assert top_logprobs, "Expected top_logprobs alternatives"
+                assert len(top_logprobs) == len(
+                    tokens
+                ), "Expected alternatives for each token"
+                assert all(
+                    top_logprobs
+                ), "Expected non-empty top_logprobs for each token"
 
             if token_logprobs:
                 assert len(token_logprobs) == len(
@@ -2475,6 +3287,9 @@ class VideoGenerationPayload(BasePayload):
 
     endpoint: str = "/v1/videos"
     timeout: int = 600
+    # Opt-in decode checks require inline media, so a URL alone cannot pass.
+    expected_video_shape: Optional[tuple[int, int, int]] = None  # frames, height, width
+    expected_video_fps: Optional[float] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2488,11 +3303,67 @@ class VideoGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
+        if self.expected_video_shape is not None or self.expected_video_fps is not None:
+            assert entry.get("b64_json"), "Video decode checks require b64_json media"
+            self._validate_video(base64.b64decode(entry["b64_json"], validate=True))
         if "url" in entry:
             assert entry["url"], "Video response url is empty"
             return entry["url"]
         assert entry.get("b64_json"), "Video response b64_json is empty"
         return "b64_video_returned"
+
+    def _validate_video(self, video_bytes: bytes) -> None:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            raise RuntimeError("ffprobe is required for video decode checks")
+        assert video_bytes[4:8] == b"ftyp", "Expected an MP4 container"
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(video_bytes)
+            video.flush()
+            # -count_frames decodes every frame without requiring the rawvideo
+            # encoder/image2pipe muxer that our restricted FFmpeg build omits.
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-err_detect",
+                    "explode",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=width,height,avg_frame_rate,nb_read_frames",
+                    "-of",
+                    "json",
+                    video.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        # FFprobe can return zero even after reporting decode errors. With
+        # -v error, any stderr means that the clip did not decode cleanly.
+        assert (
+            result.returncode == 0 and not result.stderr.strip()
+        ), f"Could not decode video (ffprobe exit {result.returncode}): {result.stderr}"
+        streams = json.loads(result.stdout)["streams"]
+        assert len(streams) == 1, "Expected a video stream"
+        metadata = streams[0]
+        frame_count = int(metadata.get("nb_read_frames", 0))
+        assert frame_count > 0, "Decoded video contains no frames"
+        if self.expected_video_fps is not None:
+            fps = float(Fraction(metadata["avg_frame_rate"]))
+            assert (
+                fps == self.expected_video_fps
+            ), f"Expected {self.expected_video_fps} FPS, got {fps}"
+        if self.expected_video_shape is not None:
+            count, height, width = self.expected_video_shape
+            assert (metadata["width"], metadata["height"]) == (width, height), (
+                f"Expected {width}x{height} video, "
+                f"got {metadata['width']}x{metadata['height']}"
+            )
+            assert frame_count == count, f"Expected {count} frames, got {frame_count}"
 
     def validate(self, response: Any, content: str) -> None:
         assert content, "Video response content is empty"

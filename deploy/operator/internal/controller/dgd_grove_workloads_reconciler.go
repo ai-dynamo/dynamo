@@ -152,7 +152,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return groveWorkloadResult{}, errors.Join(scaleErr, err)
 	}
-
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
 		req,

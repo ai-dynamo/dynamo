@@ -885,6 +885,29 @@ class TestVideoHandlerResponseFormats:
         assert response["error"] == "GPU OOM"
         assert response["data"] == []
 
+    @pytest.mark.asyncio
+    async def test_error_response_names_the_rejected_field(self):
+        """The shared request model rejects a non-positive fps, as the
+        frontend does. The failed response names the field and the rule, not
+        the rejected value, and the engine is not reached."""
+        handler = self._make_handler()
+        handler.engine.generate = MagicMock()
+
+        request = {
+            "prompt": "a test video",
+            "model": "test-model",
+            "nvext": {"fps": 0},
+        }
+
+        results = [result async for result in handler.generate(request, MagicMock())]
+
+        handler.engine.generate.assert_not_called()
+        assert results[0]["status"] == "failed"
+        assert (
+            results[0]["error"]
+            == "nvext.fps: Input should be greater than or equal to 1"
+        )
+
 
 # =============================================================================
 # Part 7: output_format field handling

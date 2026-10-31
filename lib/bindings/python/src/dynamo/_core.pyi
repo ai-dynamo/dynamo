@@ -82,7 +82,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
-            response_plane: Response plane transport ("tcp" or "quic")
+            response_plane: Response plane transport ("tcp", "quic", or "velo")
         """
         ...
 
@@ -117,6 +117,24 @@ class DistributedRuntime:
         """
         Explicitly set the system-level health status (Ready / NotReady).
         """
+        ...
+
+    def register_engine_http_handler(
+        self,
+        name: str,
+        callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Register `/engine/{name}/...` on an enabled system server.
+
+        The async callback receives `method`, the relative `path`, and JSON
+        `body` (None for an empty body), and returns `status` and JSON `body`.
+        Registration fails if the name is already registered. No authentication
+        is added; callers must restrict access to the system listener.
+        """
+        ...
+
+    def unregister_engine_http_handler(self, name: str) -> None:
+        """Remove a handler; already dispatched requests may still finish."""
         ...
 
     def register_engine_route(
@@ -765,11 +783,17 @@ class SelectionService:
         replica_sync_peers: Optional[list[str]] = None,
         selection_cache: Optional[SelectionCacheConfig] = None,
         session_affinity_ttl_secs: Optional[float] = None,
+        session_affinity_mode: Literal["hard", "soft"] = "hard",
+        session_replication_writer_id: Optional[int] = None,
     ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool.
 
         `session_affinity_ttl_secs` enables session affinity with an idle TTL
         between 1 and 31536000 seconds.
+        `session_affinity_mode`: hard rejects dispatch away from a live binding;
+        soft rebinds when the bound worker is excluded from the request's candidates.
+        `session_replication_writer_id` exports affinity updates for a host transport;
+        use an id unique to this replica incarnation.
         """
         ...
 
@@ -780,6 +804,27 @@ class SelectionService:
 
         The KV indexer thread pool is released when the handle is dropped.
         Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def shutdown_async(self) -> None:
+        """Await service shutdown without blocking the Python event loop."""
+        ...
+
+    def session_binding_updates(self) -> AsyncIterator[List[JsonLike]]:
+        """Stream session bindings this service commits or refreshes, for the
+        host to broadcast to its peers.
+
+        Each item is every binding queued since the last one (at least one).
+        Requires session_replication_writer_id. Ends on shutdown.
+        """
+        ...
+
+    def apply_session_binding(self, update: JsonLike) -> None:
+        """Merge a versioned peer binding without echoing it.
+
+        A binding this replica cannot place yet is dropped; the owner's next
+        refresh repairs it.
         """
         ...
 
@@ -895,6 +940,7 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     tokenizer_backend: str | None
+    structural_tag: dict[str, Any] | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -923,16 +969,8 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
-    def set_structural_tag_mode(self, mode: str) -> None:
-        """Set structural tag mode ("off" or "on")."""
-        ...
-
-    def set_structural_tag_scope(self, scope: str) -> None:
-        """Set structural tag scope ("auto" or "always")."""
-        ...
-
-    def set_structural_tag_schema(self, schema: str) -> None:
-        """Set structural tag schema mode ("auto" or "strict")."""
+    def set_structural_tag(self, structural_tag: dict[str, Any] | None) -> None:
+        """Set the structural-tag policy, or disable it with ``None``."""
         ...
 
     def set_disaggregated_endpoint(
@@ -1380,6 +1418,17 @@ class FpmDirectPublisher:
         ...
 
 
+class FpmHealthSnapshot:
+    @property
+    def snapshot(self) -> dict[tuple[str, int], bytes]: ...
+    @property
+    def unjoined_worker_ids(self) -> list[str]: ...
+    @property
+    def stale_rank_count(self) -> int: ...
+    @property
+    def missing_rank_count(self) -> int: ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -1419,9 +1468,12 @@ class FpmEventSubscriber:
         """
         ...
 
-    def start_tracking(self) -> None:
+    def start_tracking(self, max_age_seconds: float = 15.0) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        ``max_age_seconds`` fixes the freshness and cleanup window for this
+        subscription. It must be finite and positive.
 
         Spawns two background tasks:
 
@@ -1451,11 +1503,20 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(self) -> FpmHealthSnapshot:
+        """Return fresh samples, unjoined IDs, stale count, and missing rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        The age limit is set once by ``start_tracking()``.
+        Missing ranks include discovered workers that have not published a sample.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.
 
-        The snapshot is filtered against the known-workers set so entries
+        The snapshot is filtered against the active worker lifecycle so entries
         for already-removed workers are not returned.  Values are the raw
         ``ModelDeploymentCard`` serialized as a JSON string; callers parse
         whichever fields they need (e.g. ``runtime_config``,
@@ -1480,13 +1541,18 @@ class HttpService:
     """
 
     def __init__(
-        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+        self,
+        port: Optional[int] = None,
+        *,
+        wait_for_first_item: bool = False,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             wait_for_first_item: When True, a streaming chat, completions,
                 responses, or Anthropic messages request waits for the engine's
                 first item before the HTTP status is committed, so an exception
@@ -1922,6 +1988,42 @@ class KvRouterConfig:
 
     def copy(self) -> "KvRouterConfig": ...
 
+    def to_json(self) -> str:
+        """
+        Serialize this configuration as JSON that `from_json` accepts.
+
+        The serialization is lossy: the process-local fields
+        `router_approximate_cache_policy`, `router_prefill_policy` and
+        `router_decode_policy` are not serialized, so `from_json` restores
+        their defaults. Re-serializing the parsed result yields the same JSON:
+        `KvRouterConfig.from_json(config.to_json()).to_json() == config.to_json()`.
+        """
+        ...
+
+    def policy_parameters(self, worker_type: str) -> Dict[str, float]:
+        """
+        Resolved default-policy parameters a router built from this
+        configuration starts with for one worker type.
+
+        Args:
+            worker_type: "aggregated", "prefill" or "decode".
+
+        Returns:
+            The 8 runtime policy parameters, keyed by their `PATCH /router_policy`
+            names: overlap_score_credit, overlap_score_credit_decay,
+            prefill_load_scale, decode_active_request_weight,
+            host_cache_hit_weight, disk_cache_hit_weight,
+            shared_cache_multiplier and router_temperature. Plain decode workers
+            (decode without conditional disaggregation) report zero cache credits.
+
+        Raises:
+            ValueError: worker_type is not one of the accepted values, or the
+                configuration (or DYN_ROUTER_WORKER_SELECTION_POLICY) selects a
+                worker-selection policy instance for it, whose parameters this
+                method does not resolve.
+        """
+        ...
+
     @property
     def overlap_score_credit(self) -> float: ...
 
@@ -2199,12 +2301,12 @@ class FrontendResponse:
 
     def __init__(self, status_code: int, body: object) -> None: ...
 
-async def run_input(
+def run_input(
     distributed_runtime: DistributedRuntime,
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
-) -> None:
+) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
@@ -2345,6 +2447,8 @@ def run_mocker_trace_replay(
     agentic_snapshot: Optional[Dict[str, Any]] = None,
     agentic_warmup: bool = False,
     agentic_profile: Optional[Dict[str, Any]] = None,
+    deterministic: bool = False,
+    conversation_affinity: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2367,7 +2471,18 @@ def run_mocker_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. The ``on_tick`` result must
+    carry ``target_prefill``, ``target_decode`` and ``next_tick_ms``, and may
+    carry ``router_parameters``: ``None`` or a missing key leaves the KV
+    routers unchanged, while a ``dict[str, dict[str, float]]`` keyed by worker
+    type (``"aggregated"``, ``"prefill"`` or ``"decode"``) and then by
+    ``KvRouterConfig.policy_parameters`` name updates every router of that
+    worker type at the tick's simulated time. Values equal to the current
+    parameters are a no-op. A worker type this replay has no KV router for
+    (for example under ``router_mode="round_robin"``) or an invalid value
+    raises ``ValueError``. With KV routers, each snapshot also reports
+    ``router_policies``: one ``{"worker_type", "revision", "parameters"}``
+    entry per router, taken before that tick's decision is applied.
 
     Replay telemetry is independent from ``scaling_policy``. Set
     ``capture_telemetry`` to retain samples on the offline result, provide
@@ -2386,6 +2501,12 @@ def run_mocker_trace_replay(
     request completions stay immediate, as a live router observes them in-band
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
+
+    ``deterministic`` makes the replay reproducible: request IDs are ordinal
+    and every KV router breaks ties and samples with a fixed seed, so two
+    replays of the same trace and configuration produce identical simulated
+    results (wall-clock timings still vary). The default keeps random request
+    IDs and unseeded routing. Offline replay only.
     """
     ...
 
@@ -2457,7 +2578,8 @@ def run_mocker_synthetic_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. ``on_tick`` may return
+    ``router_parameters`` as described for ``run_mocker_trace_replay``.
 
     Replay telemetry uses the same policy-neutral capture, callback, and JSONL
     options as ``run_mocker_trace_replay``. Its cadence is simulated time and
@@ -2683,11 +2805,11 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class KvDcRelay:
+class PoolRelay:
     def __init__(
         self,
         endpoint: Endpoint,
-        dc_id: str,
+        cluster_id: str,
         namespace_filter: Optional[str] = None,
         endpoint_prefix: Optional[str] = None,
         publication_threshold: int = 16,
@@ -2730,7 +2852,9 @@ class KvDcRelay:
         ...
 
 class KvStateAgentHost:
-    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+    def __init__(
+        self, endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1
+    ) -> None:
         ...
 
     async def start(self) -> None:
@@ -2852,6 +2976,7 @@ class KvRouter:
         self,
         request: JsonLike,
         response_buffer_size: int = 100,
+        context: Context | None = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
@@ -2859,6 +2984,8 @@ class KvRouter:
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
         Set response_buffer_size to 0 for demand-driven direct Python consumption;
         negative values are rejected.
+        Pass context to preserve request metadata, cancellation, and distributed
+        tracing across the Python/Rust boundary.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -3048,11 +3175,13 @@ class EntrypointArgs:
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
+        enable_systemone_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3085,11 +3214,13 @@ class EntrypointArgs:
             ais_perf_config: Canonical AIS configuration for default KV routing
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
+            enable_systemone_api: Optional System One typed-decisions API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
         """
         ...
 
@@ -3208,6 +3339,20 @@ class StreamIncomplete(DynamoException):
 
     ...
 
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
+
+    ...
+
+class WorkerUnavailable(DynamoException):
+    """No worker on the request's route can serve it yet (HTTP 503).
+
+    Raised by `RoutedEngine.generate`, for example while prefill routing is
+    still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed
@@ -3229,6 +3374,32 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class EngineMetrics:
+        """Metrics handle provided to an engine's registration hook."""
+
+        def register_prometheus_expfmt_callback(
+            self, callback: Callable[[], str]
+        ) -> None: ...
+
+        def register_prometheus_typed_callback(
+            self,
+            callback: Callable[
+                [],
+                list[
+                    tuple[
+                        str,
+                        str,
+                        str,
+                        str,
+                        list[tuple[str, list[tuple[str, str]], float, float | None]],
+                    ]
+                ],
+            ],
+        ) -> None: ...
+
+        @property
+        def auto_labels(self) -> Dict[str, str]: ...
+
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""
@@ -3342,9 +3513,7 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
-            structural_tag_mode: str = ...,
-            structural_tag_scope: str = ...,
-            structural_tag_schema: str = ...,
+            structural_tag: Optional[Dict[str, Any]] = None,
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,

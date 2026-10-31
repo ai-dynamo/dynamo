@@ -63,9 +63,12 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 
 ### 3. Download the model
 
-Edit `model-cache/model-download.yaml` (select between GLM-5.3 and GLM-5.2 checkpoints,
-and between FP8 and NVFP4 precisions). Uncomment the `hf download` line for your
-checkpoint and remove the others.
+As shipped, `model-cache/model-download.yaml` downloads both GLM-5.3 checkpoints:
+`RadixArk/GLM-5.3-NVFP4` (B200) and `zai-org/GLM-5.3` (H200). The GLM-5.2 lines
+(`nvidia/GLM-5.2-NVFP4`, `zai-org/GLM-5.2-FP8`) are commented out. Edit the `hf download`
+lines so that only the checkpoint(s) you deploy stay enabled: comment out the GLM-5.3
+checkpoint you do not need, and for the GLM-5.2 fallback uncomment the matching GLM-5.2
+line and comment out the GLM-5.3 lines.
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
@@ -74,9 +77,24 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ### 4. Deploy the DGD
 
-When serving GLM-5.2, update every `model-path` in the target DGD to
-`nvidia/GLM-5.2-NVFP4` for B200 or `zai-org/GLM-5.2-FP8` for H200, and update every
-`served-model-name` to `zai-org/GLM-5.2`.
+When serving GLM-5.2, the model name is hardcoded in more than one file. Update all of them:
+
+- `sglang/${MODE}-${SKU}-agentic/deploy.yaml`: every `model-path` to
+  `nvidia/GLM-5.2-NVFP4` for B200 or `zai-org/GLM-5.2-FP8` for H200, and every
+  `served-model-name` to `zai-org/GLM-5.2`.
+- `perf/perf.yaml`: the `TARGET_MODEL` env value to `zai-org/GLM-5.2`. The benchmark
+  readiness loop and the AIPerf `-m` / `--tokenizer` flags use this value, so it must match
+  `served-model-name` exactly or the benchmark Job never becomes ready.
+
+For example, for the B200 recipes:
+
+```bash
+sed -i 's#model-path: RadixArk/GLM-5.3-NVFP4#model-path: nvidia/GLM-5.2-NVFP4#; s#served-model-name: zai-org/GLM-5.3#served-model-name: zai-org/GLM-5.2#' sglang/*-b200-agentic/deploy.yaml
+sed -i 's#value: zai-org/GLM-5.3#value: zai-org/GLM-5.2#' perf/perf.yaml
+```
+
+For H200, replace `RadixArk/GLM-5.3-NVFP4` / `nvidia/GLM-5.2-NVFP4` above with
+`zai-org/GLM-5.3` / `zai-org/GLM-5.2-FP8` and target `sglang/*-h200-agentic/deploy.yaml`.
 
 Deploy the target DGD:
 

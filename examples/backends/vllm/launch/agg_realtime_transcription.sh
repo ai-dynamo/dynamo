@@ -8,8 +8,10 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-MODEL="mistralai/Voxtral-Mini-4B-Realtime-2602"
+DEFAULT_MODEL="Qwen/Qwen3-ASR-0.6B"
+MODEL="$DEFAULT_MODEL"
 HF_OVERRIDES=""
+HF_OVERRIDES_SET=false
 
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -24,10 +26,12 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             HF_OVERRIDES="$2"
+            HF_OVERRIDES_SET=true
             shift 2
             ;;
         --hf-overrides=*)
             HF_OVERRIDES="${1#*=}"
+            HF_OVERRIDES_SET=true
             shift
             ;;
         *)
@@ -37,9 +41,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$HF_OVERRIDES_SET" == false && "$MODEL" == "$DEFAULT_MODEL" ]]; then
+    HF_OVERRIDES='{"architectures":["Qwen3ASRRealtimeGeneration"]}'
+fi
+
 if [[ -z "$HF_OVERRIDES" ]]; then
     echo "Error: select the model's realtime architecture explicitly with --hf-overrides." >&2
-    echo "Usage: $0 [--model MODEL] --hf-overrides JSON [vLLM args...]" >&2
+    echo "Usage: $0 [--model MODEL] [--hf-overrides JSON] [vLLM args...]" >&2
     exit 2
 fi
 

@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# flake8: noqa
-
 import logging
 
 from dynamo._core import Cancelled as Cancelled
@@ -16,6 +14,8 @@ from dynamo._core import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 from dynamo._core import SelectionServiceError as SelectionServiceError
 from dynamo._core import StreamIncomplete as StreamIncomplete
 from dynamo._core import Unknown as Unknown
+from dynamo._core import WorkerOverloaded as WorkerOverloaded
+from dynamo._core import WorkerUnavailable as WorkerUnavailable
 
 logger = logging.getLogger(__name__)
 

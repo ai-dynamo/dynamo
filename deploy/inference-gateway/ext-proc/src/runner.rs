@@ -443,6 +443,11 @@ async fn serve<P: crate::EndpointPicker>(
                     Err(error) => break Err(error.into()),
                 },
             };
+            // tonic's own listener (the plaintext path) sets TCP_NODELAY; this
+            // hand-built one has to as well.
+            if let Err(error) = tcp_stream.set_nodelay(true) {
+                tracing::debug!(%remote_addr, %error, "Failed to set TCP_NODELAY");
+            }
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 

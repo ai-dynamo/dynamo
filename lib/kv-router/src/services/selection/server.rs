@@ -3,13 +3,15 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequest, Path, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::net::TcpListener;
 
 use crate::protocols::WorkerId;
@@ -85,12 +87,8 @@ async fn list_workers(
 async fn select(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    payload: Result<Json<SelectRequest>, JsonRejection>,
+    PromptJson(req): PromptJson<SelectRequest>,
 ) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
     match state
         .service
         .select_with_policy_class(req, policy_class_from_headers(&headers))
@@ -104,12 +102,8 @@ async fn select(
 async fn select_and_reserve(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    payload: Result<Json<SelectAndReserveRequest>, JsonRejection>,
+    PromptJson(req): PromptJson<SelectAndReserveRequest>,
 ) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
     match state
         .service
         .select_and_reserve_with_policy_class(req, policy_class_from_headers(&headers))
@@ -122,12 +116,8 @@ async fn select_and_reserve(
 
 async fn create_reservation(
     State(state): State<Arc<AppState>>,
-    payload: Result<Json<ReservationRequest>, JsonRejection>,
+    PromptJson(req): PromptJson<ReservationRequest>,
 ) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
     match state.service.create_reservation(req).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
@@ -195,12 +185,8 @@ async fn loads(State(state): State<Arc<AppState>>, Query(params): Query<FilterQu
 
 async fn potential_loads(
     State(state): State<Arc<AppState>>,
-    payload: Result<Json<PotentialLoadsRequest>, JsonRejection>,
+    PromptJson(req): PromptJson<PotentialLoadsRequest>,
 ) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
     match state.service.potential_loads(req).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
@@ -209,12 +195,8 @@ async fn potential_loads(
 
 async fn overlap_scores(
     State(state): State<Arc<AppState>>,
-    payload: Result<Json<OverlapScoresRequest>, JsonRejection>,
+    PromptJson(req): PromptJson<OverlapScoresRequest>,
 ) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
     match state.service.overlap_scores(req).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
@@ -223,6 +205,58 @@ async fn overlap_scores(
 
 async fn dump_events(State(state): State<Arc<AppState>>) -> Response {
     Json(state.service.indexer_snapshot().await).into_response()
+}
+
+/// axum's `Json` for prompt-carrying bodies, without `serde_path_to_error`: `Json`
+/// tracks the path of every element it deserializes, which dominates parsing a large
+/// `token_ids` array. Rejections keep `Json`'s statuses: 415 for a missing or non-JSON
+/// `Content-Type`, 400 for malformed JSON, 422 for a body of the wrong shape.
+struct PromptJson<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for PromptJson<T> {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !has_json_content_type(req.headers()) {
+            return Err(json_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Expected request with `Content-Type: application/json`",
+            ));
+        }
+        let body = Bytes::from_request(req, state)
+            .await
+            .map_err(|rejection| json_error(rejection.status(), rejection.body_text()))?;
+        serde_json::from_slice(&body).map(Self).map_err(|error| {
+            if error.is_data() {
+                json_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Failed to deserialize the JSON body into the target type: {error}"),
+                )
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to parse the request body as JSON: {error}"),
+                )
+            }
+        })
+    }
+}
+
+/// `application/json` or an `application/*+json` subtype, as axum's `Json` accepts.
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    let essence = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .unwrap_or_default()
+        .trim();
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    let suffix = subtype
+        .rsplit_once('+')
+        .map_or(subtype, |(_, suffix)| suffix);
+    kind.eq_ignore_ascii_case("application") && suffix.eq_ignore_ascii_case("json")
 }
 
 async fn not_found() -> Response {

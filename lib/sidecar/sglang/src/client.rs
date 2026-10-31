@@ -6,18 +6,19 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DisaggregationMode, DynamoError, ErrorType};
 use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
@@ -35,8 +36,16 @@ pub(crate) struct NodeMetadata {
     pub node_rank: u32,
     pub nnodes: u32,
     pub dp_size: u32,
+    // SGLang reports model DP and attention DP separately. KV publisher ranks
+    // span their product; default to one when attention DP is not reported.
+    #[serde(default = "default_parallel_size")]
+    pub attn_dp_size: u32,
     pub dist_init_addr: Option<String>,
     pub kv_event_sources: Vec<LocalKvEventSource>,
+}
+
+fn default_parallel_size() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -71,6 +80,14 @@ impl NodeMetadata {
         );
         ensure!(self.dp_size > 0, "GetServerInfo dp_size must be positive");
         ensure!(
+            self.attn_dp_size > 0,
+            "GetServerInfo attn_dp_size must be positive"
+        );
+        let deployment_dp_size = self
+            .dp_size
+            .checked_mul(self.attn_dp_size)
+            .context("GetServerInfo deployment DP size overflow")?;
+        ensure!(
             self.nnodes == 1
                 || self
                     .dist_init_addr
@@ -82,10 +99,10 @@ impl NodeMetadata {
         let mut endpoints = HashSet::new();
         for source in &self.kv_event_sources {
             ensure!(
-                source.dp_rank < self.dp_size,
-                "KV source rank {} is outside dp_size {}",
+                source.dp_rank < deployment_dp_size,
+                "KV source rank {} is outside deployment DP size {}",
                 source.dp_rank,
-                self.dp_size
+                deployment_dp_size
             );
             ensure!(
                 ranks.insert(source.dp_rank),
@@ -112,8 +129,8 @@ impl NodeMetadata {
         block_size: Option<u32>,
     ) -> anyhow::Result<()> {
         ensure!(
-            self.dp_size == dp_size,
-            "GetServerInfo dp_size does not match leader registration"
+            self.dp_size.checked_mul(self.attn_dp_size) == Some(dp_size),
+            "GetServerInfo deployment DP size does not match leader registration"
         );
         for source in &self.kv_event_sources {
             ensure!(
@@ -222,7 +239,6 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
@@ -268,70 +284,33 @@ pub async fn connect(
     deadline: Instant,
     bootstrap: bool,
 ) -> Result<Client, DynamoError> {
-    let endpoint = Endpoint::from_shared(uri.to_string())
-        .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
-    let started = Instant::now();
-    let mut attempt = 0_u64;
-    let mut last_err;
-    let mut last_logged_at: Option<Instant> = None;
-    loop {
-        attempt += 1;
-        match try_connect_once(&endpoint, cfg, deadline).await {
-            Ok(client) => return Ok(client),
-            Err(err) => {
-                last_err = err;
-                if Instant::now() >= deadline {
-                    return Err(cannot_connect(format!(
-                        "could not reach SGLang gRPC at {uri} within {:?}: {last_err}",
-                        cfg.startup_deadline
-                    )));
-                }
-                let now = Instant::now();
-                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
-                {
-                    // Synchronous constructors may precede logging setup;
-                    // deferred launcher discovery already has a subscriber.
-                    if bootstrap {
-                        eprintln!(
-                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
-                            started.elapsed(),
-                            cfg.retry_interval,
-                        );
-                    } else {
-                        tracing::warn!(
-                            endpoint = %uri,
-                            attempt,
-                            elapsed = ?started.elapsed(),
-                            retry_interval = ?cfg.retry_interval,
-                            error = %last_err,
-                            "SGLang gRPC connection attempt failed; retrying"
-                        );
-                    }
-                    last_logged_at = Some(now);
-                }
-                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
-            }
-        }
-    }
+    let cfg = GrpcTransportConfig {
+        connections: NonZeroUsize::MIN,
+        ..*cfg
+    };
+    let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
+    Ok(client_from_channel(pool.next_channel()))
 }
 
-async fn try_connect_once(
-    endpoint: &Endpoint,
-    cfg: &GrpcTransportConfig,
+/// `GrpcChannelPool` starts its own deadline from `cfg.startup_deadline`;
+/// `deadline` also bounds it, because callers start their startup budget
+/// before connecting.
+async fn connect_pool(
+    uri: &GrpcEndpoint,
+    cfg: GrpcTransportConfig,
     deadline: Instant,
-) -> Result<Client, String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err("startup deadline elapsed".to_string());
-    }
-    let endpoint = endpoint
-        .clone()
-        .connect_timeout(cfg.connect_attempt_timeout.min(remaining));
-    let channel = timeout_at(deadline, endpoint.connect())
-        .await
-        .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| format_error_chain(&e))?;
-    Ok(client_from_channel(channel))
+    bootstrap: bool,
+) -> Result<GrpcChannelPool, DynamoError> {
+    timeout_at(
+        deadline,
+        GrpcChannelPool::connect("SGLang", uri, cfg, bootstrap),
+    )
+    .await
+    .map_err(|_| {
+        cannot_connect(format!(
+            "could not reach SGLang gRPC at {uri} within the startup deadline"
+        ))
+    })?
 }
 
 fn client_from_channel(channel: Channel) -> Client {
@@ -356,11 +335,10 @@ impl Pool {
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        let size = cfg.connections.get();
-        let mut clients = Vec::with_capacity(size);
-        for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline, false).await?);
-        }
+        let pool = connect_pool(uri, *cfg, deadline, false).await?;
+        let clients = (0..pool.len())
+            .map(|_| client_from_channel(pool.next_channel()))
+            .collect();
         Ok(Self {
             clients,
             next: AtomicUsize::new(0),
@@ -758,6 +736,20 @@ mod tests {
         assert!(NodeMetadata::from_server_info(&raw).is_err());
         raw["kv_event_sources"][0]["dp_rank"] = json!(4);
         raw["kv_event_sources"][0]["block_size"] = json!(0);
+        assert!(NodeMetadata::from_server_info(&raw).is_err());
+    }
+
+    #[test]
+    fn attention_dp_expands_the_kv_source_rank_space() {
+        let mut raw = node_metadata_json();
+        raw["dp_size"] = json!(1);
+        raw["attn_dp_size"] = json!(8);
+        raw["kv_event_sources"][0]["dp_rank"] = json!(7);
+        let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
+        metadata.validate_registration(8, Some(64)).unwrap();
+        assert!(metadata.validate_registration(1, Some(64)).is_err());
+
+        raw["kv_event_sources"][0]["dp_rank"] = json!(8);
         assert!(NodeMetadata::from_server_info(&raw).is_err());
     }
 
