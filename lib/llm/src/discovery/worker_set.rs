@@ -215,6 +215,8 @@ pub struct WorkerSet {
 
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
+    /// The same preprocessor used by the chat pipeline, when preprocessing is local.
+    pub(crate) chat_preprocessor: Option<Arc<OpenAIPreprocessor>>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
@@ -267,6 +269,7 @@ impl WorkerSet {
             mdcsum,
             card,
             chat_engine: None,
+            chat_preprocessor: None,
             completions_engine: None,
             embeddings_engine: None,
             classify_engine: None,
@@ -580,6 +583,7 @@ impl WorkerSet {
             mdcsum: self.mdcsum.clone(),
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
+            chat_preprocessor: self.chat_preprocessor.clone(),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
             classify_engine: lora_context_engine(&self.classify_engine, &lora_name),

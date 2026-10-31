@@ -92,14 +92,15 @@ pub async fn run(
             let checksum = model.card().mdcsum();
 
             let tokenizer = model.card().tokenizer()?;
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone(), tokenizer.clone())
-            .await?;
+            let (chat_pipeline, _) =
+                common::build_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(model.card(), inner_engine.clone(), tokenizer.clone())
+                .await?;
             manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
+            let (cmpl_pipeline, _) = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer)
