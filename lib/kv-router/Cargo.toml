@@ -68,7 +68,7 @@ rustc-hash = "2.1.1"
 slotmap = "1"
 
 # standalone-indexer (optional)
-axum = { version = "=0.8.4", default-features = false, features = [
+axum = { version = "0.8.4", default-features = false, features = [
   "http1",
   "json",
   "matched-path",
