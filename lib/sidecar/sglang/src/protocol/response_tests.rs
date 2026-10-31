@@ -81,6 +81,14 @@ fn prompt_logprobs_are_terminal_only() {
 }
 
 #[test]
+fn empty_prompt_logprobs_are_omitted() {
+    // Native SGLang returns an empty array, rather than a diagnostic field,
+    // when a disaggregated decode cannot return prefill logprobs.
+    let meta = HashMap::from([("input_token_logprobs".to_string(), json!([]).to_string())]);
+    assert!(engine_data_from_meta(&meta, true).unwrap().is_none());
+}
+
+#[test]
 fn output_ids_preserve_order_and_reject_negative_tokens() {
     assert_eq!(output_ids_to_u32(&[]).unwrap(), Vec::<u32>::new());
     assert_eq!(
