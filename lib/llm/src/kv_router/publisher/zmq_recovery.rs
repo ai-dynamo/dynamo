@@ -552,6 +552,7 @@ mod socket_tests {
                 None,
                 Some(0),
                 None,
+                false,
                 Some(ZmqRecoveryConfig {
                     replay_endpoint: replay.get_socket().get_last_endpoint().unwrap().unwrap(),
                     dp_rank: 0,

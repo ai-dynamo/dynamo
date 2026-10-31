@@ -735,6 +735,7 @@ async fn reconcile_owner(
                 topic: intent.raw_topic.clone(),
                 image_token_id: intent.image_token_id,
                 video_token_id: intent.video_token_id,
+                engine_owned_mm_identity: intent.engine_owned_mm_identity,
                 ingress_protocol: intent.ingress_protocol,
             },
         })
@@ -1079,6 +1080,7 @@ mod tests {
             raw_topic: "kv-events-residency-v1".to_string(),
             image_token_id: None,
             video_token_id: None,
+            engine_owned_mm_identity: false,
             router_hint_source: None,
         }
     }

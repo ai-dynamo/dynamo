@@ -28,6 +28,8 @@ for the architecture.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
 
+Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
+
 ## Launch Locally
 
 See [`lib/sidecar/sglang/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/sglang/launch)

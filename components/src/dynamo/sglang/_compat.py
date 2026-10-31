@@ -380,6 +380,29 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def sglang_has_wide_mm_pad_values() -> bool:
+    """Detect the wide event-token format introduced by sglang#43043.
+
+    Both caller hashes and engine-owned identities produce wide values.
+    """
+    try:
+        # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+        from sglang.srt.managers.schedule_batch import MultimodalDataItem
+    except ImportError:
+        return False
+    return "pad_values" in MultimodalDataItem.__struct_fields__
+
+
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether the active processor rejects caller-supplied image identities."""
+    if not sglang_has_wide_mm_pad_values():
+        return False
+    # Unknown processors on wide-pad builds must not receive identity overrides.
+    return mm_processor is None or bool(
+        getattr(mm_processor, "uses_wide_image_identity", False)
+    )
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -387,13 +410,18 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     already built ``padded_input_ids``. Rebuild that derived field after
     tokenization so the external hash, item pad value, and padded IDs remain
     consistent. The repair is idempotent if upstream already rebuilt them.
+
+    Builds that own multimodal identity never get caller hashes.
     """
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_proc = getattr(tokenizer_manager, "mm_processor", None)
+    if sglang_uses_engine_owned_mm_identity(mm_proc):
+        return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
@@ -535,4 +563,6 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "sglang_uses_engine_owned_mm_identity",
+    "sglang_has_wide_mm_pad_values",
 ]

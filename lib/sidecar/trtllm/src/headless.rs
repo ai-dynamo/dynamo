@@ -135,6 +135,7 @@ pub(crate) async fn relay(
                     video_token_id: None,
                     expected_rank: Some(rank),
                     liveness: heartbeat_timeout.map(|timeout| (rank, timeout)),
+                    engine_owned_mm_identity: false,
                     recovery: None,
                 }),
                 leader_config.enable_local_indexer,
