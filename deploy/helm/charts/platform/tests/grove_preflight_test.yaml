@@ -35,6 +35,7 @@ tests:
       - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
       - equal: {path: spec.activeDeadlineSeconds, value: 120}
       - equal: {path: spec.backoffLimit, value: 2}
+      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def kubernetes_client\('}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
       - matchRegex:
           path: spec.template.spec.containers[0].args[1]

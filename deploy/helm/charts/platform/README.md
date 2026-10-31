@@ -41,12 +41,70 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
+Dynamo supports Helm transitions within the installed minor release and between adjacent minor
+releases: `N.M` to `N.(M+1)` for upgrades and `N.(M+1)` to `N.M` for downgrades. Move through every
+intermediate minor release; skipping a minor release is unsupported.
+
+When `dynamo-operator.enabled=true`, the chart runs a read-only `pre-install,pre-upgrade` Job before
+changing the operator Deployment. A first installation passes because no existing Deployment is
+present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Flux requires
+helm-controller v1.7.0 or later; Flux v2.10.0 is the first Flux release that includes a compatible
+controller. Earlier helm-controller versions panic on the hook's
+`helm.sh/hook-output-log-policy` annotation. Raw `kubectl apply`, Argo CD selective sync, or
+disabled hooks do not enforce the check. When the operator subchart is disabled, the hook is
+omitted because the separately managed operator release owns its upgrade policy.
+
+The Job reads the installed operator version and rejects larger minor jumps and major-version
+changes. After separately validating an unsupported transition, authorize only that target minor
+with the matching override:
+
+```yaml
+dynamo-operator:
+  upgradePreflight:
+    checks:
+      upgradePath:
+        # For a forward upgrade targeting 1.5.x:
+        unsupportedUpgradeOverride: "1.5"
+        # For a downgrade targeting 1.2.x:
+        unsupportedDowngradeOverride: "1.2"
+```
+
+The value must match the target operator's `N.M` version. It is ignored when a later operation
+targets another minor, so it cannot authorize that transition. The override applies only to the
+`upgradePath` check and cannot bypass sibling preflight checks. An override does not make the path
+supported.
+
+The Job uses Python's standard library and read-only Deployment access. Configure
+`dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` for an internal registry. Failed
+Jobs are retained for log inspection. The supporting ServiceAccount, Role, and RoleBinding persist
+until the next attempt and require manual removal when retiring the release.
+
+Settings under `upgradePreflight.job` are shared defaults. A check can override individual fields
+under `upgradePreflight.checks.<checkName>.job`. Unspecified fields inherit the shared value;
+`affinity`, `podSecurityContext`, and `imagePullSecrets` replace the shared field as a whole.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
 ### v1.7.0
+
+#### Deployment Tool Compatibility
+
+##### Flux Requires helm-controller v1.7.0 or Later
+
+**Change:** Upgrade preflight Jobs use the `helm.sh/hook-output-log-policy: hook-failed`
+annotation. Flux support requires helm-controller v1.7.0 or later, which includes the fix for
+[fluxcd/helm-controller#1604](https://github.com/fluxcd/helm-controller/pull/1604). Flux v2.10.0
+is the first Flux release that includes a compatible controller.
+
+**Affected:** Flux installations using helm-controller v1.6.5 or earlier. Those versions panic
+when they process a hook with this annotation.
+
+**Action:** Upgrade to Flux v2.10.0 or later, or helm-controller v1.7.0 or later, before upgrading
+Dynamo. If a preflight Job fails, inspect the retained Job Pod logs. The helm-controller fix
+prevents the panic but does not forward hook output to controller logs or events.
 
 #### Runtime Compatibility
 
@@ -548,6 +606,14 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
+| dynamo-operator.upgradePreflight.job.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
+| dynamo-operator.upgradePreflight.job.imagePullSecrets | list | `[]` | Existing pull secrets shared by the upgrade preflight Jobs. |
+| dynamo-operator.upgradePreflight.job.activeDeadlineSeconds | int | `120` | Maximum duration of each preflight Job in seconds, including retries. |
+| dynamo-operator.upgradePreflight.job.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.upgradePreflight.job.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null uses secure defaults. Omit runAsUser on OpenShift for admission to assign the namespace UID. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |

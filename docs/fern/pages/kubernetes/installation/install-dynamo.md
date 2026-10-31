@@ -307,6 +307,55 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 </Steps>
 
+## Upgrade Dynamo
+
+Dynamo supports Helm transitions within the installed minor release and between adjacent minor
+releases. Upgrade from `N.M` to `N.(M+1)` or downgrade from `N.(M+1)` to `N.M`. Move through every
+intermediate minor release for larger changes. For example, upgrade `1.2.x` to `1.3.x`, then
+`1.3.x` to `1.4.x`; a direct transition from `1.2.x` to `1.4.x` is unsupported.
+
+When `dynamo-operator.enabled=true`, the Helm chart checks this path in a read-only
+`pre-install,pre-upgrade` Job before it changes the operator Deployment. A first installation has
+no existing Deployment and passes. Helm and Flux run the hook directly; Argo CD maps it to a
+PreSync hook. Flux requires helm-controller v1.7.0 or later; Flux v2.10.0 is the first Flux release
+that includes a compatible controller. Earlier helm-controller versions panic on the hook's
+`helm.sh/hook-output-log-policy` annotation. Raw `kubectl apply`, Argo CD selective sync, or
+disabled hooks do not enforce the check. When the operator subchart is disabled, the hook is omitted
+because the separately managed operator release owns its upgrade policy.
+
+If you have separately validated an unsupported forward upgrade, set
+`unsupportedUpgradeOverride` to the target minor version. For example, to upgrade from `1.2.x` to
+`1.5.x`, set:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.5
+```
+
+For an unsupported downgrade from `1.5.x` to `1.2.x`, unlock the lower target minor with the
+corresponding downgrade override:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.2
+```
+
+The override must match the target operator's `N.M` version. It does not match a later operation
+that targets another minor and cannot authorize that transition. The override applies only to the
+`upgradePath` check and cannot bypass sibling preflight checks. It permits the Helm operation; it
+does not make that transition a supported upgrade or downgrade path.
+
+The check uses Python's standard library with read-only access to the operator Deployment. Set
+`dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` if the cluster must pull the
+image from an internal registry. These are shared Job defaults. Override an individual check under
+`dynamo-operator.upgradePreflight.checks.<checkName>.job` when it needs a different image or runtime
+setting. Unspecified fields inherit the shared value; compound fields replace that value rather
+than merging recursively. A failed Job is retained so you can inspect its logs. The supporting
+ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual removal when
+retiring the release. With Flux, inspect the retained Job Pod logs directly because helm-controller
+does not forward hook output to its controller logs or events.
 
 ## Alternative: Install with AICR
 
