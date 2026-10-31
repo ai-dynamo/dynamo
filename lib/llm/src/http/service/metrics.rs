@@ -3042,6 +3042,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     let mut annotated = annotated.0;
     if let Some(data) = annotated.data.as_mut() {
         data.tool_call_completion.clear();
+        data.model_eos.clear();
     }
 
     if let Some(metrics) = annotated
@@ -3709,6 +3710,7 @@ mod tests {
                 ..Default::default()
             }),
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         let annotated = crate::types::Annotated::from_data(data);
 
@@ -4823,12 +4825,14 @@ mod tests {
                 complete: true,
             },
         ];
+        annotated.data.as_mut().unwrap().model_eos = vec![0];
         let transported: crate::types::Annotated<NvCreateChatCompletionStreamResponse> =
             serde_json::from_value(serde_json::to_value(&annotated).unwrap()).unwrap();
         assert_eq!(
             transported.data.as_ref().unwrap().tool_call_completion,
             annotated.data.as_ref().unwrap().tool_call_completion
         );
+        assert_eq!(transported.data.as_ref().unwrap().model_eos, vec![0]);
 
         let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
         let result = process_chat_response_using_event_converter_and_observe_metrics(
@@ -4851,6 +4855,7 @@ mod tests {
             "typed metrics must be skipped on the SSE wire"
         );
         assert!(json.get("tool_call_completion").is_none());
+        assert!(json.get("model_eos").is_none());
 
         drop(collector);
 
@@ -5541,6 +5546,7 @@ mod tests {
                     prompt_logprobs: None,
                     llm_metrics: None,
                     tool_call_completion: Vec::new(),
+                    model_eos: Vec::new(),
                 },
             ),
             event: None,
@@ -5933,6 +5939,7 @@ mod tests {
                 llm_metrics,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated {
                 data: Some(response),
