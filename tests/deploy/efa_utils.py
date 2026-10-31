@@ -25,11 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+import kr8s
+from kr8s._async_utils import as_sync_func
+
 # The request defaults, prompt and response validation are shared with
 # tests/deploy/test_dgd.py via dgd_utils, a non-test module -- so these tests
 # assert the same response contract as every other deploy test, and a fix to
 # that contract cannot land in one copy only.
 from tests.deploy.dgd_utils import (
+    _KR8S_VCLUSTER_CONNECTION_ERRORS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
     TEST_PROMPT,
@@ -37,6 +41,7 @@ from tests.deploy.dgd_utils import (
     ManagedDeployment,
     validate_chat_response,
 )
+from tests.deploy.vcluster_utils import retry_vcluster_api
 from tests.utils.client import send_request, wait_for_model_availability
 
 logger = logging.getLogger(__name__)
@@ -157,6 +162,30 @@ def runtime_version_override(image: str) -> str | None:
     return re.split(r"[-+]", version, maxsplit=1)[0]
 
 
+# Kubernetes' message when a container has no previous instance to read, e.g.
+# 'previous terminated container "main" in pod "x" not found'.
+_NO_PREVIOUS_INSTANCE = "previous terminated container"
+
+
+async def _async_fetch_pod_log(pod, params: dict) -> str:
+    async with pod.api.call_api(
+        "GET",
+        version=pod.version,
+        url=f"{pod.endpoint}/{pod.name}/log",
+        namespace=pod.namespace,
+        params=params,
+        timeout=30,
+    ) as response:
+        return response.text
+
+
+# Not pod.logs(): kr8s 0.20.13 suppresses httpx.ReadTimeout around that stream
+# and returns whatever it read, so a stalled tunnel yields a partial log with no
+# error. A plain request raises the timeout. kr8s's own sync bridge runs it on
+# the event loop that owns the pod's API session.
+_fetch_pod_log = as_sync_func(_async_fetch_pod_log)
+
+
 def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     """Return this pod's logs, including the previous container instance.
 
@@ -165,18 +194,35 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     healthy deployment), and a fallback that happened before a restart would
     otherwise be invisible. ``tail_lines`` bounds memory -- FI_LOG_LEVEL=info is
     extremely chatty and both workers' logs are held at once.
+
+    A read that fails is raised, never returned as an empty log: an empty log
+    scores as "LIBFABRIC never instantiated", which blames the backend for what
+    was a dropped vCluster API tunnel. Connection errors and read timeouts are
+    retried while the tunnel recovers; the only failure tolerated is a missing
+    previous instance.
     """
     chunks = []
     spec = pod.raw.get("spec", {})
     containers = [c["name"] for c in (spec.get("containers") or []) if c.get("name")]
     for container in containers or [""]:
         for previous in (True, False):
-            kwargs = {"tail_lines": tail_lines, "previous": previous}
+            params = {"tailLines": tail_lines}
+            if previous:
+                params["previous"] = "true"
             if container:
-                kwargs["container"] = container
+                params["container"] = container
             try:
-                chunks.append("\n".join(pod.logs(**kwargs)))
-            except Exception as e:  # noqa: BLE001 - no previous instance is normal
+                chunks.append(
+                    retry_vcluster_api(
+                        f"reading logs of {pod.name}",
+                        lambda params=params: _fetch_pod_log(pod, params),
+                        _KR8S_VCLUSTER_CONNECTION_ERRORS,
+                        logger,
+                    ).rstrip("\n")
+                )
+            except kr8s.ServerError as e:
+                if not (previous and _NO_PREVIOUS_INSTANCE in str(e)):
+                    raise
                 logger.debug(
                     "logs(previous=%s) unavailable for %s/%s: %s",
                     previous,
