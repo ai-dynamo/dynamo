@@ -132,6 +132,22 @@ pub(crate) fn validate_layout_compatibility(
     let src_layout = src.layout();
     let dst_layout = dst.layout();
 
+    if src_layout.num_layers() != dst_layout.num_layers() {
+        return Err(anyhow!(
+            "Layouts have incompatible layer counts: src={}, dst={}",
+            src_layout.num_layers(),
+            dst_layout.num_layers()
+        ));
+    }
+
+    if src_layout.outer_dim() != dst_layout.outer_dim() {
+        return Err(anyhow!(
+            "Layouts have incompatible outer dimensions: src={}, dst={}",
+            src_layout.outer_dim(),
+            dst_layout.outer_dim()
+        ));
+    }
+
     if src_layout
         .block_layout()
         .requires_transform(&dst_layout.block_layout())
@@ -170,4 +186,54 @@ pub(crate) fn can_use_whole_block_transfer(
 
     // Both must be fully contiguous
     src.layout().is_fully_contiguous() && dst.layout().is_fully_contiguous()
+}
+
+#[cfg(test)]
+mod layout_compatibility_tests {
+    use super::*;
+    use crate::layout::LayoutConfig;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::matching(2, 2, None)]
+    #[case::layer_count(3, 2, Some("Layouts have incompatible layer counts: src=2, dst=3"))]
+    #[case::outer_dimension(2, 1, Some("Layouts have incompatible outer dimensions: src=2, dst=1"))]
+    #[case::layers_first(3, 1, Some("Layouts have incompatible layer counts: src=2, dst=3"))]
+    fn test_validate_layout_compatibility_shape(
+        #[case] dst_layers: usize,
+        #[case] dst_outer_dim: usize,
+        #[case] expected_error: Option<&str>,
+    ) {
+        let agent = NixlAgent::new("test_compat_shape").unwrap();
+        let src_config = LayoutConfig::builder()
+            .num_blocks(2)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(128)
+            .build()
+            .unwrap();
+        let mut dst_config = src_config.clone();
+        dst_config.num_layers = dst_layers;
+        dst_config.outer_dim = dst_outer_dim;
+        let src = PhysicalLayout::builder(agent.clone())
+            .with_config(src_config)
+            .fully_contiguous()
+            .allocate_system()
+            .build()
+            .unwrap();
+        let dst = PhysicalLayout::builder(agent)
+            .with_config(dst_config)
+            .fully_contiguous()
+            .allocate_system()
+            .build()
+            .unwrap();
+
+        let result = validate_layout_compatibility(&src, &dst);
+        if let Some(expected_error) = expected_error {
+            assert_eq!(result.unwrap_err().to_string(), expected_error);
+        } else {
+            assert!(result.is_ok());
+        }
+    }
 }
