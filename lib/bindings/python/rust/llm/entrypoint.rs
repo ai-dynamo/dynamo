@@ -285,7 +285,10 @@ impl KvRouterConfig {
                  selects worker-selection policy instance {instance:?} for {worker_type}"
             )));
         }
-        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+        dynamo_custom_policy_builtin::startup_policy_parameters(
+            &dynamo_kv_router::SelectionConfig::from(&self.inner),
+            role,
+        )
             .into_iter()
             .map(|(name, value)| match value.as_f64() {
                 Some(value) => Ok((name, value)),
