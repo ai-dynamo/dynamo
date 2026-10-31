@@ -12,9 +12,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -324,6 +322,15 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
+    }
+
+    let mut formats = dynamo_llm::generate_format::Registry::default();
+    dynamo_generate_format_catalog::register(&mut formats)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    if !dynamo_llm::generate_format::install(formats) {
+        return Err(PyRuntimeError::new_err(
+            "generate format registry already installed",
+        ));
     }
 
     // Size the runtime the bridge may build for itself.

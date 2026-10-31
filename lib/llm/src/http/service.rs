@@ -30,15 +30,15 @@ mod write_timeout;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+pub mod format_generate;
 pub mod frontend_extension;
-pub mod generate;
+
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
-pub mod sglang_generate;
 pub mod systemone;
 mod worker_metrics;
 
