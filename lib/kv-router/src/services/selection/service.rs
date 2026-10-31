@@ -390,8 +390,10 @@ impl SelectionService {
     }
 
     /// Reconcile a peer binding independently of request load. Importing does
-    /// not publish an update. A binding this replica cannot place yet is
-    /// dropped and converges on the owner's next refresh.
+    /// not publish an update. A binding whose partition or worker this replica
+    /// has not discovered yet is held, bounded in count and dropped after the
+    /// session TTL, and applied once that worker is upserted. Until then the
+    /// worker stays ineligible and the binding is not visible.
     pub fn apply_session_binding(
         &self,
         binding: AffinityBindingEvent,

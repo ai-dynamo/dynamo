@@ -64,6 +64,13 @@ impl SelectionCore {
         for key in &affected {
             self.publish_scheduler_config(key);
         }
+        let committed: HashSet<RoutingPartitionId> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().map(WorkerCatalogRecord::key))
+            .collect();
+        for key in &committed {
+            self.apply_held_bindings(key);
+        }
         results
     }
 
@@ -81,7 +88,9 @@ impl SelectionCore {
         let mut record = previous.clone();
         record.apply_patch(patch);
         self.prepare_worker(&mut record)?;
-        self.reconcile_worker(record, Some(previous), None).await
+        let record = self.reconcile_worker(record, Some(previous), None).await?;
+        self.apply_held_bindings(&record.key());
+        Ok(record)
     }
 
     pub async fn delete_worker(
@@ -279,6 +288,9 @@ impl SelectionCore {
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         });
+        // Obtain the same tracker as bindings held before entry discovery.
+        // Do this outside the entries lock: dispatch takes held before entries.
+        let held_replica = self.held_bindings.lock().tracker(&key);
         let entry = entry_cell
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
@@ -380,6 +392,7 @@ impl SelectionCore {
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
+                    held_replica,
                     replica_config: self.replica_config.clone(),
                     affinity_replication: self.session_binding_sink(&key),
                 }))
