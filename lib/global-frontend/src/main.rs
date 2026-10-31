@@ -89,6 +89,10 @@ struct Args {
     /// How requests reach the pools.
     #[arg(long, value_enum, default_value_t = DataPlane::Axum)]
     data_plane: DataPlane,
+    /// `pingora`: serve on this many single-threaded runtimes, each with its
+    /// own I/O driver; 0 serves on the main runtime.
+    #[arg(long, default_value_t = 0)]
+    pingora_runtimes: usize,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -243,7 +247,7 @@ async fn main() -> Result<()> {
             let listener = std::net::TcpListener::bind(&address)
                 .with_context(|| format!("listen on {address}"))?;
             tracing::info!(%address, "Global Frontend listening on Pingora");
-            serve_pingora(listener, proxy, shutdown).await;
+            serve_pingora(listener, proxy, shutdown, args.pingora_runtimes).await;
         }
     }
     Ok(())

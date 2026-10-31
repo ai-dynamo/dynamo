@@ -148,7 +148,8 @@ fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
 }
 
 /// Serves a Global Frontend on `listener` until `shutdown` fires, on the data
-/// plane `GF_TEST_DATA_PLANE` names: `axum` (the default) or `pingora`.
+/// plane `GF_TEST_DATA_PLANE` names: `axum` (the default), `pingora`, or
+/// `pingora-sharded` (two runtimes of its own).
 async fn serve(
     listener: TcpListener,
     pools: watch::Receiver<Arc<PoolSnapshot>>,
@@ -158,7 +159,7 @@ async fn serve(
     shutdown: CancellationToken,
 ) {
     match std::env::var("GF_TEST_DATA_PLANE").as_deref() {
-        Ok("pingora") => {
+        Ok(plane @ ("pingora" | "pingora-sharded")) => {
             let connect_timeout = Duration::from_secs(5);
             let proxy = dynamo_global_frontend::PingoraProxy::new(
                 pools,
@@ -168,7 +169,8 @@ async fn serve(
                 connect_timeout,
             );
             let listener = listener.into_std().unwrap();
-            dynamo_global_frontend::serve_pingora(listener, proxy, shutdown).await;
+            let runtimes = if plane == "pingora" { 0 } else { 2 };
+            dynamo_global_frontend::serve_pingora(listener, proxy, shutdown, runtimes).await;
         }
         Ok("axum") | Err(_) => {
             let app = dynamo_global_frontend::app(pools, selector, in_flight, client(), metrics);

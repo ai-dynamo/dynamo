@@ -44,11 +44,12 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_POLL: Duration = Duration::from_millis(50);
 
 /// The Global Frontend's request handling, as Pingora's `ProxyHttp`.
+#[derive(Clone)]
 pub struct PingoraProxy {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
     connect_timeout: Duration,
 }
 
@@ -66,7 +67,7 @@ impl PingoraProxy {
             pools,
             selector,
             in_flight,
-            metrics,
+            metrics: Arc::new(metrics),
             connect_timeout,
         }
     }
@@ -412,34 +413,51 @@ async fn respond_error(session: &mut Session, status: StatusCode, message: &str)
 /// Serves `proxy` on `listener` until `shutdown` fires. Then it stops
 /// accepting connections and waits, up to a grace period, for requests in
 /// flight to end.
+///
+/// With `runtimes` 0, connections run on the caller's runtime. Otherwise each
+/// of `runtimes` threads runs a single-threaded runtime with its own I/O
+/// driver, accept loop on a copy of `listener`, and pool connections, so no
+/// one driver dispatches every socket's events.
 pub async fn serve_pingora(
     listener: std::net::TcpListener,
     proxy: PingoraProxy,
     shutdown: CancellationToken,
+    runtimes: usize,
 ) {
     let pools = proxy.pools.clone();
     let in_flight = proxy.in_flight.clone();
-    let conf = ServerConf {
-        upstream_keepalive_pool_size: UPSTREAM_POOL_SIZE,
-        ..ServerConf::default()
-    };
-    let mut service = pingora_proxy::http_proxy_service(&Arc::new(conf), proxy);
-    let address = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .to_string();
     listener
         .set_nonblocking(true)
         .expect("a TCP listener can be made non-blocking");
-    let mut fds = Fds::new();
-    fds.add(address.clone(), listener.into_raw_fd());
-    service.add_tcp(&address);
     let (stop, stopped) = watch::channel(false);
-    let serving = tokio::spawn(async move {
-        service
-            .start_service(Some(Arc::new(fds.into())), stopped, 1)
-            .await;
-    });
+    let mut shards = Vec::with_capacity(runtimes);
+    let serving = if runtimes == 0 {
+        Some(tokio::spawn(run_service(listener, proxy, stopped)))
+    } else {
+        for shard in 0..runtimes {
+            let listener = listener
+                .try_clone()
+                .expect("a listening socket can be duplicated");
+            let (proxy, stopped) = (proxy.clone(), stopped.clone());
+            // Requests in flight keep running on the shard until `exit` fires.
+            let (exit, exited) = tokio::sync::oneshot::channel::<()>();
+            let thread = std::thread::Builder::new()
+                .name(format!("pingora-{shard}"))
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build a Pingora runtime")
+                        .block_on(async move {
+                            run_service(listener, proxy, stopped).await;
+                            let _ = exited.await;
+                        });
+                })
+                .expect("spawn a Pingora runtime thread");
+            shards.push((exit, thread));
+        }
+        None
+    };
 
     shutdown.cancelled().await;
     let _ = stop.send(true);
@@ -455,5 +473,44 @@ pub async fn serve_pingora(
     while open() > 0 && Instant::now() < deadline {
         tokio::time::sleep(DRAIN_POLL).await;
     }
-    serving.abort();
+    if let Some(serving) = serving {
+        serving.abort();
+    }
+    let threads: Vec<_> = shards
+        .into_iter()
+        .map(|(exit, thread)| {
+            let _ = exit.send(());
+            thread
+        })
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || {
+        for thread in threads {
+            let _ = thread.join();
+        }
+    })
+    .await;
+}
+
+/// Runs one Pingora service for `proxy` on `listener`, in the current
+/// runtime, until `stopped` turns true.
+async fn run_service(
+    listener: std::net::TcpListener,
+    proxy: PingoraProxy,
+    stopped: watch::Receiver<bool>,
+) {
+    let conf = ServerConf {
+        upstream_keepalive_pool_size: UPSTREAM_POOL_SIZE,
+        ..ServerConf::default()
+    };
+    let mut service = pingora_proxy::http_proxy_service(&Arc::new(conf), proxy);
+    let address = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .to_string();
+    let mut fds = Fds::new();
+    fds.add(address.clone(), listener.into_raw_fd());
+    service.add_tcp(&address);
+    service
+        .start_service(Some(Arc::new(fds.into())), stopped, 1)
+        .await;
 }
