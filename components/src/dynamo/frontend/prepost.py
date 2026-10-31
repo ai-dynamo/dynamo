@@ -37,6 +37,7 @@ from vllm.utils.async_utils import make_async
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .reasoning import normalize_reasoning_content
 from .responses_history import responses_history_template, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
@@ -483,35 +484,145 @@ def _materialize_assistant_tool_calls(
     return normalized
 
 
+def _copy_reasoning_for_validation(
+    request: dict[str, Any] | ChatCompletionRequest,
+) -> tuple[dict[str, Any] | ChatCompletionRequest, dict[int, str | list[str]]]:
+    messages = (
+        request.messages
+        if isinstance(request, ChatCompletionRequest)
+        else request.get("messages")
+    )
+    if not isinstance(messages, list):
+        return request, {}
+
+    reasoning_by_index = {}
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        reasoning = message.get("reasoning")
+        if reasoning is None:
+            reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) or (
+            isinstance(reasoning, list)
+            and all(isinstance(item, str) for item in reasoning)
+        ):
+            reasoning_by_index[index] = reasoning
+    if not reasoning_by_index:
+        return request, {}
+
+    copied_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            copied_messages.append(message)
+            continue
+        message = dict(message)
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            message["tool_calls"] = [
+                {
+                    **call,
+                    "function": dict(call["function"]),
+                }
+                if isinstance(call, dict) and isinstance(call.get("function"), dict)
+                else call
+                for call in tool_calls
+            ]
+        copied_messages.append(message)
+    messages = copied_messages
+    for index, reasoning in reasoning_by_index.items():
+        message = messages[index]
+        message.pop("reasoning_content", None)
+        # vLLM validates reasoning as a string. Restore segments after validation.
+        message["reasoning"] = (
+            "\n".join(part for part in reasoning if part)
+            if isinstance(reasoning, list)
+            else reasoning
+        )
+    if isinstance(request, ChatCompletionRequest):
+        return request.model_copy(update={"messages": messages}), reasoning_by_index
+    return {**request, "messages": messages}, reasoning_by_index
+
+
 # Fully validate nested fields only when the fast path leaves raw dictionaries.
 def _validate_chat_completion_request(
     request: dict[str, Any] | ChatCompletionRequest,
 ) -> ChatCompletionRequest:
+    request, reasoning_by_index = _copy_reasoning_for_validation(request)
     if isinstance(request, ChatCompletionRequest):
-        return request
-    if not SKIP_REQUEST_VALIDATION:
-        return ChatCompletionRequest.model_validate(request)
-
-    validated_request = ChatCompletionRequest.model_construct(**request)
-    has_unvalidated_tools = validated_request.tools and any(
-        not hasattr(tool, "model_dump") for tool in validated_request.tools
-    )
-    if (
-        has_unvalidated_tools
-        or isinstance(validated_request.response_format, dict)
-        or isinstance(validated_request.structured_outputs, dict)
-    ):
-        return ChatCompletionRequest.model_validate(request)
-    # model_construct leaves tool_choice as the raw client dict. Normalize it
-    # here, once, rather than at each consumer: vLLM's helpers branch on the
-    # typed ChatCompletionNamedToolChoiceParam, and a dict makes
-    # get_json_schema_from_tools silently return None while
-    # get_structural_tag raises AttributeError on .model_dump().
-    if _is_named_tool_choice(validated_request.tool_choice):
-        validated_request.tool_choice = _typed_tool_choice(
-            validated_request.tool_choice
+        validated_request = request
+    elif not SKIP_REQUEST_VALIDATION:
+        validated_request = ChatCompletionRequest.model_validate(request)
+    else:
+        validated_request = ChatCompletionRequest.model_construct(**request)
+        has_unvalidated_tools = validated_request.tools and any(
+            not hasattr(tool, "model_dump") for tool in validated_request.tools
         )
+        if (
+            has_unvalidated_tools
+            or isinstance(validated_request.response_format, dict)
+            or isinstance(validated_request.structured_outputs, dict)
+        ):
+            validated_request = ChatCompletionRequest.model_validate(request)
+        # model_construct leaves tool_choice as the raw client dict. Normalize it
+        # here, once, rather than at each consumer: vLLM's helpers branch on the
+        # typed ChatCompletionNamedToolChoiceParam, and a dict makes
+        # get_json_schema_from_tools silently return None while
+        # get_structural_tag raises AttributeError on .model_dump().
+        elif _is_named_tool_choice(validated_request.tool_choice):
+            validated_request.tool_choice = _typed_tool_choice(
+                validated_request.tool_choice
+            )
+    for index, reasoning in reasoning_by_index.items():
+        message = validated_request.messages[index]
+        if isinstance(message, dict):
+            message["reasoning"] = reasoning
     return validated_request
+
+
+def _normalize_reasoning_for_template(
+    messages: list[dict[str, Any]], tokenizer: TokenizerLike, chat_params: ChatParams
+) -> list[dict[str, Any]]:
+    segmented = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and isinstance(message.get("reasoning"), list)
+        and all(isinstance(part, str) for part in message["reasoning"])
+    ]
+    apply_template = getattr(tokenizer, "apply_chat_template", None)
+    if not segmented or not callable(apply_template):
+        return messages
+
+    adapted = list(messages)
+    for index in segmented:
+        adapted[index] = {
+            **messages[index],
+            "reasoning_content": messages[index]["reasoning"],
+        }
+    kwargs = {
+        **chat_params.chat_template_kwargs,
+        "chat_template": chat_params.chat_template,
+        "tokenize": False,
+        "return_dict": False,
+    }
+    has_tools = kwargs.pop("tools", None) is not None
+
+    def render_template(probe_messages, *, tools):
+        probe_messages = [
+            {**message, "reasoning": message["reasoning_content"]}
+            if "reasoning_content" in message
+            else message
+            for message in probe_messages
+        ]
+        return apply_template(probe_messages, tools=tools, **kwargs)
+
+    normalize_reasoning_content(
+        adapted, render_template=render_template, has_tools=has_tools
+    )
+    for index in segmented:
+        adapted[index]["reasoning"] = adapted[index].pop("reasoning_content")
+    return adapted
 
 
 def _reasoning_parser_enabled(
@@ -844,6 +955,7 @@ async def preprocess_chat_request(
     # Render first: whether generation starts inside a reasoning block depends
     # on the rendered prompt (e.g. a template that ends the generation prompt
     # with an open think tag), and the tool-call grammar must match it.
+    messages = _normalize_reasoning_for_template(messages, tokenizer, chat_params)
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
 
     if "prompt_token_ids" in engine_prompt:
