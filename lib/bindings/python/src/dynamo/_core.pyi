@@ -2941,10 +2941,11 @@ class KvRouter:
         Returns success, message, prefetched_tokens and cached_tokens. Counts are
         minima across replicas; check success before using them. A missing tail
         is a successful partial hit. Cached tokens remain normally evictable.
-        Busy or unsupported engines return success=False. Transport errors raise;
+        Resource-limited or unsupported engines return success=False. Transport errors raise;
         a timeout after 60 seconds does not cancel engine-side work. No retry.
-        SGLang currently loads synchronously at idle; new arrivals wait for the
-        transfer. PP, Eagle and Mamba extra-buffer configurations are unsupported.
+        SGLang loads concurrently with inference and replies after GPU tree
+        publication. Each engine permits one explicit prefetch in flight.
+        PP, Eagle and Mamba extra-buffer configurations are unsupported.
 
         Example:
             result = await router.prefetch(worker_id, full_token_ids)
