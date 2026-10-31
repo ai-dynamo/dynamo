@@ -12,6 +12,8 @@ pub mod overlap_refresh;
 pub mod policy;
 pub mod policy_config;
 pub mod policy_queue;
+#[cfg(test)]
+mod policy_queue_tests;
 pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
