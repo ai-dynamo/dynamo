@@ -9,10 +9,10 @@
 pub use crate::booking::SchedulerBookingDescriptor;
 pub use crate::multi_worker::{
     ActiveSequencesMultiWorker, LocalWorkerLoad, NoopSequencePublisher,
-    ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequencePublishQueueError,
-    SequencePublisher, SequenceSubscriber,
+    ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use crate::prompt_registry::WorkerLoadProjection;
 pub use crate::single::ActiveSequences;
 pub use crate::topology::WorkerDpRange;
-pub use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+pub use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};

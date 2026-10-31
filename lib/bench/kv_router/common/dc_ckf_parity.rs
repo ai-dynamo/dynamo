@@ -12,16 +12,18 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-};
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
-use dynamo_kv_router::indexer::cuckoo::{
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
+use dynamo_kv_indexer::cuckoo::{
     ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublicationBatch, DcCkfPublishError,
     DcCkfPublisher, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneIngestor,
     GlobalCkfManifest, LaneLease, ProducerIdentity,
 };
-use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerWithDpRank};
+use dynamo_kv_indexer::host::OverlapScores;
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use rustc_hash::FxHashMap;
 
 const MAX_LANES: usize = 16;
@@ -249,14 +251,14 @@ impl DirectCkfParityIndexer {
 
     pub fn find_matches(
         &mut self,
-        sequence: &[dynamo_kv_router::LocalBlockHash],
+        sequence: &[dynamo_router_protocol::block_hash::LocalBlockHash],
     ) -> Result<OverlapScores> {
         self.find_matches_with_mode(sequence, DirectCkfParityMatchMode::FullMap)
     }
 
     pub fn find_matches_with_mode(
         &mut self,
-        sequence: &[dynamo_kv_router::LocalBlockHash],
+        sequence: &[dynamo_router_protocol::block_hash::LocalBlockHash],
         mode: DirectCkfParityMatchMode,
     ) -> Result<OverlapScores> {
         self.exact_drain()?;
@@ -292,7 +294,7 @@ impl DirectCkfParityIndexer {
 
 fn map_publish_result(
     result: std::result::Result<
-        dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome,
+        dynamo_kv_indexer::cuckoo::PublisherEmitOutcome,
         DcCkfPublishError<Infallible>,
     >,
 ) -> Result<()> {
@@ -307,11 +309,10 @@ fn map_publish_result(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::LocalBlockHash;
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 

@@ -25,7 +25,7 @@ fn init_sequence_logging(enabled: bool) {
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
-            "error,dynamo_kv_router::sequences=warn,dynamo_mocker=warn",
+            "error,dynamo_slot_tracker=warn,dynamo_mocker=warn",
         ))
         .with_writer(std::io::stderr)
         .try_init();

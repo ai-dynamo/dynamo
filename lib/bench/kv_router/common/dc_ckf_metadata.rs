@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CKF_MOONCAKE_BLOCK_SIZE: usize = 512;

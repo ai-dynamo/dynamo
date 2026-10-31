@@ -33,7 +33,9 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 dynamo-llm = { workspace = true }
-dynamo-kv-router = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tokio-stream = { workspace = true, features = ["net"] }

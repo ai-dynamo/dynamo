@@ -21,20 +21,22 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::dc_ckf_metadata::DcCkfCorpusMetadata;
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+    RouterEvent,
 };
-use dynamo_kv_router::indexer::cuckoo::{
+use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_kv_indexer::cuckoo::{
     CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
     DcCkfSnapshot, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfIngestionPool,
     GlobalCkfIngestionPoolConfig, GlobalCkfManifest, LaneLease, PrefixSearchConfig,
     ProducerIdentity,
 };
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    compute_seq_hash_for_block,
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::{Deserialize, Serialize};
 
 const CORPUS_SCHEMA_VERSION: u32 = 4;

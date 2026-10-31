@@ -16,19 +16,21 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use dynamo_kv_router::ConcurrentRadixTreeCompressed;
-use dynamo_kv_router::identity::{
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers,
+    LowerTierQueryOptions, MatchDetails, ResidencyProjection, ResidencyRoutingSnapshot,
+};
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::{
     CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
     RoutingScopeId, StableDpSlotId,
 };
-use dynamo_kv_router::indexer::{
-    KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
-};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
-    StorageTier, WorkerWithDpRank,
-};
+use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::Serialize;
 
 use super::mooncake_shared::{WorkerTrace, WorkerTraceEntry};

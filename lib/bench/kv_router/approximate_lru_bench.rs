@@ -14,13 +14,14 @@ use dynamo_bench::kv_router_common::issuer::{
     parse_cpu_list, pin_current_thread, pin_current_thread_to_cpus,
 };
 use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
-use dynamo_kv_router::indexer::{
+use dynamo_kv_indexer::host::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
-    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
+    ApproximateRetentionConfig, ConcurrentRadixTreeCompressed, KvIndexerInterface,
+    KvIndexerMetrics, PruneConfig, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::AttemptId;
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer, approx::PruneConfig};
+use dynamo_router_protocol::attempt::AttemptId;
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_tokens::SequenceHash;
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};

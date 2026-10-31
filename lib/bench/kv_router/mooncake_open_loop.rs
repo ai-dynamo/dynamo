@@ -9,12 +9,13 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use std::time::Instant;
 
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::{
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_indexer::host::{
     KvIndexerInterface, LowerTierIndexers, LowerTierMatchDetails, ObservationError, SyncIndexer,
     ThreadPoolIndexer, ThreadPoolObservationPlan, query_lower_tiers_with_options,
 };
-use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent, StorageTier};
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_router_protocol::residency::StorageTier;
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
@@ -1317,7 +1318,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
 
 fn last_completion_ns(
     query_results: &[QueryLaneResult],
-    snapshot: &dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+    snapshot: &dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
 ) -> Option<u64> {
     let last_query = query_results
         .iter()
@@ -1346,7 +1347,7 @@ fn analyze_result(
     config: OpenLoopConfig,
     issuer: IssuerAnalysisInput,
     query_results: Vec<QueryLaneResult>,
-    snapshot: dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+    snapshot: dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
     lower_tier: Option<(Footprint, u64)>,
 ) -> OpenLoopResult {
@@ -1901,7 +1902,7 @@ mod tests {
             worker_id: u64::from(id),
             payload: DispatchPayload::Event(RouterEvent::new(
                 u64::from(id),
-                dynamo_kv_router::protocols::KvCacheEvent {
+                dynamo_kv_events::event::KvCacheEvent {
                     event_id: u64::from(id),
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
