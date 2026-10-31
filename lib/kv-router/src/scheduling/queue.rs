@@ -2285,11 +2285,12 @@ mod tests {
 
     use super::*;
     use crate::kv_hints::KvTransferCandidates;
-    use crate::plugins::worker_selection::WorkerCandidates;
+    use crate::plugins::request_classifier::WorkerView;
     use crate::protocols::{
         ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
     use crate::scheduling::OverlapSignals;
+    use crate::scheduling::classifier_rows::ClassifierRows;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
     use crate::sequences::topology::WorkerDpRange;
@@ -3026,7 +3027,7 @@ mod tests {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                _workers: WorkerCandidates<'_>,
+                _workers: &dyn WorkerView,
             ) -> ClassifyFuture {
                 let expected = self.0.clone();
                 let pin = self.1;
@@ -3050,7 +3051,7 @@ mod tests {
                 queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
             assert_eq!(request.token_seq, hashes);
             let mut classifier = InspectHashes(hashes, pin);
-            let pending = workers.read(|workers| classifier.classify(classified, workers));
+            let pending = classifier.classify(classified, &ClassifierRows(workers));
             // The independently pollable future must not borrow actor-owned data.
             request.token_seq = Some(vec![99]);
             request.pinned_worker = None;
@@ -3075,7 +3076,7 @@ mod tests {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                _workers: WorkerCandidates<'_>,
+                _workers: &dyn WorkerView,
             ) -> ClassifyFuture {
                 Box::pin(async move {
                     std::future::pending::<()>().await;
@@ -3124,7 +3125,7 @@ mod tests {
                         ingress_at,
                         WorkerInputs::NONE,
                     );
-                    let mut future = workers.read(|workers| classifier.classify(input, workers));
+                    let mut future = classifier.classify(input, &ClassifierRows(workers));
                     assert!(future.as_mut().poll(&mut cx).is_pending());
                     futures.push(future);
                 }

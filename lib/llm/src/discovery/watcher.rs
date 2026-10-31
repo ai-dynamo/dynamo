@@ -2272,7 +2272,7 @@ mod tests {
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
-        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
+        use dynamo_kv_router::plugins::request_classifier::WorkerView;
         use dynamo_kv_router::scheduling::{
             ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
         };
@@ -2288,7 +2288,7 @@ mod tests {
             fn classify(
                 &mut self,
                 _request: ClassifyRequest,
-                _workers: WorkerCandidates<'_>,
+                _workers: &dyn WorkerView,
             ) -> ClassifyFuture {
                 self.calls += 1;
                 self.events

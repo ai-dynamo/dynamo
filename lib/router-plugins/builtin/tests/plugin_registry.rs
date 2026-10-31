@@ -5,20 +5,16 @@ use std::sync::Arc;
 
 use dynamo_kv_router::SelectionConfig;
 use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::WorkerView;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
 struct PassThrough;
 
 impl RequestClassifier for PassThrough {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })
     }
 }

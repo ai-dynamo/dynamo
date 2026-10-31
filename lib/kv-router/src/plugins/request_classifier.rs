@@ -7,8 +7,10 @@ mod config;
 mod inputs;
 mod progress;
 mod registry;
+mod view;
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
+pub use view::{NoWorkers, WorkerCacheView, WorkerLoadView, WorkerView};
 
 pub(crate) use config::RawRequestClassifierConfig;
 pub use config::RequestClassifierConfig;
@@ -27,7 +29,7 @@ use async_trait::async_trait;
 use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
-use crate::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::{
     BusyThresholds, PolicyProfile, SessionContext, policy_queue::QueueSnapshot,
@@ -331,7 +333,7 @@ pub type ClassifyFuture =
 /// }
 ///
 /// impl RequestClassifier for Pauser {
-///     fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+///     fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
 ///         // Clone the handle into the future; `self` cannot be borrowed.
 ///         let state = Arc::clone(&self.state);
 ///         Box::pin(async move {
@@ -363,7 +365,8 @@ pub trait RequestClassifier: Send + 'static {
 
     /// `workers` covers every worker rank eligible for this request under its pin, allowed
     /// workers, availability, and routing constraints, in unspecified order, with the groups
-    /// [`Self::required_worker_inputs`] declares; it is empty when that is
+    /// [`Self::required_worker_inputs`] declares (`CACHE` and `LOAD`; other groups are
+    /// selection's and read as `None` here); it is empty when that is
     /// [`WorkerInputs::NONE`]. Overloaded workers are included. Values come from the row
     /// builder worker selection uses, so each group means the same thing here as in a filter
     /// or scorer.
@@ -372,11 +375,7 @@ pub trait RequestClassifier: Send + 'static {
     /// frees the rows when `classify` returns, so a deferred classification does not hold them.
     /// Copy into the returned future anything it needs. Worker selection takes its own
     /// snapshot when it later picks a worker, so it can pick a different worker.
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })
     }
 

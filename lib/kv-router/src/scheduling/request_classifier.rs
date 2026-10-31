@@ -15,6 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::classifier_rows::ClassifierRows;
 use super::types::KvSchedulerError;
 use crate::plugins::worker_selection::{WorkerInputRows, WorkerInputs};
 use crate::protocols::WorkerWithDpRank;
@@ -217,10 +218,11 @@ impl RequestClassifierRuntime {
                     request_id.to_owned(),
                 ));
             }
-            let classification = catch_unwind(AssertUnwindSafe(|| {
-                workers.read(|workers| classifier.classify(request, workers))
-            }))
-            .map_err(|panic| KvSchedulerError::RequestClassifierPanicked(panic_message(panic)))?;
+            let workers = ClassifierRows(workers);
+            let classification =
+                catch_unwind(AssertUnwindSafe(|| classifier.classify(request, &workers))).map_err(
+                    |panic| KvSchedulerError::RequestClassifierPanicked(panic_message(panic)),
+                )?;
             drop(workers);
             classification
         };
@@ -545,7 +547,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::plugins::worker_selection::WorkerCandidates;
+    use crate::plugins::request_classifier::{NoWorkers, WorkerView};
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::KvSchedulerError;
 
@@ -561,7 +563,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 panic!("synchronous classifier panic");
@@ -604,7 +606,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             let should_panic = self.calls.fetch_add(1, Ordering::Relaxed) == 0;
             Box::pin(async move {
@@ -650,7 +652,7 @@ mod tests {
         fn classify(
             &mut self,
             _request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             Box::pin(async { Err(Box::new(TestClassifierError) as Box<ClassifierError>) })
         }
@@ -678,7 +680,7 @@ mod tests {
         fn classify(
             &mut self,
             _request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             Box::pin(async { Ok(ClassifyRequest::new(2, 0)) })
         }
@@ -723,10 +725,7 @@ mod tests {
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
-        let result = WorkerInputRows::empty()
-            .read(|workers| PassThrough.classify(request, workers))
-            .await
-            .unwrap();
+        let result = PassThrough.classify(request, &NoWorkers).await.unwrap();
 
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
@@ -748,7 +747,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             let entered = Arc::clone(&self.entered);
             let released = Arc::clone(&self.released);
@@ -801,7 +800,7 @@ mod tests {
         fn classify(
             &mut self,
             _request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             self.entered.fetch_add(1, Ordering::Relaxed);
             Box::pin(std::future::pending())
@@ -889,7 +888,7 @@ mod tests {
         fn classify(
             &mut self,
             mut request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             self.calls.fetch_add(1, Ordering::Relaxed);
             request.set_scheduling_cost_tokens(7);
@@ -1034,7 +1033,7 @@ mod tests {
         fn classify(
             &mut self,
             mut request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
             let entered = Arc::clone(&self.entered);
@@ -1352,7 +1351,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: WorkerCandidates<'_>,
+            _workers: &dyn WorkerView,
         ) -> ClassifyFuture {
             let _ = self
                 .observed

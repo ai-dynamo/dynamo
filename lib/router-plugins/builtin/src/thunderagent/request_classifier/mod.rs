@@ -12,12 +12,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::request_classifier::WorkerView;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -284,11 +284,7 @@ impl ThunderAgentClassifier {
 
 #[async_trait]
 impl RequestClassifier for ThunderAgentClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         let Some(session) = request.session_context() else {
             return Box::pin(async move { Ok(request) });
         };
