@@ -30,9 +30,14 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=8.0,
+                profiled_vram_gib=9.8,  # actual peak with the mamba cap below
                 requested_sglang_kv_tokens=8192,
-                env={"SINGLE_GPU": "true"},
+                # SGLang sizes the Qwen3.5 mamba cache from free VRAM, not
+                # --max-total-tokens; without a cap it starves co-scheduled tests.
+                env={
+                    "SINGLE_GPU": "true",
+                    "SGLANG_EXTRA_ARGS": "--max-mamba-cache-size 64",
+                },
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
