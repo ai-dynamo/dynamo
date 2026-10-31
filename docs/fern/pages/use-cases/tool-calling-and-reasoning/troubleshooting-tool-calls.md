@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Troubleshooting Tool Calls
 subtitle: Capture raw model output with logprobs so issues can be localized
@@ -19,7 +19,13 @@ what the response will look like, so you can capture and share useful
 diagnostic info.
 
 > [!IMPORTANT]
->  Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`.
+> Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint.
+> On the V2 parser route (see [Parser Generation Routing](#parser-generation-routing)),
+> `logprobs.content` lists every token entry the backend returns, in generation order, including
+> reasoning, tool-call, and control tokens that the parsed message does not show. Streamed responses
+> carry each backend chunk's entries once, on one chunk for that choice, so the entries need not line
+> up with the text in `reasoning_content`, `content`, and `tool_calls`. This note does not describe
+> the V1 route.
 
 ## The request
 
@@ -88,11 +94,20 @@ engine's raw token stream:
 }
 ```
 
-Each entry in `logprobs.content` is one generated token with its exact UTF-8
-`bytes`. Concatenating those bytes in order reconstructs the raw model
-output, before any tool-call parser touched it. That is the key piece for
-triage: it tells us what the model actually produced, separately from what
-the parser made of it.
+Each entry in `logprobs.content` is one generated token and keeps the score
+the backend returned for it. The `token` text and `bytes` are decoded
+representations: a control token such as end-of-sequence can have empty text
+and bytes, and `return_tokens_as_token_ids` can replace the text with a
+`token_id:<id>` label. Without that option, concatenating the `bytes` in
+order approximates the model output before any tool-call parser touched it.
+It omits tokens that decode to nothing, and because each token can be
+decoded on its own, it can lose spacing that the tokenizer adds only in
+context. That is the key piece for triage: it tells us what the model
+actually produced, separately from what the parser made of it. For an exact
+replay, also request the generated token IDs with
+`"nvext": {"extra_fields": ["completion_token_ids"]}` where the response
+supports them (see
+[NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md)).
 
 ## What to include when reporting an issue
 
@@ -108,8 +123,9 @@ Share these four things in the bug report or issue thread:
    value if set.
 
 With those four pieces, the Dynamo team can usually localize the bug
-without standing up your model. The team will reconstruct the raw stream
-from the `bytes` arrays and compare it against `message.content` and
+without standing up your model. The team will rebuild the raw stream from
+the per-token entries, using exact token IDs over decoded `bytes` where the
+response provides them, and compare it against `message.content` and
 `message.tool_calls` to decide whether the issue is in the model output,
 the parser configuration, or the parser logic.
 
