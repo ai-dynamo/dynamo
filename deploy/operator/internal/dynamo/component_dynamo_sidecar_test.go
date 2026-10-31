@@ -130,7 +130,25 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
 			}
 			originalDCD := dcd.DeepCopy()
-			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
+			require.NoError(t, err)
+
+			t.Log("Copy the component before rendering, as the production DCD renderer does")
+			componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+			pod, err := GenerateBasePodSpec(
+				componentForRendering,
+				backend,
+				nil,
+				dcd.Name,
+				dcd.Namespace,
+				RoleMain,
+				dcd.Spec.GetNumberOfNodes(),
+				&configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove,
+				GetDCDComponentName(dcd),
+				nil,
+				staticContainerGPUCount(0),
+			)
 			require.NoError(t, err)
 			require.Equal(t, originalDCD, dcd)
 
@@ -653,7 +671,9 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 										require.ErrorContains(t, err, "spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates")
 										require.Nil(t, pod)
 										dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: string(backend.framework)}}
-										_, err = GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+										resolvedBackend, err := GetBackendFrameworkFromDynamoComponent(dcd)
+										require.NoError(t, err)
+										_, err = GenerateBasePodSpec(dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(), resolvedBackend, nil, dcd.Name, dcd.Namespace, role, dcd.Spec.GetNumberOfNodes(), config, provider, GetDCDComponentName(dcd), nil, staticContainerGPUCount(1))
 										require.ErrorContains(t, err, "require complete leader and worker podTemplates")
 										_, err = buildCliqueForRole(cliqueParams{component: component, backendFramework: backend.framework, r: ServiceRole{Role: role}})
 										require.ErrorContains(t, err, "require complete leader and worker podTemplates")
@@ -707,8 +727,14 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 									pod, err := GenerateBasePodSpec(component, backend.framework, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(1))
 									require.NoError(t, err)
 									dcd := &v1beta1.DynamoComponentDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: string(backend.framework)}}
-									childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+									originalDCD := dcd.DeepCopy()
+									resolvedBackend, err := GetBackendFrameworkFromDynamoComponent(dcd)
 									require.NoError(t, err)
+
+									t.Log("Copy the DCD component before rendering its authored role")
+									childPod, err := GenerateBasePodSpec(dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(), resolvedBackend, nil, dcd.Name, dcd.Namespace, role, dcd.Spec.GetNumberOfNodes(), config, provider, GetDCDComponentName(dcd), nil, staticContainerGPUCount(1))
+									require.NoError(t, err)
+									require.Equal(t, originalDCD, dcd)
 									authored, err := EffectiveComponentForRole(original, role)
 									require.NoError(t, err)
 									main := GetMainContainer(authored)
