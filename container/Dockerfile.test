@@ -68,6 +68,8 @@ COPY --chmod=755 --chown=dynamo:0 \
     .github/scripts/helm_chart_version.py \
     .github/scripts/retry_kubectl.sh \
     .github/scripts/collect_vcluster_diagnostics.sh /workspace/.github/scripts/
+COPY --chmod=755 --chown=dynamo:0 \
+    .github/actions/connect-vcluster/port-forward-watchdog.sh /workspace/.github/actions/connect-vcluster/
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
