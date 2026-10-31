@@ -145,23 +145,22 @@ Refresh discovery before each control phase and require the complete capability 
 
 ### Scope Discovery by Namespace
 
-The RL listener reads the set of Dynamo namespaces it searches from its own process environment, and from nothing else. The `--namespace` and `--namespace-prefix` frontend flags scope model discovery only; neither writes its value back into the environment. A frontend started with `--namespace-prefix ns` and no `DYN_NAMESPACE_PREFIX` set therefore gets prefix-scoped model discovery and exact-scoped RL discovery. Set the environment variable, not the flag, to scope RL discovery.
+The RL listener searches exactly the Dynamo namespaces that frontend model discovery searches. The frontend resolves the scope once, from its flags and environment, and passes the result to the RL listener. A frontend started with `--namespace-prefix ns` therefore scopes both model discovery and `/v1/rl/workers` to that prefix.
 
-Three variables decide that scope, and the first one that applies wins:
+Three inputs decide the scope, and the first rule that applies wins:
 
-| Variable | Effect when it applies |
+| Input | Effect when it applies |
 |---|---|
-| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2`. The value `dynamo` means every namespace |
-| `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
-| `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
+| `--namespace-prefix` or `DYN_NAMESPACE_PREFIX` | By default, match every namespace that starts with this literal string, so `ns` matches `ns`, `ns-abc123`, and also `ns2`. An empty value or `dynamo` means every namespace |
+| `--namespace` or `DYN_NAMESPACE` unset, empty, or `dynamo` | Match every namespace. The worker suffix is not applied, because every namespace already includes the suffixed ones |
+| `DYN_NAMESPACE_WORKER_SUFFIX` with a non-global namespace | Match the exact namespace after appending `-{suffix}` if it is not already present, following the Rust backend's apply-once rule |
+| `--namespace` or `DYN_NAMESPACE` | Match this exact namespace |
 
-The `dynamo` value is the one case where a prefix deliberately reaches past its own deployment: every other deployment's pause, resume, and weight-update endpoints then appear in this listener's `/v1/rl/workers`. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
+A manual prefix defaults to a literal string match. Choose a prefix that no other deployment name starts with: under `ns`, the pause, resume, and weight-update endpoints of a deployment named `ns2` also appear in `/v1/rl/workers`, and the frontend routes inference requests to its workers too. Namespace scope is a discovery filter, not access control.
 
-An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent, exactly as an unset one does. An empty `DYN_NAMESPACE` does not: it is the namespace to search. Model discovery agrees with RL discovery on the `dynamo` value but not on the empty one, where it reads an empty `DYN_NAMESPACE_PREFIX` as every namespace rather than as absent.
+The `dynamo` value deliberately reaches every deployment. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
 
-This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
-
-When the Dynamo Kubernetes Operator manages the deployment, it sets `DYN_NAMESPACE_PREFIX` on the frontend container, so the listener matches every worker generation at once, including the two generations that coexist during a rolling update. For a listener that the operator does not manage, including an unmanaged Kubernetes deployment or a deployment outside Kubernetes, configure the listener's namespace scope explicitly. To reach the workers of one suffixed pool:
+When the Dynamo Kubernetes Operator manages the deployment, it sets `DYN_NAMESPACE_PREFIX` and `DYN_NAMESPACE_PREFIX_STRICT=true` on the frontend container. Both model discovery and the RL listener then match only the prefix itself, its `-legacy` namespace, and worker generations ending in a hyphen followed by eight lowercase hexadecimal characters. This includes generations that coexist during a rolling update and excludes sibling deployment names. Exact and global scopes are unchanged by strict mode. For a frontend that the operator does not manage, configure the namespace scope explicitly. To reach the workers of one suffixed pool:
 
 ```bash
 DYN_ENABLE_RL=true DYN_RL_PORT=8001 \
@@ -169,7 +168,7 @@ DYN_ENABLE_RL=true DYN_RL_PORT=8001 \
   python -m dynamo.frontend
 ```
 
-`DYN_NAMESPACE_PREFIX` is also documented in the [frontend configuration reference](../../reference/components/frontend-configuration.mdx), and `DYN_NAMESPACE_WORKER_SUFFIX` in the [runtime configuration reference](../../reference/components/runtime-configuration.mdx). Those pages describe how the variables scope model discovery; this section describes the RL listener only.
+`DYN_NAMESPACE_PREFIX` is also documented in the [frontend configuration reference](../../reference/components/frontend-configuration.mdx), and `DYN_NAMESPACE_WORKER_SUFFIX` in the [runtime configuration reference](../../reference/components/runtime-configuration.mdx).
 
 ## Coordinate Policy Refresh
 
