@@ -65,7 +65,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 | [**Disaggregated Serving**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
-| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
+| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) ([deprecated](https://docs.nvidia.com/dynamo/reference/releases/deprecations#v150)) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) | ✅ | ✅ | ✅ |
 
@@ -98,7 +98,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 |------------|-------------|----------------|
 | [**Disaggregated Prefill/Decode**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
-| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
+| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage. [Deprecated](https://docs.nvidia.com/dynamo/reference/releases/deprecations#v150) in v1.5.0; removal is targeted for v1.7.0 | Extends effective context length beyond GPU memory |
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
@@ -326,7 +326,7 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [disagg]: docs/design-docs/disagg-serving.md
 [kv-routing]: docs/components/router/README.md
 [planner]: docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
-[kvbm]: docs/components/kvbm/README.md
+[kvbm]: lib/bindings/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
