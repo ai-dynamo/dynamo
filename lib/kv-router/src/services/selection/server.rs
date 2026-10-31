@@ -39,8 +39,7 @@ pub struct AppState {
 /// The HTTP response for a selection error: its status class, and a JSON body
 /// that keeps plugin-produced detail server-side.
 pub(crate) fn selection_error_response(error: SelectionError) -> Response {
-    let status =
-        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = error.status();
     if matches!(
         &error,
         SelectionError::Scheduler(

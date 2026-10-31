@@ -72,6 +72,7 @@ rmp-serde = { workspace = true }
 rustc-hash = "2.1.1"
 
 # standalone-indexer (optional)
+http = { workspace = true }
 axum = { version = "=0.8.4", default-features = false, features = [
   "http1",
   "json",
