@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -42,10 +42,14 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
 // `map_python_exception` restores `ErrorClass::WorkerUnavailable` so the client
 // gets the intended HTTP 503 instead of a generic 500.
 pyo3::create_exception!(dynamo._core, WorkerUnavailable, DynamoException);
+pyo3::create_exception!(dynamo._core, WorkerDraining, WorkerUnavailable);
 
 /// Convert a routed-pipeline error to a Python exception, keeping the
 /// `WorkerUnavailable` and `InvalidArgument` class that the generic [`crate::to_pyerr`] would drop.
 pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
+    if is_worker_draining(err.as_ref()) {
+        return WorkerDraining::new_err(err.to_string());
+    }
     if is_worker_unavailable(err.as_ref()) {
         return WorkerUnavailable::new_err(err.to_string());
     }
@@ -53,6 +57,20 @@ pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
         return InvalidArgument::new_err(message);
     }
     crate::to_pyerr(err)
+}
+
+fn is_worker_draining(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<DynamoError>()
+            .is_some_and(|error| error.reason().as_str() == "backend.worker_draining")
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
 }
 
 fn is_worker_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
@@ -80,12 +98,13 @@ pub(crate) fn worker_unavailable_to_dynamo(py: Python<'_>, err: &PyErr) -> Optio
         .str()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Some(
-        DynamoError::builder()
-            .class(ErrorClass::WorkerUnavailable)
-            .message(message)
-            .build(),
-    )
+    let mut error = DynamoError::builder()
+        .class(ErrorClass::WorkerUnavailable)
+        .message(message);
+    if err.is_instance_of::<WorkerDraining>(py) {
+        error = error.reason(ErrorReason::new("backend.worker_draining").ok()?);
+    }
+    Some(error.build())
 }
 
 // Raised by the in-process `SelectionService` bindings for selector failures
@@ -158,6 +177,7 @@ macro_rules! define_dynamo_exceptions {
                 m.py().get_type::<SelectionServiceError>(),
             )?;
             m.add("WorkerUnavailable", m.py().get_type::<WorkerUnavailable>())?;
+            m.add("WorkerDraining", m.py().get_type::<WorkerDraining>())?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
             )*
@@ -335,6 +355,26 @@ mod tests {
             .message("no workers")
             .build();
         assert!(!is_worker_unavailable(&pool_unavailable));
+    }
+
+    #[test]
+    fn worker_draining_remains_distinct_through_error_context() {
+        let rejection = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .reason(ErrorReason::new("backend.worker_draining").unwrap())
+            .message("worker closed admission")
+            .build();
+        assert_eq!(rejection.class(), ErrorClass::Unavailable);
+        assert!(is_worker_draining(&rejection));
+        assert!(is_worker_draining(
+            anyhow::Error::from(rejection)
+                .context("worker RPC")
+                .as_ref()
+        ));
+        let generic = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .build();
+        assert!(!is_worker_draining(&generic));
     }
 
     #[test]

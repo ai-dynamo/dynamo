@@ -21,6 +21,7 @@ def install_graceful_shutdown(
     shutdown_event: asyncio.Event,
     *,
     signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
+    terminal_event: asyncio.Event | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """
     Set up graceful shutdown with discovery unregister and grace period.
@@ -78,6 +79,8 @@ def install_graceful_shutdown(
 
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:
         def _kick() -> None:
+            if terminal_event is not None:
+                terminal_event.set()
             asyncio.create_task(_shutdown_sequence(signum, frame))
 
         loop.call_soon_threadsafe(_kick)

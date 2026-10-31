@@ -88,6 +88,8 @@ impl HasTokenIds for LLMEngineOutput {
 #[error("{0}")]
 pub(crate) struct ClassifierRejection(#[source] pub(crate) DynamoError);
 
+const WORKER_DRAINING_RESELECTION_LIMIT: u32 = 3;
+
 const MIGRATION_BLOCKING_REASONS: &[&str] = &[
     "request.cancelled",
     "request.deadline_exceeded",
@@ -113,6 +115,7 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.engine_shutdown"
             | "backend.stream_incomplete"
             | "backend.worker_unavailable"
+            | "backend.worker_draining"
             | "capacity.worker_overloaded"
     )
 }
@@ -144,6 +147,30 @@ fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'
         current = source.source();
     }
     migratable
+}
+
+fn worker_draining_error<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    let mut draining = None;
+    while let Some(source) = current {
+        if source.is::<ClassifierRejection>() {
+            return None;
+        }
+        if let Some(error) = source.downcast_ref::<DynamoError>() {
+            if blocks_migration(error.reason()) {
+                return None;
+            }
+            if error.reason().as_str() == "backend.worker_draining" {
+                draining = Some(error);
+            }
+        }
+        current = source.source();
+    }
+    draining
+}
+
+fn is_worker_draining(err: &(dyn StdError + 'static)) -> bool {
+    worker_draining_error(err).is_some()
 }
 
 /// Check if an error chain indicates the request should be migrated.
@@ -240,6 +267,7 @@ impl AttemptBudget {
 
 pub struct Migration {
     migration_limit: u32,
+    worker_withdrawal: bool,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -260,6 +288,9 @@ impl Migration {
         );
         Arc::new(Self {
             migration_limit,
+            worker_withdrawal: dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::worker::DYN_EXPERIMENTAL_WORKER_WITHDRAWAL,
+            ),
             max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
@@ -336,6 +367,7 @@ where
             self.model_name.clone(),
             self.metrics.clone(),
             session_affinity,
+            self.worker_withdrawal,
         )
         .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
@@ -374,6 +406,8 @@ where
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
     attempts: AttemptBudget,
+    draining_reselections_left: u32,
+    response_started: bool,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -419,6 +453,7 @@ where
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
+        worker_withdrawal: bool,
     ) -> Result<Self> {
         // TODO: prompt_embeds take precedence over replayed token_ids. Disable migration for
         // embedding prompts until a retry can represent an embedding-based continuation.
@@ -476,6 +511,12 @@ where
             next_generate: next,
             next_stream: None,
             attempts: AttemptBudget::new(retries_left),
+            draining_reselections_left: if worker_withdrawal {
+                WORKER_DRAINING_RESELECTION_LIMIT
+            } else {
+                0
+            },
+            response_started: false,
             max_seq_len,
             model_name,
             metrics,
@@ -504,7 +545,14 @@ where
             if let Some(mut response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
                 if let Some(err) = response.error.as_ref() {
-                    if is_migratable_for_request(&self.request, err) {
+                    if is_worker_draining(err) {
+                        if self.reselect_draining_worker(err, self.active_route_trace.clone())
+                            && self.new_stream(None).await.is_ok()
+                        {
+                            continue;
+                        }
+                        self.abort_request_lifecycle(err);
+                    } else if is_migratable_for_request(&self.request, err) {
                         let Some(migration_error) = migratable_error_in_chain(err) else {
                             tracing::warn!(error = %err, "Migration eligibility had no semantic error");
                             continue;
@@ -551,8 +599,10 @@ where
                         self.abort_request_lifecycle(err);
                     }
                 }
+                self.response_started |= response.data.is_some();
                 self.track_response(&response);
                 self.rebase_usage(&mut response);
+                self.release_replay_prompt_if_final();
                 return Some(response);
             }
             return None;
@@ -691,6 +741,13 @@ where
                     self.replayed_tokens = replayed_tokens;
                     return Ok(());
                 }
+                Err(err) if is_worker_draining(err.as_ref()) => {
+                    if self.reselect_draining_worker(err.as_ref(), Some(route_trace)) {
+                        continue;
+                    }
+                    self.abort_request_lifecycle(err.as_ref());
+                    return Err(err);
+                }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
                     let Some(migration_error) = migratable_error_in_chain(err.as_ref()) else {
                         tracing::warn!(error = %err, "Migration eligibility had no semantic error");
@@ -741,6 +798,34 @@ where
         let error = Error::msg("Migration limit exhausted");
         self.abort_request_lifecycle(error.as_ref());
         Err(error)
+    }
+
+    fn reselect_draining_worker(
+        &mut self,
+        error: &(dyn StdError + 'static),
+        route_trace: Option<Arc<RouteTraceContext>>,
+    ) -> bool {
+        if self.response_started
+            || self.draining_reselections_left == 0
+            || !is_migratable_for_request(&self.request, error)
+        {
+            return false;
+        }
+        if let Some(worker_id) = route_trace
+            .as_deref()
+            .and_then(RouteTraceContext::selected_worker_id)
+        {
+            self.request
+                .migration_state
+                .get_or_insert_with(Default::default)
+                .record_failure(worker_id, worker_draining_error(error).cloned());
+        }
+        self.draining_reselections_left -= 1;
+        // Admission was rejected before execution, so this does not consume
+        // the user's migration budget or replay any generated response.
+        self.attempts.remaining += 1;
+        self.queue_migration(ErrorType::WorkerUnavailable, route_trace);
+        true
     }
 
     /// The attempt a failure belongs to. Prefers the attempt's own trace
@@ -847,7 +932,10 @@ where
     /// dispatched attempt holds its own reference for as long as it needs one. Release it so a
     /// long prompt is not pinned for the rest of the response stream.
     fn release_replay_prompt_if_final(&mut self) {
-        if !self.attempts.has_remaining() && !self.request.token_ids.is_empty() {
+        if !self.attempts.has_remaining()
+            && (self.response_started || self.draining_reselections_left == 0)
+            && !self.request.token_ids.is_empty()
+        {
             self.request.token_ids = Arc::default();
         }
     }
@@ -1257,6 +1345,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -1316,6 +1405,11 @@ mod tests {
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
             worker_ids: Vec<u64>,
+        },
+        WorkerDraining {
+            rejected: u32,
+            streamed: bool,
+            after_data: bool,
         },
         /// Succeeds initially, fails mid-stream with specific error, then succeeds on retry
         MidStreamFail {
@@ -1512,6 +1606,47 @@ mod tests {
                         Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
                         Arc::new(Controller::new(self.context_id.clone())),
                     ))
+                }
+                MockBehavior::WorkerDraining {
+                    rejected,
+                    streamed,
+                    after_data,
+                } => {
+                    assert_eq!(preprocessed_request.token_ids.as_slice(), &[1, 2, 3]);
+                    if let Some(trace) = dynamo_runtime::pipeline::network::egress::route_span::get_route_trace_context(&context) {
+                        trace.set_selected_worker_id(7 + u64::from(call_num));
+                    }
+                    if call_num > 0 {
+                        assert_eq!(
+                            preprocessed_request
+                                .migration_state
+                                .as_ref()
+                                .unwrap()
+                                .excluded_worker_ids(),
+                            (7..7 + u64::from(call_num)).collect::<Vec<_>>()
+                        );
+                    }
+                    if call_num < *rejected {
+                        let error = DynamoError::builder()
+                            .class(ErrorType::WorkerUnavailable)
+                            .reason(ErrorReason::new("backend.worker_draining").unwrap())
+                            .message("worker closed admission")
+                            .build();
+                        if !streamed {
+                            return Err(error.into());
+                        }
+                        let mut chunks = Vec::new();
+                        if *after_data {
+                            chunks.push(create_mock_output(101));
+                        }
+                        chunks.push(Annotated::from_err(error));
+                        return Ok(ResponseStream::new(
+                            Box::pin(stream::iter(chunks)),
+                            Arc::new(Controller::new(self.context_id.clone())),
+                        ));
+                    }
+                    self.send_responses(responses_already_generated, self.num_responses)
+                        .await
                 }
                 MockBehavior::WorkerOverloadSequence { worker_ids } => {
                     let excluded = preprocessed_request
@@ -1824,6 +1959,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1848,6 +1984,7 @@ mod tests {
     async fn build_and_observe_prompt(
         behavior: MockBehavior,
         migration_limit: u32,
+        worker_withdrawal: bool,
     ) -> (
         RetryManager<BackendOutput>,
         std::sync::Weak<Vec<TokenIdType>>,
@@ -1867,22 +2004,26 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            worker_withdrawal,
         )
         .await
         .expect("Failed to build RetryManager");
         (retry_manager, prompt)
     }
 
-    /// Without retries left, the RetryManager must not pin the prompt for the whole stream:
-    /// once the final attempt is dispatched, only the downstream attempt may hold it.
+    /// Keep the prompt only until admission succeeds; a late rejection can
+    /// still reselect at migration limit zero without pinning a long stream.
     #[tokio::test]
-    async fn test_retry_manager_releases_prompt_after_final_dispatch() {
-        let (mut retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0).await;
+    async fn test_retry_manager_releases_prompt_after_final_admission() {
+        let (mut retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::Success, 0, true).await;
         assert!(
-            prompt.upgrade().is_none(),
-            "prompt pinned with no retries left"
+            prompt.upgrade().is_some(),
+            "admission may still be rejected"
         );
-        let mut responses = 0;
+        assert!(retry_manager.next().await.unwrap().error.is_none());
+        assert!(prompt.upgrade().is_none(), "prompt pinned after admission");
+        let mut responses = 1;
         while let Some(response) = retry_manager.next().await {
             assert!(response.err().is_none());
             responses += 1;
@@ -1891,8 +2032,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn withdrawal_disabled_releases_prompt_after_dispatch() {
+        let (_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0, false).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "disabled feature retained replay tokens"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retry_manager_keeps_prompt_while_retries_remain() {
-        let (_retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 1).await;
+        let (_retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::Success, 1, false).await;
         let prompt = prompt
             .upgrade()
             .expect("prompt released while a retry is possible");
@@ -1902,12 +2053,14 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_releases_prompt_after_last_retry() {
         let (mut retry_manager, prompt) =
-            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1).await;
+            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1, false).await;
         assert!(
             prompt.upgrade().is_none(),
-            "prompt pinned after the last retry"
+            "final dispatch retained the prompt"
         );
-        let mut responses = 0;
+        assert!(retry_manager.next().await.unwrap().error.is_none());
+        assert!(prompt.upgrade().is_none(), "prompt pinned after admission");
+        let mut responses = 1;
         while let Some(response) = retry_manager.next().await {
             assert!(response.err().is_none());
             responses += 1;
@@ -2018,6 +2171,107 @@ mod tests {
         assert!(responses[0].error.is_none());
     }
 
+    #[tokio::test]
+    async fn worker_draining_reselects_before_output_without_migration_budget() {
+        for (streamed, enabled) in [(false, false), (true, false), (false, true), (true, true)] {
+            let context_id = uuid::Uuid::new_v4().to_string();
+            let engine = Arc::new(MockEngine::new(
+                MockBehavior::WorkerDraining {
+                    rejected: 2,
+                    streamed,
+                    after_data: false,
+                },
+                1,
+                100,
+                context_id.clone(),
+            ));
+            let calls = engine.call_count.clone();
+            let request =
+                Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+            let mut migration =
+                Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            Arc::get_mut(&mut migration).unwrap().worker_withdrawal = enabled;
+            let result = migration.generate(request, engine).await;
+            if !enabled && !streamed {
+                assert!(is_worker_draining(result.err().unwrap().as_ref()));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                continue;
+            }
+            let mut stream = result.unwrap();
+            let responses = stream.by_ref().collect::<Vec<_>>().await;
+            assert_eq!(calls.load(Ordering::SeqCst), if enabled { 3 } else { 1 });
+            assert_eq!(responses.len(), 1);
+            assert_eq!(responses[0].error.is_none(), enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_draining_reselection_is_bounded_and_respects_explicit_targets() {
+        for (streamed, pinned) in [(false, false), (true, false), (false, true)] {
+            let context_id = uuid::Uuid::new_v4().to_string();
+            let engine = Arc::new(MockEngine::new(
+                MockBehavior::WorkerDraining {
+                    rejected: u32::MAX,
+                    streamed,
+                    after_data: false,
+                },
+                1,
+                100,
+                context_id.clone(),
+            ));
+            let calls = engine.call_count.clone();
+            let mut content = create_mock_request(1);
+            if pinned {
+                content.routing = Some(RoutingHints {
+                    backend_instance_id: Some(7),
+                    ..Default::default()
+                });
+            }
+            let request = Context::with_id_and_metadata(content, context_id, BTreeMap::new());
+            let mut migration =
+                Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            Arc::get_mut(&mut migration).unwrap().worker_withdrawal = true;
+            let result = migration.generate(request, engine).await;
+            if streamed {
+                let mut responses = result.unwrap();
+                let failure = responses.next().await.unwrap();
+                assert!(is_worker_draining(failure.error.as_ref().unwrap()));
+                assert!(responses.next().await.is_none());
+            } else {
+                assert!(is_worker_draining(result.err().unwrap().as_ref()));
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), if pinned { 1 } else { 4 });
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_draining_does_not_reselect_after_response_data() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let engine = Arc::new(MockEngine::new(
+            MockBehavior::WorkerDraining {
+                rejected: 1,
+                streamed: true,
+                after_data: true,
+            },
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = engine.call_count.clone();
+        let request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+        let mut migration =
+            Migration::new(2, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        Arc::get_mut(&mut migration).unwrap().worker_withdrawal = true;
+        let mut responses = migration.generate(request, engine).await.unwrap();
+        assert!(responses.next().await.unwrap().data.is_some());
+        assert!(is_worker_draining(
+            responses.next().await.unwrap().error.as_ref().unwrap()
+        ));
+        assert!(responses.next().await.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     /// Test case 2: New request migration
     /// Tests the scenario where a worker becomes unreachable for new requests initially,
     /// triggering the RetryManager to retry the request. The MockEngine with FailThenSuccess
@@ -2050,6 +2304,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2112,6 +2367,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2205,6 +2461,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2255,6 +2512,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -2324,6 +2582,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -2406,6 +2665,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2459,6 +2719,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2514,6 +2775,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2595,6 +2857,7 @@ mod tests {
                 Arc::new(TEST_MODEL.to_string()),
                 metrics.clone(),
                 None,
+                false,
             )
             .await
             .expect("a handshake cancelled by the client closes cleanly");
@@ -2722,6 +2985,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2801,6 +3065,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2874,6 +3139,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2939,6 +3205,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3021,6 +3288,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3136,6 +3404,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3242,6 +3511,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3384,6 +3654,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .expect("initial stream should be created");
@@ -3533,6 +3804,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3716,6 +3988,7 @@ mod tests {
                     Arc::new(TEST_MODEL.to_string()),
                     Arc::new(Metrics::new()),
                     None,
+                    false,
                 )
                 .await
                 .expect("initial stream should be created");
@@ -3928,6 +4201,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");

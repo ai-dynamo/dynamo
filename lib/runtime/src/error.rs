@@ -429,6 +429,7 @@ impl ErrorReason {
             | "transport.disconnected"
             | "backend.unavailable"
             | "backend.worker_unavailable"
+            | "backend.worker_draining"
             | "backend.cannot_connect"
             | "backend.disconnected"
             | "backend.engine_shutdown"
@@ -1211,6 +1212,19 @@ mod tests {
             roundtrip.source().unwrap().to_string(),
             "Internal: io error"
         );
+    }
+
+    #[test]
+    fn worker_draining_reason_retains_worker_scoped_unavailability() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .reason(ErrorReason::new("backend.worker_draining").unwrap())
+            .build();
+        let encoded = serde_json::to_value(error).unwrap();
+        let decoded: DynamoError = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.class(), ErrorClass::Unavailable);
+        assert_eq!(decoded.error_type(), ErrorClass::WorkerUnavailable);
+        assert_eq!(decoded.reason().as_str(), "backend.worker_draining");
     }
 
     #[test]

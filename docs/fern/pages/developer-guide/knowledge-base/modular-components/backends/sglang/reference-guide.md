@@ -180,3 +180,118 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
 - **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
+
+
+## Experimental worker withdrawal
+
+Set `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` and enable `DYN_SYSTEM_PORT` on
+`python -m dynamo.sglang` LLM workers to expose reversible, pre-delete withdrawal.
+This applies to aggregated, decode, and prefill handlers with TCP or Velo response
+planes. Startup rejects QUIC when withdrawal is enabled because discovery removal
+currently cancels its active responses. It does not use
+SGLang's `pause_generation`, abort requests, or stop the engine.
+
+Use the same `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL` setting on frontends and workers.
+It accepts `1`, `true`, or `yes` (case-insensitive) and defaults to disabled.
+On a frontend it enables bounded admission reselection and retains the prompt's
+shared token buffer until the first response data on the final ordinary attempt.
+With the feature disabled, the final attempt releases its replay reference after
+dispatch as before. The setting is read when the model pipeline is constructed,
+not on every request. Workers use it to enable the controls below.
+
+For DGD deployments, configure it once through the existing graph-level environment:
+
+```yaml
+# Fragment of a nvidia.com/v1beta1 DynamoGraphDeployment
+spec:
+  env:
+    - name: DYN_EXPERIMENTAL_WORKER_WITHDRAWAL
+      value: "1"
+```
+
+The operator propagates this to each component's `main` container, including the
+frontend and aggregated or PD workers, through the existing Grove Pod-template
+path. For `v1alpha1`, use `spec.envs` instead. Component-level entries with the same
+name override the graph value; avoid duplicating this setting there. Workers still
+require the normal `DYN_SYSTEM_PORT` configuration for their system listener.
+
+Environment injection applies to newly created Pods; it does not change running
+processes. Under Grove OnDelete, complete an initial deployment of compatible
+images and this setting before using withdrawal for later releases.
+
+Keeping an `Arc` reference does not copy token data, but can extend the allocation's
+lifetime. For `C` requests waiting for first response data, token-buffer retention
+can be up to `4 * sum(token_vector_capacity)` bytes (`u32` tokens), excluding other
+request state. At a capacity of 128 Ki tokens and 1,024 waiting requests, that is
+512 MiB. This is a sizing example, not measured RSS growth; model limits and actual
+concurrency determine the budget. Other owners may already retain these buffers.
+
+Upgrade frontends and workers to a revision supporting the `backend.worker_draining`
+error reason before enabling this experimental feature. Older frontends may reject
+that reason or lack the independent, bounded reselection behavior.
+
+Use the selected worker's system listener directly, rather than a load-balanced
+Service. The listener follows the existing engine-control network boundary; keep
+it accessible only to trusted administrators.
+
+| Method | Worker system path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/worker_lifecycle/drain` | Withdraw from discovery, allow routing convergence, then close new request admission |
+| `GET` | `/engine/worker_lifecycle/status` | Report local withdrawal and admission state |
+| `POST` | `/engine/worker_lifecycle/resume` | Reopen admission and restore discovery registration |
+
+Requests must have no body or an empty JSON object. Invalid methods return 405;
+invalid bodies return 400. Startup and terminal-shutdown conflicts return 409;
+discovery failures return 503. Controls become available only after model readiness
+and observation of this exact endpoint instance's initial registration.
+
+```bash
+curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/drain"
+curl --fail-with-body "$WORKER_SYSTEM_URL/engine/worker_lifecycle/status"
+curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/resume"
+```
+
+The routing-convergence window uses `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`
+(default: 5 seconds). After successful unregistration, the worker continues
+accepting new requests during this interval while frontends process discovery
+withdrawal. Increasing the interval delays admission closure; it does not wait
+for engine requests or KV transfers to complete. The same setting also controls
+the existing SIGTERM routing-convergence grace.
+
+```text
+unregister succeeds → continue accepting during grace → close business admission
+previously admitted work continues independently ─────────────────────────────→
+```
+
+Expiry establishes local admission closure, not acknowledgement from every
+frontend or permission to delete the Pod. After admission closes, a late request
+receives a typed worker-draining rejection. A supporting
+frontend may reselect up to three times independently of its ordinary migration
+budget, before response data and subject to explicit routing constraints.
+Internal worker health probes remain callable during manual withdrawal.
+
+Manual withdrawal remains in force across native engine controls. Resume is
+rejected while SGLang generation is paused; continue the engine first, then
+resume the worker. SIGTERM fences resume immediately but preserves the existing
+discovery-first shutdown grace before admission closes.
+
+Status progresses from `serving` to `withdrawing` during discovery withdrawal and
+the routing-convergence window, then to `withdrawn` when discovery unregistration
+has succeeded and local new-request admission is closed. `admin_withdrawn` records
+the successful manual discovery withdrawal; it may already be `true` during the
+convergence window. `starting` and `stopping` fence control operations.
+
+> [!WARNING]
+> `withdrawn` describes routing withdrawal, not completion of engine requests or KV
+> transfers. This API neither tracks nor waits for that work and provides no
+> `drained` or safe-to-delete signal. Discovery propagation is asynchronous, so
+> it also does not prove that every frontend has observed the change. Engine work
+> completion and Pod-deletion timing remain the responsibility of the engine and
+> operator. This increment alone does not guarantee a lossless release.
+
+Worker state is process-local. A restart creates a new worker identity; confirm
+Pod UID and instance identity before any maintenance action. WorkerSet batching,
+automatic Pod deletion, and replacement inference-admission gating are separate
+increments in the [manual Grove OnDelete release proposal](https://github.com/ai-dynamo/dynamo/issues/17568).
+Engine completion reporting and real targeted inference validation before a
+replacement enters business traffic remain follow-up work.
