@@ -1751,7 +1751,8 @@ class ModelType:
     """OpenAI-style surfaces supported by a model.
 
     Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
-    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    TensorBased, Images, Audios, Transcriptions, Videos, Realtime, and Empty
+    (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1766,6 +1767,7 @@ class ModelType:
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
+    Transcriptions: ModelType
     Videos: ModelType
     Realtime: ModelType
     # Sequence-classification / cross-encoder pooling models served on /v1/classify.

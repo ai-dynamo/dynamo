@@ -52,6 +52,7 @@ use crate::{
             images::{NvCreateImageRequest, NvImagesResponse},
             pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
             rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
+            transcriptions::{NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -244,6 +245,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Embedding,
     ModelType::Images,
     ModelType::Audios,
+    ModelType::Transcriptions,
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
@@ -994,6 +996,17 @@ impl ModelWatcher {
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
 
+            if card.model_type.supports_transcriptions() {
+                let transcriptions_router = PushRouter::<
+                    NvCreateAudioTranscriptionRequest,
+                    Annotated<NvAudioTranscriptionResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.transcriptions_engine = Some(Arc::new(transcriptions_router));
+            }
+
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
@@ -1082,7 +1095,7 @@ impl ModelWatcher {
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Rerank|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Transcriptions|Videos|Embeddings|Classify|Pooling|Rerank|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -3049,6 +3062,7 @@ request_classifier:
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
         assert!(is_model_type_list_empty(&mm, ModelType::Audios));
+        assert!(is_model_type_list_empty(&mm, ModelType::Transcriptions));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
