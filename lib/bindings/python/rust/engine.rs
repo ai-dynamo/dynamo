@@ -20,10 +20,8 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_llm::admission_gate::{
-    AdmissionRequest, AdmissionResponse, BackendAdmissionGate, WorkerAdmissionGate,
-};
-use dynamo_runtime::component::Component;
+use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, WorkerAdmissionGate};
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
@@ -97,6 +95,10 @@ where
     G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
+        // Covers GIL acquisition plus the Rust->Python crossing that builds the
+        // request object and calls the handler's `generate`. Not token
+        // generation: the generator has not been advanced when this range ends.
+        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
@@ -133,9 +135,14 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
+        // the Python generator (and, for a worker, the engine) producing the item,
+        // so leaving it outside the range keeps engine time out of the bridge cost.
+        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
+        drop(nvtx_anext);
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -221,7 +228,7 @@ impl PythonAsyncEngine {
     pub(crate) fn network_engine(
         &self,
         backend_role: BackendRole,
-        admission: EndpointAdmission,
+        admission: WorkerAdmissionGate,
     ) -> PythonNetworkEngine {
         PythonNetworkEngine {
             engine: self.0.clone(),
@@ -305,28 +312,6 @@ impl BackendRole {
     }
 }
 
-/// How a Python endpoint's network engines reach the admission gate of the
-/// worker the endpoint serves for: that worker's own handle, cloned from its
-/// runtime, and the component the endpoint serves.
-#[derive(Clone)]
-pub(crate) struct EndpointAdmission {
-    gate: WorkerAdmissionGate,
-    component: Component,
-}
-
-impl EndpointAdmission {
-    pub(crate) fn new(gate: WorkerAdmissionGate, component: Component) -> Self {
-        Self { gate, component }
-    }
-
-    /// The worker's gate. `register_model` creates it, for this endpoint's
-    /// component, before it records the role that lets a request use it, so a
-    /// request always receives the gate already created.
-    pub(crate) fn gate(&self) -> Arc<BackendAdmissionGate> {
-        self.gate.get_or_create(&self.component)
-    }
-}
-
 /// Network-only Python engine. Requests stay Python-owned objects, transcoded
 /// directly from the request-plane codec, and each response is encoded
 /// straight into the request's own codec as it leaves the handler.
@@ -334,7 +319,7 @@ impl EndpointAdmission {
 pub(crate) struct PythonNetworkEngine {
     engine: PythonServerStreamingEngine,
     backend_role: BackendRole,
-    admission: EndpointAdmission,
+    admission: WorkerAdmissionGate,
 }
 
 #[async_trait::async_trait]
@@ -368,7 +353,7 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<EncodedPythonResponse>, Error>
         );
         if uses_admission {
             self.admission
-                .gate()
+                .get()?
                 .admit(&context, dp_rank, generate)
                 .await
         } else {
@@ -524,6 +509,9 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
+        // Per-response Python->Rust deserialization: pure Dynamo overhead paid
+        // once per streamed chunk.
+        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
         Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
