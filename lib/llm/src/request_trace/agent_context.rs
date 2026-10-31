@@ -210,6 +210,7 @@ pub(crate) fn request_metrics(
         model: Some(model),
         input_tokens: tracker.and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
         output_tokens: tracker.map(RequestTracker::osl_tokens),
+        reasoning_tokens: None,
         cached_tokens: tracker.and_then(|tracker| tracker.cached_tokens().map(|v| v as u64)),
         request_received_ms: timing.as_ref().map(|timing| timing.request_received_ms),
         prefill_wait_time_ms: timing
@@ -241,10 +242,10 @@ pub(crate) struct AgentContextTraceState {
     pub finish_reason_metadata: SharedFinishReasonMetadata,
 }
 
-pub(crate) fn build_agent_context_trace_state(
+pub(crate) fn build_agent_context_trace_state<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
 ) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
@@ -282,6 +283,27 @@ pub(crate) fn record_backend_finish_reason_metadata(
         finish_reason.map(ToString::to_string),
         stop_reason.cloned(),
     );
+}
+
+/// Record tool calls parsed from native `/generate` output. Their IDs are
+/// omitted because the frontend never sent any to the client.
+pub(crate) fn record_generate_tool_calls(
+    finish_reason_metadata: &SharedFinishReasonMetadata,
+    tool_names: &[String],
+) {
+    if tool_names.is_empty() {
+        return;
+    }
+    let mut metadata = finish_reason_metadata.lock();
+    for (index, name) in tool_names.iter().enumerate() {
+        metadata.record_tool_call_chunk(0, index as u32, None, Some(name));
+    }
+    if matches!(
+        metadata.metadata.backend_finish_reason.as_deref(),
+        Some("stop" | "eos")
+    ) {
+        metadata.record_choice_finish_reason(0, dynamo_protocols::types::FinishReason::ToolCalls);
+    }
 }
 
 pub(crate) fn record_chat_finish_reason_metadata(
@@ -348,7 +370,7 @@ pub(crate) fn record_completion_finish_reason_metadata(
     }
 }
 
-fn snapshot_finish_reason_metadata(
+pub(crate) fn snapshot_finish_reason_metadata(
     finish_reason_metadata: &SharedFinishReasonMetadata,
 ) -> Option<FinishReasonMetadata> {
     finish_reason_metadata.lock().snapshot()

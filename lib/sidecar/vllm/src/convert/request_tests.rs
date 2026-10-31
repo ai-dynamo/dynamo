@@ -39,17 +39,22 @@ fn media_strings_move_into_generate_request() {
 
 // Exercise the real frontend projection before lowering to the engine protocol.
 fn plugin_request(body: serde_json::Value) -> PreprocessedRequest {
+    plugin_request_with_headers(body, &[])
+}
+
+fn plugin_request_with_headers(
+    body: serde_json::Value,
+    headers: &[(&str, &str)],
+) -> PreprocessedRequest {
     use dynamo_llm::generate_format::{ClientRequest, GenerateFormat, Worker};
     let body = serde_json::to_vec(&body).unwrap();
     let opened = dynamo_vllm_generate::VllmFormat
         .open(ClientRequest {
             body: &body,
-            headers: &[(
-                "content-type".parse().unwrap(),
-                "application/json".parse().unwrap(),
-            )]
-            .into_iter()
-            .collect(),
+            headers: &std::iter::once(("content-type", "application/json"))
+                .chain(headers.iter().copied())
+                .map(|(name, value)| (name.parse().unwrap(), value.parse().unwrap()))
+                .collect(),
             default_request_id: "native",
         })
         .unwrap();
@@ -63,6 +68,47 @@ fn plugin_request(body: serde_json::Value) -> PreprocessedRequest {
     })
     .unwrap()
     .request
+}
+
+#[test]
+fn plugin_priority_header_reaches_engine_in_every_phase() {
+    for (header, expected) in [
+        (None, -7),
+        (Some("5"), 5),
+        (Some("0"), 0),
+        (Some(" -5 "), -5),
+        (Some("-2147483648"), i32::MIN),
+        (Some("2147483647"), i32::MAX),
+        (Some("2147483648"), -7),
+        (Some("invalid"), -7),
+        (Some(""), -7),
+    ] {
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+        ] {
+            let headers = header.map(|value| ("x-dynamo-request-priority", value));
+            let request = plugin_request_with_headers(
+                json!({"token_ids": [1], "sampling_params": {}, "priority": 7}),
+                headers.as_slice(),
+            );
+            let mut request: PreprocessedRequest =
+                serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+            let routing = request.routing.as_ref().unwrap();
+            assert_eq!(routing.priority, Some(expected));
+            assert_eq!(routing.priority_jump, Some(expected.max(0) as f64));
+            if mode.is_decode() {
+                request.prefill_result = decode_request().prefill_result;
+            }
+            let wire = build_generate_request(request, "priority".into(), mode).unwrap();
+            assert_eq!(
+                wire.priority,
+                expected.saturating_neg(),
+                "{header:?} {mode:?}"
+            );
+        }
+    }
 }
 
 #[test]

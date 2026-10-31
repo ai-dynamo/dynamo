@@ -584,6 +584,7 @@ impl ModelWatcher {
             } else {
                 None
             };
+            worker_set.tokenizer = tokenizer.clone();
 
             // Routing is required whenever any pipeline (factory chat or local) will exist.
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
