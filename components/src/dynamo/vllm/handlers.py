@@ -92,6 +92,8 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.decode_regulation import DecodeRegulationConfig
+from dynamo.vllm.decode_regulation import attach_identity as attach_regulation_class
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
@@ -976,11 +978,17 @@ def build_sampling_params(
     # bridge pressure before chunks cross into Dynamo.
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
+    attach_regulation_class(sampling_params, request, _decode_regulation_config())
 
     # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
     # and vLLM validates before the process_inputs clone reruns it.
     sampling_params.__post_init__()
     return sampling_params
+
+
+@functools.cache
+def _decode_regulation_config() -> DecodeRegulationConfig:
+    return DecodeRegulationConfig.from_env()
 
 
 def _update_kv_transfer_params(
@@ -4115,6 +4123,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 enable_rl=self.config.enable_rl,
             )
         )
+        if engine_generate_input is not None:
+            # TITO requests bypass build_sampling_params.
+            attach_regulation_class(
+                sampling_params, request, _decode_regulation_config()
+            )
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)

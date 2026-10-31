@@ -57,6 +57,10 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.decode_regulation import (
+    DECODE_REGULATION_METRIC_PREFIX,
+    DecodeRegulationConfig,
+)
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
@@ -375,6 +379,10 @@ def setup_metrics_collection(
         == "DynamoMultimodalEmbeddingCacheConnector"
     ):
         engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+    # DecodeRegulationScheduler (EngineCore process) writes its series to the
+    # multiprocess .db files, like the embedding cache connector.
+    if DecodeRegulationConfig.from_env().enabled:
+        engine_metric_prefixes.append(DECODE_REGULATION_METRIC_PREFIX)
 
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
