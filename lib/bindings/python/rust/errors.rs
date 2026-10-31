@@ -149,6 +149,7 @@ macro_rules! define_dynamo_exceptions {
         /// Register all Dynamo exception classes on the `_core` module.
         pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("DynamoException", m.py().get_type::<DynamoException>())?;
+            m.add("WorkerShutdown", m.py().get_type::<WorkerShutdown>())?;
             m.add(
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
@@ -188,6 +189,19 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
     (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
+
+// Keep existing EngineShutdown handlers working while identifying an explicit
+// worker shutdown separately from an engine crash.
+pyo3::create_exception!(dynamo._core, WorkerShutdown, EngineShutdown);
+
+pub(crate) fn worker_shutdown_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    err.is_instance_of::<WorkerShutdown>(py).then(|| {
+        DynamoError::builder()
+            .error_type(ErrorClass::WorkerUnavailable)
+            .message(err.to_string())
+            .build()
+    })
+}
 
 /// Generic label for an InvalidRequest that carries no explicit
 /// public message.
