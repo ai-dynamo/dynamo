@@ -41,6 +41,24 @@ from dynamo.planner.core.types import EngineCapabilities
 
 logger = logging.getLogger(__name__)
 
+# AISimulate's spelling of an identity fact the Planner cannot observe.
+_UNKNOWN = "unknown"
+
+
+def _known(value: Any, placeholder: Any) -> Any:
+    return placeholder if value == _UNKNOWN else value
+
+
+# Engine controls a worker does not report to the Planner.
+_UNOBSERVED_ENGINE_CONTROLS = (
+    "gemm_quant_mode",
+    "moe_quant_mode",
+    "fmha_quant_mode",
+    "kvcache_quant_mode",
+    "comm_quant_mode",
+    "attention_backend",
+)
+
 _ENGINE_MODEL_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 _ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, RuntimeError)
 
@@ -280,14 +298,14 @@ class PlannerEnginePerfModel:
         if spec is None:
             config = asdict(
                 ForwardPassPerfModelConfig(
-                    model=self._config.model_name
-                    or f"dynamo-planner:{self._config.namespace}",
-                    system="unprofiled",
+                    model=self._config.model_name or _UNKNOWN,
                     backend="vllm"
                     if self._config.backend == "mocker"
                     else self._config.backend,
                     worker_type=self._worker_type,
                     estimation_mode="fpm_regression",
+                    fallback_policy="deny",
+                    **self._observed_identity(),
                 )
             )
         else:
@@ -318,11 +336,13 @@ class PlannerEnginePerfModel:
         defaults = ForwardPassPerfModelConfig.from_legacy_engine_config(
             {
                 "schema_version": 1,
+                # Only estimator controls are taken from this migration, which
+                # resolves a native identity; unknown facts do not change them.
                 "model_name": config["model"],
-                "system_name": config["system"],
+                "system_name": _known(config["system"], "unprofiled"),
                 "backend": config["backend"],
-                "tp_size": config["tp"],
-                "pp_size": config["pp"],
+                "tp_size": _known(config["tp"], 1),
+                "pp_size": _known(config["pp"], 1),
             },
             self._worker_type,
             self._build_options(),
@@ -331,6 +351,41 @@ class PlannerEnginePerfModel:
             defaults, config.get("estimator_config", {})
         )
         return config
+
+    def _observed_identity(self) -> dict[str, Any]:
+        """Identity facts of a cold regression model: what the worker reports,
+        and AIS's ``"unknown"`` for every fact the Planner cannot observe.
+
+        A saved snapshot then times a recommendation role without guessing:
+        AISimulate pins the known facts and asks the caller for the rest.
+        """
+
+        caps = self._capabilities
+        num_gpu = caps.num_gpu if caps is not None else None
+        # One GPU per worker fixes every parallel width; wider workers do not
+        # report how they split it.
+        width: int | str = 1 if num_gpu == 1 else _UNKNOWN
+        limits = {
+            "num_gpus": num_gpu,
+            "max_num_batched_tokens": caps.max_num_batched_tokens if caps else None,
+            "max_num_seqs": caps.max_num_seqs if caps else None,
+            "max_kv_tokens": caps.max_kv_tokens if caps else None,
+            "context_length": caps.context_length if caps else None,
+        }
+        return {
+            "system": _UNKNOWN,
+            "backend_version": _UNKNOWN,
+            "tp": width,
+            "pp": width,
+            "attention_dp": width,
+            "moe_tp_size": None if num_gpu == 1 else _UNKNOWN,
+            "moe_ep_size": None if num_gpu == 1 else _UNKNOWN,
+            **{name: _UNKNOWN for name in _UNOBSERVED_ENGINE_CONTROLS},
+            "deployment_limits": {
+                name: value if value is not None and value > 0 else _UNKNOWN
+                for name, value in limits.items()
+            },
+        }
 
     def _model_key(self) -> Optional[tuple[Any, ...]]:
         values = self._limit_values()
