@@ -779,6 +779,7 @@ impl ModelWatcher {
                         Some(preprocessor) => preprocessor,
                         None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
                     };
+                    worker_set.chat_preprocessor = Some(preprocessor.clone());
                     Some(
                         routing
                             .build_pipeline::<
@@ -2441,6 +2442,15 @@ request_classifier:
                 .prepare_worker_set(&spec, admission_rx, cancellation.clone())
                 .await
                 .unwrap();
+            assert!(
+                prepared
+                    .worker_set
+                    .as_ref()
+                    .unwrap()
+                    .chat_preprocessor
+                    .is_some(),
+                "discovered Rust chat pipelines must retain their tokenizer for token counting"
+            );
             let engine = prepared
                 .worker_set
                 .as_ref()

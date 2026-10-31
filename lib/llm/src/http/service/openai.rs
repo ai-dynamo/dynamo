@@ -4085,8 +4085,7 @@ pub fn validate_completion_fields_generic(
 /// Handles `POST /v1/responses/input_tokens` and returns an estimated input
 /// token count using a len/3 heuristic.
 ///
-/// Like the Anthropic `/v1/messages/count_tokens` handler, this deliberately
-/// performs neither a readiness nor a model-serving check: clients routinely
+/// This deliberately performs neither a readiness nor a model-serving check: clients routinely
 /// send routing names this frontend does not serve, and a pre-flight estimate
 /// does not need a live model.
 async fn handler_responses_input_tokens(

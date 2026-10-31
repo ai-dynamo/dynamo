@@ -827,6 +827,19 @@ impl Model {
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
+    /// Select through the normal chat readiness/routing policy, including sets
+    /// whose tokenizer lives in a backend. Do not silently substitute another
+    /// set's tokenizer when the selected chat pipeline cannot count locally.
+    pub(crate) fn get_chat_preprocessor_with_parsing(
+        &self,
+    ) -> Result<(Option<Arc<OpenAIPreprocessor>>, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.has_chat_engine()
+                .then(|| (ws.chat_preprocessor.clone(), ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+    }
+
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {

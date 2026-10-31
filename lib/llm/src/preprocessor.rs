@@ -1885,6 +1885,7 @@ impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
+    count_only: bool,
 }
 
 struct EmbeddingTokenizerState {
@@ -3264,6 +3265,118 @@ impl OpenAIPreprocessor {
         }))
     }
 
+    fn normalize_chat_tools(&self, request: &mut NvCreateChatCompletionRequest) -> Result<()> {
+        // In-process callers bypassing HTTP still need the function engine view.
+        request
+            .inner
+            .normalize_custom_tools()
+            .map_err(|error| invalid_argument_error(error.to_string()))?;
+        request.normalize_responses_history_phases(tool_choice::uses_muse_spark_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ));
+        request
+            .normalize_responses_tools(self.formatter.supports_native_tools(request))
+            .map_err(|error| invalid_argument_error(error.to_string()))?;
+
+        Ok(())
+    }
+
+    fn normalize_chat_prompt_controls(
+        &self,
+        request: &mut NvCreateChatCompletionRequest,
+    ) -> Result<()> {
+        self.apply_preserve_thinking(request)?;
+        // Apply the deployment default before parser-specific normalization so
+        // it can override an implicit model default (for example Kimi K2.5),
+        // while explicit request controls still take precedence.
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        self.validate_reasoning_request(request)?;
+        self.apply_default_thinking_mode(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            self.runtime_config.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
+        );
+        Self::normalize_kimi_k3_named_tool_choice(request, self.tool_call_parser.as_deref());
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+            request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+
+        Ok(())
+    }
+
+    /// Count the prompt with the serving pipeline's tokenizer, template and media
+    /// processing. No engine is invoked, and context limits do not prevent clients
+    /// from measuring an oversized prompt before compacting it.
+    pub(crate) async fn count_input_tokens(
+        &self,
+        mut request: NvCreateChatCompletionRequest,
+    ) -> Result<u32> {
+        const MEDIA_UNAVAILABLE: &str = "Token counting is unavailable for this model's media inputs: the frontend cannot determine their expanded token count";
+        let media_unavailable = || {
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(MEDIA_UNAVAILABLE)
+                .public_message(MEDIA_UNAVAILABLE)
+                .build()
+        };
+        #[cfg(feature = "mm-routing")]
+        let count_images = self.image_token_counter.is_some()
+            && self.routing_image_token_id.is_some()
+            && self.routing_image_prompt_layout.is_some()
+            && self.kv_cache_block_size > 0;
+        #[cfg(not(feature = "mm-routing"))]
+        let count_images = false;
+        // Reject missing media capability before decoding or inserting media in
+        // the shared cache. Inspect variants without cloning URLs/base64 data.
+        for message in &request.inner.messages {
+            if let Some(mut parts) = multimodal_content_parts(message)
+                && parts.any(|part| match part {
+                    MultimodalContentPart::User(
+                        ChatCompletionRequestUserMessageContentPart::Text(_),
+                    )
+                    | MultimodalContentPart::Tool(
+                        ChatCompletionRequestToolMessageContentPart::Text(_),
+                    ) => false,
+                    MultimodalContentPart::User(
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_),
+                    )
+                    | MultimodalContentPart::Tool(
+                        ChatCompletionRequestToolMessageContentPart::ImageUrl(_),
+                    ) => !count_images,
+                    _ => true,
+                })
+            {
+                return Err(media_unavailable().into());
+            }
+        }
+        self.normalize_chat_tools(&mut request)?;
+        self.normalize_chat_prompt_controls(&mut request)?;
+        let (request, _, _, _) = self
+            .preprocess_request_with_options(
+                &request,
+                None,
+                PreprocessRequestOptions {
+                    count_only: true,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await?;
+        let length = Self::validate_preprocessed_token_budget(&request, None)?
+            .ok_or_else(media_unavailable)?;
+        u32::try_from(length).map_err(|_| invalid_argument_error("Input token count exceeds u32"))
+    }
+
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
@@ -3488,6 +3601,15 @@ impl OpenAIPreprocessor {
                 .as_object_mut()
                 .context("preprocessed extra_args must be an object")?;
             extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
+        }
+
+        if options.count_only {
+            return Ok((
+                preprocessed,
+                annotations,
+                prompt_injected_reasoning,
+                image_tokens,
+            ));
         }
 
         // If omitted, allow generation up to the remaining context length. Responses requests
@@ -8382,18 +8504,7 @@ impl
         let lifecycle = preprocessing_lifecycle(&context);
         let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
 
-        // In-process callers bypassing HTTP still need the function engine view.
-        request
-            .inner
-            .normalize_custom_tools()
-            .map_err(|error| invalid_argument_error(error.to_string()))?;
-        request.normalize_responses_history_phases(tool_choice::uses_muse_spark_parser(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ));
-        request
-            .normalize_responses_tools(self.formatter.supports_native_tools(&request))
-            .map_err(|error| invalid_argument_error(error.to_string()))?;
+        self.normalize_chat_tools(&mut request)?;
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -8426,30 +8537,7 @@ impl
 
         // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
-        self.apply_preserve_thinking(&mut request)?;
-        // Apply the deployment default before parser-specific normalization so
-        // it can override an implicit model default (for example Kimi K2.5),
-        // while explicit request controls still take precedence.
-        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
-        self.validate_reasoning_request(&request)?;
-        self.apply_default_thinking_mode(&mut request);
-        Self::normalize_thinking_arg_with_source(
-            &mut request,
-            self.runtime_config.reasoning_parser.as_deref(),
-            self.tool_call_parser.as_deref(),
-            thinking_control_from_client,
-        );
-        Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
-        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
+        self.normalize_chat_prompt_controls(&mut request)?;
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -8459,6 +8547,7 @@ impl
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
                 .ok()
                 .is_some_and(|flag| *flag),
+            ..Default::default()
         };
 
         // convert the chat completion request to a common completion request
@@ -15231,6 +15320,7 @@ responses_tools: None,
                 Some(100),
                 PreprocessRequestOptions {
                     preserve_omitted_max_tokens: true,
+                    ..Default::default()
                 },
             ),
             None

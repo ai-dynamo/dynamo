@@ -44,9 +44,10 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
-    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicContentBlock, AnthropicCountTokensInput, AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse, AnthropicCreateMessageRequest, AnthropicErrorBody,
+    AnthropicErrorResponse, AnthropicMessage, AnthropicMessageContent, AnthropicTool,
+    SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -61,6 +62,10 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+
+#[cfg(test)]
+#[path = "anthropic/count_tokens_tests.rs"]
+mod count_tokens_tests;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
@@ -194,6 +199,29 @@ struct AnthropicHandlerError {
 }
 
 impl AnthropicHandlerError {
+    fn model_lookup(error: crate::discovery::ModelManagerError, model: &str) -> Self {
+        if matches!(
+            error,
+            crate::discovery::ModelManagerError::ModelUnavailable(_)
+        ) {
+            Self::new(
+                ErrorClass::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                super::openai::model_not_ready_message(model),
+                ErrorType::Unavailable,
+            )
+        } else {
+            Self::new(
+                ErrorClass::NotFound,
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                format!("Model '{model}' not found"),
+                ErrorType::NotFound,
+            )
+        }
+    }
+
     fn new(
         class: ErrorClass,
         status: StatusCode,
@@ -516,27 +544,9 @@ async fn anthropic_messages(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
-                ErrorClass::Unavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                super::openai::model_not_ready_message(&model),
-                ErrorType::Unavailable,
-            )
-            .into_marked_response(&mut inflight_guard),
-            _ => AnthropicHandlerError::new(
-                ErrorClass::NotFound,
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("Model '{}' not found", model),
-                ErrorType::NotFound,
-            )
-            .into_marked_response(&mut inflight_guard),
+        .map_err(|error| {
+            AnthropicHandlerError::model_lookup(error, &model)
+                .into_marked_response(&mut inflight_guard)
         })?;
 
     let (orig_request, context) = request.into_parts();
@@ -544,7 +554,7 @@ async fn anthropic_messages(
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
-    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // best-effort text-length estimate; the converter replaces it when
     // the backend reports final usage.
     let estimated_input_tokens = if streaming {
         estimate_input_tokens(&orig_request)
@@ -610,20 +620,7 @@ async fn anthropic_messages(
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 
-    if prompt_injected_reasoning {
-        let args = chat_request
-            .chat_template_args
-            .get_or_insert_with(Default::default);
-        args.entry("enable_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(true));
-        // Preserve reasoning from prior turns. Some templates (Nemotron)
-        // strip historical <think> content by default to save context.
-        // For agentic flows the model needs to see why it made prior decisions.
-        // Ref: NVIDIA's SWE training config also sets this to false:
-        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
-        args.entry("truncate_history_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(false));
-    }
+    apply_anthropic_thinking_defaults(&mut chat_request, prompt_injected_reasoning);
 
     let mut request = context.map(|_req| chat_request);
 
@@ -953,25 +950,90 @@ async fn anthropic_messages(
     }
 }
 
+fn apply_anthropic_thinking_defaults(
+    request: &mut NvCreateChatCompletionRequest,
+    prompt_injected_reasoning: bool,
+) {
+    if prompt_injected_reasoning {
+        let args = request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        args.entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Count tokens
 // ---------------------------------------------------------------------------
 
 /// Handler for POST /v1/messages/count_tokens.
-/// Returns an estimated input token count using a len/3 heuristic.
+/// Counts the prompt using the selected chat pipeline without invoking an engine.
 async fn handler_count_tokens(
-    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<AnthropicCountTokensRequest>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(mut request): Json<AnthropicCountTokensInput>,
 ) -> Result<Response, Response> {
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(AnthropicHandlerError::from_request_validation(error).into_response());
     }
-    // Count Tokens does not convert or execute tools, so keep tool definitions
-    // permissive here. TODO: Add validation when Anthropic server tools are supported.
+    validate_anthropic_tools(request.tools.as_deref())
+        .map_err(|error| AnthropicHandlerError::from_request_validation(error).into_response())?;
+    request.model = state
+        .manager()
+        .resolve_canonical_name(resolve_request_model(&request.model, template.as_ref()));
+    let (preprocessor, parsing_options) = state
+        .manager()
+        .get_chat_preprocessor_with_parsing(&request.model)
+        .map_err(|error| {
+            AnthropicHandlerError::model_lookup(error, &request.model).into_response()
+        })?;
+    let preprocessor = preprocessor.ok_or_else(|| {
+        AnthropicHandlerError::validation(
+            "Token counting is unavailable for this model: its serving pipeline does not expose a frontend tokenizer and chat template",
+        )
+        .into_response()
+    })?;
     if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
-    let tokens = request.estimate_tokens();
+    let thinking_explicitly_disabled = request
+        .thinking
+        .as_ref()
+        .is_some_and(|thinking| thinking.thinking_type == "disabled");
+    let mut request: NvCreateChatCompletionRequest = request.try_into().map_err(|error| {
+        AnthropicHandlerError::validation(format!("Failed to convert request: {error}"))
+            .into_response()
+    })?;
+    request
+        .validate()
+        .map_err(|error| AnthropicHandlerError::validation(error.to_string()).into_response())?;
+    apply_anthropic_thinking_defaults(
+        &mut request,
+        parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled,
+    );
+    let tokens = preprocessor
+        .count_input_tokens(request)
+        .await
+        .map_err(|error| {
+            if let Some(error) = find_canonical_error_in_chain(error.as_ref())
+                && let Some(response) = anthropic_semantic_error(error)
+            {
+                return response;
+            }
+            AnthropicHandlerError::sanitized(
+                SanitizedError::Internal,
+                format!("Failed to count Anthropic input tokens: {error:#}"),
+                ErrorType::Internal,
+            )
+            .into_response()
+        })?;
     Ok(Json(AnthropicCountTokensResponse {
         input_tokens: tokens,
     })

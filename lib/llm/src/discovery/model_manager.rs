@@ -1496,6 +1496,24 @@ impl ModelManager {
             .get_chat_engine()
     }
 
+    pub(crate) fn get_chat_preprocessor_with_parsing(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            Option<Arc<crate::preprocessor::OpenAIPreprocessor>>,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_preprocessor_with_parsing()
+    }
+
     pub fn get_tensor_engine(
         &self,
         model: &str,
@@ -1724,8 +1742,35 @@ impl ModelManager {
         &self,
         model: &str,
         card_checksum: &str,
+        card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        self.add_chat_model_with_assets(model, card_checksum, card, engine, None)
+    }
+
+    pub(crate) fn add_chat_completions_model_with_preprocessor(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIChatCompletionsStreamingEngine,
+        preprocessor: Arc<crate::preprocessor::OpenAIPreprocessor>,
+    ) -> Result<(), ModelManagerError> {
+        self.add_chat_model_with_assets(
+            model,
+            card_checksum,
+            Self::aggregated_local_card(),
+            engine,
+            Some(preprocessor),
+        )
+    }
+
+    fn add_chat_model_with_assets(
+        &self,
+        model: &str,
+        card_checksum: &str,
         mut card: ModelDeploymentCard,
         engine: OpenAIChatCompletionsStreamingEngine,
+        preprocessor: Option<Arc<crate::preprocessor::OpenAIPreprocessor>>,
     ) -> Result<(), ModelManagerError> {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
@@ -1738,6 +1783,7 @@ impl ModelManager {
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
+        ws.chat_preprocessor = preprocessor;
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
         Ok(())

@@ -853,7 +853,7 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
 
 #[tokio::test]
 #[serial]
-async fn count_tokens_returns_exact_estimate_without_calling_engine() {
+async fn count_tokens_rejects_engine_without_frontend_tokenizer() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start(Vec::<Script>::new()).await;
         let response = svc
@@ -870,10 +870,14 @@ async fn count_tokens_returns_exact_estimate_without_calling_engine() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(
-            response.json::<Value>().await.unwrap(),
-            json!({"input_tokens": 19})
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let error = response.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("frontend tokenizer")
         );
         assert!(svc.engine.take_requests().await.is_empty());
 

@@ -893,6 +893,42 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
+#### Messages Token Counting
+
+`/v1/messages/count_tokens` resolves the served model or registered alias and
+counts its rendered input with the tokenizer and chat template used by the
+Rust chat pipeline. It accepts `model`, `messages`, `system`, `tools`,
+`tool_choice`, `thinking`, and `output_config`; prompt controls follow the
+same conversion as `/v1/messages`. Include the same prompt fields when counting
+and generating. System instructions, client tool schemas, tool history, and
+the assistant generation prefix all contribute to the count.
+
+Counting runs frontend preprocessing without inference or tool execution. The
+tokenizer and template are reused from model registration. A prompt can be
+counted even when it exceeds the model's generation context limit, so clients
+can decide how much to compact. Cache hints do not reduce `input_tokens`.
+
+| Condition | Result |
+|---|---|
+| Ready model with Rust chat preprocessing | `200` with `{"input_tokens": N}` |
+| Unknown model or alias | `404`, `not_found_error` |
+| Registered chat model without ready workers | `503`, `overloaded_error` |
+| Tokenization delegated to a backend or Python chat processor | `400`, `invalid_request_error` |
+| Media whose expanded token count is unavailable | `400`, `invalid_request_error` |
+| Unsupported document or server-tool definition | `400`, `invalid_request_error` |
+
+Image counting requires a build with `mm-routing` and a model configuration for
+which the existing image preprocessing path can determine the full expanded
+prompt length. Other configurations return an error rather than a text-only
+count or a length estimate. Media loading uses the same validation and network
+access restrictions as generation.
+
+Counts describe the selected deployment's prompt. They can differ between
+deployments of the same model name if their tokenizer or template differs, and
+from counts produced by Anthropic-hosted models. The initial `message_start`
+usage in a generation stream still uses a provisional estimate until backend
+usage arrives.
+
 ### Infrastructure
 
 | Method | Path | Description |
