@@ -35,7 +35,9 @@ def test_expected_osl_uses_mooncake_output_length_and_preserves_hints():
 
     assert request["extra"] == {
         "metadata": "preserved",
-        "nvext": {"agent_hints": {"priority": 7, "osl": 32}},
+        "nvext": {
+            "agent_hints": {"priority": 7, "osl": 32},
+        },
     }
     assert "nvext" not in request
 
@@ -63,6 +65,8 @@ def test_priority_tagging_does_not_mutate_source_request():
     assert request["extra"]["nvext"]["agent_hints"] == {"osl": 32}
     assert tagged_request["extra"] == {
         "metadata": {"request_id": "request-1"},
-        "nvext": {"agent_hints": {"osl": 32, "priority": 7}},
+        "nvext": {
+            "agent_hints": {"osl": 32, "priority": 7},
+        },
     }
     assert tagged_request["extra"] is not request["extra"]
