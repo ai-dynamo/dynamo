@@ -15,6 +15,7 @@ pub mod policy_queue;
 #[cfg(test)]
 mod policy_queue_tests;
 pub mod prefill_load;
+pub mod protocols;
 pub mod queue;
 mod queue_admission;
 pub mod request_classifier;
