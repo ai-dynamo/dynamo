@@ -9,6 +9,7 @@ ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
 CLUSTERTEST_TIMEOUT ?= 30m
+UPGRADE_TEST_PARALLELISM ?= 2
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
 CLUSTERTEST_REUSE ?= true
@@ -712,7 +713,7 @@ clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, ex
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
 	python3 hack/generate_upgrade_fixtures.py --check
 	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestCluster(HistoryStorage|ComponentHistoryBlocksWorkloads)$$' -count=1 -v -timeout=3m
-	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=30m
+	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -parallel=$(UPGRADE_TEST_PARALLELISM) -count=1 -v -timeout=30m
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
 clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.
