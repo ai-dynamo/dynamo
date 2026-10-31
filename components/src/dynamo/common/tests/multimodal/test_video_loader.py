@@ -3,6 +3,7 @@
 
 import logging
 import sys
+import threading
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -271,7 +272,14 @@ async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
     loader = VideoLoader()
     frames = np.zeros((2, 4, 6, 3), dtype=np.uint8)
     meta = {"fps": 30.0, "frames_indices": [0, 1], "total_num_frames": 2}
-    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
+    loop_thread = threading.get_ident()
+    probe_threads = []
+
+    def probe(content):
+        probe_threads.append(threading.get_ident())
+        return "h264"
+
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", probe)
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
     monkeypatch.setattr(
         video_loader_module,
@@ -284,6 +292,8 @@ async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
 
     np.testing.assert_array_equal(got_frames, frames)
     assert got_meta == meta
+    assert len(probe_threads) == 1
+    assert probe_threads[0] != loop_thread
     assert media_io.calls == []  # hardware decoded; software untouched
 
 

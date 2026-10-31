@@ -202,7 +202,14 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     )
     sentinel = object()
     monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"h264 bytes"))
-    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    loop_thread = threading.get_ident()
+    probe_threads = []
+
+    def probe(content):
+        probe_threads.append(threading.get_ident())
+        return "h264"
+
+    monkeypatch.setattr(mmp, "probe_video_codec", probe)
     monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: codec == "h264")
     nvdec = MagicMock(return_value=sentinel)
     monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
@@ -220,6 +227,8 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
         ep_disaggregated_params=None,
     )
 
+    assert len(probe_threads) == 1
+    assert probe_threads[0] != loop_thread
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
