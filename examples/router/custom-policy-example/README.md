@@ -396,3 +396,7 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Measured hotspot experiment
+
+See [the matched-input result and CPU statistics replay](hotspot-progress-benchmark.md) for the fixed native-tracker comparison, retained group data and scope limits.

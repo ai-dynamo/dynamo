@@ -229,17 +229,16 @@ fn progress_group_disabled_preserves_original_cache_choice() {
 }
 
 #[test]
-fn progress_group_short_decode_keeps_warm_source() {
-    for budget in [16, 24, 32] {
+fn progress_group_short_and_boundary_budgets_keep_warm_source() {
+    // Include equality: 8 * (40 - 8) == the 256-token move threshold.
+    for budget in [16, 24, 32, 40] {
         let frame = Frame::new(Some(budget), true);
-        assert_eq!(frame.select(Some(parameters())), frame.source);
+        assert_eq!(
+            frame.select(Some(parameters())),
+            frame.source,
+            "output budget {budget} must keep the warm source"
+        );
     }
-}
-
-#[test]
-fn progress_group_budget_equality_is_not_a_move() {
-    let frame = Frame::new(Some(40), true); // 8 * (40 - 8) == 256
-    assert_eq!(frame.select(Some(parameters())), frame.source);
 }
 
 #[test]
