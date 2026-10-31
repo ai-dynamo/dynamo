@@ -13,5 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# The env client supplies the generated gRPC stubs for the ate-env-guest
+# daemon; the adapter dials the guest through the Substrate router itself.
 ate-env-client @ git+https://github.com/agent-substrate/env.git@281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b#subdirectory=clients/python
 harbor==0.16.0

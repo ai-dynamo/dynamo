@@ -12,10 +12,12 @@ golden snapshots, one trial, a concurrent batch, result inspection, and cleanup.
 
 This directory contains the runnable files:
 
-- `substrate_environment.py`: Harbor's external environment provider.
+- `substrate_environment.py`: Harbor's external environment provider. It talks
+  to Substrate directly: `kubectl-ate` for actor lifecycle, and the Substrate
+  router for commands and files inside the actor.
 - `harbor-job.yaml`: editable Harbor job with task-to-template mappings.
 - `Dockerfile.pi`: prepared task image with pinned Pi and provider dependencies.
-- YAML manifests: environment API, runner, worker pool, task template, and network policy.
+- YAML manifests: runner, worker pool, task template, and the atespace access policy.
 - `runner-kubeconfig.yaml`: in-cluster CLI identity using projected token files.
 - `*.patch`: compatibility changes applied to the pinned upstream sources.
 - [Install Substrate integration](INSTALL.md), [Capture inference and tools](TRACING.md),

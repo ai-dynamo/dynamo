@@ -3,10 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-Install the pinned Substrate environment integration for the
+Install the pinned Substrate pieces for the
 [Harbor tutorial](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx).
 Run these commands from the example directory. Set `EXAMPLE_DIR`,
 `KUBE_CONTEXT`, and `IMAGE_REPO` as described there.
+
+The Harbor adapter talks to Substrate directly. It creates and deletes actors
+through `kubectl-ate`, and it reaches the guest daemon inside each actor
+through the Substrate router. There is no environment service to deploy.
 
 ## Check cluster capabilities
 
@@ -45,16 +49,16 @@ export PATH="$EXAMPLE_DIR/deps/bin:$PATH"
 
 Prepare `.local/substrate-install.yaml` using the upstream installation guide.
 Select `ghcr.io/agent-substrate/substrate` and `v1.0.0-rc.1` for the runtime
-images. Include the runner's identity in `ingressAllowedSPIFFEIDs`:
+images. The router admits only clients whose SPIFFE ID it is given. Include the
+runner's identity:
 
 ```yaml
 ingressAllowedSPIFFEIDs:
-  - spiffe://cluster.local/ns/ate-env/sa/ate-env-api
+  - spiffe://cluster.local/ns/ate-env/sa/harbor-runner
 ```
 
-Use your installation's trust domain if it differs from `cluster.local`, and
-update `env-access-policy.yaml` to match. Preserve existing permitted identities.
-Install the configured control plane:
+Use your installation's trust domain if it differs from `cluster.local`.
+Preserve existing permitted identities. Install the configured control plane:
 
 ```bash
 ate-setup deploy ate-system --context "$KUBE_CONTEXT" \
@@ -68,67 +72,58 @@ building `ate-setup` if that validation blocks an otherwise configured S3
 installation. It does not configure the storage backend. Omit or adapt optional
 Google `PodMonitoring` resources on clusters without that API.
 
-For an existing installation, merge the required identity and settings through
-its normal deployment configuration. Do not replace the whole shared install.
+For an existing installation, merge the identity into the router's allowlist
+through its normal deployment configuration. The installer renders it as the
+`--ingress-allowed-spiffe-ids` argument of the `atenet-router` container. Do
+not replace the whole shared install.
 
-## Build the environment service and guest
+## Build the guest image
 
-The pinned env source predates Substrate rc1. Apply the included compatibility
-patch, which updates its Go API bindings and authenticated transport:
+`ate-env-guest` is the daemon that runs commands and moves files inside an
+actor. It comes from the env repository and does not depend on the Substrate Go
+module, so it builds from the pinned commit without changes:
 
 ```bash
 git clone https://github.com/agent-substrate/env deps/env
 git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
-git -C deps/env apply "$EXAMPLE_DIR/env-rc1-compat.patch"
 (
 	cd deps/env
 	umask 022
-	KO_DOCKER_REPO="$IMAGE_REPO/env-api" ko build --bare \
-	  --platform=linux/amd64,linux/arm64 ./cmd/ate-env-api
 	KO_DOCKER_REPO="$IMAGE_REPO/env-guest" ko build --bare \
 	  --platform=linux/amd64 ./cmd/ate-env-guest
 )
 ```
 
-Save the printed digest references as `ENV_API_IMAGE` and `GUEST_IMAGE` in
-`.local/config.env`. These are images you build and publish to your registry.
-Configure image-pull credentials separately if the registry is private.
+Save the printed digest reference as `GUEST_IMAGE` in `.local/config.env`. The
+actor template mounts this image as a volume at `/ate`, so the task image stays
+untouched. Configure image-pull credentials separately if the registry is
+private. The same checkout supplies the Python client the runner installs
+later; the adapter uses its generated gRPC stubs for the guest.
 
-## Create the namespace and atespace
+## Create the namespace, atespace, and access policy
 
 Run the Substrate commands as an administrator with global ownership. An
 atespace-scoped owner cannot create an atespace:
 
 ```bash
 kubectl --context "$KUBE_CONTEXT" create namespace ate-env
-kubectl --context "$KUBE_CONTEXT" -n ate-env create serviceaccount ate-env-api
 kubectl-ate --context "$KUBE_CONTEXT" create atespace ate-env
 kubectl-ate --context "$KUBE_CONTEXT" create access-policy \
-  -a ate-env -f env-access-policy.yaml
+  -a ate-env -f runner-access-policy.yaml
 ```
 
-If these objects already exist, inspect and reuse them. For an existing access
-policy, preserve its current bindings and update with its `uid` and `version`.
-The namespace, atespace, and owner binding must exist before the env API starts.
+The policy grants the runner's ServiceAccount token the editor role on the
+atespace. That covers creating and deleting actors, creating egress policies,
+and listing templates. The ServiceAccount itself is created with the runner
+Pod in the tutorial. If these objects already exist, inspect and reuse them.
+For an existing access policy, preserve its current bindings and update with
+its `uid` and `version`.
 
-Render and deploy the environment service:
-
-```bash
-set -a
-source .local/config.env
-set +a
-envsubst '${ENV_API_IMAGE}' < env-api.yaml > .local/env-api.yaml
-kubectl --context "$KUBE_CONTEXT" apply -f .local/env-api.yaml
-kubectl --context "$KUBE_CONTEXT" apply -f env-network-policy.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env rollout status \
-  deployment/ate-env-api --timeout=300s
-```
-
-Keep `api.ate-system.svc:443` and `atenet-router.ate-system.svc:443` consistent
-with the service certificates. The projected identity bundle authenticates
-those downstream connections. The env Service's port 7777 is plaintext inside
-the cluster; do not expose it publicly. NetworkPolicy enforcement requires a
-network plugin that supports it.
+Two identities, one ServiceAccount: `kubectl-ate` sends the projected token,
+whose principal is `user:system:serviceaccount:ate-env:harbor-runner`. The
+adapter's guest calls present the projected pod certificate, whose SPIFFE ID is
+the one in `ingressAllowedSPIFFEIDs`. The access policy covers the first. The
+router allowlist covers the second.
 
 ## Align request timeouts
 

@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Substrate access policy for the ate-env atespace. kubectl-ate authenticates
+# with the runner's ServiceAccount token, whose principal is the Kubernetes
+# form below. Editor covers creating and deleting actors, creating egress
+# policies, and listing templates.
 metadata:
   name: default
 bindings:
-  - role: owner
+  - role: editor
     members:
-      - user:spiffe://cluster.local/ns/ate-env/sa/ate-env-api
+      - user:system:serviceaccount:ate-env:harbor-runner

@@ -13,7 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+# The runner's identity is used two ways. kubectl-ate sends the projected
+# ServiceAccount token to the Substrate control plane, so the access policy
+# binds user:system:serviceaccount:ate-env:harbor-runner. The adapter presents
+# the projected pod certificate to the Substrate router, so the installation's
+# ingressAllowedSPIFFEIDs lists spiffe://cluster.local/ns/ate-env/sa/harbor-runner.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-runner
+  namespace: ate-env
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -37,7 +47,7 @@ roleRef:
   name: harbor-substrate-client-trust
 subjects:
 - kind: ServiceAccount
-  name: ate-env-api
+  name: harbor-runner
   namespace: ate-env
 ---
 apiVersion: v1
@@ -48,7 +58,7 @@ metadata:
   labels:
     app: harbor-runner
 spec:
-  serviceAccountName: ate-env-api
+  serviceAccountName: harbor-runner
   restartPolicy: Never
   containers:
   - name: runner
@@ -78,8 +88,6 @@ spec:
       value: /work/example:/work/pi-plugin/harbor
     - name: KUBECONFIG
       value: /work/kubeconfig
-    - name: SUBSTRATE_ENV_API
-      value: ate-env-api.ate-env.svc:7777
     - name: DYNAMO_API_KEY
       valueFrom:
         secretKeyRef:

@@ -40,11 +40,15 @@ environment:
   import_path: substrate_environment:SubstrateEnvironment
   delete: true
   kwargs:
-    endpoint: ate-env-api.ate-env.svc:7777
+    # Control plane, through kubectl-ate with the runner's ServiceAccount token.
     kube_context: in-cluster
     ate_cli: /work/kubectl-ate
     ate_endpoint: api.ate-system.svc:443
     ate_token_file: /var/run/secrets/ateapi/token
+    # Guest daemon, through the Substrate router with the runner's pod certificate.
+    router_endpoint: atenet-router.ate-system.svc:443
+    credential_bundle: /run/substrate/credential-bundle.pem
+    trust_bundle: /run/substrate/trust-bundle.pem
     egress_policy: /work/example/egress.yaml
     ready_timeout: 1200
     template_map:

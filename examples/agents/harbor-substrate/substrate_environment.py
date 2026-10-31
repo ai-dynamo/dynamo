@@ -15,13 +15,19 @@
 
 """Harbor external environment backed by a pre-registered Substrate template.
 
+The adapter talks to Substrate directly. Actor lifecycle and the egress policy
+go through ``kubectl-ate`` with the runner's ServiceAccount token. Commands and
+files go to the ``ate-env-guest`` daemon inside the actor, through Substrate's
+router over mTLS with the runner Pod's certificate and the ``ate-target-actor``
+routing header. The guest's gRPC services come from the env Python client.
+
 The template must contain the selected task's built image and ate-env-guest.
 This example supports Linux, root, one container, and public task networking.
-CPU and memory limits are configured on the template. The provider applies
-the supplied egress policy to each actor.
+CPU and memory limits are configured on the template.
 """
 
 import asyncio
+import collections
 import contextlib
 import json
 import os
@@ -33,7 +39,8 @@ import time
 import uuid
 from pathlib import Path
 
-from ate_env import Client, EnvError, NotFoundError
+import grpc
+from ate_env import Client, EnvError
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentResourceCapabilities
 from harbor.environments.tar_transfer import (
@@ -43,12 +50,97 @@ from harbor.environments.tar_transfer import (
     remote_unpack_command,
 )
 
+# Routing header the Substrate router reads to select the actor.
+TARGET_ACTOR_HEADER = "ate-target-actor"
+
+
+class _ClientCallDetails(
+    collections.namedtuple(
+        "_ClientCallDetails",
+        ["method", "timeout", "metadata", "credentials", "wait_for_ready"],
+    ),
+    grpc.aio.ClientCallDetails,
+):
+    pass
+
+
+class _TargetActor:
+    """Add the router's actor-selection header to a guest call.
+
+    grpc.aio files an interceptor under the first call type it matches, so one
+    object cannot serve all four. Each call type gets its own small class, and
+    target_actor_interceptors() returns the set to pass to the channel.
+    """
+
+    def __init__(self, atespace: str, actor_id: str):
+        self._target = f"{atespace}/{actor_id}"
+
+    def _inject(self, details):
+        metadata = list(details.metadata or [])
+        metadata.append((TARGET_ACTOR_HEADER, self._target))
+        return _ClientCallDetails(
+            details.method,
+            details.timeout,
+            metadata,
+            details.credentials,
+            details.wait_for_ready,
+        )
+
+
+class _TargetActorUnaryUnary(_TargetActor, grpc.aio.UnaryUnaryClientInterceptor):
+    async def intercept_unary_unary(self, continuation, details, request):
+        return await continuation(self._inject(details), request)
+
+
+class _TargetActorUnaryStream(_TargetActor, grpc.aio.UnaryStreamClientInterceptor):
+    async def intercept_unary_stream(self, continuation, details, request):
+        return await continuation(self._inject(details), request)
+
+
+class _TargetActorStreamUnary(_TargetActor, grpc.aio.StreamUnaryClientInterceptor):
+    async def intercept_stream_unary(self, continuation, details, request_iterator):
+        return await continuation(self._inject(details), request_iterator)
+
+
+class _TargetActorStreamStream(_TargetActor, grpc.aio.StreamStreamClientInterceptor):
+    async def intercept_stream_stream(self, continuation, details, request_iterator):
+        return await continuation(self._inject(details), request_iterator)
+
+
+def target_actor_interceptors(atespace: str, actor_id: str) -> list:
+    """Interceptors that route every call type to one actor."""
+    return [
+        cls(atespace, actor_id)
+        for cls in (
+            _TargetActorUnaryUnary,
+            _TargetActorUnaryStream,
+            _TargetActorStreamUnary,
+            _TargetActorStreamStream,
+        )
+    ]
+
+
+_PEM_BLOCK = re.compile(rb"-----BEGIN ([A-Z ]+)-----.*?-----END \1-----\r?\n?", re.S)
+
+
+def split_credential_bundle(bundle: bytes) -> tuple[bytes, bytes]:
+    """Return (certificate chain, private key) from a projected pod certificate bundle."""
+    chain, key = [], None
+    for match in _PEM_BLOCK.finditer(bundle):
+        kind = match.group(1)
+        if kind == b"CERTIFICATE":
+            chain.append(match.group(0))
+        elif kind.endswith(b"PRIVATE KEY"):
+            key = match.group(0)
+    if not chain or key is None:
+        raise ValueError("credential bundle needs a certificate and a private key")
+    return b"".join(chain), key
+
 
 class SubstrateEnvironment(BaseEnvironment):
     def __init__(
         self,
         *args,
-        endpoint: str,
         kube_context: str,
         egress_policy: str,
         template: str | None = None,
@@ -58,13 +150,15 @@ class SubstrateEnvironment(BaseEnvironment):
         ate_cli: str = "kubectl-ate",
         ate_endpoint: str | None = None,
         ate_token_file: str | None = None,
+        router_endpoint: str = "atenet-router.ate-system.svc:443",
+        credential_bundle: str = "/run/substrate/credential-bundle.pem",
+        trust_bundle: str = "/run/substrate/trust-bundle.pem",
         workdir: str = "/testbed",
         ready_timeout: float = 180,
         transfer_timeout: float = 600,
         uploads: dict[str, str] | None = None,
         **kwargs,
     ):
-        self._endpoint = endpoint
         self._template = template
         self._task_name = task_name
         self._template_map = template_map
@@ -73,11 +167,15 @@ class SubstrateEnvironment(BaseEnvironment):
         self._ate_cli = ate_cli
         self._ate_endpoint = ate_endpoint
         self._ate_token_file = ate_token_file
+        self._router_endpoint = router_endpoint
+        self._credential_bundle = Path(credential_bundle)
+        self._trust_bundle = Path(trust_bundle)
         self._atespace = atespace
         self._workdir = workdir
         self._ready_timeout = ready_timeout
         self._transfer_timeout = transfer_timeout
         self._uploads = uploads or {}
+        self._channel = None
         self._client = None
         self._env = None
         super().__init__(*args, **kwargs)
@@ -104,6 +202,10 @@ class SubstrateEnvironment(BaseEnvironment):
         if not self._kube_context or not self._egress_policy.is_file():
             raise ValueError(
                 "An explicit Kubernetes context and egress policy file are required"
+            )
+        if not self._credential_bundle.is_file() or not self._trust_bundle.is_file():
+            raise ValueError(
+                "The runner needs its projected pod certificate and trust bundle"
             )
         if self.environment_name != self._task_name:
             raise ValueError("The ActorTemplate is prepared for a different task")
@@ -147,6 +249,65 @@ class SubstrateEnvironment(BaseEnvironment):
             with path.open("a") as stream:
                 stream.write(json.dumps(record) + "\n")
 
+    # --- Substrate control plane, through kubectl-ate ---
+
+    async def _ate(self, *args: str, timeout: float = 120) -> str:
+        """Run one kubectl-ate command with the runner's token and return its stdout."""
+        command = [self._ate_cli]
+        if self._ate_endpoint:
+            command.extend(["--endpoint", self._ate_endpoint])
+        if self._ate_token_file:
+            command.extend(["--token-file", self._ate_token_file])
+        command.extend(["--context", self._kube_context, *args])
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            async with asyncio.timeout(timeout):
+                stdout, stderr = await proc.communicate()
+        finally:
+            if proc.returncode is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
+        if proc.returncode:
+            raise RuntimeError(
+                f"kubectl-ate {' '.join(args[:2])} failed: "
+                f"{stderr.decode(errors='replace').strip()}"
+            )
+        return stdout.decode(errors="replace")
+
+    # --- guest, through the Substrate router ---
+
+    def _open_guest_channel(self) -> None:
+        """Open the mTLS channel to the router that carries this actor's guest calls.
+
+        The projected certificate rotates, so the files are read for every actor
+        rather than once per process.
+        """
+        chain, key = split_credential_bundle(self._credential_bundle.read_bytes())
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=self._trust_bundle.read_bytes(),
+            private_key=key,
+            certificate_chain=chain,
+        )
+        self._channel = grpc.aio.secure_channel(
+            self._router_endpoint,
+            credentials,
+            interceptors=target_actor_interceptors(self._atespace, self.actor_id),
+        )
+        self._client = Client(self._router_endpoint, channel=self._channel)
+        self._env = self._client.env(self.actor_id, atespace=self._atespace)
+
+    async def _close_guest_channel(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+        if self._channel is not None:
+            await self._channel.close()
+        self._channel = self._client = self._env = None
+
     async def start(self, force_build: bool) -> None:
         if force_build:
             raise ValueError("Build the task image and register its template first")
@@ -157,33 +318,46 @@ class SubstrateEnvironment(BaseEnvironment):
             "task": self.environment_name,
             "environment_id": self.environment_id,
             "harbor_session_id": self.session_id,
+            "router": self._router_endpoint,
         }
         self.trial_paths.trial_dir.mkdir(parents=True, exist_ok=True)
         (self.trial_paths.trial_dir / "substrate.json").write_text(
             json.dumps(receipt, indent=2) + "\n"
         )
-        self._client = Client(self._endpoint)
-        # Keep the handle before create so cleanup can address a timed-out create.
-        self._env = self._client.env(self.actor_id, atespace=self._atespace)
+        created = False
         try:
             async with asyncio.timeout(self._ready_timeout):
                 with self._timing("create_actor"):
-                    await self._client.create(
+                    await self._ate(
+                        "create",
+                        "actor",
                         self.actor_id,
-                        atespace=self._atespace,
-                        template_name=self._template,
-                        template_atespace=self._atespace,
+                        "-a",
+                        self._atespace,
+                        "--template",
+                        self._template,
                     )
+                    created = True
                 with self._timing("egress_policy"):
-                    await self._create_egress_policy()
+                    await self._ate(
+                        "create",
+                        "egress-policy",
+                        self.actor_id,
+                        "-a",
+                        self._atespace,
+                        "-f",
+                        str(self._egress_policy),
+                    )
+                self._open_guest_channel()
                 with self._timing("first_guest_command"):
                     while True:
                         try:
-                            # Guest traffic activates the actor; state polling does not.
+                            # The first guest call makes the router wake the actor.
+                            # The router answers Unavailable until the guest listens.
                             result = await self.exec("true", cwd="/", timeout_sec=5)
                             if result.return_code == 0:
                                 break
-                        except (EnvError, TimeoutError):
+                        except (EnvError, grpc.RpcError, TimeoutError):
                             pass
                         await asyncio.sleep(1)
             with self._timing("log_directories"):
@@ -196,61 +370,28 @@ class SubstrateEnvironment(BaseEnvironment):
             self.logger.info("Substrate actor %s ready", self.actor_id)
         except BaseException:
             try:
-                await self.stop(delete=True)
+                await self.stop(delete=created)
             except Exception:
                 self.logger.exception(
                     "Failed to delete actor %s after startup failure", self.actor_id
                 )
             raise
 
-    async def _create_egress_policy(self):
-        # The env API has no policy RPC. Use the upstream control-plane CLI.
-        cli_flags = []
-        if self._ate_endpoint:
-            cli_flags.extend(["--endpoint", self._ate_endpoint])
-        if self._ate_token_file:
-            cli_flags.extend(["--token-file", self._ate_token_file])
-        proc = await asyncio.create_subprocess_exec(
-            self._ate_cli,
-            *cli_flags,
-            "--context",
-            self._kube_context,
-            "create",
-            "egress-policy",
-            self.actor_id,
-            "-a",
-            self._atespace,
-            "-f",
-            str(self._egress_policy),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        try:
-            _, stderr = await proc.communicate()
-            if proc.returncode:
-                raise RuntimeError(
-                    f"Actor egress policy failed: {stderr.decode(errors='replace')}"
-                )
-        finally:
-            if proc.returncode is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-                await proc.wait()
-
     async def stop(self, delete: bool):
         try:
-            if self._env is not None and delete:
-                async with asyncio.timeout(60):
-                    with contextlib.suppress(NotFoundError):
-                        await self._env.delete()
-            elif self._env is not None:
+            if delete:
+                try:
+                    async with asyncio.timeout(60):
+                        await self._ate("delete", "actor", self.actor_id, "-a", self._atespace)
+                except RuntimeError as exc:
+                    if "notfound" not in str(exc).replace(" ", "").lower():
+                        raise
+            else:
                 self.logger.info(
                     "Retaining actor %s in %s", self.actor_id, self._atespace
                 )
         finally:
-            if self._client is not None:
-                await self._client.close()
-            self._client = self._env = None
+            await self._close_guest_channel()
 
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
         if self._resolve_user(user) not in (None, "root", "0", 0):

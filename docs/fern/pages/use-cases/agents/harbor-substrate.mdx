@@ -19,19 +19,20 @@ installation and hardware requirements.
 
 <Warning>
 This integration is experimental. It includes compatibility patches for the
-pinned Substrate environment service and Pi adapter. Check the installation
-requirements before allocating model-serving resources.
+pinned Pi adapter and an optional one for the Substrate installer. Check the
+installation requirements before allocating model-serving resources.
 </Warning>
 
 ## What you build
 
 ```mermaid
 flowchart LR
-    H[Harbor runner] -->|Create, execute, collect| E[Environment adapter and API]
-    E --> A
+    H[Harbor runner with the Substrate adapter] -->|Create and delete actors| C[Substrate control plane]
+    H -->|Commands and files over mTLS| R[Substrate router]
     subgraph S[Substrate worker pool]
-        A[Actor: Pi, coding tools, and verifier]
+        A[Actor: guest daemon, Pi, coding tools, and verifier]
     end
+    R --> A
     A -->|Model requests| D[Dynamo frontend]
     D --> M[Inference engine]
     A -.->|Alternative| X[External model API]
@@ -42,9 +43,11 @@ and collects results. Pi calls the model and executes coding tools in the task
 workspace. Substrate places isolated actors on CPU workers. Dynamo serves
 inference outside those actors.
 
-The Harbor environment adapter translates lifecycle, command, and file
-operations into Substrate calls. The model does not grade its own answer.
-Harbor runs the task's verifier after Pi finishes.
+The Harbor environment adapter talks to Substrate directly. It creates and
+deletes actors through `kubectl-ate`, and it runs commands and moves files
+through the Substrate router to a small guest daemon inside the actor. The
+model does not grade its own answer. Harbor runs the task's verifier after Pi
+finishes.
 
 ## Check prerequisites
 
@@ -128,28 +131,29 @@ External jobs disable Dynamo's session-final control requests. Harbor
 results and Substrate metrics remain available. Dynamo's server-side
 inference traces require a Dynamo endpoint you control.
 
-## Install Substrate and its environment API
+## Install Substrate and build the guest image
 
 Complete [Install the Substrate integration](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/INSTALL.md).
-That procedure installs or checks the pinned control plane, creates the
-`ate-env` atespace, builds the compatible environment API and guest images, and
-grants the runner access.
+That procedure installs or checks the pinned control plane, builds the guest
+image, creates the `ate-env` atespace, and grants the runner's identity access.
 
 A Kubernetes namespace and a Substrate atespace are separate objects. The
-example uses `ate-env` for both. The environment API receives Harbor requests
-on port 7777 and uses authenticated connections to Substrate. Its client-facing
-Service stays internal and is restricted to runner Pods by NetworkPolicy.
+example uses `ate-env` for both. The runner holds one ServiceAccount with two
+projected credentials. Its token authenticates `kubectl-ate` to the control
+plane, where the access policy makes it an editor of the atespace. Its pod
+certificate authenticates the adapter to the router, which admits only the
+SPIFFE IDs in its allowlist.
 
-Before continuing, verify the deployment:
+Before continuing, verify the installation:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env rollout status \
-  deployment/ate-env-api --timeout=300s
 kubectl --context "$KUBE_CONTEXT" -n ate-system get daemonset atelet
+kubectl --context "$KUBE_CONTEXT" -n ate-system get deployment atenet-router \
+  -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ' ' '\n' | grep ingress-allowed
 ```
 
-The environment API must be Ready, and `atelet` must be ready on each node
-eligible for sandbox placement.
+`atelet` must be ready on each node eligible for sandbox placement, and the
+router's allowlist must name `spiffe://cluster.local/ns/ate-env/sa/harbor-runner`.
 
 ## Create sandbox capacity
 
@@ -265,7 +269,9 @@ kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
 `runner-kubeconfig.yaml` selects the in-cluster Kubernetes API and the runner's
 projected ServiceAccount token. The Pod sets `KUBECONFIG` to that file. Substrate
 uses a separate token projected for the audience `api.ate-system.svc`. The job
-passes its file path and the Substrate endpoint to the environment adapter.
+passes its file path and the control-plane endpoint to the adapter for
+`kubectl-ate`, and the paths of the projected pod certificate and trust bundle
+for the router. The env client is installed only for its generated gRPC stubs.
 Harbor runs outside the actor. Pi, its tools, and the verifier run inside it.
 The runner does not need a Docker daemon.
 
@@ -287,20 +293,17 @@ chmod +x .local/kubectl-ate
 kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/kubectl-ate harbor-runner:/work/kubectl-ate
 ```
 
-Build the upstream environment CLI from the patched source installed earlier.
-Use it for the sandbox checks below:
+Check the runner's control-plane access:
 
 ```bash
-(cd deps/env && CGO_ENABLED=0 GOOS=linux GOARCH="$RUNNER_ARCH" \
-  go build -o "$EXAMPLE_DIR/.local/ate-env" ./cmd/ate-env)
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/ate-env harbor-runner:/work/ate-env
 kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
   /work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 \
   --token-file /var/run/secrets/ateapi/token get actor-templates -a ate-env
 ```
 
-The final command must succeed, even if the template list is empty. It checks
-the CLI connection, trust configuration, and the runner's Substrate permissions.
+The command must succeed, even if the template list is empty. It checks the
+CLI connection, trust configuration, and the access policy for the runner's
+token. A `PermissionDenied` error names the principal that is missing a role.
 
 Render the actor's model egress rule from the selected endpoint:
 
@@ -461,45 +464,30 @@ kubectl --context "$KUBE_CONTEXT" -n ate-env exec -it harbor-runner -- \
   env ACTOR_TEMPLATE="$ACTOR_TEMPLATE" bash
 ```
 
-Inside the runner, create a disposable actor. `SUBSTRATE_ENV_API` is set by the
-runner Pod manifest. The CLI uses it to reach the environment API:
+Inside the runner, create a disposable actor from the template and watch it
+start:
 
 ```bash
-/work/ate-env create harbor-check-one --atespace ate-env --template "$ACTOR_TEMPLATE"
-/work/ate-env harbor-check-one --atespace ate-env shell --timeout 10s 'true'
+ATE="/work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 --token-file /var/run/secrets/ateapi/token"
+$ATE create actor harbor-check-one -a ate-env --template "$ACTOR_TEMPLATE"
+$ATE get actor harbor-check-one -a ate-env
 ```
 
-The first image pull can take several minutes. If the shell command reports
-that the guest is not ready, inspect the actor with `kubectl-ate get actor`
-from the workstation, wait for it to run, and repeat the harmless `true` probe.
-Investigate failures that persist beyond the job's 1,200-second readiness budget.
-
-Once the probe succeeds, check the task repository, Pi version, and provider:
+The first image pull can take several minutes. Repeat the `get` until the
+state is `ACTOR_STATE_RUNNING` and a worker Pod is listed. Investigate a start
+that takes longer than the job's 1,200-second readiness budget. Then delete
+the actor:
 
 ```bash
-/work/ate-env harbor-check-one --atespace ate-env shell --timeout 60s \
-  'set -e; cd /testbed; test -z "$(git status --porcelain --untracked-files=no)"; git rev-parse HEAD; node --version; pi --version; cd /root/pi-dynamo-provider; sha256sum -c /opt/pi-provider.sha256'
-/work/ate-env harbor-check-one --atespace ate-env shell --timeout 10s \
-  'touch /tmp/harbor-clone-marker'
-/work/ate-env delete harbor-check-one --atespace ate-env
-/work/ate-env create harbor-check-two --atespace ate-env --template "$ACTOR_TEMPLATE"
-/work/ate-env harbor-check-two --atespace ate-env shell --timeout 10s 'true'
-```
-
-Wait for the second actor's guest if necessary, then check that it did not
-inherit the marker. Delete the actor after the check succeeds:
-
-```bash
-/work/ate-env harbor-check-two --atespace ate-env shell --timeout 10s \
-  'test ! -e /tmp/harbor-clone-marker'
-/work/ate-env delete harbor-check-two --atespace ate-env
+$ATE delete actor harbor-check-one -a ate-env
 exit
 ```
 
-Expect a clean tracked workspace, the task's repository
-commit, Pi `0.72.1`, successful provider checksums, and no marker in the second
-actor. These checks exercise startup and isolation. The first Harbor trial
-checks model access and the full agent-verifier sequence.
+This pulls the image onto the worker that placed the actor and proves that the
+template, the access policy, and the worker pool fit together. The guest, the
+baked runtime, and the verifier are checked by the oracle job below, which
+runs them through the same adapter path a trial uses. Every trial starts a
+fresh actor from the template, so nothing carries over between trials.
 
 A prepared image avoids repeated package installation. Prewarming caches its
 layers on the selected node. When adding nodes, repeat these checks with
