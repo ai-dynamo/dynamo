@@ -30,23 +30,23 @@ from kvbm.vllm_integration.gpu_offloading import (
     _GPUFrameworkPinAdapter,
 )
 from kvcr.types import BlockKey
+from vllm.distributed.kv_events import BlockRemoved
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    OffloadingConnectorScheduler,
-    TransferJobStatus,
-)
-from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
-from vllm.distributed.kv_events import BlockRemoved
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
     _OffloadEventMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    OffloadingConnectorScheduler,
+    TransferJobStatus,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,

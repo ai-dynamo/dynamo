@@ -85,13 +85,14 @@ def _can_import_gpu_tiering() -> bool:
 
 def pytest_ignore_collect(collection_path, config):
     """Skip collecting vllm test files if vllm module isn't installed.
-    Checks test_vllm_*.py and the retained-GPU framework-dependent module.
+    Checks test_vllm_*.py and the retained-GPU framework-dependent modules.
     """
     filename = collection_path.name
-    if filename.startswith("test_vllm_") or filename == "test_gpu_offloading.py":
+    gpu_tiering_test = filename in {"test_gpu_offloading.py", "test_gpu_memory.py"}
+    if filename.startswith("test_vllm_") or gpu_tiering_test:
         if not _can_import_vllm():
             return True  # vllm not available, skip this file
-    if filename == "test_gpu_offloading.py" and not _can_import_gpu_tiering():
+    if gpu_tiering_test and not _can_import_gpu_tiering():
         return True
     # Omni tests import dynamo.vllm.omni.* which transitively imports
     # vllm_omni at module load. On CPU-only sample-runtime runners the

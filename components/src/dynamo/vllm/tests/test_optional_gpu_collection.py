@@ -20,9 +20,11 @@ pytestmark = [
     ("filename", "available", "expected", "checks"),
     [
         ("test_gpu_offloading.py", False, True, 1),
+        ("test_gpu_memory.py", False, True, 1),
         ("test_vllm_args.py", False, True, 1),
         ("test_kv_hints.py", False, None, 0),
         ("test_gpu_offloading.py", True, None, 1),
+        ("test_gpu_memory.py", True, None, 1),
     ],
 )
 def test_optional_framework_collection_boundary(
@@ -115,6 +117,7 @@ def test_absent_optional_kvcr_is_cached_without_importing_upstream(monkeypatch):
     ("filename", "expected"),
     [
         ("test_gpu_offloading.py", True),
+        ("test_gpu_memory.py", True),
         ("test_vllm_args.py", None),
         ("test_kv_hints.py", None),
         ("test_optional_gpu_collection.py", None),
@@ -137,17 +140,15 @@ def test_missing_kvcr_omits_only_the_gpu_framework_file(
     assert module.pytest_ignore_collect(path.with_name(filename), None) is expected
 
 
-def test_gpu_file_with_absent_optional_upstream_is_ignored(monkeypatch):
+@pytest.mark.parametrize("filename", ["test_gpu_offloading.py", "test_gpu_memory.py"])
+def test_gpu_file_with_absent_optional_upstream_is_ignored(monkeypatch, filename):
     path = Path(__file__).with_name("conftest.py")
     spec = importlib.util.spec_from_file_location("pure_gpu_optional_file", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "_can_import_vllm", lambda: True)
     monkeypatch.setattr(module, "_can_import_gpu_tiering", lambda: False)
-    assert (
-        module.pytest_ignore_collect(path.with_name("test_gpu_offloading.py"), None)
-        is True
-    )
+    assert module.pytest_ignore_collect(path.with_name(filename), None) is True
 
 
 @pytest.mark.parametrize(
