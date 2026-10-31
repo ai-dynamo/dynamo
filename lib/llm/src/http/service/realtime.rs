@@ -100,7 +100,7 @@ async fn realtime_ws_handler(
     let permit = state.acquire_inflight();
     // Count the upgrade attempt before the readiness gate so shutdown cannot
     // observe zero inflight while this WebSocket admission is in progress.
-    if !state.is_ready() {
+    if !state.accepts_inference() {
         drop(permit);
         return super::openai::ErrorMessage::_service_unavailable().into_response();
     }

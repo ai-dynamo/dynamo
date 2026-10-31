@@ -14,6 +14,7 @@ from dynamo._core import FpmHealthSnapshot as FpmHealthSnapshot
 from dynamo._core import FrontendExtensionContext as FrontendExtensionContext
 from dynamo._core import FrontendResponse as FrontendResponse
 from dynamo._core import FrontendRoute as FrontendRoute
+from dynamo._core import FrontendShutdown as FrontendShutdown
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
