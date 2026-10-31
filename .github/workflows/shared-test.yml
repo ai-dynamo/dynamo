@@ -447,6 +447,8 @@ jobs:
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
           PARALLEL_MODE: 'auto'
           MAX_VRAM_GIB: ${{ inputs.gpu_parallel_max_vram_gib }}
+          # Must match this step's timeout-minutes.
+          GPU_PARALLEL_STAGE_TIMEOUT_MINUTES: ${{ inputs.gpu_test_timeout_minutes }}
           GPU_TESTS: 'true'
           VERIFY_GPU: ${{ inputs.verify_gpu }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -21,11 +21,17 @@ Flags:
 
 A 10-second cooldown between launches avoids the vLLM profiling race
 (bug #10643). Tests that fail due to profiling race are retried up to 3 times.
+
+Set DYN_GPU_PARALLEL_STAGE_DEADLINE (Unix epoch seconds) to bound the whole
+run: once it passes, queued tests are not started, running test trees are
+killed, and the run fails.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
+import math
 import os
 import subprocess
 import sys
@@ -34,6 +40,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import psutil
 
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
@@ -266,6 +274,89 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Absolute epoch deadline so CI counts from its step start. GitHub's step timeout does
+# not reliably signal this process, which would keep launching tests onto a busy GPU.
+_STAGE_DEADLINE_ENV = "DYN_GPU_PARALLEL_STAGE_DEADLINE"
+
+
+def _stage_deadline() -> float | None:
+    """Return the stage deadline from the environment, or None when unset.
+
+    Raises ValueError for a malformed or non-finite value rather than running
+    without the limit the caller asked for.
+    """
+    raw = os.environ.get(_STAGE_DEADLINE_ENV, "").strip()
+    if not raw:
+        return None
+    deadline = float(raw)
+    if not math.isfinite(deadline):
+        raise ValueError(f"{_STAGE_DEADLINE_ENV} must be finite, got {raw!r}")
+    return deadline
+
+
+# One shared wait for all trees, so the kill time stays bounded however many
+# tests were running when the deadline passed.
+_STAGE_KILL_GRACE_S = 15.0
+_PR_SET_CHILD_SUBREAPER = 36
+
+
+def _set_child_subreaper(enabled: bool) -> bool:
+    """Make orphaned descendants reparent to this process instead of init.
+
+    Linux only. Returns False when the call is unavailable or fails.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def _signal_all(procs, kill: bool) -> None:
+    """Signal each process, tolerating exits and denied access."""
+    for proc in procs:
+        try:
+            proc.kill() if kill else proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+def _tree(pid: int) -> list[psutil.Process]:
+    """Return a process and its descendants, or no entries if lookup fails."""
+    try:
+        root = psutil.Process(pid)
+        return [root, *root.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+
+
+def _kill_process_trees(
+    pids: list[int],
+    grace_s: float = _STAGE_KILL_GRACE_S,
+    keep: frozenset[int] = frozenset(),
+) -> None:
+    """SIGTERM every process in all the given trees, then SIGKILL survivors.
+
+    Takes about three times ``grace_s`` at most, where terminating one tree
+    at a time adds up the waits. Descendants orphaned earlier are not in any
+    tree; with _set_child_subreaper on they are children of this process, so
+    every child not in ``keep`` is killed afterwards.
+    """
+    me = psutil.Process()
+    procs = [p for pid in pids for p in _tree(pid)]
+    _signal_all(procs, kill=False)
+    _, alive = psutil.wait_procs(procs, timeout=grace_s)
+    _signal_all(alive, kill=True)
+    psutil.wait_procs(alive, timeout=grace_s)
+    for _ in range(3):
+        adopted = [p for c in me.children() if c.pid not in keep for p in _tree(c.pid)]
+        if not adopted:
+            break
+        _signal_all(adopted, kill=True)
+        psutil.wait_procs(adopted, timeout=grace_s / 3)
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -649,6 +740,16 @@ def run_parallel(
 
     # --- Scheduling state ---
     t0 = time.monotonic()
+    stage_deadline = _stage_deadline()
+    own_children = frozenset(c.pid for c in psutil.Process().children())
+    # Keeps orphaned test processes findable so the deadline can kill them.
+    subreaper = stage_deadline is not None and _set_child_subreaper(True)
+    if stage_deadline is not None:
+        _print(
+            f"Stage deadline in {stage_deadline - time.time():.0f}s "
+            f"({_STAGE_DEADLINE_ENV})"
+        )
+    not_run: list[_TestEntry] = []
     pending = list(tests)
     running: dict[int, _RunningTest] = {}
     next_status = t0 + 10
@@ -865,6 +966,50 @@ def run_parallel(
                     _print(ln)
                 next_status = now + 10
 
+        # --- Stage budget ---
+        # Checked after reaping so tests that just finished keep their result.
+        if stage_deadline is not None and time.time() >= stage_deadline:
+            _print(
+                f"\nStage deadline reached after {now - t0:.0f}s: "
+                f"not starting {len(pending)} queued test(s), "
+                f"killing {len(running)} running test(s)"
+            )
+            not_run = pending
+            pending = []
+            for test in not_run:
+                _print(f"[w{test.w_id}] {test.name} NOT RUN - stage budget exhausted")
+            # Kills each child pytest and every descendant, including engine
+            # processes in their own session and orphans adopted as subreaper.
+            _kill_process_trees(
+                [r.proc.pid for r in running.values()], keep=own_children
+            )
+            for w_id, run_info in list(running.items()):
+                run_info.proc.wait()
+                if run_info.reader_thread is not None:
+                    run_info.reader_thread.join(timeout=5)
+                test = run_info.test
+                duration = time.monotonic() - run_info.start_time
+                if not stream:
+                    for line in run_info.captured:
+                        _print(f"[w{w_id}] {line}")
+                _print(
+                    f"[w{w_id}] {test.name} FAILED [{duration:.0f}s]"
+                    " - killed: stage budget exhausted"
+                )
+                if test.assigned_gpu is not None:
+                    gpu_states[test.assigned_gpu].budget_used -= test.profiled_gib
+                    gpu_states[test.assigned_gpu].running_count -= 1
+                completed.append(
+                    _CompletedTest(
+                        test=test,
+                        duration=duration,
+                        passed=False,
+                        fail_reason="killed: stage budget exhausted",
+                    )
+                )
+                del running[w_id]
+            break
+
         # --- Launch pending tests ---
         # _select_launches packs VRAM tests up to budget (pairing a big test
         # with smaller ones), backfills spare slots with zero-VRAM fillers, and
@@ -893,7 +1038,7 @@ def run_parallel(
                 batch.append(entry)
             batch.reverse()
 
-            for entry in batch:
+            for batch_idx, entry in enumerate(batch):
                 w_id = entry.w_id
                 gi = entry.assigned_gpu
                 assert gi is not None
@@ -909,6 +1054,14 @@ def run_parallel(
                     wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
                     if wait > 0:
                         time.sleep(wait)
+
+                # The stagger can cross the deadline; return the rest of the
+                # batch to the queue so the stage budget check reports it.
+                if stage_deadline is not None and time.time() >= stage_deadline:
+                    for unlaunched in batch[batch_idx:]:
+                        unlaunched.assigned_gpu = None
+                    pending[:0] = batch[batch_idx:]
+                    break
 
                 gpu_states[gi].budget_used += entry.profiled_gib
                 gpu_states[gi].running_count += 1
@@ -952,6 +1105,8 @@ def run_parallel(
             time.sleep(1.0)
 
     # Summary
+    if subreaper:
+        _set_child_subreaper(False)
     wall_time = time.monotonic() - t0
     sequential_time = sum(c.duration for c in completed if not c.skipped)
     n_passed = sum(1 for c in completed if c.passed)
@@ -986,6 +1141,8 @@ def run_parallel(
                 f"FAILED [w{w_id}] {test.name} "
                 f"[{duration}s/{timeout}s]{retry_str}{fail_str}"
             )
+    for test in sorted(not_run, key=lambda t: t.w_id):
+        _print(f"NOT RUN [w{test.w_id}] {test.name} - stage budget exhausted")
 
     n_summary_parts = []
     if n_failed:
@@ -993,6 +1150,8 @@ def run_parallel(
     n_summary_parts.append(f"{n_passed} passed")
     if n_skipped:
         n_summary_parts.append(f"{n_skipped} skipped")
+    if not_run:
+        n_summary_parts.append(f"{len(not_run)} not run")
 
     wall_int = int(wall_time)
     h, remainder = divmod(wall_int, 3600)
@@ -1015,7 +1174,7 @@ def run_parallel(
     if combined:
         _print(f"JUnit XML: {combined}")
 
-    return 0 if n_failed == 0 else 1
+    return 0 if n_failed == 0 and not not_run else 1
 
 
 # ---------------------------------------------------------------------------
