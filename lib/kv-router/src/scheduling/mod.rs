@@ -22,6 +22,7 @@ pub mod request_classifier;
 pub mod router_config;
 pub mod selector;
 pub mod shared_cache;
+pub mod tracking_hash;
 
 mod types;
 pub use filter::*;
