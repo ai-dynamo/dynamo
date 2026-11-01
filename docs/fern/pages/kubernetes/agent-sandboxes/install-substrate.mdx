@@ -134,89 +134,35 @@ These checks confirm API availability. After deploying Substrate, verify
 certificate issuance and volume projection in
 [Verify the installation](#verify-the-installation).
 
-### Choose architecture per component
+### Identify node architecture
 
-The Substrate control plane, sandbox workers, workload clients, and Dynamo can
-run on separate nodes with different CPU architectures. Match each component's
-binaries and images to its own nodes:
+This guide assumes the Substrate control plane, atelets, workers, and actors
+run on nodes with the same CPU architecture. Identify that architecture before
+continuing:
 
-| Component | Architecture choice |
-| --- | --- |
-| `ate-setup` and workstation `kubectl-ate` | Build for the workstation where you execute them. |
-| Substrate control plane and router | Use images for their scheduled nodes. The pinned release publishes multi-architecture images. |
-| `atelet`, workers, and actors | Match each sandbox node's architecture. Actor images and guest executables must match that worker. |
-| Workload clients | Use images and CLI binaries for the client's own node. |
-| Dynamo | Select serving images for the inference hardware through the model recipe, independently of Substrate. |
+```bash
+kubectl get nodes -L kubernetes.io/arch
+```
 
-For gVisor, the pinned
+Use this architecture for workload builds and configuration. If your deployment
+uses both architectures, match each component's binaries, images, and runtime
+assets to the nodes where it runs.
+
+The supplied
 [`gvisor-default` SandboxConfig](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/sandboxconfig-gvisor.yaml)
-provides both architecture variants of the same runtime release. `atelet`
-selects the matching assets. Inspect eligible nodes with the relevant tab:
-
-<Tabs>
-<Tab title="x86-64 (amd64)">
-
-```bash
-kubectl get nodes -l kubernetes.io/os=linux,kubernetes.io/arch=amd64
-```
-
-Use `linux/amd64` worker and actor images. The SandboxConfig's `assets.amd64`
-entry supplies the `x86_64` gVisor release archive.
-
-</Tab>
-<Tab title="ARM64 (arm64)">
-
-```bash
-kubectl get nodes -l kubernetes.io/os=linux,kubernetes.io/arch=arm64
-```
-
-Use `linux/arm64` worker and actor images. The SandboxConfig's `assets.arm64`
-entry supplies the `aarch64` gVisor release archive.
-
-</Tab>
-</Tabs>
-
-Every node eligible for sandbox placement needs `atelet` and the assets
-required by its runtime. For a different sandbox runtime, check that its
-binaries, kernel requirements, and configured assets support the selected
-architecture. Workload guides configure worker placement and actor images
-separately after this platform installation.
+selects the runtime assets for each node.
 
 </Step>
 
 <Step title="Build the installation tools" id="build-the-installation-tools">
 
-Fetch the same release as the control-plane images:
+Fetch the pinned release and build the installation tools:
 
 ```bash
 mkdir -p deps/bin
 git clone --branch v1.0.0-rc.1 https://github.com/agent-substrate/substrate deps/substrate
-go env GOHOSTOS GOHOSTARCH
-```
-
-Choose the architecture reported by Go for your **workstation**, independently
-of the cluster nodes. These commands keep the workstation's operating system:
-
-<Tabs>
-<Tab title="x86-64 workstation (amd64)">
-
-```bash
-GOARCH=amd64 go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
-GOARCH=amd64 go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
-```
-
-</Tab>
-<Tab title="ARM64 workstation (arm64)">
-
-```bash
-GOARCH=arm64 go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
-GOARCH=arm64 go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
-```
-
-</Tab>
-</Tabs>
-
-```bash
+go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
+go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
 export PATH="$PWD/deps/bin:$PATH"
 ```
 
@@ -327,9 +273,6 @@ credential entries with the same Secret. Keep its endpoint, region, and
       key: AWS_SECRET_ACCESS_KEY
 ```
 
-The pinned RustFS and AWS CLI images contain both `linux/amd64` and
-`linux/arm64` variants. Keep their image references for either architecture;
-RustFS can run on a different node architecture from the sandbox workers.
 Apply the edited manifest and wait for the bucket:
 
 ```bash
@@ -417,11 +360,7 @@ ServiceAccount token. Anyone who can mint that token has global ownership.
 If you replace the owner, authenticate subsequent CLI commands with the
 configured administrator's token using `--token-file`.
 
-Use the same release settings for x86-64 and ARM64 nodes. Kubernetes selects
-the matching platform from each multi-architecture image. If you replace a
-release image with your own build, publish both architectures or constrain
-that component's placement to nodes matching your image. A digest for one
-architecture is different from a digest for the multi-architecture index.
+The supplied release images support both `amd64` and `arm64`.
 
 Before deploying, also check [sandbox asset caching](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/sandbox-asset-cache.md)
 for your runtime's binaries and node cache, and complete the certificate

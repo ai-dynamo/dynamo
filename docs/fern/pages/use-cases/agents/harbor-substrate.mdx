@@ -77,19 +77,11 @@ Prepare these resources:
 - For Grafana panels, Prometheus Operator and Grafana. The example can use an
   existing `kube-prometheus-stack` installation.
 
-Choose architecture per component, not per cluster:
-
-| Component | Architecture must match |
-| --- | --- |
-| Installation tools | The workstation where you run them |
-| Substrate control plane and router | Their Kubernetes nodes |
-| Worker and actor | The sandbox node, gVisor assets, guest daemon, and task image |
-| Harbor runner | Its own node; it can differ from the workers |
-| Dynamo | Its inference nodes and the selected model recipe |
-
-The tabs below use `amd64` for x86-64 and `arm64` for AArch64. Choose the same
-sandbox architecture for the guest build, worker pool, and task image.
-The supplied sandbox configs default to `amd64`; edit them in place for ARM64.
+Use the same node architecture for the guest image, worker pool, and task image.
+The supplied configuration defaults to `amd64`; follow the `arm64` instructions
+for ARM64 nodes. See
+[Identify node architecture](../../kubernetes/agent-sandboxes/install-substrate.mdx#identify-node-architecture)
+if you need to check your nodes.
 
 <Note>
 The ARM64 task base image is published, but this tutorial's ARM64 oracle and Pi
@@ -163,8 +155,7 @@ Choose one of the following paths:
 
 For self-hosted inference, use the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx).
 Follow the recipe from the root of your Dynamo clone and complete its smoke
-test. Select a recipe target and serving images for your inference hardware;
-the inference nodes can use a different CPU architecture from the sandboxes.
+test. Select a recipe target and serving images for your inference hardware.
 Record the served model ID, frontend Service name, and namespace. Then
 return to this tutorial's directory from the repository root:
 
@@ -349,7 +340,7 @@ git clone https://github.com/agent-substrate/env deps/env
 git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
 ```
 
-Build for the sandbox node, regardless of your workstation's architecture:
+Build the guest image for your node architecture:
 
 <Tabs>
 <Tab title="x86-64 (amd64)">
@@ -454,17 +445,12 @@ workerSelector:
 </Tab>
 </Tabs>
 
-The supplied `spec.workerImage` pins a multi-architecture index containing
-both Linux architectures. Keep the same reference for either tab:
+The supplied worker image supports both architectures. Keep its reference:
 
 ```yaml
 spec:
   workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0-rc.1@sha256:02a31963cdfb1d250d205a55fb870385b1ba5bad1be1308d556a6296f76bf145
 ```
-
-Kubernetes selects the worker image for its node. Substrate's `gvisor-default`
-configuration supplies the corresponding runtime assets. Each actor still
-needs a guest image and task image built for that same architecture.
 
 Keep the initial replica count and resources, then apply the edited file:
 
@@ -479,12 +465,9 @@ on the node you selected. Its resource requests reserve two CPUs and 6 GiB
 per worker. The actor template allocates one CPU and 4 GiB per task, leaving
 room for one such actor per worker with capacity headroom.
 
-The pool's sandbox and architecture labels match the actor template's
-`workerSelector`. Keep both sides aligned. For simultaneous x86-64 and ARM64
-capacity, use separate pool and template names, with the corresponding labels
-and image digests. To add nodes, first ensure that `atelet` and runtime assets
-are present there, then adjust placement and replica count. To fit more actors
-per worker, increase worker capacity while preserving per-actor limits.
+To add nodes, first ensure that `atelet` and runtime assets are present there,
+then adjust placement and replica count. To fit more actors per worker,
+increase worker capacity while preserving per-actor limits.
 
 The [installation guide](../../kubernetes/agent-sandboxes/install-substrate.mdx#resolve-low-port-permission-failures-when-needed)
 includes the conditional low-port permission fix for platforms that need it.
@@ -528,8 +511,7 @@ cp -a deps/agent-plugins/pi-plugin .build/image/pi-plugin
 
 Select the sandbox architecture and replace `registry.example.com/harbor-substrate`
 with a repository you can push to and the workers can pull from. Each tab pins
-a task base image for that architecture. `Dockerfile.pi` selects the matching
-`uv` binary from BuildKit's `TARGETARCH`:
+a task base image for that architecture:
 
 <Tabs>
 <Tab title="x86-64 (amd64)">
@@ -592,34 +574,8 @@ your logging and artifact handling accordingly before using an authenticated
 endpoint. A Kubernetes Secret does not redact those logs. Use a scoped key for
 the run and treat captured logs as potentially credential-bearing.
 
-The Python image in `harbor-runner.yaml` pins a multi-architecture index with
-both x86-64 and ARM64 builds. Choose the runner's placement independently of
-the sandbox workers. To select its architecture, add one of these fragments
-to the **Pod** document's `spec` in `harbor-runner.yaml`:
-
-<Tabs>
-<Tab title="x86-64 (amd64)">
-
-```yaml
-spec:
-  nodeSelector:
-    kubernetes.io/arch: amd64
-```
-
-</Tab>
-<Tab title="ARM64 (arm64)">
-
-```yaml
-spec:
-  nodeSelector:
-    kubernetes.io/arch: arm64
-```
-
-</Tab>
-</Tabs>
-
-Keep the supplied image reference for either architecture. Start the runner
-and install its pinned dependencies:
+The supplied image in `harbor-runner.yaml` supports both architectures. Start
+the runner and install its pinned dependencies:
 
 ```bash title="Workstation"
 kubectl apply -f harbor-runner.yaml
