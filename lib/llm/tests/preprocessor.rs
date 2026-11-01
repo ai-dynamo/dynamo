@@ -257,6 +257,7 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -265,6 +266,7 @@ impl Request {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -674,6 +676,7 @@ mod cached_multimodal_uuid {
             .unwrap();
 
         let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        assert_eq!(media["audio_url"].len(), 1);
         assert!(matches!(
             &media["audio_url"][0],
             MultimodalData::Url(url) if url.as_str() == "data:audio/wav;base64,AA=="
@@ -971,6 +974,7 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -979,6 +983,7 @@ mod context_length_validation {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -1351,6 +1356,7 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1360,6 +1366,7 @@ mod embedding_without_chat_template {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
             thinking_token_budget: None,
+            preserve_thinking: None,
         }
     }
 

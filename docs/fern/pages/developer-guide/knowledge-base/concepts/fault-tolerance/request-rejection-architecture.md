@@ -64,9 +64,10 @@ rank_busy = any(configured check is true)
 worker_busy = all(data-parallel ranks are busy)
 ```
 
-The fractional and absolute prefill checks can be enabled separately or together. A worker is not
-excluded until all of its data-parallel ranks are busy, which avoids discarding capacity on ranks that
-can still admit work.
+The fractional and absolute prefill checks can be enabled separately or together. The absolute check,
+`--active-prefill-tokens-threshold`, is deprecated and will be removed in v1.7; use
+`--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
+are busy, which avoids discarding capacity on ranks that can still admit work.
 
 Decode-block rejection depends on the KV router worker-load path. `--router-mode kv` initializes that
 path. `--router-track-output-blocks` adds generated output tokens to the router's observed active-block
@@ -84,9 +85,14 @@ for busy rejection.
 3. Recalculates the busy set when load or runtime configuration changes.
 4. Publishes the current busy set to the router.
 
-A `POST /busy_threshold` update changes the stored threshold configuration. It does not synchronously
-recompute every worker. The next worker-load or runtime-configuration update triggers reevaluation, so
-a new threshold can take a short time to change routing decisions.
+A [`POST /busy_threshold`](../../../../reference/components/frontend-configuration.mdx#admin)
+update changes the stored threshold configuration. It does not synchronously recompute every worker.
+The next worker-load or runtime-configuration update triggers reevaluation, so a new threshold can
+take a short time to change routing decisions.
+
+With `--router-mode kv`, the KV router applies the thresholds itself. While it projects each rank's
+booked load for a request, it judges that load against the current thresholds and the capacity the
+rank reports, and selection skips workers whose ranks are all busy. In this mode `KvWorkerMonitor` keeps only the decode threshold and applies it to the worker-reported `kv_used_blocks`, the signal the router's bookings cannot see: generated tokens, requests from other frontends, and prefill workers that track no active blocks. Selection skips a worker that either check marks busy. A `POST /busy_threshold` update takes effect at the next selection and at the monitor's next load event.
 
 ## Rejection Path
 

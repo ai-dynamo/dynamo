@@ -239,8 +239,15 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let messages_json = self.template_messages_json();
         Value::from_serialize(&messages_json)
+    }
+
+    fn template_messages_json_override(&self) -> Option<serde_json::Value> {
+        self.responses_tools
+            .as_ref()
+            .filter(|context| !context.history_phases.is_empty())
+            .map(|_| self.template_messages_json())
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
@@ -248,22 +255,31 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn tools(&self) -> Option<Value> {
-        if self.inner.tools.is_none() {
-            None
-        } else {
-            // Try to fix the tool schema if it is missing type and properties
-            Some(may_be_fix_tool_schema(
-                serde_json::to_value(&self.inner.tools).unwrap(),
-            )?)
+        if let Some(tools) = self.declared_template_tools() {
+            return may_be_fix_tool_schema(tools);
         }
+        let tools = self.inner.tools.as_ref()?;
+        // Custom tools use the function schema before template-specific repair.
+        may_be_fix_tool_schema(
+            serde_json::to_value(
+                tools
+                    .iter()
+                    .map(|tool| tool.function_template_tool())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        self.native_template_tools()
     }
 
     fn tool_choice(&self) -> Option<Value> {
-        if self.inner.tool_choice.is_none() {
-            None
-        } else {
-            Some(Value::from_serialize(&self.inner.tool_choice))
-        }
+        self.inner
+            .tool_choice
+            .as_ref()
+            .map(|choice| Value::from_serialize(choice.function_template_choice()))
     }
 
     fn response_format(&self) -> Option<Value> {
@@ -704,6 +720,47 @@ fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPromp
 #[cfg(test)]
 mod tests {
     use super::normalize_tool_call_arguments;
+
+    #[test]
+    fn chat_tool_deferral_reaches_prompt_and_python_request() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
+        use serde_json::json;
+
+        let template = include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja");
+        let config: ChatTemplate =
+            serde_json::from_value(json!({"chat_template": template})).unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
+
+        for stream in [false, true] {
+            for nested in [false, true] {
+                let mut tool = json!({"type": "function", "function": {
+                    "name": "lookup", "description": "Find support tickets",
+                    "parameters": {"type": "object", "properties": {
+                        "deferred_query": {"type": "string"}
+                    }}
+                }});
+                if nested {
+                    tool["function"]["defer_loading"] = json!(true);
+                } else {
+                    tool["defer_loading"] = json!(true);
+                }
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                    "model": "muse_spark_open", "stream": stream,
+                    "messages": [{"role": "user", "content": "Find a ticket"}],
+                    "tools": [tool]
+                }))
+                .unwrap();
+                assert!(request.responses_tools.is_none());
+                let rendered = formatter.render(&request).unwrap();
+                assert!(rendered.contains("[deferred: use tool_search to load full schema]"));
+                assert!(!rendered.contains("deferred_query"), "{rendered}");
+                let wire = serde_json::to_value(request).unwrap();
+                assert_eq!(wire["tools"][0]["function"]["defer_loading"], json!(true));
+            }
+        }
+    }
 
     fn make_tool_call_messages(arguments: &str) -> serde_json::Value {
         serde_json::json!([{

@@ -587,6 +587,10 @@ pub(crate) fn cancelled(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Cancelled, message)
 }
 
+pub(crate) fn stream_incomplete(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::StreamIncomplete, message)
+}
+
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }

@@ -1,0 +1,356 @@
+--- a/deploy/operator/internal/controller/clusterenv_helpers_test.go
++++ b/deploy/operator/internal/controller/clusterenv_helpers_test.go
+@@ -8,12 +8,9 @@
+ package controller
+ 
+ import (
+-	"testing"
+-
+ 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+ 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+ 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+-	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+ 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+ 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+ 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
+@@ -43,7 +40,6 @@
+ 	utilruntime.Must(configv1alpha1.AddToScheme(scheme))
+ 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+ 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
+-	utilruntime.Must(nvidiacomv1beta2.AddToScheme(scheme))
+ 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+ 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+ 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
+@@ -64,12 +60,6 @@
+ 	return scheme
+ }
+ 
+-func TestClusterTestSchemeIncludesDGDRV1Beta2(t *testing.T) {
+-	if _, err := newClusterTestScheme().New(nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK); err != nil {
+-		t.Fatalf("create v1beta2 DynamoGraphDeploymentRequest from cluster-test scheme: %v", err)
+-	}
+-}
+-
+ func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {
+ 	config := &configv1alpha1.OperatorConfiguration{}
+ 	configv1alpha1.SetDefaultsOperatorConfiguration(config)
+--- a/deploy/operator/internal/controller/upgrade_component_clustertest_test.go
++++ b/deploy/operator/internal/controller/upgrade_component_clustertest_test.go
+@@ -6,6 +6,21 @@
+ package controller
+ 
+ import (
++	"fmt"
++	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
++	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
++	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
++	appsv1 "k8s.io/api/apps/v1"
++	autoscalingv2 "k8s.io/api/autoscaling/v2"
++	networkingv1 "k8s.io/api/networking/v1"
++	resourcev1 "k8s.io/api/resource/v1"
++	"sigs.k8s.io/controller-runtime/pkg/builder"
++	"sigs.k8s.io/controller-runtime/pkg/event"
++	"sigs.k8s.io/controller-runtime/pkg/handler"
++	"sigs.k8s.io/controller-runtime/pkg/predicate"
++	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
++	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
++
+ 	"context"
+ 	"testing"
+ 	"time"
+@@ -30,12 +45,80 @@
+ 		Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("dynamocomponentdeployment"),
+ 		Config: opts.Config, RuntimeConfig: opts.RuntimeConfig,
+ 	}
+-	builder, err := r.controllerBuilder(mgr)
+-	if err != nil {
+-		return err
+-	}
++	// Index native PodSnapshot references so dependency events can find affected DCDs.
++	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
++		if err := mgr.GetFieldIndexer().IndexField(
++			context.Background(),
++			&api.DynamoComponentDeployment{},
++			dcdPodSnapshotRefIndex,
++			dcdPodSnapshotRefIndexValues,
++		); err != nil {
++			return fmt.Errorf("register DCD PodSnapshot reference index: %w", err)
++		}
++	}
++
++	m := ctrl.NewControllerManagedBy(mgr).
++		For(&api.DynamoComponentDeployment{}, builder.WithPredicates(common.GenerationOrDeletionChangedPredicate())).
++		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
++		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
++			// ignore creation cause we don't want to be called again after we create the deployment
++			CreateFunc:  func(ce event.CreateEvent) bool { return false },
++			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
++			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
++			GenericFunc: func(ge event.GenericEvent) bool { return true },
++		})).
++		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
++		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
++		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
++
++	// Watch PodSnapshot changes that can unblock native DCD restore reconciliation.
++	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
++		m = m.Watches(
++			&snapshotv1alpha1.PodSnapshot{},
++			handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDCDRequests),
++			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
++		)
++	}
++
++	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
++		m = m.Watches(
++			&resourcev1.ResourceClaim{},
++			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimToDCDRequests),
++			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
++		).Watches(
++			&resourcev1.ResourceClaimTemplate{},
++			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimTemplateToDCDRequests),
++			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
++		).Watches(
++			&resourcev1.DeviceClass{},
++			handler.EnqueueRequestsFromMapFunc(r.mapDeviceClassToDCDRequests),
++			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
++		)
++	}
++
++	if r.RuntimeConfig.Gate.Enabled(features.LWS) {
++		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
++			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
++			CreateFunc:  func(ce event.CreateEvent) bool { return false },
++			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
++			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
++			GenericFunc: func(ge event.GenericEvent) bool { return true },
++		})).
++			Owns(&volcanov1beta1.PodGroup{}, builder.WithPredicates(predicate.Funcs{
++				// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
++				CreateFunc:  func(ce event.CreateEvent) bool { return false },
++				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
++				UpdateFunc:  func(de event.UpdateEvent) bool { return true },
++				GenericFunc: func(ge event.GenericEvent) bool { return true },
++			}))
++	}
++
++	if r.Config.Ingress.UseVirtualService() {
++		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
++	}
++	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
+ 	completed.next = r
+-	return builder.WithOptions(controller.Options{MaxConcurrentReconciles: 2}).Complete(completed)
++	return m.WithOptions(controller.Options{MaxConcurrentReconciles: 2}).Complete(completed)
+ }
+ 
+ // incompatibleUpgradeClient changes only the candidate's in-memory rendering input.
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/single/component/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/single/component/output.yaml
+@@ -114,15 +114,6 @@
+           successThreshold: 1
+           timeoutSeconds: 3
+         resources: {}
+-        startupProbe:
+-          failureThreshold: 30
+-          httpGet:
+-            path: /live
+-            port: http
+-            scheme: HTTP
+-          periodSeconds: 10
+-          successThreshold: 1
+-          timeoutSeconds: 1
+         terminationMessagePath: /dev/termination-log
+         terminationMessagePolicy: File
+         volumeMounts:
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/aggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/disaggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/disaggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/disaggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/sglang/disaggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/aggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/aggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/aggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/aggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/disaggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/disaggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/disaggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/trtllm/disaggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/aggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/aggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/aggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/aggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/disaggregated/multi/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/disaggregated/multi/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory
+--- a/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/disaggregated/single/grove/output.yaml
++++ b/deploy/operator/internal/controller/testdata/upgrade/latest/vllm/disaggregated/single/grove/output.yaml
+@@ -101,13 +101,6 @@
+               periodSeconds: 10
+               timeoutSeconds: 3
+             resources: {}
+-            startupProbe:
+-              failureThreshold: 30
+-              httpGet:
+-                path: /live
+-                port: http
+-              periodSeconds: 10
+-              timeoutSeconds: 1
+             volumeMounts:
+             - mountPath: /dev/shm
+               name: shared-memory

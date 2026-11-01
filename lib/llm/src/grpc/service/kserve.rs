@@ -190,7 +190,7 @@ pub struct KserveServiceConfig {
     #[builder(default = "None")]
     http_cancel_token: Option<CancellationToken>,
 
-    /// Distributed runtime used to publish frontend load to the KV DC Relay.
+    /// Distributed runtime used to publish frontend load to the Pool Relay.
     #[builder(default = "None")]
     runtime: Option<dynamo_runtime::DistributedRuntime>,
 

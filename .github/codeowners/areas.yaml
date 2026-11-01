@@ -10,6 +10,9 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
+  - lib/llm/src/generate_format/
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -71,16 +74,18 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
+  - lib/global-view-broadcaster/
+  - components/src/dynamo/pool_relay/
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
-  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
-  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
-  - lib/bindings/python/rust/llm/kv_dc_relay.rs
   - lib/global-*/**
-  - lib/llm/src/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay/
+  - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/reference/components/pool-relay-configuration.md
+  - lib/bindings/python/rust/llm/pool_relay.rs
+  - lib/llm/src/pool_relay.rs
+  - lib/llm/src/pool_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json
-  - tests/router/test_kv_dc_relay_e2e.py
+  - tests/router/test_pool_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -89,6 +94,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/generate-formats/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -112,6 +118,7 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - lib/generate-formats/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
@@ -894,6 +901,10 @@ shared:
   - planner
   - operator
 - glob: components/src/dynamo/aisimulate/tests/dgd/
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/aisimulate/output/dgdr_run/
   owners:
   - planner
   - operator

@@ -21,6 +21,61 @@ and modify a request through the API version that owns its native fields; do not
 set or edit the conversion field directly. An unchanged conversion view can be
 written back without changing the stored request.
 
+### v1beta2 hardware SKU
+
+`spec.hardware.gpu.sku` in `nvidia.com/v1beta2` is an open string containing an
+AISimulate system-catalog identifier. The AISimulate release bundled with this
+Dynamo release includes `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`,
+`b60`, `gb200`, `gb300`, `h100_pcie`, `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and
+`rtx_pro_6000_server`.
+
+Admission passes an explicit SKU through unchanged. It warns when the bundled
+catalog does not contain that identifier, but does not reject it: an external
+AISimulate systems catalog may provide additional identifiers.
+
+Omit `hardware` to let admission discover and persist `sku`, `budget`, and
+`numGpusPerNode`. An exactly empty `hardware: {}` object opts out of all operator
+cluster and DCGM discovery and typed hardware defaults. Any nonempty object,
+including `hardware: {gpu: {}}`, is partial hardware intent: admission discovers
+and persists each missing field while preserving every explicit value. The Run
+controller never performs hardware discovery.
+
+Set all three values to bypass discovery with fully explicit hardware. An unknown
+SKU must provide both `budget` and `numGpusPerNode`, because admission cannot map
+that identifier to cluster capacity or topology.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: future-accelerator
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  hardware:
+    gpu:
+      sku: future_accelerator # Passed to AISimulate unchanged; admission warns if unknown.
+      budget: 8
+    numGpusPerNode: 8        # Completes explicit hardware; admission performs no discovery.
+```
+
+To leave the complete hardware input to AISimulate and `inputOverrides`, use the
+empty-object opt-out and supply both the upstream hardware selector and candidate
+GPU budget yourself. The operator does not validate this opaque input against the
+AISimulate schema yet; invalid or incomplete overrides fail during the Run.
+
+```yaml
+spec:
+  hardware: {}
+  aisimulate:
+    inputOverrides:
+      engine:
+        hardware: h200_sxm
+      optimization:
+        constraints:
+          max_candidate_gpus: 8
+```
+
 ## Spec reference
 
 Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.
@@ -69,7 +124,7 @@ do not already have an explicit override. This behavior applies across profiler
 versions. Profilers through Dynamo 1.3.0 may discard the field while parsing the
 DGDR, but the operator reapplies the default from the stored DGDR.
 
-Set `spec.runtimeVersionOverride` when an effective generated component image
+Set `spec.runtimeVersionOverride` when an effective generated component runtime image
 uses a non-semantic-version tag or digest, or when its tag does not identify the
 intended Dynamo runtime version. The DGDR value also covers images replaced
 through `spec.overrides.dgd` when that component does not set its own
@@ -84,7 +139,7 @@ These updates do not modify `status.profilingResults.selectedConfig` or the
 forbidden after profiling starts.
 
 When the DGDR-level field is unset, each effective generated DGD component
-follows the [component runtime version rules](dynamo-component-deployment.mdx#runtime-version-compatibility) independently. An overridden image without a
+follows the [component runtime version rules](dynamo-component-deployment.mdx#runtime-version-compatibility) independently. An overridden runtime image without a
 parseable semantic-version tag requires `runtimeVersionOverride` on that
 component.
 
@@ -142,16 +197,16 @@ service.
 
 <Indent>
   <ParamField path="gpuSku" type="GPUSKUType">
-    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
+    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected as the GPU type of the node with the most GPUs (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
   </ParamField>
   <ParamField path="vramMb" type="number">
-    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted.
+    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted. If this value differs from the auto-selected shape and `totalGpus` is omitted, the request is rejected.
   </ParamField>
   <ParamField path="totalGpus" type="integer">
-    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by `gpuSku` when set), temporarily capped at 32 to limit the profiler search space. Set explicitly to override the cap.
+    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the auto-selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit the profiler search space. This reflects discovered GPUs, not currently free capacity. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. Set explicitly to override the derived budget or use a `numGpusPerNode` or `vramMb` value that differs from the selected shape; a shape override without `totalGpus` is rejected.
   </ParamField>
   <ParamField path="numGpusPerNode" type="integer">
-    GPUs per node. Auto-detected when omitted.
+    GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. If this value differs from the auto-selected shape and `totalGpus` is omitted, the request is rejected.
   </ParamField>
   <ParamField path="interconnect" type="string">
     Primary GPU-to-GPU interconnect within a node, for example `nvlink` or `pcie`. Capability metadata for profiling and planning only — it does not enable any interconnect. Best-effort discovery distinguishes `nvlink` from `pcie` when omitted. An over-optimistic value can lead the planner to overestimate intra-node bandwidth and pick overly aggressive parallelism.
