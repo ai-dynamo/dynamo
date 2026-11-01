@@ -56,27 +56,15 @@ the resulting solution.
 Prepare these resources:
 
 - A local clone of the Dynamo repository.
-- A Kubernetes cluster with [Substrate installed and verified](../../kubernetes/agent-sandboxes/install-substrate.mdx#verify-the-installation)
-  and the pinned `kubectl-ate` CLI on `PATH`. Administrative access is needed
-  to create the tutorial's atespace and authorize its runner.
-- Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with matching gVisor
-  assets and task images. Start with capacity for a worker requesting two CPUs
-  and 6 GiB of memory, plus separate capacity for the control plane and Harbor runner.
-- An image registry where you can publish the guest and prepared task images.
-  This tutorial assumes atelet can pull those images without authentication.
-  For private repositories, [configure atelet's image-pull authentication](../../kubernetes/agent-sandboxes/install-substrate.mdx#configure-image-pull-authentication)
-  during Substrate installation. Prepared task images can be large; reserve
-  node image-cache space before adding tasks.
+- A Kubernetes cluster with [Substrate installed and verified](../../kubernetes/agent-sandboxes/install-substrate.mdx#verify-the-installation),
+  the pinned `kubectl-ate` CLI on `PATH`, and administrative access.
+- Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with capacity for a
+  worker requesting 2 CPUs and 6 GiB of memory.
+- An image registry for publishing guest and task images. The tutorial assumes
+  anonymous image pulls; for private registries, follow
+  [Configure image-pull authentication](../../kubernetes/agent-sandboxes/install-substrate.mdx#configure-image-pull-authentication).
 - Git, `kubectl`, `curl`, `sha256sum`, OpenSSL, Python 3.12 or newer,
-  Docker with BuildKit, image build and push support, Go 1.27 or newer, and `ko`
-  on the preparation workstation. Use a native builder for the target sandbox
-  architecture, or configure [Docker cross-platform builds](https://docs.docker.com/build/building/multi-platform/).
-
-Use the same node architecture for the guest image, worker pool, and task image.
-The supplied configuration defaults to `amd64`; follow the `arm64` instructions
-for ARM64 nodes. See
-[Identify node architecture](../../kubernetes/agent-sandboxes/install-substrate.mdx#identify-node-architecture)
-if you need to check your nodes.
+  Docker with BuildKit, Go 1.27 or newer, and `ko` on the preparation workstation.
 
 <Note>
 The ARM64 task base image is published, but this tutorial's ARM64 oracle and Pi
@@ -296,8 +284,10 @@ managed router configuration when updating Substrate.
 
 <Step title="Create the worker pool" id="create-sandbox-capacity">
 
-In `workerpool.yaml`, select a node that runs `atelet`. Replace the hostname
-in the selected tab with that node's name, and check its architecture:
+In `workerpool.yaml`, select a node that runs `atelet` and has matching gVisor
+runtime assets. Allow capacity for the Harbor runner and Substrate control plane
+in addition to the workers. Replace the hostname in the selected tab with that
+node's name, and check its architecture:
 
 ```bash title="Workstation"
 kubectl get node your-sandbox-node \
@@ -392,6 +382,12 @@ includes the conditional low-port permission fix for platforms that need it.
 </Step>
 
 <Step title="Prepare the sandbox images" id="prepare-the-sandbox-images">
+
+Build the guest and task images for the worker pool's architecture. The supplied
+configuration defaults to `amd64`; use the `arm64` instructions for ARM64 nodes.
+Use a native builder or configure
+[Docker cross-platform builds](https://docs.docker.com/build/building/multi-platform/).
+Prepared task images can be large. Reserve node image-cache space before adding tasks.
 
 ### Build the guest image
 
