@@ -58,19 +58,69 @@ ingressAllowedSPIFFEIDs:
 ```
 
 Use your installation's trust domain if it differs from `cluster.local`.
-Preserve existing permitted identities. Install the configured control plane:
+Preserve existing permitted identities.
+
+### Use an S3-compatible snapshot store
+
+The installer assumes Google Cloud Storage on every cluster that is not kind.
+It refuses to deploy `ate-api-server` unless `storage.transferGSAName` and
+`gcp.projectID` are set, because on GCS the object-store plugin impersonates
+that service account to mint per-actor credentials. The S3 backend never reads
+the value. Its plugin transfers with the Pod's own credentials and answers the
+credential exchange as unimplemented. Give the two settings placeholder values
+to pass the check:
+
+```yaml
+storage:
+  snapshotLocation: s3://your-bucket/
+  transferGSAName: unused
+gcp:
+  projectID: not-a-gcp-project
+```
+
+With `cluster.context` set, nothing else reads `gcp.projectID`. Any
+S3-compatible service works, including the small in-cluster RustFS from
+upstream's `manifests/ate-install/kind/rustfs.yaml`. Create the bucket before
+the first actor.
+
+Install the configured control plane:
 
 ```bash
 ate-setup deploy ate-system --context "$KUBE_CONTEXT" \
   --config .local/substrate-install.yaml
 ```
 
-An S3-compatible snapshot store also needs its endpoint, credentials, and storage
-plugin configured. `substrate-s3-install.patch` only removes the installer's
-GCS service-account requirement for `s3://` snapshot paths. Apply it before
-building `ate-setup` if that validation blocks an otherwise configured S3
-installation. It does not configure the storage backend. Omit or adapt optional
-Google `PodMonitoring` resources on clusters without that API.
+Omit or adapt optional Google `PodMonitoring` resources on clusters without
+that API.
+
+The installer does not carry S3 endpoint or credential settings yet, so point
+the object-store plugin at your store after the deploy. The plugin runs as the
+`objectstore-plugin` init container of both the `ate-api-server` Deployment and
+the `atelet` DaemonSet:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" -n ate-system create secret generic ate-objectstore \
+  --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
+  --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key
+cat > .local/objectstore-s3.json <<'EOF'
+{"spec":{"template":{"spec":{"initContainers":[{"name":"objectstore-plugin","env":[
+  {"name":"ATE_STORAGE_BACKEND","value":"s3"},
+  {"name":"AWS_REGION","value":"us-east-1"},
+  {"name":"AWS_ENDPOINT_URL","value":"http://rustfs.ate-system.svc:9000"},
+  {"name":"AWS_S3_USE_PATH_STYLE","value":"true"},
+  {"name":"AWS_ACCESS_KEY_ID","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_ACCESS_KEY_ID"}}},
+  {"name":"AWS_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_SECRET_ACCESS_KEY"}}}
+]}]}}}}
+EOF
+kubectl --context "$KUBE_CONTEXT" -n ate-system patch deployment ate-api-server --patch-file .local/objectstore-s3.json
+kubectl --context "$KUBE_CONTEXT" -n ate-system patch daemonset atelet --patch-file .local/objectstore-s3.json
+kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status deployment/ate-api-server --timeout=300s
+kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status daemonset/atelet --timeout=600s
+```
+
+Replace the endpoint and region with your store's values. Running
+`ate-setup deploy` again rewrites both workloads, so reapply the patch after
+each deploy.
 
 For an existing installation, merge the identity into the router's allowlist
 through its normal deployment configuration. The installer renders it as the
