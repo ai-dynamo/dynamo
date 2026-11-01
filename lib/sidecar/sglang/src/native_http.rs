@@ -760,7 +760,6 @@ mod tests {
             opened.validation.unwrap();
             let bound = (opened.bind)(&Worker {
                 model: "model",
-                engine_info: &serde_json::Value::Null,
                 kv_cache_block_size: 16,
                 lora_name: None,
                 tower_connector_lora_enabled: false,
