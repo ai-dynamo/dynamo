@@ -102,14 +102,12 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     /// Builds candidate rows before the request reaches the scheduler actor, for
     /// selectors whose rows depend only on the request and worker configuration
     /// until load inputs are filled.
-    #[doc(hidden)]
     fn candidate_preparer(&self) -> Option<CandidatePreparer> {
         None
     }
 
     /// Like [`Self::select_worker_traced`], from rows that [`Self::candidate_preparer`]
     /// built against the same worker configuration when given. The default ignores them.
-    #[doc(hidden)]
     fn select_worker_prepared(
         &self,
         input: WorkerSelectionInput<'_, C>,

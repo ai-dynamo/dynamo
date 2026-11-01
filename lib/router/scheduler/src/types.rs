@@ -150,8 +150,8 @@ pub struct SchedulingResponse {
     pub log_fields: Option<SelectionLogFields>,
 }
 
-/// Internal result that pairs a public scheduling response with its attempt identity.
-#[doc(hidden)]
+/// A scheduling response paired with its admission attempt. Hosts that track request
+/// lifecycles keep the attempt and hand the response on.
 #[derive(Debug)]
 pub struct AdmittedSchedulingResponse {
     pub response: SchedulingResponse,
@@ -159,7 +159,6 @@ pub struct AdmittedSchedulingResponse {
 }
 
 /// Whether an admitted scheduling response owns tracked request state.
-#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionAttempt {
     Untracked,

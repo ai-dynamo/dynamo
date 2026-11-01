@@ -340,7 +340,6 @@ where
     }
 
     /// Schedule a request and return the router-internal admitted-attempt identity.
-    #[doc(hidden)]
     pub async fn schedule_request_admitted(
         &self,
         request: ScheduleRequest,
@@ -350,7 +349,6 @@ where
     }
 
     /// Schedule with the router's original ingress timing.
-    #[doc(hidden)]
     pub async fn schedule_request_admitted_with_context(
         &self,
         request: ScheduleRequest,
@@ -477,7 +475,6 @@ where
     /// Tokio runtime: it spawns the classifier's event-delivery task.
     ///
     /// Returns `false` when a classifier is already installed.
-    #[doc(hidden)]
     pub fn install_request_classifier(
         &self,
         classifier: Box<dyn RequestClassifier>,
@@ -488,7 +485,8 @@ where
             .is_ok()
     }
 
-    #[doc(hidden)]
+    /// Start the installed classifier's lifecycle for `request_id`; `None` when no
+    /// classifier is installed.
     pub fn begin_request_lifecycle(
         &self,
         request_id: &str,
@@ -678,7 +676,6 @@ where
     }
 
     /// Book a request and return the router-internal attempt identity.
-    #[doc(hidden)]
     pub async fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -690,7 +687,6 @@ where
     /// racing worker removal cannot lazily recreate the removed worker/rank.
     /// The returned handle guards the booking: dropping it frees the booking,
     /// `commit` hands it over.
-    #[doc(hidden)]
     pub fn add_request_if_registered_guarded(
         &self,
         req: SequenceRequest,
@@ -762,14 +758,13 @@ where
         self.slots.request_worker(request_id).is_some()
     }
 
-    #[doc(hidden)]
+    /// Whether `booking` still describes a live booking in the slot tracker.
     pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.slots.has_booking(booking)
     }
 
     /// Release a booking only if `booking` still describes it; `NoChange` when
     /// the id was freed or rebooked since the descriptor was taken.
-    #[doc(hidden)]
     pub async fn free_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -797,7 +792,8 @@ where
         Ok(outcome)
     }
 
-    #[doc(hidden)]
+    /// The cleanup ingress a host hands to its request lease, so a dropped lease frees
+    /// its booking.
     pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
         self.queue.booking_cleanup()
     }
@@ -806,7 +802,6 @@ where
     /// already marked complete. `Applied` confirms the state mutation, the
     /// ordered completion event, and a capacity notification when prompt load
     /// was released; it does not confirm completion of pending admission.
-    #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -832,7 +827,6 @@ where
     }
 
     /// Republish the ordered prefill-completion event while `booking` is live.
-    #[doc(hidden)]
     pub fn publish_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -888,7 +882,6 @@ where
     /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
     /// does not mutate state or emit load observations. Queue shutdown is checked
     /// first, including for zero counts.
-    #[doc(hidden)]
     pub async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -905,7 +898,6 @@ where
     ///
     /// Zero counts and stale or missing bookings return `NoChange`. A zero count
     /// does not mutate state or emit load observations.
-    #[doc(hidden)]
     pub fn add_output_blocks_if_booking_sync(
         &self,
         booking: &SchedulerBookingDescriptor,

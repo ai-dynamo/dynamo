@@ -1,13 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared test utilities. The indexer event builders and assertions live in
-//! `dynamo_kv_indexer::testing` and are re-exported here at their old paths.
+//! Shared test utilities. The indexer event builders live in
+//! `dynamo_kv_indexer::testing` and are re-exported here by name.
 
 use std::collections::HashSet;
 
 use crate::protocols::WorkerConfigLike;
-pub use dynamo_kv_indexer::testing::*;
+pub use dynamo_kv_indexer::testing::{
+    add_blocks, add_blocks_with_start_position, create_remove_event, create_store_event,
+    create_store_event_with_start_position, make_blocks, make_clear_event,
+    make_clear_event_with_dp_rank, make_remove_event, make_remove_event_with_dp_rank,
+    make_remove_event_with_parent, make_store_event, make_store_event_full,
+    make_store_event_with_dp_rank, make_store_event_with_parent,
+    make_store_event_with_start_position, remove_event, router_event, snapshot_events,
+    stored_blocks_with_sequence_hashes,
+};
 pub use dynamo_slot_tracker::NoopSequencePublisher;
 
 /// Minimal [`WorkerConfigLike`] for scheduler/queue tests and benchmarks.

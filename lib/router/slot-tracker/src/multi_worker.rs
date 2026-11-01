@@ -1359,8 +1359,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
+    /// Bench hook: project every worker's load into `projections` the way the scheduler
+    /// does when it builds candidate rows, with no prefill-load hint.
     #[cfg(feature = "bench")]
-    #[doc(hidden)]
     pub fn bench_project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,

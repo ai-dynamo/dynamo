@@ -394,7 +394,6 @@ fn enqueue_cleanup_entry(
 }
 
 /// Cloneable non-blocking ingress for attempt-scoped scheduler cleanup.
-#[doc(hidden)]
 #[derive(Clone)]
 pub struct SchedulerBookingCleanup {
     cleanup: Arc<AdmissionCleanup>,
@@ -405,7 +404,8 @@ pub struct SchedulerBookingCleanup {
 type DirectBookingRelease =
     Arc<dyn Fn(&SchedulerBookingDescriptor) -> Result<(), SequenceError> + Send + Sync>;
 
-#[doc(hidden)]
+/// The scheduler's acknowledgement of an enqueued booking release; `wait` resolves with
+/// the release outcome.
 pub struct SchedulerCleanupAck {
     response: Result<(), SequenceError>,
 }
@@ -459,7 +459,6 @@ impl SchedulerBookingCleanup {
 
 /// A booking whose release this handle owns until `commit` hands it over.
 /// Dropping an armed handle frees the booking through the scheduler's cleanup queue.
-#[doc(hidden)]
 #[must_use]
 pub struct BookingHandle {
     booking: SchedulerBookingDescriptor,

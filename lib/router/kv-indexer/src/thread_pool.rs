@@ -590,8 +590,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         })
     }
 
+    /// Bench hook: enqueue one owned event on its worker's lane as an observed event; the
+    /// receipt carries `correlation_id` and is timed against `epoch`.
     #[cfg(feature = "bench")]
-    #[doc(hidden)]
     pub fn enqueue_active_observation_owned(
         &self,
         event: RouterEvent,
@@ -799,8 +800,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
     /// depends on removal and acknowledgement using that same FIFO lane before activation. This
     /// proves queue progress only; ordinary event errors are logged by the worker.
-    #[doc(hidden)]
-    pub async fn flush_worker_lane_and_wait(
+    pub(crate) async fn flush_worker_lane_and_wait(
         &self,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
