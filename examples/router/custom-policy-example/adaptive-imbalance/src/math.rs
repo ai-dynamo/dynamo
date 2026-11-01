@@ -37,12 +37,21 @@ pub struct WeightSet {
 }
 
 /// Affinity goes down with `split`, both load weights go up by the same factor `1 + gain × split`.
-pub fn weights_for(base: WeightSet, split: f64, gain: f64) -> WeightSet {
+/// The active-request weight also gains `split × spread_active_request_weight`: scaling alone keeps
+/// it at 0 when the baseline is the router default of 0, and that term is the one that counts
+/// in-flight requests (sequence slots) rather than KV blocks.
+pub fn weights_for(
+    base: WeightSet,
+    split: f64,
+    gain: f64,
+    spread_active_request_weight: f64,
+) -> WeightSet {
     let up = 1.0 + gain * split;
     WeightSet {
         overlap_score_credit: base.overlap_score_credit * (1.0 - split),
         prefill_load_scale: base.prefill_load_scale * up,
-        decode_active_request_weight: base.decode_active_request_weight * up,
+        decode_active_request_weight: base.decode_active_request_weight * up
+            + split * spread_active_request_weight,
     }
 }
 
@@ -108,15 +117,38 @@ mod tests {
 
     #[test]
     fn weights_at_split_zero_equal_baseline() {
-        assert_eq!(weights_for(BASE, 0.0, 4.0), BASE);
+        assert_eq!(weights_for(BASE, 0.0, 4.0, 0.0), BASE);
     }
 
     #[test]
     fn weights_move_opposite_ways_with_split() {
-        let w = weights_for(BASE, 0.98, 4.0);
+        let w = weights_for(BASE, 0.98, 4.0, 0.0);
         assert!((w.overlap_score_credit - 0.02).abs() < 1e-9);
         assert!((w.prefill_load_scale - 4.92).abs() < 1e-9);
         assert!((w.decode_active_request_weight - 2.46).abs() < 1e-9);
+    }
+
+    /// The router default: no active-request term at baseline.
+    const ZERO_ACTIVE: WeightSet = WeightSet {
+        overlap_score_credit: 1.0,
+        prefill_load_scale: 1.0,
+        decode_active_request_weight: 0.0,
+    };
+
+    #[test]
+    fn spread_active_request_weight_adds_nothing_while_the_pool_is_even() {
+        assert_eq!(weights_for(ZERO_ACTIVE, 0.0, 4.0, 100.0), ZERO_ACTIVE);
+    }
+
+    #[test]
+    fn active_request_weight_rises_from_a_zero_baseline() {
+        // 0 × (1 + 4 × 0.98) + 0.98 × 100 = 98 blocks per in-flight request.
+        let w = weights_for(ZERO_ACTIVE, 0.98, 4.0, 100.0);
+        assert!(
+            (w.decode_active_request_weight - 98.0).abs() < 1e-9,
+            "got {}",
+            w.decode_active_request_weight
+        );
     }
 
     #[test]
@@ -126,7 +158,7 @@ mod tests {
         assert!((cost_for(BASE, 64.0, 0.0, true, 60.0, 0.0, 30.0) - 19.0).abs() < 1e-9);
         assert!((cost_for(BASE, 64.0, 0.0, true, 20.0, 0.0, 5.0) - 46.5).abs() < 1e-9);
         // hot pool: with split 0.98 W4 becomes cheaper than W1
-        let hot = weights_for(BASE, 0.98, 4.0);
+        let hot = weights_for(BASE, 0.98, 4.0, 0.0);
         let w1 = cost_for(hot, 64.0, 0.0, true, 60.0, 0.0, 30.0);
         let w4 = cost_for(hot, 64.0, 0.0, true, 20.0, 0.0, 5.0);
         assert!(w4 < w1, "w4={w4} w1={w1}");

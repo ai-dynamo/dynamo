@@ -16,6 +16,7 @@ worker_selection:
         sigmoid_midpoint: 0.5
         sigmoid_slope: 10
         gain: 4.0
+        spread_active_request_weight: 64.0
         dwell_cycles: 4
         stale_after_ms: 5000
         enter_threshold: 0.6

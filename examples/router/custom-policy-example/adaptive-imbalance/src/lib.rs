@@ -44,6 +44,11 @@ pub struct Parameters {
     /// How far both load weights rise at full split (`1 + gain`); finite and non-negative.
     #[serde(default = "default_gain")]
     pub gain: f64,
+    /// Active-request weight added at full split, in KV blocks per in-flight request; finite and
+    /// non-negative. Scaling by `gain` keeps a baseline of 0 (the router default) at 0, and only this
+    /// term counts in-flight requests (sequence slots) rather than KV blocks. 0 restores pure scaling.
+    #[serde(default = "default_spread_active_request_weight")]
+    pub spread_active_request_weight: f64,
     /// Minimum cycles in the current state before engaging or disengaging again; 0 disables the dwell.
     #[serde(default = "default_dwell_cycles")]
     pub dwell_cycles: u32,
@@ -87,6 +92,9 @@ fn default_sigmoid_slope() -> f64 {
 fn default_gain() -> f64 {
     4.0
 }
+fn default_spread_active_request_weight() -> f64 {
+    64.0
+}
 fn default_dwell_cycles() -> u32 {
     4
 }
@@ -108,6 +116,7 @@ impl Default for Parameters {
             sigmoid_midpoint: default_sigmoid_midpoint(),
             sigmoid_slope: default_sigmoid_slope(),
             gain: default_gain(),
+            spread_active_request_weight: default_spread_active_request_weight(),
             dwell_cycles: default_dwell_cycles(),
             stale_after_ms: default_stale_after_ms(),
             enter_threshold: default_enter_threshold(),
@@ -145,6 +154,14 @@ impl Parameters {
         }
         if !(self.gain.is_finite() && self.gain >= 0.0) {
             return Err("gain must be a finite non-negative number".into());
+        }
+        if !(self.spread_active_request_weight.is_finite()
+            && self.spread_active_request_weight >= 0.0)
+        {
+            return Err(format!(
+                "spread_active_request_weight must be a finite non-negative number, got {}",
+                self.spread_active_request_weight
+            ));
         }
         unit("enter_threshold", self.enter_threshold)?;
         unit("exit_threshold", self.exit_threshold)?;
@@ -271,6 +288,13 @@ mod tests {
             ),
             ("negative gain", Parameters { gain: -1.0, ..d() }),
             (
+                "negative spread_active_request_weight",
+                Parameters {
+                    spread_active_request_weight: -1.0,
+                    ..d()
+                },
+            ),
+            (
                 "stale_after_ms below interval_ms",
                 Parameters {
                     interval_ms: 250,
@@ -342,6 +366,18 @@ mod tests {
             parse("prefill_load_scale: -1").is_err(),
             "baseline overrides must be finite and non-negative"
         );
+    }
+
+    #[test]
+    fn yaml_spread_active_request_weight_has_a_default_and_an_override() {
+        assert_eq!(parse("{}").unwrap().spread_active_request_weight, 64.0);
+        assert_eq!(
+            parse("spread_active_request_weight: 128")
+                .unwrap()
+                .spread_active_request_weight,
+            128.0
+        );
+        assert!(parse("spread_active_request_weight: .nan").is_err());
     }
 
     struct TestWorker;

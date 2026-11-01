@@ -91,7 +91,12 @@ impl Controller {
             0.0
         };
         let next = Weights {
-            set: weights_for(self.baseline.set, split, self.params.gain),
+            set: weights_for(
+                self.baseline.set,
+                split,
+                self.params.gain,
+                self.params.spread_active_request_weight,
+            ),
             temperature: self.last.temperature,
             imbalance: self.smoothed,
             split,
@@ -199,6 +204,39 @@ mod tests {
         assert!(!c.engaged());
         assert_eq!(calm.weights.set, baseline().set);
         assert_eq!(calm.transition, Some(Transition::Disengaged));
+    }
+
+    #[test]
+    fn hotspot_raises_the_active_request_weight_from_a_zero_baseline() {
+        // The router default has no active-request term; a hotspot must still turn one on,
+        // and draining must return it to exactly 0.
+        let zero = Weights {
+            set: WeightSet {
+                decode_active_request_weight: 0.0,
+                ..baseline().set
+            },
+            ..baseline()
+        };
+        let mut c = Controller::new(&params(), zero);
+        let mut hot = None;
+        for _ in 0..8 {
+            if let Some(u) = tick_fresh(&mut c, &[30.0, 4.0, 2.0, 5.0]) {
+                hot = Some(u.weights);
+            }
+        }
+        let hot = hot.expect("hotspot must publish new weights");
+        assert!(
+            hot.set.decode_active_request_weight > 30.0,
+            "decode_active_request_weight={}",
+            hot.set.decode_active_request_weight
+        );
+        let mut calm = None;
+        for _ in 0..12 {
+            if let Some(u) = tick_fresh(&mut c, &[9.0, 9.0, 8.0, 9.0]) {
+                calm = Some(u.weights);
+            }
+        }
+        assert_eq!(calm.expect("draining must publish again").set, zero.set);
     }
 
     #[test]

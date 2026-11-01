@@ -16,10 +16,10 @@ imbalance(t) = stddev / mean of active_requests across workers, clamped to 0..1,
 split(t)     = sigmoid(imbalance(t); sigmoid_midpoint, sigmoid_slope)   when engaged, else 0
 overlap_score_credit(t)         = baseline × (1 − split(t))
 prefill_load_scale(t)           = baseline × (1 + gain × split(t))
-decode_active_request_weight(t) = baseline × (1 + gain × split(t))
+decode_active_request_weight(t) = baseline × (1 + gain × split(t)) + split(t) × spread_active_request_weight
 ```
 
-`request_blocks` and `prefill_backlog_blocks[w]` are token counts divided by the block size, as the default policy computes them, and the whole prefill term is zero for requests that do not track prefill tokens. The loop scales each load weight from its baseline, so with a baseline `decode_active_request_weight` of 0 (the router default) that weight stays 0 at any split.
+`request_blocks` and `prefill_backlog_blocks[w]` are token counts divided by the block size, as the default policy computes them, and the whole prefill term is zero for requests that do not track prefill tokens. The loop scales each load weight from its baseline. Scaling alone would keep a baseline `decode_active_request_weight` of 0 (the router default) at 0, and that is the only term that counts in-flight requests (sequence slots) rather than KV blocks, so the loop also adds `split(t) × spread_active_request_weight` to it. At split 0 the term is 0 and the weights equal the baseline.
 
 ## Parameters
 
@@ -34,6 +34,7 @@ decode_active_request_weight(t) = baseline × (1 + gain × split(t))
 | `sigmoid_midpoint` | 0.5 | 0..1 | Imbalance at which the split is 0.5 |
 | `sigmoid_slope` | 10 | > 0 | Steepness of the sigmoid |
 | `gain` | 4.0 | >= 0 | How far the load weights rise at full split |
+| `spread_active_request_weight` | 64 | finite, >= 0 | Active-request weight added at full split, in KV blocks per in-flight request; 0 restores pure scaling |
 | `dwell_cycles` | 4 | integer >= 0 | Minimum cycles before the engaged state can change; 0 disables the dwell |
 | `stale_after_ms` | 5000 | >= `interval_ms` | Age after which the last load sample counts as stale and the pool as idle; the scorer refreshes the sample only when it scores a request, so keep this above the longest request gap the loop should ride through |
 | `enter_threshold` | 0.6 | 0..1 | Smoothed imbalance that engages the loop |
