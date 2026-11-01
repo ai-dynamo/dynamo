@@ -343,10 +343,43 @@ kubectl -n ate-system logs job/rustfs-bucket-init
 kubectl -n ate-system get pvc rustfs-data
 ```
 
-The Job must report that `ate-snapshots` was created or already exists, and
-the PVC must be `Bound`. If the Job fails, inspect its logs and the PVC and Pod
-events before continuing. The completed Job confirms that the endpoint accepts
-the configured credentials and the bucket exists.
+On a fresh installation, the apply and wait commands end with output like:
+
+```text
+persistentvolumeclaim/rustfs-data created
+service/rustfs created
+deployment.apps/rustfs created
+job.batch/rustfs-bucket-init created
+networkpolicy.networking.k8s.io/rustfs created
+deployment "rustfs" successfully rolled out
+job.batch/rustfs-bucket-init condition met
+```
+
+When you reapply the manifest, resources can report `unchanged` or `configured`
+instead of `created`.
+
+The Job logs can include startup retries before the bucket is available.
+A successful log excerpt looks like:
+
+```text
+waiting for rustfs to become available... (1/60)
+bucket ate-snapshots created
+```
+
+The success message can also be `bucket ate-snapshots already exists`.
+
+For the 50 GiB allocation above, expect PVC output like:
+
+```text
+NAME          STATUS   VOLUME       CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE
+rustfs-data   Bound    pvc-<uuid>   50Gi       RWO            <storage-class>   <unset>                 1m
+```
+
+The volume name, storage class, and age depend on your cluster. Confirm that
+the rollout succeeded, the Job completed, and the PVC is `Bound` before
+continuing. The completed Job confirms that the endpoint accepts the configured
+credentials and the bucket exists. If a command fails or times out, inspect
+the Job logs and the PVC and Pod events.
 
 </Step>
 
