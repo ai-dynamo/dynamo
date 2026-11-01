@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 use crate::client::TrtllmClient;
 use crate::engine::{RoutingSupervision, TrtllmSidecarEngine};
@@ -39,6 +41,8 @@ mod kv_routing;
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
+    /// `traceparent` and `tracestate` metadata per `Generate` call.
+    trace_metadata: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
     affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
@@ -116,6 +120,14 @@ impl pb::inference_server::Inference for FakeTrtllm {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string),
         );
+        let trace = ["traceparent", "tracestate"]
+            .into_iter()
+            .filter_map(|key| {
+                let value = request.metadata().get(key)?.to_str().ok()?;
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+        self.trace_metadata.lock().await.push(trace);
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
 
@@ -701,6 +713,43 @@ async fn aggregated_generation_streams_delta_then_terminal() {
         pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
         other => panic!("expected token IDs input, got {other:?}"),
     }
+}
+
+/// The current span's W3C Trace Context rides on `Generate` as the gRPC
+/// metadata OpenEngine defines; without a distributed trace context nothing
+/// is sent.
+#[tokio::test]
+async fn trace_context_rides_in_generate_metadata() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+    collect(&engine, request()).await;
+    let recorded = server.service.trace_metadata.lock().await.pop().unwrap();
+    assert!(recorded.is_empty());
+
+    // Only the request span has the trace fields this layer requires.
+    let subscriber = tracing_subscriber::registry().with(
+        dynamo_runtime::logging::DistributedTraceIdLayer.with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| metadata.name() == "handle_payload"),
+        ),
+    );
+    let _default = tracing::subscriber::set_default(subscriber);
+    let span = tracing::info_span!(
+        "handle_payload",
+        trace_id = "0af7651916cd43dd8448eb211c80319c",
+        span_id = "b7ad6b7169203331",
+        tracestate = "vendor=value",
+    );
+    collect(&engine, request()).instrument(span).await;
+    let recorded = server.service.trace_metadata.lock().await.pop().unwrap();
+    assert_eq!(
+        recorded.get("traceparent").map(String::as_str),
+        Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    );
+    assert_eq!(
+        recorded.get("tracestate").map(String::as_str),
+        Some("vendor=value")
+    );
 }
 
 #[tokio::test]

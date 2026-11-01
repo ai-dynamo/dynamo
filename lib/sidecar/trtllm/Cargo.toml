@@ -49,5 +49,6 @@ tonic = { workspace = true }
 tonic-build = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tokio-stream = { workspace = true, features = ["net"] }

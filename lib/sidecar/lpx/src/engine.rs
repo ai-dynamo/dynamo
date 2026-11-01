@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, OpenEngineClient, engine_shutdown, invalid_argument};
 use crate::convert::{
     DispatchFailure, ResponseState, build_generate_request, build_handoff_cleanup_request,
-    dispatch_failure, stream_status, trace_headers,
+    dispatch_failure, stream_status,
 };
 use crate::load;
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
@@ -338,7 +338,7 @@ impl LLMEngine for LpxSidecarEngine {
                 );
                 None
             },
-            result = client.generate(proto_request, trace_headers()) => Some(result),
+            result = client.generate(proto_request) => Some(result),
         };
         if let Some(error) = rejection {
             if let Some(Err(status)) = &dispatched {

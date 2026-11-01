@@ -38,6 +38,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = { workspace = true }
