@@ -142,6 +142,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_USE_TOKENIZER`
 </ParamField>
 
+<ParamField path="--require-dp-rank" type="boolean" default="false">
+  Require every request handled by this vLLM worker to carry a valid data-parallel rank in Dynamo routing metadata. The selected global rank must fall within the worker's advertised rank range; Dynamo converts it to the local vLLM engine rank. Missing or invalid ranks fail the request instead of letting vLLM select an engine internally. Enable this on workers whose local DP engines are routed independently by Dynamo. Existing workers retain the fallback when the option is omitted.
+
+  Environment variable: `DYN_VLLM_REQUIRE_DP_RANK`
+</ParamField>
+
 <ParamField path="--enable-multimodal" type="boolean" default="false">
   Enable multimodal processing. Combine it with `--disaggregation-mode=encode`, `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode` to select a disaggregated multimodal role. Use the default `agg` mode for aggregated multimodal serving.
 

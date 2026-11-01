@@ -2562,10 +2562,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
         """Convert global DP rank to local DP rank based on engine config."""
         if dp_rank is None:
+            if self.config.require_dp_rank:
+                raise ValueError(
+                    "DP rank is required when --require-dp-rank is enabled"
+                )
             return None
+        if type(dp_rank) is not int:
+            raise ValueError(f"DP rank must be an integer, got {dp_rank!r}")
         if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
+            if self.config.require_dp_rank:
+                raise ValueError(
+                    f"DP rank {dp_rank} is outside worker range "
+                    f"[{self.dp_range[0]}, {self.dp_range[0] + self.dp_range[1]})"
+                )
             logger.warning(
-                f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
+                "Received DP rank %d outside worker range [%d, %d), "
+                "falling back to vLLM internal DP selection",
+                dp_rank,
+                self.dp_range[0],
+                self.dp_range[0] + self.dp_range[1],
             )
             return None
         local_dp_rank = (dp_rank - self.dp_range[0]) % self.dp_range[1]

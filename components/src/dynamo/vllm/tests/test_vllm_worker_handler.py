@@ -109,6 +109,7 @@ def _make_config(
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.enable_rl = False
+    config.require_dp_rank = False
     config.artifact_router_profile = None
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
@@ -117,6 +118,41 @@ def _make_config(
         {}
     )
     return config
+
+
+@pytest.mark.parametrize("rank, local_rank", [(4, 0), (5, 1)])
+def test_required_dp_rank_selects_the_intended_local_engine(rank, local_rank):
+    config = _make_config()
+    config.require_dp_rank = True
+    handler = _make_handler(config)
+    handler.config = config
+    handler.dp_range = (4, 2)
+
+    assert handler._to_local_dp_rank(rank) == local_rank
+
+
+@pytest.mark.parametrize("rank", [None, -1, 3, 6, True, "4"])
+def test_required_dp_rank_rejects_missing_or_invalid_selection(rank):
+    config = _make_config()
+    config.require_dp_rank = True
+    handler = _make_handler(config)
+    handler.config = config
+    handler.dp_range = (4, 2)
+
+    with pytest.raises(ValueError, match="required|integer|outside worker range"):
+        handler._to_local_dp_rank(rank)
+
+
+def test_optional_dp_rank_retains_internal_selection_fallback():
+    config = _make_config()
+    handler = _make_handler(config)
+    handler.config = config
+    handler.dp_range = (4, 2)
+
+    assert handler._to_local_dp_rank(None) is None
+    assert handler._to_local_dp_rank(6) is None
+    with pytest.raises(ValueError, match="integer"):
+        handler._to_local_dp_rank("4")
 
 
 def _make_handler(

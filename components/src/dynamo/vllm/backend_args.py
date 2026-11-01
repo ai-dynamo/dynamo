@@ -155,6 +155,18 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--require-dp-rank",
+            env_var="DYN_VLLM_REQUIRE_DP_RANK",
+            default=False,
+            help=(
+                "Reject requests without a valid data-parallel rank instead of "
+                "falling back to vLLM's internal rank selection. Enable when "
+                "Dynamo owns routing among local DP engines."
+            ),
+        )
+
         # Multimodal
         add_negatable_bool_argument(
             g,
@@ -605,6 +617,7 @@ class DynamoVllmConfig(ConfigBase):
     ]  # None when not provided; resolved to enum in validate()
     artifact_router_profile: Optional[str] = None
     use_vllm_tokenizer: bool
+    require_dp_rank: bool = False
 
     # Multimodal
     route_to_encoder: bool
