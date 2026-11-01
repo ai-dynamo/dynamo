@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Install the pinned Substrate pieces for the
 [Harbor tutorial](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx).
-Run these commands from the example directory. Set `EXAMPLE_DIR` and
-`KUBE_CONTEXT` as described there.
+Run these commands from `examples/agents/harbor-substrate` with the intended
+Kubernetes context already selected.
 
 The Harbor adapter talks to Substrate directly. It creates and deletes actors
 through `kubectl-ate`, and it reaches the guest daemon inside each actor
@@ -22,7 +22,7 @@ for database, storage, runtime assets, certificate issuance, and platform settin
 Check that Kubernetes serves both native certificate APIs:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" api-resources --api-group=certificates.k8s.io
+kubectl api-resources --api-group=certificates.k8s.io
 ```
 
 Require `PodCertificateRequest` and `ClusterTrustBundle`, and their respective
@@ -42,9 +42,8 @@ Build the pinned tools:
 ```bash
 mkdir -p deps/bin
 git clone --branch v1.0.0-rc.1 https://github.com/agent-substrate/substrate deps/substrate
-(cd deps/substrate && go build -o "$EXAMPLE_DIR/deps/bin/ate-setup" ./cmd/ate-setup)
-(cd deps/substrate && go build -o "$EXAMPLE_DIR/deps/bin/kubectl-ate" ./cmd/kubectl-ate)
-export PATH="$EXAMPLE_DIR/deps/bin:$PATH"
+go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
+go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
 ```
 
 Prepare `substrate-install.yaml` using the upstream installation guide.
@@ -86,7 +85,7 @@ the first actor.
 Install the configured control plane:
 
 ```bash
-ate-setup deploy ate-system --context "$KUBE_CONTEXT" \
+deps/bin/ate-setup deploy ate-system \
   --config substrate-install.yaml
 ```
 
@@ -99,7 +98,7 @@ the object-store plugin at your store after the deploy. The plugin runs as the
 the `atelet` DaemonSet:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-system create secret generic ate-objectstore \
+kubectl -n ate-system create secret generic ate-objectstore \
   --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
   --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key
 cat > objectstore-s3.json <<'EOF'
@@ -112,10 +111,10 @@ cat > objectstore-s3.json <<'EOF'
   {"name":"AWS_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_SECRET_ACCESS_KEY"}}}
 ]}]}}}}
 EOF
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch deployment ate-api-server --patch-file objectstore-s3.json
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch daemonset atelet --patch-file objectstore-s3.json
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status deployment/ate-api-server --timeout=300s
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status daemonset/atelet --timeout=600s
+kubectl -n ate-system patch deployment ate-api-server --patch-file objectstore-s3.json
+kubectl -n ate-system patch daemonset atelet --patch-file objectstore-s3.json
+kubectl -n ate-system rollout status deployment/ate-api-server --timeout=300s
+kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
 ```
 
 Replace the endpoint and region with your store's values. Running
@@ -158,9 +157,9 @@ Run the Substrate commands as an administrator with global ownership. An
 atespace-scoped owner cannot create an atespace:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" create namespace ate-env
-kubectl-ate --context "$KUBE_CONTEXT" create atespace ate-env
-kubectl-ate --context "$KUBE_CONTEXT" create access-policy \
+kubectl create namespace ate-env
+deps/bin/kubectl-ate create atespace ate-env
+deps/bin/kubectl-ate create access-policy \
   -a ate-env -f runner-access-policy.yaml
 ```
 
@@ -184,8 +183,8 @@ process-output streams. In the `atenet-router` container's deployment arguments,
 set `--route-timeout=60m` for the unmodified 3,000-second task deadlines:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-system edit deployment atenet-router
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status \
+kubectl -n ate-system edit deployment atenet-router
+kubectl -n ate-system rollout status \
   deployment/atenet-router --timeout=300s
 ```
 

@@ -28,7 +28,7 @@ flowchart LR
 
 Set `MODEL_NAMESPACE` and `DGD_NAME` to the namespace and name from your model
 recipe. These shell variables select resources for CLI commands. Work from
-the example directory and set `KUBE_CONTEXT` as in the tutorial.
+the example directory with the intended Kubernetes context already selected.
 
 Edit `tool-trace-service.yaml` in place:
 
@@ -55,9 +55,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
   -keyout .trace/private/tls.key -out .trace/public/tls.crt \
   -subj "/CN=$TRACE_HOST" -addext "subjectAltName=DNS:$TRACE_HOST"
 chmod 600 .trace/private/tls.key
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" create secret tls harbor-tool-trace-tls \
+kubectl -n "$MODEL_NAMESPACE" create secret tls harbor-tool-trace-tls \
   --cert=.trace/public/tls.crt --key=.trace/private/tls.key
-kubectl --context "$KUBE_CONTEXT" apply -f tool-trace-service.yaml
+kubectl apply -f tool-trace-service.yaml
 ```
 
 Only the public certificate and client configuration go into actors. The
@@ -151,8 +151,8 @@ configuration without duplicate entries. Inspect the diff, then apply it:
 
 ```bash
 diff -u .build/frontend-before.yaml "$DEPLOYMENT_YAML"
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" apply -f "$DEPLOYMENT_YAML"
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" wait \
+kubectl -n "$MODEL_NAMESPACE" apply -f "$DEPLOYMENT_YAML"
+kubectl -n "$MODEL_NAMESPACE" wait \
   --for=condition=Ready "dgd/$DGD_NAME" --timeout=1800s
 ```
 
@@ -199,10 +199,10 @@ Copy the policy and public client files to the runner, then return to the
 tutorial to upload the edited job:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- mkdir -p /work/tool-trace
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp .trace/public/tls.crt harbor-runner:/work/tool-trace/tls.crt
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp stunnel-client.conf harbor-runner:/work/tool-trace/stunnel-client.conf
+kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
+kubectl -n ate-env exec harbor-runner -- mkdir -p /work/tool-trace
+kubectl -n ate-env cp .trace/public/tls.crt harbor-runner:/work/tool-trace/tls.crt
+kubectl -n ate-env cp stunnel-client.conf harbor-runner:/work/tool-trace/stunnel-client.conf
 ```
 
 Run one trial and confirm that Pi's `toolCallId` values appear in native tool
@@ -216,11 +216,11 @@ After the job finishes, wait for the frontend's trace writer to flush. Find the
 frontend Pod using your deployment's labels, then copy its trace directory:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" get pods \
+kubectl -n "$MODEL_NAMESPACE" get pods \
   -l "nvidia.com/dynamo-namespace=$MODEL_NAMESPACE-$DGD_NAME,nvidia.com/dynamo-component=Frontend"
 export FRONTEND_POD=your-frontend-pod
 mkdir -p results/traces
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" cp -c main \
+kubectl -n "$MODEL_NAMESPACE" cp -c main \
   "$FRONTEND_POD:/traces/." results/traces
 python3 ../../../benchmarks/request_trace/convert_to_perfetto.py \
   results/traces/request-trace*.jsonl \

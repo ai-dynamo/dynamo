@@ -81,14 +81,10 @@ configuration files in place as you follow the tutorial.
 
 ```bash
 cd examples/agents/harbor-substrate
-export EXAMPLE_DIR="$PWD"
-export KUBE_CONTEXT=your-kubernetes-context
 ```
 
-`EXAMPLE_DIR` keeps paths valid while building dependencies. `KUBE_CONTEXT`
-selects the cluster for CLI commands. Set it to the context you intend to use;
-the configuration itself lives in the YAML files below. Keep API keys out of
-those files.
+The commands use your current Kubernetes context. The configuration lives
+in the YAML files below. Keep API keys out of those files.
 
 ## Choose an inference endpoint
 
@@ -150,8 +146,8 @@ SPIFFE IDs in its allowlist.
 Before continuing, verify the installation:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-system get daemonset atelet
-kubectl --context "$KUBE_CONTEXT" -n ate-system get deployment atenet-router \
+kubectl -n ate-system get daemonset atelet
+kubectl -n ate-system get deployment atenet-router \
   -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ' ' '\n' | grep ingress-allowed
 ```
 
@@ -164,7 +160,7 @@ In `workerpool.yaml`, replace `spec.template.nodeSelector.kubernetes.io/hostname
 with an `amd64` node that runs `atelet`. Check the node's architecture first:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" get node your-amd64-sandbox-node \
+kubectl get node your-amd64-sandbox-node \
   -o jsonpath='{.metadata.labels.kubernetes\.io/arch}{"\n"}'
 ```
 
@@ -190,8 +186,8 @@ spec:
 Keep the initial replica count and resources, then apply the edited file:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" apply -f workerpool.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env rollout status \
+kubectl apply -f workerpool.yaml
+kubectl -n ate-env rollout status \
   deployment/harbor-workers --timeout=600s
 ```
 
@@ -217,13 +213,11 @@ Fetch the pinned Pi integration and task dataset:
 git clone https://github.com/ai-dynamo/agent-plugins deps/agent-plugins
 git -C deps/agent-plugins checkout 223a0b8823610d042e7479bfff9b93eeac4a23ec
 for patch in pi-provider-limits pi-harbor-adapter; do
-	git -C deps/agent-plugins apply "$EXAMPLE_DIR/$patch.patch"
+	git -C deps/agent-plugins apply < "$patch.patch"
 done
-export PI_PLUGIN_DIR="$EXAMPLE_DIR/deps/agent-plugins/pi-plugin"
 
 git clone https://github.com/harbor-framework/harbor-datasets deps/harbor-datasets
 git -C deps/harbor-datasets checkout 86723674f04e4209ac479d0fb75d9d9f44b4377e
-export DATASET_DIR="$EXAMPLE_DIR/deps/harbor-datasets/datasets/swebench-verified"
 export TASK=astropy__astropy-12907
 ```
 
@@ -241,7 +235,7 @@ in both commands with a repository you can push to and the workers can pull from
 
 ```bash
 mkdir -p .build/image
-cp -a "$PI_PLUGIN_DIR" .build/image/pi-plugin
+cp -a deps/agent-plugins/pi-plugin .build/image/pi-plugin
 docker build --platform linux/amd64 -f Dockerfile.pi \
   -t registry.example.com/harbor-substrate/astropy-pi:prepared .build/image
 docker push registry.example.com/harbor-substrate/astropy-pi:prepared
@@ -268,7 +262,7 @@ before starting the runner:
 ```bash
 read -rsp 'Model API key: ' MODEL_API_KEY
 printf '\n'
-printf '%s' "$MODEL_API_KEY" | kubectl --context "$KUBE_CONTEXT" -n ate-env \
+printf '%s' "$MODEL_API_KEY" | kubectl -n ate-env \
   create secret generic harbor-model-api --from-file=api-key=/dev/stdin
 unset MODEL_API_KEY
 ```
@@ -283,16 +277,16 @@ the run and treat captured logs as potentially credential-bearing.
 Start the runner and install its pinned dependencies:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" apply -f harbor-runner.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env wait --for=condition=Ready \
+kubectl apply -f harbor-runner.yaml
+kubectl -n ate-env wait --for=condition=Ready \
   pod/harbor-runner --timeout=300s
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl -n ate-env exec harbor-runner -- \
   mkdir -p /work/example /work/tasks
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp deps/env/clients/python harbor-runner:/work/env-client
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp "$PI_PLUGIN_DIR" harbor-runner:/work/pi-plugin
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp substrate_environment.py harbor-runner:/work/example/substrate_environment.py
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp runner-kubeconfig.yaml harbor-runner:/work/kubeconfig
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl -n ate-env cp deps/env/clients/python harbor-runner:/work/env-client
+kubectl -n ate-env cp deps/agent-plugins/pi-plugin harbor-runner:/work/pi-plugin
+kubectl -n ate-env cp substrate_environment.py harbor-runner:/work/example/substrate_environment.py
+kubectl -n ate-env cp runner-kubeconfig.yaml harbor-runner:/work/kubeconfig
+kubectl -n ate-env exec harbor-runner -- \
   pip install harbor==0.16.0 /work/env-client
 ```
 
@@ -308,7 +302,7 @@ The runner does not need a Docker daemon.
 Download the Substrate CLI for the runner's architecture and verify its checksum:
 
 ```bash
-RUNNER_MACHINE="$(kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- uname -m)"
+RUNNER_MACHINE="$(kubectl -n ate-env exec harbor-runner -- uname -m)"
 case "$RUNNER_MACHINE" in
 	x86_64) RUNNER_ARCH=amd64 ;;
 	aarch64) RUNNER_ARCH=arm64 ;;
@@ -321,13 +315,13 @@ curl -fL "$ATE_RELEASE/kubectl-ate-linux-$RUNNER_ARCH" -o deps/runner-bin/kubect
 curl -fL "$ATE_RELEASE/kubectl-ate-linux-$RUNNER_ARCH.sha256" -o deps/runner-bin/kubectl-ate.sha256
 (cd deps/runner-bin && printf '%s  kubectl-ate\n' "$(cut -d ' ' -f1 kubectl-ate.sha256)" | sha256sum -c -)
 chmod +x deps/runner-bin/kubectl-ate
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp deps/runner-bin/kubectl-ate harbor-runner:/work/kubectl-ate
+kubectl -n ate-env cp deps/runner-bin/kubectl-ate harbor-runner:/work/kubectl-ate
 ```
 
 Check the runner's control-plane access:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl -n ate-env exec harbor-runner -- \
   /work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 \
   --token-file /var/run/secrets/ateapi/token get actor-templates -a ate-env
 ```
@@ -353,7 +347,7 @@ the default HTTPS port is 443. For HTTP without an explicit port, use 80.
 Upload the edited policy:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
+kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
 ```
 
 This is a Substrate egress policy, not a Kubernetes NetworkPolicy. The adapter
@@ -461,9 +455,9 @@ Copy the original task without changing its instructions or verifier. The
 selected task retains its 3,000-second agent and verifier deadlines:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp "$DATASET_DIR/$TASK" "harbor-runner:/work/tasks/$TASK"
-kubectl-ate --context "$KUBE_CONTEXT" create actor-template -f actor-template.yaml
-kubectl-ate --context "$KUBE_CONTEXT" get actor-template swe-astropy-12907-pi -a ate-env -o yaml
+kubectl -n ate-env cp "deps/harbor-datasets/datasets/swebench-verified/$TASK" "harbor-runner:/work/tasks/$TASK"
+deps/bin/kubectl-ate create actor-template -f actor-template.yaml
+deps/bin/kubectl-ate get actor-template swe-astropy-12907-pi -a ate-env -o yaml
 ```
 
 Actor templates are immutable in the pinned Substrate release. To change an
@@ -490,7 +484,7 @@ trajectory conversion step.
 Upload the job after making any tracing changes:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
+kubectl -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
 ```
 
 ## Prewarm and check the environment
@@ -498,7 +492,7 @@ kubectl --context "$KUBE_CONTEXT" -n ate-env cp harbor-job.yaml harbor-runner:/w
 Open a runner shell:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec -it harbor-runner -- \
+kubectl -n ate-env exec -it harbor-runner -- \
   bash
 ```
 
@@ -554,10 +548,10 @@ agents:
 Upload and run it, then read the reward:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp oracle-job.yaml harbor-runner:/work/oracle-job.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl -n ate-env cp oracle-job.yaml harbor-runner:/work/oracle-job.yaml
+kubectl -n ate-env exec harbor-runner -- \
   harbor run --config /work/oracle-job.yaml -y
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl -n ate-env exec harbor-runner -- \
   sh -c 'cat /work/jobs/swe-oracle/*/verifier/reward.txt'
 ```
 
@@ -589,15 +583,15 @@ In `golden-job.yaml`, set `job_name: swe-golden` and map
 template:
 
 ```bash
-kubectl-ate --context "$KUBE_CONTEXT" create actor-template -f golden-template.yaml
-kubectl-ate --context "$KUBE_CONTEXT" get actor-template swe-astropy-12907-pi-golden -a ate-env -o json
+deps/bin/kubectl-ate create actor-template -f golden-template.yaml
+deps/bin/kubectl-ate get actor-template swe-astropy-12907-pi-golden -a ate-env -o json
 ```
 
 Read `status.goldenSnapshotStatus.goldenTag`, then fetch that tag:
 
 ```bash
 export GOLDEN_TAG=the-tag-from-template-status
-kubectl-ate --context "$KUBE_CONTEXT" get tag "$GOLDEN_TAG" -a ate-env -o json
+deps/bin/kubectl-ate get tag "$GOLDEN_TAG" -a ate-env -o json
 ```
 
 Wait for `status.snapshot.durableSnapshot.state` to become
@@ -606,7 +600,7 @@ Repeat the prewarm actor creation and deletion with
 `--template swe-astropy-12907-pi-golden`. Then upload the golden job:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp golden-job.yaml harbor-runner:/work/golden-job.yaml
+kubectl -n ate-env cp golden-job.yaml harbor-runner:/work/golden-job.yaml
 ```
 
 Golden snapshots reuse initial sandbox state. The prepared guest snapshot does
@@ -619,7 +613,7 @@ and golden-snapshot runs in separate output directories.
 Open a runner shell:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec -it harbor-runner -- sh
+kubectl -n ate-env exec -it harbor-runner -- sh
 ```
 
 Inside the runner, run the uploaded job:
@@ -659,10 +653,10 @@ For a two-task batch, set `job_name: swe-batch` and
 job, and run it:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" apply -f workerpool.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env rollout status deployment/harbor-workers --timeout=600s
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp batch-job.yaml harbor-runner:/work/batch-job.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- \
+kubectl apply -f workerpool.yaml
+kubectl -n ate-env rollout status deployment/harbor-workers --timeout=600s
+kubectl -n ate-env cp batch-job.yaml harbor-runner:/work/batch-job.yaml
+kubectl -n ate-env exec harbor-runner -- \
   harbor run --config /work/batch-job.yaml -y
 ```
 
@@ -684,7 +678,7 @@ Exit the runner shell and copy the job before removing resources:
 mkdir -p results
 # Use swe-golden or swe-batch here to collect the corresponding job.
 export JOB_NAME=swe-one
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp \
+kubectl -n ate-env cp \
   "harbor-runner:/work/jobs/$JOB_NAME" "results/$JOB_NAME"
 ```
 
@@ -736,9 +730,9 @@ First save the results and native trace files. Confirm that Harbor deleted its
 actors. Use the CLI to list actors before removing any retained resources:
 
 ```bash
-kubectl-ate --context "$KUBE_CONTEXT" get actors -a ate-env
-kubectl --context "$KUBE_CONTEXT" -n ate-env delete pod harbor-runner
-kubectl --context "$KUBE_CONTEXT" -n ate-env delete workerpool harbor-workers
+deps/bin/kubectl-ate get actors -a ate-env
+kubectl -n ate-env delete pod harbor-runner
+kubectl -n ate-env delete workerpool harbor-workers
 ```
 
 Delete only templates, golden tags, Secrets, and collector resources created

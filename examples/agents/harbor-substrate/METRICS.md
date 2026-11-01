@@ -13,7 +13,7 @@ labels, changes no worker capacity, and enables no suspension policy.
 - Complete the [Substrate integration setup](INSTALL.md).
 - Install Prometheus Operator and Grafana. This example uses the
   `kube-prometheus-stack` release in namespace `monitoring`.
-- Set `KUBE_CONTEXT` to the cluster context. Run commands from this directory.
+- Run commands from this directory with the intended Kubernetes context selected.
 - Stop active Harbor jobs before changing the telemetry configuration.
 
 > [!WARNING]
@@ -35,8 +35,8 @@ monitoring namespace selector to your Prometheus namespace (`monitoring`).
 Keep the Collector endpoint, port mappings, and resource limits for this run:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" apply -f metrics-bridge.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status \
+kubectl apply -f metrics-bridge.yaml
+kubectl -n ate-system rollout status \
   deployment/substrate-metrics-bridge --timeout=120s
 ```
 
@@ -53,9 +53,9 @@ so a separate metrics endpoint override cannot preserve the other destinations.
 
 ```bash
 mkdir -p .build
-kubectl --context "$KUBE_CONTEXT" -n ate-system get configmap ate-otel-config \
+kubectl -n ate-system get configmap ate-otel-config \
   -o yaml > .build/ate-otel-config.before.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch configmap ate-otel-config \
+kubectl -n ate-system patch configmap ate-otel-config \
   --type=merge -p '{"data":{
     "OTEL_EXPORTER_OTLP_ENDPOINT":"http://substrate-metrics-bridge.ate-system.svc.cluster.local:4317",
     "OTEL_METRIC_EXPORT_INTERVAL":"5000",
@@ -67,7 +67,7 @@ kubectl --context "$KUBE_CONTEXT" -n ate-system patch configmap ate-otel-config 
     "ATE_WORKER_OTEL_TRACES_EXPORTER":"none",
     "ATE_WORKER_OTEL_LOGS_EXPORTER":"none"
   }}'
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout restart \
+kubectl -n ate-system rollout restart \
   daemonset/atelet deployment/ate-api-server deployment/atenet-router \
   deployment/atenet-egress deployment/ate-controller
 ```
@@ -97,12 +97,12 @@ provision the same dashboard from a labeled ConfigMap. Replace `monitoring`
 in these commands if Grafana runs in a different namespace:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n monitoring create configmap \
+kubectl -n monitoring create configmap \
   substrate-native-metrics-dashboard \
   --from-file=substrate-native-metrics.json=substrate-dashboard.json \
   --dry-run=client -o yaml | kubectl label --local -f - \
-  grafana_dashboard=1 -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
-kubectl --context "$KUBE_CONTEXT" -n monitoring port-forward \
+  grafana_dashboard=1 -o yaml | kubectl apply -f -
+kubectl -n monitoring port-forward \
   service/kube-prometheus-stack-grafana 3007:80
 ```
 
@@ -159,9 +159,9 @@ Path('.build/restore-otel.json').write_text(json.dumps([
     {'op': 'replace', 'path': '/data', 'value': before.get('data', {})}
 ]))
 PY
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch configmap ate-otel-config \
+kubectl -n ate-system patch configmap ate-otel-config \
   --type=json --patch-file .build/restore-otel.json
-kubectl --context "$KUBE_CONTEXT" -n ate-system rollout restart \
+kubectl -n ate-system rollout restart \
   daemonset/atelet deployment/ate-api-server deployment/atenet-router \
   deployment/atenet-egress deployment/ate-controller
 ```
@@ -170,8 +170,8 @@ Wait for those components and worker pools to be ready. Confirm that the
 previous telemetry destination receives data before deleting the bridge:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" delete -f metrics-bridge.yaml
-kubectl --context "$KUBE_CONTEXT" -n monitoring delete configmap \
+kubectl delete -f metrics-bridge.yaml
+kubectl -n monitoring delete configmap \
   substrate-native-metrics-dashboard --ignore-not-found
 ```
 
