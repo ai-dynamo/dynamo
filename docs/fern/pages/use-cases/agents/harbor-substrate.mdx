@@ -269,13 +269,30 @@ The policy grants the `harbor-runner` ServiceAccount the editor role in
 
 ### Authorize the Harbor runner at the router
 
+Substrate's default Envoy router blocks ingress to actors until a client
+identity is explicitly allowed. Add the Harbor runner so it can execute guest
+commands and transfer files.
+
+The Harbor runner's certificate identifies it with this **SPIFFE ID**, a
+workload identity derived from its namespace and ServiceAccount:
+
+```text
+spiffe://cluster.local/ns/ate-env/sa/harbor-runner
+```
+
+Use your installation's trust domain if it differs from `cluster.local`.
+In this release, the [router allowlist grants access to all actors reachable through that router](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization).
+
 Update the `atenet-router` Deployment's container arguments:
 
-- Append `spiffe://cluster.local/ns/ate-env/sa/harbor-runner` to the comma-separated
-  `--ingress-allowed-spiffe-ids` value. Add the argument if absent. Use your
-  installation's trust domain if it differs from `cluster.local`.
-- Set `--route-timeout=60m` to accommodate the task's 3,000-second command
-  deadlines. The rc1 default is five minutes.
+| Argument | Change |
+| --- | --- |
+| `--ingress-allowed-spiffe-ids` | Append the Harbor runner's SPIFFE ID, preserving existing identities. Add the argument if absent. |
+| `--route-timeout` | Set to `60m` to accommodate the task's 50-minute command deadlines. |
+
+The default route timeout is **five minutes per request**, including streamed
+command output. A 12-minute test command would lose its output stream after
+five minutes. This timeout does not limit the actor's lifetime.
 
 Preserve existing identities and other arguments. On a shared installation,
 have its operator make these changes:
