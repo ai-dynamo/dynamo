@@ -38,16 +38,24 @@ flowchart LR
     A -.->|Alternative| X[External model API]
 ```
 
-Harbor selects tasks, limits concurrent trials, runs the agent and verifier,
-and collects results. Pi calls the model and executes coding tools in the task
-workspace. Substrate places isolated actors on CPU workers. Dynamo serves
-inference outside those actors.
+| Component | Responsibility |
+| --- | --- |
+| **Harbor** | Orchestrates evaluation: selects tasks, limits concurrent trials, runs the agent and task verifier, and collects results. |
+| **Pi** | Runs the coding-agent loop inside the sandbox: sends requests to the model, executes its tool calls against the task workspace, and returns tool results to the model. |
+| **Substrate** | Provides the sandboxes: places actors on CPU workers, controls their lifecycle and network access, and supports checkpoint and restore. |
+| **Dynamo** | Serves model inference outside the sandboxes: accepts Pi's API requests and routes them to the inference engine. A compatible external API can fill this role instead. |
 
-The Harbor environment adapter talks to Substrate directly. It creates and
-deletes actors through `kubectl-ate`, and it runs commands and moves files
-through the Substrate router to a small guest daemon inside the actor. The
-model does not grade its own answer. Harbor runs the task's verifier after Pi
-finishes.
+Harbor connects to Substrate through the environment adapter. For each trial,
+the adapter creates an actor from the task's template, then runs commands and
+transfers files through the Substrate router to the guest daemon inside that
+actor. Pi runs there alongside the task repository and coding tools; the model
+runs separately behind Dynamo or an external endpoint.
+
+Pi alternates between model requests and local tool execution until it finishes
+the task. Harbor then runs the task's verifier inside the same actor, collects
+the agent logs and verification results, and asks the adapter to delete the
+actor. The verifier determines the reward; the model does not grade its own
+answer.
 
 ## Check prerequisites
 
