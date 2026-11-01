@@ -25,6 +25,77 @@ around limitations in that release's installer.
 - Git, Go 1.27 or newer, and `kubectl` on the installation workstation, with the
   intended Kubernetes context already selected.
 
+## What this installs
+
+The installation prepares the Substrate platform and node runtime, backed by
+PostgreSQL and object storage. WorkerPools, ActorTemplates, and actors are
+workload resources you create afterward. The diagram shows two workers as an
+example; each worker can host multiple actors when capacity allows.
+
+```mermaid
+flowchart TB
+    CLIENT["Workload client"]
+
+    subgraph DEFINITIONS["Workload resource definitions"]
+        direction LR
+        POOL["WorkerPool"]
+        TEMPLATE["ActorTemplate"]
+    end
+
+    subgraph PLATFORM["Substrate platform"]
+        direction LR
+        subgraph CONTROL["Control plane"]
+            API["API server"]
+            CONTROLLER["WorkerPool controller"]
+        end
+        ROUTER["Router"]
+        EGRESS["Egress gateway"]
+    end
+
+    subgraph NODE["Sandbox node"]
+        direction LR
+        ATELET["Node supervisor<br/>atelet"]
+        subgraph WORKER1["Worker Pod"]
+            W1["ateworker + tunnel"]
+            A1["Actor sandbox"]
+        end
+        subgraph WORKER2["Worker Pod"]
+            W2["ateworker + tunnel"]
+            A2["Actor sandbox"]
+        end
+    end
+
+    subgraph STORAGE["Storage"]
+        direction LR
+        DB[("PostgreSQL")]
+        SNAPSHOTS[("Object storage")]
+    end
+
+    DEFINITIONS -->|"Configure"| PLATFORM
+    CLIENT -->|"Manage and access actors"| PLATFORM
+    PLATFORM -->|"Manage and route to actors"| NODE
+    PLATFORM -->|"Persist state"| STORAGE
+    NODE -->|"Store and restore snapshots"| STORAGE
+```
+
+| Boundary | Component | Responsibility |
+| --- | --- | --- |
+| Workload resource definitions | `WorkerPool` | Kubernetes resource that declares worker count, placement, capacity, and sandbox runtime. |
+| Workload resource definitions | `ActorTemplate` | Substrate resource that defines actor images, resource limits, worker selection, and snapshot settings. |
+| Control plane | API server (`ate-api-server`) | Manages actor records and lifecycle, selects workers, and coordinates activation and snapshots. |
+| Control plane | WorkerPool controller (`ate-controller`) | Reconciles each WorkerPool into a Kubernetes Deployment that maintains worker Pods. |
+| Substrate platform | Router (`atenet-router`) | Resolves an actor's worker assignment through the API, requests resume when needed, and forwards client traffic to the worker tunnel. |
+| Substrate platform | Egress gateway (`atenet-egress`) | Applies actor egress policies to outbound requests. |
+| Sandbox node | Node supervisor (`atelet`) | Prepares images and runtime assets, directs local workers, and transfers snapshots through an object-store plugin. |
+| Sandbox node | Worker Pod (`ateworker` and its tunnel) | Runs the sandbox runtime and forwards incoming traffic to the assigned actor. |
+| Worker Pod | Actor sandbox | Runs the workload's processes and holds its working state. Each actor has its own sandbox. |
+| Storage | PostgreSQL | Stores control-plane records, including templates, actor lifecycle state, and worker assignments. |
+| Storage | Object storage | Stores durable snapshots in S3 or GCS. Object-store plugins handle snapshot transfers and management. |
+
+For lifecycle and networking details, see Substrate's
+[architecture documentation](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/architecture.md#system-components)
+and [resource glossary](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/reference/glossary.md).
+
 Run commands from a working directory of your choice. Paths are relative to
 that directory. Keep the installer configuration for future updates.
 
