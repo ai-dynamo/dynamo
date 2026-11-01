@@ -2696,6 +2696,53 @@ async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
                 await metrics_task
 
 
+def _decode_warmup_engine(events):
+    async def async_generate(**kwargs):
+        events.append(("generate", kwargs))
+
+    async def freeze_gc():
+        events.append(("freeze_gc", {}))
+
+    return SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(is_image_understandable_model=False),
+            freeze_gc=freeze_gc,
+        ),
+    )
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_matches_launch_server_order():
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    events = []
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events),
+        SimpleNamespace(skip_server_warmup=False, skip_tokenizer_init=False),
+    )
+
+    assert [name for name, _ in events] == ["generate", "freeze_gc", "generate"]
+    assert "prompt" in events[0][1]
+    assert events[2][1]["input_ids"] == [0]
+    assert events[2][1]["sampling_params"]["max_new_tokens"] == 1
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skip_server_warmup_still_freezes_gc():
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    events = []
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events),
+        SimpleNamespace(skip_server_warmup=True, skip_tokenizer_init=False),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
 def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
     from dynamo.runtime import logging as runtime_logging
 

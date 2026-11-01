@@ -63,6 +63,105 @@ async def _warmup_prefill_engine(
         raise RuntimeError(f"Prefill warmup failed: {exc}") from exc
 
 
+def _warmup_image_base64(model_config) -> str:
+    """The image launch_server's warmup uses for this model (SGLang chooses it
+    per architecture; most models get a minimal PNG)."""
+    from sglang.srt.entrypoints import http_server
+
+    choose = getattr(http_server, "_get_vlm_warmup_image_base64", None)
+    if callable(choose):
+        hf_config = getattr(model_config, "hf_config", None)
+        return choose(
+            {
+                "model_type": getattr(hf_config, "model_type", None),
+                "architectures": getattr(hf_config, "architectures", None),
+            }
+        )
+    return http_server.MINIMUM_PNG_PICTURE_BASE64
+
+
+async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
+    """Prepare the engine as sglang.launch_server does before it serves: its
+    warmup request, POST /freeze_gc, then the 1-token /health generation.
+
+    Without an eager forward first, CUDA-graph decode stays slower for the life
+    of the process. Without the freeze, full collections walk ~1M startup
+    objects and stall every stream for 0.3-1 s. Honors --skip-server-warmup
+    like SGLang (the freeze still runs).
+    """
+    if getattr(server_args, "skip_server_warmup", False):
+        await _freeze_engine_gc(engine)
+        return
+    sampling = {"temperature": 0.0, "max_new_tokens": 8}
+    started = time.time()
+    tokenizer_manager = engine.tokenizer_manager
+    model_config = getattr(tokenizer_manager, "model_config", None)
+    # As launch_server decides it (http_server._execute_server_warmup).
+    is_vlm = (
+        bool(getattr(model_config, "is_image_understandable_model", False))
+        and not getattr(server_args, "language_only", False)
+        and not getattr(server_args, "skip_tokenizer_init", False)
+    )
+    sent = False
+    if is_vlm:
+        try:
+            from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
+            from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+
+            chat = OpenAIServingChat(tokenizer_manager, engine.template_manager)
+            image = "data:image/png;base64," + _warmup_image_base64(model_config)
+            request = ChatCompletionRequest(
+                model=tokenizer_manager.served_model_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image}},
+                            {"type": "text", "text": "Describe the image."},
+                        ],
+                    }
+                ],
+                max_tokens=sampling["max_new_tokens"],
+                stream=False,
+                temperature=0.0,
+            )
+            internal = chat._convert_to_internal_request(request)[0]
+            async for _ in tokenizer_manager.generate_request(internal, None):
+                pass
+            sent = True
+        except Exception as exc:  # fall back to the text warmup
+            logging.warning("Image warmup failed (%s); using a text warmup", exc)
+    if not sent:
+        if getattr(server_args, "skip_tokenizer_init", False):
+            await engine.async_generate(
+                input_ids=[10, 11, 12], sampling_params=sampling
+            )
+        else:
+            await engine.async_generate(
+                prompt="The capital city of France is", sampling_params=sampling
+            )
+    await _freeze_engine_gc(engine)
+    # SGLang's /health generation.
+    await engine.async_generate(
+        input_ids=[0], sampling_params={"temperature": 0.0, "max_new_tokens": 1}
+    )
+    logging.info("Engine warmup done in %.1fs", time.time() - started)
+
+
+async def _freeze_engine_gc(engine: sgl.Engine) -> None:
+    """launch_server's post-warmup /freeze_gc: freeze the GC of the tokenizer
+    manager (this process), the schedulers and the detokenizer."""
+    freeze = getattr(engine.tokenizer_manager, "freeze_gc", None)
+    if freeze is None:
+        return
+    result = freeze()
+    if asyncio.iscoroutine(result):
+        await result
+    logging.info(
+        "Froze SGLang GC after warmup (tokenizer manager, schedulers, detokenizer)"
+    )
+
+
 def _freeze_gc_after_init(enabled: bool) -> None:
     if enabled:
         collected = gc.collect()
@@ -142,6 +241,9 @@ async def init_decode(
     )
 
     shutdown_endpoints[:] = [generate_endpoint]
+
+    if attached_engine is None and server_args.disaggregation_mode == "null":
+        await _warmup_decode_engine(engine, server_args)
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
