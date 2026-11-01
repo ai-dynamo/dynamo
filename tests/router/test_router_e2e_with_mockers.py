@@ -600,12 +600,14 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_mocker_session_affinity(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
+    event_plane,
 ):
     """Replica affinity overrides conflicting per-frontend KV-prefix placement."""
     mocker_args = {
