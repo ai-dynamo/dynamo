@@ -61,6 +61,7 @@ from dynamo.trtllm.conversation_affinity import (
     engine_conversation_affinity_enabled,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.engine_monitor import exit_worker_on_fatal_error
 from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -994,22 +995,13 @@ class HandlerBase(BaseGenerativeHandler):
             request["sampling_options"].setdefault("temperature", temperature)
 
     async def _initiate_shutdown(self, error: Exception):
-        """Initiate graceful shutdown after fatal error"""
+        """Shut down and exit the worker after a fatal error.
+
+        Engine teardown is bounded and runs off the event loop; see
+        exit_worker_on_fatal_error().
+        """
         logging.warning(f"Initiating graceful shutdown due to: {error}")
-
-        try:
-            if self.runtime:
-                logging.info("Shutting down Dynamo runtime...")
-                self.runtime.shutdown()
-
-            if self.engine:
-                logging.info("Shutting down TensorRT-LLM engine...")
-                await self.engine.cleanup()
-        except Exception as cleanup_error:
-            logging.error(f"Error during graceful shutdown: {cleanup_error}")
-        finally:
-            logging.critical("Forcing process exit for restart")
-            os._exit(1)
+        await asyncio.to_thread(exit_worker_on_fatal_error, self.engine, self.runtime)
 
     async def generate_locally(
         self,
@@ -1686,6 +1678,12 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        # TRT-LLM's SamplingParams has no logit_bias field, so reject a
+        # non-empty bias instead of generating without it.
+        if overrides.pop("logit_bias", None):
+            raise InvalidArgument(
+                "logit_bias is not supported by the TensorRT-LLM backend"
+            )
         if "top_k" in overrides:
             overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 

@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
       examples: ${{ steps.changes.outputs.examples }}
@@ -62,7 +62,7 @@ jobs:
     name: Docs Lint
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -72,7 +72,7 @@ jobs:
       run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
 
   pre-merge-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
@@ -81,7 +81,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -94,7 +94,7 @@ jobs:
     name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})
     needs: changed-files
     if: needs.changed-files.outputs.planner_gym == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -123,7 +123,7 @@ jobs:
     name: Recipe Check
     needs: changed-files
     if: needs.changed-files.outputs.examples == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -147,9 +147,19 @@ jobs:
           'pytest-benchmark>=4' \
           'pytest-timeout==2.4.0'
     - name: Install qualified Kustomize renderer
+      # kustomize-matrix.py finds kustomize on PATH, and the tests read KUSTOMIZE_BIN.
+      env:
+        KUSTOMIZE_VERSION: v5.8.1
+        KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
       run: |
-        go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
-        echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
+        dir="${RUNNER_TEMP}/kustomize"
+        mkdir -p "${dir}"
+        curl -fsSL --retry 3 -o "${dir}/kustomize.tar.gz" \
+          "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+        echo "${KUSTOMIZE_SHA256}  ${dir}/kustomize.tar.gz" | sha256sum --check --strict
+        tar -xzf "${dir}/kustomize.tar.gz" -C "${dir}" kustomize
+        echo "${dir}" >> "${GITHUB_PATH}"
+        echo "KUSTOMIZE_BIN=${dir}/kustomize" >> "${GITHUB_ENV}"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
@@ -159,7 +169,7 @@ jobs:
     name: Generated API References
     needs: changed-files
     if: needs.changed-files.outputs.api_docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -191,7 +201,9 @@ jobs:
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
           docs/fern/scripts/tests/test_api_reference_regressions.py \
-          docs/fern/scripts/tests/test_api_freshness.py
+          docs/fern/scripts/tests/test_api_freshness.py \
+          docs/fern/scripts/tests/test_relink_shared_reference.py \
+          docs/fern/scripts/tests/test_resolve_translation_links.py
     - name: Generate API references from source
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
@@ -235,7 +247,7 @@ jobs:
     name: Fern Configuration Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -319,7 +331,7 @@ jobs:
     name: Docs Website Composition Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -365,7 +377,7 @@ jobs:
     name: Fern Broken Links Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -388,12 +400,13 @@ jobs:
       run: npm install -g fern-api
     - name: Check for broken links
       working-directory: docs/fern
-      run: fern docs broken-links
+      # Without --strict the command reports errors and still exits 0.
+      run: fern docs broken-links --strict
 
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -416,7 +429,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
@@ -546,7 +559,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:

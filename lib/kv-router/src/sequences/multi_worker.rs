@@ -24,7 +24,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
-use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
+use super::prompt_registry::{PromptRegistry, WorkerLoadReader, WorkerLoadSnapshot};
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
@@ -33,9 +33,11 @@ use super::single::{
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
+use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
+use crate::scheduling::policy_config::FullRankCounts;
 use crate::scheduling::{AttemptId, queue::SchedulerBookingDescriptor};
 
 // How often we force expire stale requests across all workers. See the comment
@@ -1307,18 +1309,46 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
         let mut projections = FxHashMap::default();
-        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections, None);
         projections
     }
 
+    /// Project every registered rank's load for one request into `projections`. With
+    /// `full_ranks`, the pass also counts the ranks past its busy thresholds per worker.
     pub(crate) fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
     ) {
-        self.prompt_registry
-            .project_worker_loads_into(token_sequence, decay_now, projections);
+        self.prompt_registry.project_worker_loads_into(
+            token_sequence,
+            decay_now,
+            projections,
+            full_ranks,
+        );
+    }
+
+    /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
+    pub(crate) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+        self.prompt_registry.worker_load_reader(decay_now)
+    }
+
+    /// Record the capacity each worker's ranks report, so the projection pass can judge a
+    /// rank's load against it. Ranks outside the registered topology are ignored; a worker
+    /// that reports nothing keeps unreported capacity.
+    pub fn set_worker_capacities(
+        &self,
+        capacities: impl IntoIterator<Item = (WorkerDpRange, WorkerCapacity)>,
+    ) {
+        for (range, capacity) in capacities {
+            let end = range.dp_start.saturating_add(range.dp_size);
+            for dp_rank in range.dp_start..end {
+                self.prompt_registry
+                    .set_worker_capacity(WorkerWithDpRank::new(range.worker_id, dp_rank), capacity);
+            }
+        }
     }
 
     #[cfg(feature = "bench")]
@@ -1329,7 +1359,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) {
-        self.project_worker_loads_into(token_sequence, decay_now, projections);
+        self.project_worker_loads_into(token_sequence, decay_now, projections, None);
     }
 
     /// Query all workers for their current number of active blocks.

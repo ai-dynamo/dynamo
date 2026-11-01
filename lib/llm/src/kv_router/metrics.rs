@@ -77,6 +77,9 @@ pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
+const ROUTER_QUEUE_WAIT_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -765,10 +768,7 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(||
                 ),
                 "Time requests spend pending in the router scheduler queue",
             )
-            .buckets(vec![
-                0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
-                60.0,
-            ]),
+            .buckets(ROUTER_QUEUE_WAIT_BUCKETS.to_vec()),
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_wait_seconds histogram"),
@@ -1789,7 +1789,8 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
                         frontend_service::ROUTER_QUEUE_WAIT_SECONDS
                     ),
                     "Time requests spend pending in the router scheduler queue",
-                ),
+                )
+                .buckets(ROUTER_QUEUE_WAIT_BUCKETS.to_vec()),
                 &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),

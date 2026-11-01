@@ -210,7 +210,7 @@ func TestGMSPodReplacementErrors(t *testing.T) {
 		reconciler := &gmsPodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-			NamespacedName: types.NamespacedName{Namespace: "inference", Name: "restore-worker"},
+			Namespace: "inference", Name: "restore-worker",
 		})
 		require.ErrorIs(t, err, retryErr)
 		assert.ErrorContains(t, err, "get GMS Pod replacement candidate")
@@ -256,23 +256,21 @@ func gmsPodReplacementErrorClient(t *testing.T, pod *corev1.Pod, deleteErr error
 
 func gmsPodReplacementTestPod(uid types.UID, restartCount int32) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "restore-worker",
-			Namespace: "inference",
-			UID:       uid,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: "worker",
-				consts.KubeLabelDynamoNamespace: "inference-graph",
-			},
-			Annotations: map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       "restore-worker",
-				UID:        "owner-uid",
-				Controller: ptr.To(true),
-			}},
+		Name:      "restore-worker",
+		Namespace: "inference",
+		UID:       uid,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoComponent: "worker",
+			consts.KubeLabelDynamoNamespace: "inference-graph",
 		},
+		Annotations: map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       "restore-worker",
+			UID:        "owner-uid",
+			Controller: new(true),
+		}},
 		Spec: corev1.PodSpec{
 			InitContainers: []corev1.Container{{
 				Name:          gms.ServerContainerName,

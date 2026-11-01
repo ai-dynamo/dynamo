@@ -217,6 +217,8 @@ def load_vision_model(
                 max_num_seqs=int(os.getenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")),
                 max_model_len=1,
                 mm_encoder_only=True,
+                # The encode worker's image processor already normalizes pixels.
+                mm_device_do_normalize=False,
                 enable_prefix_caching=False,
             )
         return (

@@ -94,7 +94,6 @@ fn compatibility_envelope_preserves_typed_controls() {
             response.prompt_candidates.and_then(|tokens| tokens.select),
             Some(pb::candidate_tokens::Select::TopN(3))
         );
-        assert_eq!(response.skip_special_tokens, Some(false));
         assert!(response.output_token_ids);
     }
 }
@@ -110,7 +109,6 @@ fn prefill_uses_canonical_controls_without_decode_sampling_json() {
     let stopping = wire.stopping.expect("stopping");
     assert_eq!(stopping.max_new_tokens, 1);
     assert_eq!(stopping.min_new_tokens, 1);
-    assert_eq!(wire.response.unwrap().skip_special_tokens, Some(false));
 }
 
 #[test]
@@ -238,7 +236,6 @@ fn absent_and_explicit_zero_controls_preserve_native_sentinels() {
             request.stop_conditions.ignore_eos = Some(false);
             request.output_options.logprobs = Some(0);
             request.output_options.prompt_logprobs = Some(0);
-            request.output_options.skip_special_tokens = Some(false);
         }
         let wire = build_generate_request(
             request,
@@ -278,7 +275,6 @@ fn absent_and_explicit_zero_controls_preserve_native_sentinels() {
         assert_eq!(response.output_logprobs, explicit);
         assert_eq!(response.prompt_logprobs, explicit);
         assert_eq!(response.prompt_token_ids, explicit);
-        assert_eq!(response.skip_special_tokens, explicit.then_some(false));
         assert_eq!(
             response.output_candidates.and_then(|value| value.select),
             explicit.then_some(pb::candidate_tokens::Select::TopN(0))
@@ -426,8 +422,6 @@ fn vllm_extensions_preserve_native_fields() {
         decoding.structured_output,
         Some(pb::decoding_parameters::StructuredOutput::Json(_))
     ));
-    let stopping = sent.stopping.as_ref().unwrap();
-    assert!(stopping.include_stop_strings);
     let kv = sent.kv.as_ref().unwrap();
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
@@ -521,9 +515,6 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         ("allowed_token_ids must not be empty", |r| {
             r.extra_args = Some(json!({"sampling_options": {"allowed_token_ids": []}}))
         }),
-        ("detokenize=false is not supported", |r| {
-            r.extra_args = Some(json!({"sampling_options": {"detokenize": false}}))
-        }),
         ("logprob_token_ids is not supported", |r| {
             r.extra_args = Some(json!({"sampling_options": {"logprob_token_ids": [1]}}))
         }),
@@ -577,7 +568,7 @@ fn sampling_passthrough_reaches_decoding_parameters() {
     request.extra_args = Some(json!({"sampling_options": {
         "allowed_token_ids": [10, 11],
         "bad_words_token_ids": vec![[1]; 128],
-        "detokenize": true,
+        "detokenize": false,
     }}));
     let decoding = build_generate_request(request, "id".into(), DisaggregationMode::Aggregated)
         .unwrap()
@@ -766,7 +757,6 @@ fn canonical_sampling_and_stopping_fields_are_preserved() {
     request.stop_conditions = StopConditions {
         max_tokens: Some(1),
         min_tokens: Some(1),
-        stop: Some(vec!["done".into()]),
         ignore_eos: Some(true),
         ..Default::default()
     };
@@ -800,8 +790,24 @@ fn canonical_sampling_and_stopping_fields_are_preserved() {
     );
     let stopping = wire.stopping.unwrap();
     assert_eq!((stopping.max_new_tokens, stopping.min_new_tokens), (1, 1));
-    assert_eq!(stopping.stop_strings, ["done"]);
     assert!(stopping.ignore_eos);
+}
+
+#[test]
+fn frontend_owns_output_text_and_stop_strings() {
+    // `request()` carries the stop string "done", include_stop_str_in_output
+    // and hidden stop token 2. vLLM gets the stop token IDs only.
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    let wire = build_generate_request(request, "token-only".into(), DisaggregationMode::Aggregated)
+        .unwrap();
+    let stopping = wire.stopping.unwrap();
+    assert!(stopping.stop_strings.is_empty());
+    assert!(!stopping.include_stop_strings);
+    assert_eq!(stopping.stop_token_ids, [2]);
+    let response = wire.response.unwrap();
+    assert_eq!(response.output_text, Some(false));
+    assert_eq!(response.skip_special_tokens, None);
 }
 
 #[test]
@@ -962,7 +968,6 @@ fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
     assert_eq!(legacy.stop_conditions.ignore_eos, Some(true));
     assert_eq!(legacy.output_options.logprobs, Some(2));
     assert_eq!(legacy.output_options.prompt_logprobs, Some(3));
-    assert_eq!(legacy.output_options.skip_special_tokens, Some(false));
 
     let mut canonical = legacy.clone();
     canonical.sampling_options.temperature = Some(0.4);
@@ -1125,6 +1130,25 @@ fn unprojected_native_sampling_is_rejected_instead_of_silently_discarded() {
                 .contains("sampling_params.logit_bias is not supported")
         );
     }
+}
+
+#[test]
+fn logit_bias_is_forwarded_to_decoding_parameters() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions {
+        logit_bias: Some(std::collections::HashMap::from([(18, -100.0), (42, 5.5)])),
+        ..Default::default()
+    };
+    let wire = build_generate_request(
+        request,
+        "logit-bias".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("logit_bias request should convert");
+    let decoding = wire.decoding.expect("decoding parameters");
+    assert_eq!(decoding.logit_bias.len(), 2);
+    assert_eq!(decoding.logit_bias.get(&18), Some(&-100.0));
+    assert_eq!(decoding.logit_bias.get(&42), Some(&5.5));
 }
 
 #[test]

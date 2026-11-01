@@ -1447,9 +1447,11 @@ def run_arena_replay(
         )
 
     config = _as_config(substrate_config)
-    # Rivals run in advisory mode like the planner replay (decisions are applied
-    # by the harness, not by a live orchestrator).
-    config.advisory = True
+    # The arena replays every rival's decisions; an advisory planner would hold
+    # the replayed deployment fixed and only record recommendations. Set it
+    # explicitly: a PlannerConfig passed in directly bypasses match_config's
+    # reserved-field check.
+    config.advisory = False
     if sla_ttft_ms is not None:
         config.ttft_ms = sla_ttft_ms
     if sla_itl_ms is not None:

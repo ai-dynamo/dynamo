@@ -57,6 +57,7 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
+    utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
 
@@ -97,6 +98,18 @@ fn worker_set_key(
         wt.as_str(),
     ))
     .expect("serializing WorkerSet key strings cannot fail")
+}
+
+/// Refresh committed capability records without changing controller admission.
+fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    if let Some(admission) = &worker_set.image_edit_admission {
+        admission.replace(members.iter().map(|member| {
+            (
+                member.mcid.instance_id,
+                super::image_edits::advertised_limit(&member.card),
+            )
+        }));
+    }
 }
 
 fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
@@ -206,6 +219,7 @@ pub struct ModelWatcher {
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 }
 
@@ -317,6 +331,7 @@ impl ModelWatcher {
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
+            systemone_enabled: false,
             plugins,
         }
     }
@@ -343,6 +358,10 @@ impl ModelWatcher {
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+
+    pub(crate) fn set_systemone_enabled(&mut self, enabled: bool) {
+        self.systemone_enabled = enabled;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
@@ -468,6 +487,11 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
+        if card.model_type.supports_images() {
+            worker_set.image_edit_admission = Some(Arc::new(
+                super::image_edits::ImageEditAdmission::new(admitted_ids.clone()),
+            ));
+        }
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
             endpoint: endpoint.clone(),
             group: spec.key.id(),
@@ -542,10 +566,24 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
-                && card.has_tokenizer()
-            {
+            let needs_systemone_preprocessor =
+                self.systemone_enabled && card.is_systemone_serial_eligible();
+            let needs_local_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
+            } else if needs_systemone_preprocessor && card.has_tokenizer() {
+                match card.tokenizer().context("System One tokenizer") {
+                    Ok(tokenizer) => Some(tokenizer),
+                    Err(cause) => {
+                        tracing::warn!(
+                            model_name = card.name(),
+                            error = %format!("{cause:#}"),
+                            "System One tokenizer is unavailable; keeping other model surfaces active"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -668,6 +706,31 @@ impl ModelWatcher {
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
+            if needs_systemone_preprocessor {
+                worker_set.systemone_preprocessor = match tokenizer.clone() {
+                    Some(tokenizer) => {
+                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                            Ok(preprocessor) => Some(preprocessor),
+                            Err(error) => {
+                                tracing::warn!(
+                                    model = card.name(),
+                                    error = %format!("{error:#}"),
+                                    "System One preprocessor is unavailable"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            model = card.name(),
+                            "System One preprocessor is unavailable: model has no supported Rust tokenizer"
+                        );
+                        None
+                    }
+                };
+            }
+
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
                     entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
@@ -712,8 +775,10 @@ impl ModelWatcher {
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor =
-                        worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
+                    let preprocessor = match worker_set.systemone_preprocessor.clone() {
+                        Some(preprocessor) => preprocessor,
+                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                    };
                     Some(
                         routing
                             .build_pipeline::<
@@ -899,7 +964,14 @@ impl ModelWatcher {
                     Annotated<NvImagesResponse>,
                 >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
-                worker_set.images_engine = Some(Arc::new(images_router));
+                let admission = worker_set
+                    .image_edit_admission
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("image admission state was not initialized"))?;
+                worker_set.images_engine = Some(Arc::new(super::image_edits::ImageEditEngine {
+                    router: images_router,
+                    admission: admission.clone(),
+                }));
             }
 
             if card.model_type.supports_videos() {
@@ -1046,6 +1118,15 @@ impl ControllerHost for ModelWatcher {
         card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        let router_mode =
+            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+        anyhow::ensure!(
+            card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
+            "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
+             --use-vllm-tokenizer) because it requires frontend tokenization; enable frontend \
+             tokenization or explicitly configure a non-KV router mode",
+            card.name()
+        );
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
@@ -1102,6 +1183,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1185,6 +1267,13 @@ impl ControllerHost for ModelWatcher {
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
+        if let Some(worker_set) = self
+            .manager
+            .get_committed_model(&key.model_name)
+            .and_then(|model| model.get_worker_set(&key.worker_set_key))
+        {
+            update_image_edit_capabilities(&worker_set, members);
+        }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
@@ -1235,6 +1324,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1418,7 +1508,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
         "base_capacity": card.runtime_config.max_gpu_lora_count,
         "requires_registration": card.runtime_config.runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION),
     });
-    canonicalize_json(&mut value);
+    canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
@@ -1437,27 +1527,8 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
         return None;
     }
     let mut contracts = serde_json::Value::Object(contracts);
-    canonicalize_json(&mut contracts);
+    canonicalize_json_object_keys(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn worker_set_chat_preprocessor(
@@ -1505,15 +1576,27 @@ mod tests {
 
         let vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
         let reordered_vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+            serde_json::json!({
+                "sampling": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token",
+            }),
         );
         let sglang = card_with_contract(
             SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
 
         assert_eq!(
@@ -1827,20 +1910,19 @@ mod tests {
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
-                    .env("DYNAMO_ALIAS_TEST", test_name)
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classify subprocess must finish within its deadline")
-            .expect("classify subprocess must start");
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_ALIAS_TEST", test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classify subprocess must finish within its deadline")
+                .expect("classify subprocess must start");
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
@@ -2173,24 +2255,24 @@ mod tests {
         if std::env::var("DYNAMO_CLASSIFIER_CATALOG_TEST").as_deref() != Ok(test_name) {
             // Isolate the process-global request plane and give the debug routing future
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
-                    .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
-                    .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classifier subprocess timed out")
-            .unwrap();
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classifier subprocess timed out")
+                .unwrap();
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
+        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use dynamo_kv_router::scheduling::{
             ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
         };
@@ -2203,7 +2285,11 @@ mod tests {
         }
         #[async_trait]
         impl RequestClassifier for RejectingClassifier {
-            fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+            fn classify(
+                &mut self,
+                _request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> ClassifyFuture {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
@@ -2534,6 +2620,142 @@ request_classifier:
     }
 
     #[tokio::test]
+    async fn discovery_rejects_text_input_with_effective_kv_routing() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for frontend_mode in [RouterMode::RoundRobin, RouterMode::KV] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig {
+                    router_mode: frontend_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            for worker_mode in [None, Some(RouterMode::RoundRobin), Some(RouterMode::KV)] {
+                for model_input in [ModelInput::Text, ModelInput::Tokens] {
+                    let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
+                    card.model_input = model_input;
+                    card.model_type = ModelType::Chat;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    card.router_config = worker_mode.map(|router_mode| RouterConfig {
+                        router_mode,
+                        ..Default::default()
+                    });
+                    let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
+                    else {
+                        unreachable!();
+                    };
+                    let result = watcher.normalize(instance, &NamespaceFilter::Global);
+                    if model_input == ModelInput::Text
+                        && worker_mode.unwrap_or(frontend_mode).is_kv_routing()
+                    {
+                        let error = result.expect_err("text-input KV card must be rejected");
+                        let message = error.to_string();
+                        assert!(message.contains("kv-text-model"), "{message}");
+                        assert!(message.contains("KV routing is incompatible"), "{message}");
+                        assert!(message.contains("frontend tokenization"), "{message}");
+                    } else {
+                        let desired = result.unwrap().expect("valid card must be admitted");
+                        assert_eq!(
+                            desired
+                                .card
+                                .router_config
+                                .as_ref()
+                                .map(|config| config.router_mode),
+                            worker_mode
+                        );
+                        assert_eq!(desired.card.model_input, model_input);
+                    }
+                }
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn rejected_kv_text_workers_preserve_valid_models() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("kv-text-preserve")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) = watch_test_cards(
+            drt,
+            manager.clone(),
+            RouterConfig {
+                router_mode: RouterMode::KV,
+                ..Default::default()
+            },
+        );
+        let mut valid = ModelDeploymentCard::with_name_only("valid-text-model");
+        valid.model_input = ModelInput::Text;
+        valid.model_type = ModelType::Chat;
+        valid.worker_type = Some(WorkerType::Aggregated);
+        valid.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..Default::default()
+        });
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &valid),
+        )
+        .await;
+        let original = wait_for_model(&manager, valid.name(), Model::is_ready_to_serve).await;
+
+        let mut invalid = valid.clone();
+        invalid.router_config = None;
+        // A rejected update must not remove the existing worker or replace its pipeline.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &invalid),
+        )
+        .await;
+        // An incompatible newcomer must not join the serving set either.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 1, &invalid),
+        )
+        .await;
+        let mut other = ModelDeploymentCard::with_name_only("invalid-text-model");
+        other.model_input = ModelInput::Text;
+        other.model_type = ModelType::Chat;
+        other.worker_type = Some(WorkerType::Aggregated);
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 2, &other),
+        )
+        .await;
+
+        let model = manager.get_committed_model(valid.name()).unwrap();
+        assert!(Arc::ptr_eq(&original, &model));
+        assert!(model.is_ready_to_serve());
+        assert_eq!(model.total_workers(), 1);
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert_eq!(manager.get_model_cards()[0].mdcsum(), valid.mdcsum());
+        assert!(manager.get_committed_model(other.name()).is_none());
+        assert!(!task.is_finished());
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn surface_encode_worker_builds_kv_load_context_without_load_monitoring() {
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
 
@@ -2748,6 +2970,7 @@ request_classifier:
                 serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
                     .unwrap();
             let request = NvCreateChatCompletionRequest {
+                responses_tools: None,
                 inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                     .model(adapter_card.name())
                     .messages(messages)
@@ -2758,6 +2981,7 @@ request_classifier:
                 chat_template_args: None,
                 thinking: None,
                 thinking_token_budget: None,
+                preserve_thinking: None,
                 media_io_kwargs: None,
                 return_tokens_as_token_ids: None,
                 unsupported_fields: Default::default(),

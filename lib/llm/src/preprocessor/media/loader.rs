@@ -191,6 +191,13 @@ pub struct MediaFetcher {
     pub allow_private_ips: bool,
     pub allowed_media_domains: Option<HashSet<String>>,
     pub timeout: Option<Duration>,
+    /// When `false`, reject every `http(s)://` URL; only `data:` URLs pass.
+    #[serde(default = "default_allow_remote_urls")]
+    pub allow_remote_urls: bool,
+}
+
+fn default_allow_remote_urls() -> bool {
+    true
 }
 
 impl Default for MediaFetcher {
@@ -202,6 +209,7 @@ impl Default for MediaFetcher {
             allow_private_ips: false,
             allowed_media_domains: None,
             timeout: Some(DEFAULT_HTTP_TIMEOUT),
+            allow_remote_urls: default_allow_remote_urls(),
         }
     }
 }
@@ -225,9 +233,28 @@ impl MediaFetcher {
     /// `DYN_MM_ALLOW_INTERNAL=1` flips `allow_direct_ip`,
     /// `allow_direct_port`, and `allow_private_ips` all to `true` at
     /// once.
+    ///
+    /// `DYN_MM_ALLOW_REMOTE_URLS=0` (or any other false value) sets
+    /// `allow_remote_urls` to `false`.
     pub fn from_env() -> Self {
         let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
-        Self::with_internal_access(allow_internal)
+        let allow_remote = std::env::var("DYN_MM_ALLOW_REMOTE_URLS").ok();
+        Self {
+            allow_remote_urls: Self::allow_remote_urls_from(allow_remote.as_deref()),
+            ..Self::with_internal_access(allow_internal)
+        }
+    }
+
+    /// Unset or empty keeps remote URLs on. A value that is not a boolean
+    /// turns them off, so a typo fails closed.
+    fn allow_remote_urls_from(value: Option<&str>) -> bool {
+        let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
+            return true;
+        };
+        dynamo_runtime::config::parse_bool(value).unwrap_or_else(|error| {
+            tracing::error!(%error, "Invalid DYN_MM_ALLOW_REMOTE_URLS; disabling remote media URLs");
+            false
+        })
     }
 }
 
@@ -270,6 +297,14 @@ impl MediaFetcher {
 
         if url.scheme() == "data" {
             return Ok(());
+        }
+
+        if !self.allow_remote_urls {
+            return Err(policy_rejection(
+                "Remote media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); \
+                 send the media inline as a data: URL instead",
+            )
+            .into());
         }
 
         let host = url
@@ -1144,6 +1179,22 @@ mod tests_non_nixl {
         panic!("error chain did not contain InvalidArgument: {error}");
     }
 
+    /// Reads the request head so the test server never closes with unread
+    /// request bytes, which would reset the connection instead of closing it.
+    async fn read_request_head(connection: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let n = connection.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+    }
+
     #[test]
     fn media_input_error_keeps_classified_errors() {
         let host_fault: anyhow::Error = DynamoError::builder()
@@ -1286,6 +1337,40 @@ mod tests_non_nixl {
                 .to_string()
                 .contains("Direct IP access is not allowed")
         );
+    }
+
+    #[test]
+    fn test_remote_urls_blocked_when_disabled() {
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            allow_remote_urls: false,
+            ..Default::default()
+        };
+
+        for raw in [
+            "https://example.com/image.jpg",
+            "http://example.com/image.jpg",
+        ] {
+            let url = url::Url::parse(raw).unwrap();
+            let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+            assert_invalid_argument_in_chain(error.as_ref());
+            assert!(error.to_string().contains("DYN_MM_ALLOW_REMOTE_URLS=0"));
+        }
+
+        let data_url = url::Url::parse("data:image/png;base64,dGVzdA==").unwrap();
+        assert!(fetcher.check_if_url_allowed(&data_url).is_ok());
+    }
+
+    #[test]
+    fn test_allow_remote_urls_from_env_value() {
+        for off in [Some("0"), Some("disabled")] {
+            assert!(!MediaFetcher::allow_remote_urls_from(off));
+        }
+        for on in [None, Some("1"), Some("")] {
+            assert!(MediaFetcher::allow_remote_urls_from(on));
+        }
     }
 
     #[test]
@@ -1494,6 +1579,7 @@ mod tests_non_nixl {
         let source_port = source.local_addr().unwrap().port();
         let source_task = tokio::spawn(async move {
             let (mut connection, _) = source.accept().await.unwrap();
+            read_request_head(&mut connection).await;
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
@@ -1537,6 +1623,7 @@ mod tests_non_nixl {
         let source_task = tokio::spawn(async move {
             loop {
                 let (mut connection, _) = source.accept().await.unwrap();
+                read_request_head(&mut connection).await;
                 let response = format!(
                     "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{source_port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 );

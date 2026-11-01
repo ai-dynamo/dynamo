@@ -48,6 +48,11 @@ type Build struct {
 	ioFPGACount int32
 	// ioFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
 	ioFanoutFactor int32
+	// checkpoint is the validated source checkpoint that the deployment contract records, or nil.
+	checkpoint *Checkpoint
+	// checkpointErr rejects the recorded checkpoint. It fails only a workload
+	// that would project the checkpoint, so other workloads keep the build.
+	checkpointErr error
 }
 
 // buildPartition describes one normalized physical compiler partition.

@@ -68,7 +68,29 @@ runs:
         echo "::group::Delete vCluster ${VCLUSTER_NAME}"
         set -euo pipefail
 
-        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+        # Cleanup gates the next lifecycle; retry API errors without treating
+        # an unsuccessful query as proof that the namespace is absent.
+        get_namespace() {
+          local attempt output query_status
+          for attempt in 1 2 3; do
+            if output=$(kubectl get namespace "${NAMESPACE}" --ignore-not-found \
+              --request-timeout=30s -o name); then
+              printf '%s' "${output}"
+              return 0
+            else
+              query_status=$?
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::Namespace query failed after ${attempt} attempts" >&2
+              return "${query_status}"
+            fi
+            echo "::warning::Namespace query failed; retrying in 5s (${attempt}/3)" >&2
+            sleep 5
+          done
+        }
+
+        namespace=$(get_namespace)
+        if [ -z "${namespace}" ]; then
           echo "Namespace ${NAMESPACE} does not exist; nothing to delete"
           echo "::endgroup::"
           exit 0
@@ -123,7 +145,8 @@ runs:
           exit 1
         fi
 
-        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+        namespace=$(get_namespace)
+        if [ -n "${namespace}" ]; then
           echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
           kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
           exit 1
