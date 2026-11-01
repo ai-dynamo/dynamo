@@ -13,7 +13,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 import aiohttp
 import requests
@@ -6910,6 +6910,110 @@ def _priority_request_id() -> str:
     return str(uuid.uuid4())
 
 
+def _canonical_request_uuid(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise AssertionError(f"{label}: request id {value!r} is empty")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise AssertionError(f"{label}: request id {value!r} is not a UUID") from exc
+    canonical = str(parsed)
+    if value != canonical:
+        raise AssertionError(
+            f"{label}: request id {value!r} is not canonical {canonical}"
+        )
+    return canonical
+
+
+def _cmpl_internal_request_id(raw: Any, *, label: str) -> str:
+    prefix = "cmpl-"
+    if not isinstance(raw, str) or not raw.startswith(prefix):
+        raise AssertionError(
+            f"{label}: SSE id {raw!r} does not have the exact {prefix} prefix"
+        )
+    return _canonical_request_uuid(raw[len(prefix) :], label=label)
+
+
+def _prefill_records_after(stack, boundary: int) -> list[dict[str, Any]]:
+    records = stack.selection_records()
+    if boundary < 0 or boundary > len(records):
+        raise AssertionError(
+            f"owned selection boundary {boundary} is outside {len(records)} records"
+        )
+    return [
+        record
+        for record in records[boundary:]
+        if record.get("worker_type") == "prefill"
+    ]
+
+
+def _require_eligible_prefill_booking(
+    record: Mapping[str, Any], *, expected_prefill: int, label: str
+) -> str:
+    request_id = _canonical_request_uuid(record.get("request_id"), label=label)
+    if record.get("worker_type") != "prefill":
+        raise AssertionError(f"{label}: booking is not prefill: {record}")
+    candidates = record.get("candidates") or []
+    if record.get("candidate_count") != 1 or len(candidates) != 1:
+        raise AssertionError(
+            f"{label}: booking is not one candidate_count/triple: {record}"
+        )
+    worker_id, dp_rank, cost = candidates[0]
+    if worker_id != expected_prefill or dp_rank != 0:
+        raise AssertionError(
+            f"{label}: booking worker/rank is {(worker_id, dp_rank)}, "
+            f"expected ({expected_prefill}, 0): {record}"
+        )
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        raise AssertionError(f"{label}: booking cost is not numeric: {record}")
+    if cost != cost or cost in (float("inf"), float("-inf")):
+        raise AssertionError(f"{label}: booking cost is not finite: {record}")
+    return request_id
+
+
+def _require_no_prior_selection(stack, *, case_name: str) -> int:
+    prior = stack.selection_records()
+    if prior:
+        raise AssertionError(
+            f"{case_name}: owned selection records are not empty before blocker: "
+            f"{prior}"
+        )
+    return 0
+
+
+def _require_fe_generation_internal_ids(
+    outcomes: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    booked_blocker_id: str,
+    case_name: str,
+) -> dict[str, str]:
+    ids: dict[str, str] = {}
+    for label, outcome in outcomes:
+        if "error" in outcome:
+            raise AssertionError(f"{case_name} FE {label} failed: {outcome['error']}")
+        if outcome.get("status") != 200:
+            raise AssertionError(
+                f"{case_name} FE {label} HTTP {outcome.get('status')}: "
+                f"{str(outcome.get('text', ''))[:300]}"
+            )
+        internal = outcome.get("internal_id")
+        if not isinstance(internal, str) or not internal:
+            raise AssertionError(
+                f"{case_name} FE {label} missing response-owned internal id"
+            )
+        ids[label] = internal
+    if ids["blocker"] != booked_blocker_id:
+        raise AssertionError(
+            f"{case_name}: blocker SSE internal id {ids['blocker']!r} != "
+            f"post-book {booked_blocker_id!r}"
+        )
+    if len(set(ids.values())) != 3:
+        raise AssertionError(
+            f"{case_name}: FE internal ids are not distinct: {ids}"
+        )
+    return ids
+
+
 def _start_frontend_generation(
     stack,
     payload,
@@ -6934,7 +7038,6 @@ def _start_frontend_generation(
     def _run() -> None:
         try:
             merged = dict(merge_request_headers(request_id, headers))
-            merged["x-dynamo-request-id"] = request_id
             with requests.Session() as session:
                 session.trust_env = False
                 response = session.post(
@@ -6966,6 +7069,19 @@ def _start_frontend_generation(
                         raise AssertionError(
                             f"{label}: FE generation stream contained " "an error chunk"
                         )
+                    derived = _cmpl_internal_request_id(chunk.get("id"), label=label)
+                    recorded = outcome.get("internal_id")
+                    if recorded is None:
+                        outcome["internal_id"] = derived
+                    elif recorded != derived:
+                        raise AssertionError(
+                            f"{label}: FE generation SSE ids are mixed "
+                            f"{recorded!r} vs {derived!r}"
+                        )
+                if "internal_id" not in outcome:
+                    raise AssertionError(
+                        f"{label}: FE generation stream has no cmpl- internal id"
+                    )
         except Exception as exc:
             outcome["error"] = exc
 
@@ -6975,53 +7091,139 @@ def _start_frontend_generation(
     return thread, outcome
 
 
+def _assert_held_generation_open(
+    outcome: Mapping[str, Any],
+    thread,
+    *,
+    label: str,
+    when: str,
+) -> None:
+    if "error" in outcome:
+        raise AssertionError(
+            f"{label} finished with error {when}: {outcome['error']}"
+        )
+    status = outcome.get("status")
+    if status is not None and status != 200:
+        raise AssertionError(
+            f"{label} HTTP {status} {when}: "
+            f"{str(outcome.get('text', ''))[:300]}"
+        )
+    if "text" in outcome:
+        raise AssertionError(f"{label} completed {when}: {outcome!r}")
+    if not thread.is_alive():
+        raise AssertionError(f"{label} thread exited {when}")
+
+
+def _require_priority_threads_finished(
+    threads: Sequence[tuple[str, Any]],
+    *,
+    case_name: str,
+) -> None:
+    alive = [label for label, thread in threads if thread.is_alive()]
+    if alive:
+        raise AssertionError(
+            f"{case_name}: FE threads still alive after join: {alive}"
+        )
+
+
 def _wait_prefill_booking(
-    stack, request_id: str, deadline: float, expected_prefill: int
+    stack,
+    *,
+    boundary: int,
+    deadline: float,
+    expected_prefill: int,
+    blocker_thread,
+    blocker_out,
+    case_name: str,
 ):
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        for record in stack.selection_records():
-            if (
-                record.get("request_id") != request_id
-                or record.get("worker_type") != "prefill"
-            ):
-                continue
-            ids = []
-            for row in record.get("candidates") or []:
-                if isinstance(row, (list, tuple)) and row:
-                    ids.append(int(row[0]))
-            if expected_prefill not in ids:
-                raise AssertionError(
-                    f"FE booking for {request_id} is not eligible prefill "
-                    f"{expected_prefill}: {record}"
-                )
-            return record
+        _assert_held_generation_open(
+            blocker_out,
+            blocker_thread,
+            label=f"{case_name}: FE blocker",
+            when="before booking",
+        )
+        fresh = _prefill_records_after(stack, boundary)
+        if len(fresh) > 1:
+            raise AssertionError(
+                f"{case_name}: FE blocker booking is ambiguous: {fresh}"
+            )
+        if len(fresh) == 1:
+            request_id = _require_eligible_prefill_booking(
+                fresh[0],
+                expected_prefill=expected_prefill,
+                label=f"{case_name}-blocker",
+            )
+            return request_id, fresh[0]
         time.sleep(0.05)
     raise AssertionError(
-        f"FE booking trace missing for request_id={request_id}: "
-        f"{stack.selection_records()}"
+        f"{case_name}: FE blocker post-book prefill missing after boundary "
+        f"{boundary}: {stack.selection_records()}"
     )
 
 
 def _wait_fe_priority_prefill_order(
-    stack, low_id: str, high_id: str, deadline: float, case_name: str
+    stack,
+    *,
+    low_id: str,
+    high_id: str,
+    blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
+    deadline: float,
+    case_name: str,
 ) -> list[str]:
     last: list[str] = []
+    blocker_count = 0
     while time.monotonic() < deadline:
         last = []
-        for record in stack.selection_records():
-            if record.get("worker_type") != "prefill":
-                continue
+        seen: set[str] = set()
+        blocker_count = 0
+        for record in _prefill_records_after(stack, boundary):
             rid = record.get("request_id")
-            if rid in {low_id, high_id} and rid not in last:
-                last.append(rid)
-        if len(last) == 2:
+            if rid == blocker_id:
+                if blocker_count:
+                    raise AssertionError(
+                        f"{case_name}: duplicate FE blocker prefill {record}"
+                    )
+                _require_eligible_prefill_booking(
+                    record,
+                    expected_prefill=expected_prefill,
+                    label=f"{case_name}-blocker",
+                )
+                blocker_count += 1
+                continue
+            if rid not in {low_id, high_id}:
+                raise AssertionError(
+                    f"{case_name}: unexpected FE prefill booking {record}"
+                )
+            if rid in seen:
+                raise AssertionError(
+                    f"{case_name}: duplicate FE prefill booking {record}"
+                )
+            _require_eligible_prefill_booking(
+                record,
+                expected_prefill=expected_prefill,
+                label=f"{case_name}-{rid}",
+            )
+            seen.add(rid)
+            last.append(rid)
+        if blocker_count != 1:
+            if last:
+                raise AssertionError(
+                    f"{case_name}: FE post-boundary cohort is not exactly "
+                    f"one blocker plus low/high: blocker={blocker_count} "
+                    f"low/high={last}"
+                )
+        elif len(last) == 2:
             return last
         time.sleep(0.05)
     raise AssertionError(
-        f"{case_name}: FE low/high prefill traces are {last}, expected both"
+        f"{case_name}: FE post-boundary prefill cohort is blocker="
+        f"{blocker_count} low/high={last}, expected one blocker plus both"
     )
 
 
@@ -7143,7 +7345,6 @@ def _post_fe_priority_sentinel(
     if remaining <= 0:
         raise AssertionError(f"{case_name}: FE hold budget exhausted before sentinel")
     headers = dict(merge_request_headers(sentinel_id, None))
-    headers["x-dynamo-request-id"] = sentinel_id
     with requests.Session() as session:
         session.trust_env = False
         sentinel = session.post(
@@ -7163,35 +7364,36 @@ def _assert_priority_hold_pending(
     low_out,
     high_out,
     blocker_id: str,
-    low_id: str,
-    high_id: str,
+    boundary: int,
+    expected_prefill: int,
     case_name: str,
 ) -> None:
-    if "error" in low_out or "error" in high_out:
+    _assert_held_generation_open(
+        low_out,
+        low_thread,
+        label=f"{case_name}: FE low",
+        when="during hold",
+    )
+    _assert_held_generation_open(
+        high_out,
+        high_thread,
+        label=f"{case_name}: FE high",
+        when="during hold",
+    )
+    fresh = _prefill_records_after(stack, boundary)
+    if len(fresh) != 1:
         raise AssertionError(
-            f"{case_name}: FE low/high finished with error during hold: "
-            f"{low_out!r} {high_out!r}"
+            f"{case_name}: FE hold has {len(fresh)} post-boundary prefill "
+            f"bookings, expected only the blocker: {fresh}"
         )
-    if "status" in low_out or "status" in high_out:
+    booked = _require_eligible_prefill_booking(
+        fresh[0],
+        expected_prefill=expected_prefill,
+        label=f"{case_name}-blocker",
+    )
+    if booked != blocker_id:
         raise AssertionError(
-            f"{case_name}: FE low/high HTTP finished during hold: "
-            f"{low_out!r} {high_out!r}"
-        )
-    if not low_thread.is_alive() or not high_thread.is_alive():
-        raise AssertionError(f"{case_name}: FE low/high thread exited during hold")
-    blocker_booked = False
-    for record in stack.selection_records():
-        rid = record.get("request_id")
-        if rid in {low_id, high_id}:
-            raise AssertionError(
-                f"{case_name}: FE low/high has a typed selection during hold: "
-                f"{record}"
-            )
-        if rid == blocker_id and record.get("worker_type") == "prefill":
-            blocker_booked = True
-    if not blocker_booked:
-        raise AssertionError(
-            f"{case_name}: FE blocker prefill booking missing during hold"
+            f"{case_name}: FE hold prefill {booked!r} != blocker {blocker_id!r}"
         )
 
 
@@ -7224,8 +7426,8 @@ def _wait_priority_queue_ordering(
     low_out,
     high_out,
     blocker_id: str,
-    low_id: str,
-    high_id: str,
+    boundary: int,
+    expected_prefill: int,
 ) -> None:
     from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
 
@@ -7240,8 +7442,8 @@ def _wait_priority_queue_ordering(
             low_out=low_out,
             high_out=high_out,
             blocker_id=blocker_id,
-            low_id=low_id,
-            high_id=high_id,
+            boundary=boundary,
+            expected_prefill=expected_prefill,
             case_name=case_name,
         )
         last = stack.queue_ordering_records(after_bytes=after_bytes)
@@ -7258,8 +7460,8 @@ def _wait_priority_queue_ordering(
                 low_out=low_out,
                 high_out=high_out,
                 blocker_id=blocker_id,
-                low_id=low_id,
-                high_id=high_id,
+                boundary=boundary,
+                expected_prefill=expected_prefill,
                 case_name=case_name,
             )
             return
@@ -7278,6 +7480,8 @@ def _prove_fe_priority_capacity(
     deadline: float,
     case_name: str,
     blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
     low_id: str,
     high_id: str,
     sentinel_id: str,
@@ -7320,8 +7524,8 @@ def _prove_fe_priority_capacity(
         low_out=low_out,
         high_out=high_out,
         blocker_id=blocker_id,
-        low_id=low_id,
-        high_id=high_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
     )
     _assert_priority_catalog(stack, catalog, "before FE sentinel")
     sentinel = _post_fe_priority_sentinel(
@@ -7334,8 +7538,8 @@ def _prove_fe_priority_capacity(
         low_out=low_out,
         high_out=high_out,
         blocker_id=blocker_id,
-        low_id=low_id,
-        high_id=high_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
         case_name=case_name,
     )
     _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, case_name)
@@ -7346,8 +7550,8 @@ def _prove_fe_priority_capacity(
         low_out=low_out,
         high_out=high_out,
         blocker_id=blocker_id,
-        low_id=low_id,
-        high_id=high_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
         case_name=case_name,
     )
     _assert_priority_catalog(stack, catalog, "during FE hold")
@@ -7573,6 +7777,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
     fe_error = None
     try:
         _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        boundary = _require_no_prior_selection(stack, case_name=kind)
         blocker_thread, blocker = _start_frontend_generation(
             stack,
             case["payload"],
@@ -7582,7 +7787,15 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
             deadline=deadline,
             label=f"{kind}-blocker",
         )
-        _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
+        blocker_internal, _booking = _wait_prefill_booking(
+            stack,
+            boundary=boundary,
+            deadline=deadline,
+            expected_prefill=catalog["prefill"],
+            blocker_thread=blocker_thread,
+            blocker_out=blocker,
+            case_name=kind,
+        )
         (
             low_thread,
             low_out,
@@ -7595,7 +7808,9 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
             catalog=catalog,
             deadline=deadline,
             case_name=kind,
-            blocker_id=blocker_id,
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
             low_id=low_id,
             high_id=high_id,
             sentinel_id=sentinel_id,
@@ -7612,22 +7827,34 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
         for thread in (blocker_thread, low_thread, high_thread):
             thread.join(timeout=max(leftover, 0.0))
             leftover = join_deadline - time.monotonic()
-        for label, outcome in (
-            ("blocker", blocker),
-            ("low", low_out),
-            ("high", high_out),
-        ):
-            if "error" in outcome:
-                raise AssertionError(f"{kind} FE {label} failed: {outcome['error']}")
-            if outcome.get("status") != 200:
-                raise AssertionError(
-                    f"{kind} FE {label} HTTP {outcome.get('status')}: "
-                    f"{str(outcome.get('text', ''))[:300]}"
-                )
-        fe_order = _wait_fe_priority_prefill_order(
-            stack, low_id, high_id, join_deadline, kind
+        _require_priority_threads_finished(
+            (
+                ("blocker", blocker_thread),
+                ("low", low_thread),
+                ("high", high_thread),
+            ),
+            case_name=kind,
         )
-        if fe_order != [high_id, low_id]:
+        internals = _require_fe_generation_internal_ids(
+            (
+                ("blocker", blocker),
+                ("low", low_out),
+                ("high", high_out),
+            ),
+            booked_blocker_id=blocker_internal,
+            case_name=kind,
+        )
+        fe_order = _wait_fe_priority_prefill_order(
+            stack,
+            low_id=internals["low"],
+            high_id=internals["high"],
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
+            deadline=join_deadline,
+            case_name=kind,
+        )
+        if fe_order != [internals["high"], internals["low"]]:
             raise AssertionError(
                 f"{kind}: FE admission order {fe_order} is not high then low"
             )
@@ -7769,7 +7996,7 @@ def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
         if admitted != "high" or pending != "low":
             if (
                 kind in {"header_strict", "header_normal"}
-                and fe_order == [high_id, low_id]
+                and fe_order == [internals["high"], internals["low"]]
                 and admitted == "low"
                 and pending == "high"
             ):
@@ -7813,6 +8040,7 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
     fe_error = None
     try:
         _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        boundary = _require_no_prior_selection(stack, case_name="sentinel")
         blocker_thread, blocker = _start_frontend_generation(
             stack,
             case["payload"],
@@ -7822,7 +8050,15 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             deadline=deadline,
             label="sentinel-blocker",
         )
-        _wait_prefill_booking(stack, blocker_id, deadline, catalog["prefill"])
+        blocker_internal, _booking = _wait_prefill_booking(
+            stack,
+            boundary=boundary,
+            deadline=deadline,
+            expected_prefill=catalog["prefill"],
+            blocker_thread=blocker_thread,
+            blocker_out=blocker,
+            case_name="sentinel",
+        )
         (
             low_thread,
             low_out,
@@ -7835,7 +8071,9 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
             catalog=catalog,
             deadline=deadline,
             case_name="sentinel",
-            blocker_id=blocker_id,
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
             low_id=low_id,
             high_id=high_id,
             sentinel_id=sentinel_id,
@@ -7852,15 +8090,23 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
         for thread in (blocker_thread, low_thread, high_thread):
             thread.join(timeout=max(leftover, 0.0))
             leftover = join_deadline - time.monotonic()
-        for label, outcome in (
-            ("blocker", blocker),
-            ("low", low_out),
-            ("high", high_out),
-        ):
-            if "error" in outcome or outcome.get("status") != 200:
-                raise AssertionError(
-                    f"sentinel FE {label} did not complete after CONT: " f"{outcome}"
-                )
+        _require_priority_threads_finished(
+            (
+                ("blocker", blocker_thread),
+                ("low", low_thread),
+                ("high", high_thread),
+            ),
+            case_name="sentinel",
+        )
+        _require_fe_generation_internal_ids(
+            (
+                ("blocker", blocker),
+                ("low", low_out),
+                ("high", high_out),
+            ),
+            booked_blocker_id=blocker_internal,
+            case_name="sentinel",
+        )
     except BaseException as exc:
         fe_error = exc
     _finish_fe_priority_hold(stack, fe_error)
