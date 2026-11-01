@@ -4,7 +4,7 @@
 //! Shared direct-ZMQ SUB socket grouping for high-fanout KV ingress.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     sync::Arc,
     time::Duration,
@@ -20,6 +20,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+
+use crate::utils::zmq::multipart_message;
 
 const GROUP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -57,10 +59,20 @@ pub(crate) enum DirectZmqSubItem {
     IdentityMismatch,
 }
 
+/// Undecoded multipart frames from a pool that routes by raw topic frame.
+pub(crate) type RawZmqFrames = Vec<Vec<u8>>;
+
+enum RouteSender {
+    Envelope(mpsc::Sender<DirectZmqSubItem>),
+    Raw(mpsc::Sender<RawZmqFrames>),
+}
+
 struct GroupRoute {
     endpoint: String,
     generation: u64,
-    sender: mpsc::Sender<DirectZmqSubItem>,
+    sender: RouteSender,
+    /// Raw-topic pools subscribe per route and route by this exact topic frame.
+    topic: Option<Vec<u8>>,
     disconnected: CancellationToken,
 }
 
@@ -94,15 +106,44 @@ enum GroupCommand {
 
 struct SocketGroup {
     assignments: HashMap<u64, u64>,
+    /// Routes per connected endpoint. Publishers that share one PUB endpoint share
+    /// one connection, so they must land in the same group.
+    endpoints: HashMap<String, usize>,
+    /// Raw-topic routes. Frames route by exact topic, so topics are unique per group.
+    topics: HashSet<Vec<u8>>,
     command_tx: mpsc::UnboundedSender<GroupCommand>,
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+}
+
+impl SocketGroup {
+    fn accepts_topic(&self, topic: Option<&[u8]>) -> bool {
+        topic.is_none_or(|topic| !self.topics.contains(topic))
+    }
 }
 
 struct PoolInner {
     groups: HashMap<u64, SocketGroup>,
     next_group_id: u64,
     closed: bool,
+    /// Publishers discovered behind each shared endpoint, registered or not.
+    discovered: HashMap<String, usize>,
+}
+
+impl PoolInner {
+    /// Publishers a group carries: per endpoint, the larger of its registered
+    /// routes and the publishers discovered behind it.
+    fn load(&self, group: &SocketGroup) -> usize {
+        group
+            .endpoints
+            .iter()
+            .map(|(endpoint, routes)| (*routes).max(self.discovered_on(endpoint)))
+            .sum()
+    }
+
+    fn discovered_on(&self, endpoint: &str) -> usize {
+        self.discovered.get(endpoint).copied().unwrap_or(0)
+    }
 }
 
 #[derive(Clone)]
@@ -111,15 +152,19 @@ pub(crate) struct DirectZmqSubPool {
     topic: Arc<str>,
     endpoints_per_sub: usize,
     rcvhwm: i32,
+    shared_endpoints: bool,
+    raw_topics: bool,
     cancellation_token: CancellationToken,
 }
 
-pub(crate) struct DirectZmqSubRegistration {
+pub(crate) struct DirectZmqSubRegistration<T = DirectZmqSubItem> {
     pub(crate) group_id: u64,
-    pub(crate) receiver: mpsc::Receiver<DirectZmqSubItem>,
+    pub(crate) receiver: mpsc::Receiver<T>,
     pub(crate) disconnected: CancellationToken,
     pool: DirectZmqSubPool,
     publisher_id: u64,
+    endpoint: String,
+    topic: Option<Vec<u8>>,
     generation: u64,
     armed: bool,
 }
@@ -136,7 +181,7 @@ enum DispatchOutcome {
     GroupCancelled,
 }
 
-impl DirectZmqSubRegistration {
+impl<T> DirectZmqSubRegistration<T> {
     fn release(&mut self) -> Option<SocketGroup> {
         if !self.armed {
             return None;
@@ -145,8 +190,13 @@ impl DirectZmqSubRegistration {
         // queuing the ordered endpoint removal.
         self.receiver.close();
         self.armed = false;
-        self.pool
-            .remove_registration(self.group_id, self.publisher_id, self.generation)
+        self.pool.remove_registration(
+            self.group_id,
+            self.publisher_id,
+            &self.endpoint,
+            self.topic.as_deref(),
+            self.generation,
+        )
     }
 
     pub(crate) async fn close(mut self) {
@@ -178,7 +228,7 @@ impl DirectZmqSubConnection {
     }
 }
 
-impl Drop for DirectZmqSubRegistration {
+impl<T> Drop for DirectZmqSubRegistration<T> {
     fn drop(&mut self) {
         if let Some(group) = self.release() {
             tokio::spawn(stop_group(group));
@@ -200,12 +250,58 @@ impl DirectZmqSubPool {
                 groups: HashMap::new(),
                 next_group_id: 1,
                 closed: false,
+                discovered: HashMap::new(),
             })),
             topic: topic.into(),
             endpoints_per_sub,
             rcvhwm,
+            shared_endpoints: false,
+            raw_topics: false,
             cancellation_token,
         })
+    }
+
+    /// A pool for raw publishers, such as vLLM KV event streams, whose frames
+    /// carry no publisher ID. Each route subscribes to its own topic and receives
+    /// the frames whose topic frame matches it exactly, undecoded.
+    pub(crate) fn new_raw(
+        endpoints_per_sub: usize,
+        rcvhwm: i32,
+        cancellation_token: CancellationToken,
+    ) -> Result<Self> {
+        let mut pool = Self::new("raw", endpoints_per_sub, rcvhwm, cancellation_token)?;
+        pool.raw_topics = true;
+        Ok(pool)
+    }
+
+    /// Expect several publishers behind one PUB endpoint, as a KV state-agent host
+    /// multiplexes its slots. Every source then joins a group, so each endpoint is
+    /// connected once and routed by publisher ID; a dedicated socket would receive
+    /// every co-located publisher's traffic.
+    pub(crate) fn with_shared_endpoints(mut self) -> Self {
+        self.shared_endpoints = true;
+        self
+    }
+
+    /// Record a publisher discovered behind `endpoint`, before it registers. A
+    /// shared endpoint is placed by every publisher it carries, since all of them
+    /// will join the group that connects it.
+    pub(crate) fn expect_publisher(&self, endpoint: &str) {
+        if self.shared_endpoints {
+            *self
+                .inner
+                .lock()
+                .discovered
+                .entry(endpoint.to_string())
+                .or_default() += 1;
+        }
+    }
+
+    /// Undo [`Self::expect_publisher`] once the publisher is no longer discovered.
+    pub(crate) fn forget_publisher(&self, endpoint: &str) {
+        if self.shared_endpoints {
+            release_endpoint(&mut self.inner.lock().discovered, endpoint);
+        }
     }
 
     pub(crate) async fn connect(
@@ -214,7 +310,7 @@ impl DirectZmqSubPool {
         endpoint: &str,
         generation: u64,
     ) -> Result<DirectZmqSubConnection> {
-        if self.endpoints_per_sub == 1 {
+        if self.endpoints_per_sub == 1 && !self.shared_endpoints {
             anyhow::ensure!(
                 !self.inner.lock().closed,
                 "direct-ZMQ socket pool is closed"
@@ -240,8 +336,57 @@ impl DirectZmqSubPool {
         endpoint: &str,
         generation: u64,
     ) -> Result<DirectZmqSubRegistration> {
+        anyhow::ensure!(!self.raw_topics, "raw-topic pools route raw sources only");
+        self.register_route(
+            publisher_id,
+            endpoint,
+            None,
+            generation,
+            RouteSender::Envelope,
+        )
+        .await
+    }
+
+    /// Route the frames `endpoint` publishes on exactly `topic` to `route_id`.
+    /// Topics must be non-empty, and a group holds each topic once: subscriptions
+    /// are prefix filters, so frames are routed only by an exact topic match.
+    pub(crate) async fn register_raw(
+        &self,
+        route_id: u64,
+        endpoint: &str,
+        topic: &str,
+        generation: u64,
+    ) -> Result<DirectZmqSubRegistration<RawZmqFrames>> {
+        anyhow::ensure!(self.raw_topics, "pool routes event-plane envelopes");
+        anyhow::ensure!(!topic.is_empty(), "pooled raw sources need a topic");
+        self.register_route(
+            route_id,
+            endpoint,
+            Some(topic),
+            generation,
+            RouteSender::Raw,
+        )
+        .await
+    }
+
+    async fn register_route<T>(
+        &self,
+        publisher_id: u64,
+        endpoint: &str,
+        topic: Option<&str>,
+        generation: u64,
+        route_sender: fn(mpsc::Sender<T>) -> RouteSender,
+    ) -> Result<DirectZmqSubRegistration<T>> {
         let (sender, receiver) = mpsc::channel(self.rcvhwm as usize);
+        let topic_bytes = topic.map(|topic| topic.as_bytes().to_vec());
         let disconnected = CancellationToken::new();
+        let route = GroupRoute {
+            endpoint: endpoint.to_string(),
+            generation,
+            sender: route_sender(sender),
+            topic: topic_bytes.clone(),
+            disconnected: disconnected.clone(),
+        };
         let (group_id, completion) = {
             let mut inner = self.inner.lock();
             Self::reap_failed_groups(&mut inner);
@@ -254,16 +399,37 @@ impl DirectZmqSubPool {
                 "publisher {publisher_id} is already registered"
             );
 
-            let group_id = inner
+            let running =
+                |group: &SocketGroup| !group.command_tx.is_closed() && !group.handle.is_finished();
+            // A group already connected to this endpoint takes the route even when
+            // full: a second connection would duplicate every co-located publisher.
+            let affine = inner
                 .groups
                 .iter()
-                .filter(|(_, group)| {
-                    group.assignments.len() < self.endpoints_per_sub
-                        && !group.command_tx.is_closed()
-                        && !group.handle.is_finished()
-                })
-                .min_by_key(|(group_id, group)| (group.assignments.len(), **group_id))
-                .map(|(group_id, _)| *group_id);
+                .find(|(_, group)| group.endpoints.contains_key(endpoint) && running(group));
+            if let Some((_, group)) = affine {
+                anyhow::ensure!(
+                    group.accepts_topic(topic_bytes.as_deref()),
+                    "duplicate raw topic on endpoint {endpoint}"
+                );
+            }
+            // A new endpoint brings every publisher discovered behind it, so place it
+            // by that count; otherwise discovery order decides which group ends up
+            // reading most shared endpoints.
+            let weight = inner.discovered_on(endpoint).max(1);
+            let group_id = affine.map(|(group_id, _)| *group_id).or_else(|| {
+                inner
+                    .groups
+                    .iter()
+                    .map(|(group_id, group)| (*group_id, group, inner.load(group)))
+                    .filter(|(_, group, load)| {
+                        load + weight <= self.endpoints_per_sub
+                            && running(group)
+                            && group.accepts_topic(topic_bytes.as_deref())
+                    })
+                    .min_by_key(|(group_id, _, load)| (*load, *group_id))
+                    .map(|(group_id, _, _)| group_id)
+            });
 
             if let Some(group_id) = group_id {
                 let group = inner
@@ -271,52 +437,50 @@ impl DirectZmqSubPool {
                     .get_mut(&group_id)
                     .expect("selected socket group must exist");
                 group.assignments.insert(publisher_id, generation);
+                *group.endpoints.entry(endpoint.to_string()).or_default() += 1;
+                group.topics.extend(topic_bytes.clone());
                 let (completed, completion) = oneshot::channel();
                 let command = GroupCommand::Add {
                     publisher_id,
-                    route: GroupRoute {
-                        endpoint: endpoint.to_string(),
-                        generation,
-                        sender,
-                        disconnected: disconnected.clone(),
-                    },
+                    route,
                     completed,
                 };
                 if group.command_tx.send(command).is_err() {
                     group.assignments.remove(&publisher_id);
+                    release_endpoint(&mut group.endpoints, endpoint);
+                    release_topic(&mut group.topics, topic_bytes.as_deref());
                     anyhow::bail!("direct-ZMQ socket group stopped");
                 }
                 (group_id, Some(completion))
             } else {
                 // libzmq connects asynchronously. Keep group creation serialized so
                 // concurrent registrations cannot create excess transient sockets.
-                let socket =
-                    DynamicZmqSubSocket::connect_with_rcvhwm(endpoint, &self.topic, self.rcvhwm)?;
+                let socket = DynamicZmqSubSocket::connect_with_rcvhwm(
+                    endpoint,
+                    topic.unwrap_or(&self.topic),
+                    self.rcvhwm,
+                )?;
                 let group_id = inner.next_group_id;
                 inner.next_group_id = inner.next_group_id.wrapping_add(1);
                 let (command_tx, command_rx) = mpsc::unbounded_channel();
                 let cancel = self.cancellation_token.child_token();
-                let routes = HashMap::from([(
-                    publisher_id,
-                    GroupRoute {
-                        endpoint: endpoint.to_string(),
-                        generation,
-                        sender,
-                        disconnected: disconnected.clone(),
-                    },
-                )]);
+                let routes = HashMap::from([(publisher_id, route)]);
                 let handle = tokio::spawn(run_socket_group(
                     group_id,
                     self.topic.clone(),
                     socket,
                     routes,
                     command_rx,
+                    self.shared_endpoints,
+                    self.raw_topics,
                     cancel.clone(),
                 ));
                 inner.groups.insert(
                     group_id,
                     SocketGroup {
                         assignments: HashMap::from([(publisher_id, generation)]),
+                        endpoints: HashMap::from([(endpoint.to_string(), 1)]),
+                        topics: topic_bytes.clone().into_iter().collect(),
                         command_tx,
                         cancel,
                         handle,
@@ -329,6 +493,8 @@ impl DirectZmqSubPool {
             pool: self.clone(),
             group_id,
             publisher_id,
+            endpoint: endpoint.to_string(),
+            topic: topic_bytes,
             generation,
             receiver,
             disconnected,
@@ -358,6 +524,8 @@ impl DirectZmqSubPool {
         &self,
         group_id: u64,
         publisher_id: u64,
+        endpoint: &str,
+        topic: Option<&[u8]>,
         generation: u64,
     ) -> Option<SocketGroup> {
         let mut inner = self.inner.lock();
@@ -367,6 +535,8 @@ impl DirectZmqSubPool {
             return None;
         }
         group.assignments.remove(&publisher_id);
+        release_endpoint(&mut group.endpoints, endpoint);
+        release_topic(&mut group.topics, topic);
         if group.assignments.is_empty() {
             let group = inner
                 .groups
@@ -421,16 +591,108 @@ impl DirectZmqSubPool {
     }
 }
 
+/// One group socket's routes, and for raw-topic pools the topic index into them.
+struct GroupRoutes {
+    routes: HashMap<u64, GroupRoute>,
+    by_topic: HashMap<Vec<u8>, u64>,
+}
+
+impl GroupRoutes {
+    fn new(routes: HashMap<u64, GroupRoute>) -> Self {
+        let by_topic = routes
+            .iter()
+            .filter_map(|(publisher_id, route)| Some((route.topic.clone()?, *publisher_id)))
+            .collect();
+        Self { routes, by_topic }
+    }
+
+    fn add(
+        &mut self,
+        socket: &mut DynamicZmqSubSocket,
+        publisher_id: u64,
+        route: GroupRoute,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.routes.contains_key(&publisher_id),
+            "publisher {publisher_id} is already registered"
+        );
+        // Already connected for a co-located publisher.
+        if !self
+            .routes
+            .values()
+            .any(|existing| existing.endpoint == route.endpoint)
+        {
+            socket.add_endpoint(&route.endpoint)?;
+        }
+        if let Some(topic) = &route.topic {
+            socket.subscribe(topic)?;
+            self.by_topic.insert(topic.clone(), publisher_id);
+        }
+        self.routes.insert(publisher_id, route);
+        Ok(())
+    }
+
+    fn remove(
+        &mut self,
+        socket: &mut DynamicZmqSubSocket,
+        publisher_id: u64,
+        generation: u64,
+    ) -> Result<()> {
+        match self.routes.get(&publisher_id) {
+            Some(route) if route.generation == generation => {
+                let route = self
+                    .routes
+                    .remove(&publisher_id)
+                    .expect("route was present");
+                if let Some(topic) = &route.topic {
+                    self.by_topic.remove(topic);
+                    socket.unsubscribe(topic)?;
+                }
+                if self
+                    .routes
+                    .values()
+                    .any(|other| other.endpoint == route.endpoint)
+                {
+                    return Ok(());
+                }
+                socket.remove_endpoint(&route.endpoint)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+enum GroupMessage {
+    Envelope(ZmqWireMessage),
+    Raw(tmq::Multipart),
+}
+
+async fn next_group_message(
+    socket: &mut DynamicZmqSubSocket,
+    raw_topics: bool,
+) -> Option<Result<GroupMessage>> {
+    if raw_topics {
+        let frames = socket.next_frames().await?;
+        Some(frames.map(GroupMessage::Raw))
+    } else {
+        let message = socket.next().await?;
+        Some(message.map(GroupMessage::Envelope))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_socket_group(
     group_id: u64,
     topic: Arc<str>,
     mut socket: DynamicZmqSubSocket,
-    mut routes: HashMap<u64, GroupRoute>,
+    routes: HashMap<u64, GroupRoute>,
     mut command_rx: mpsc::UnboundedReceiver<GroupCommand>,
+    shared_endpoints: bool,
+    raw_topics: bool,
     cancellation_token: CancellationToken,
 ) {
     let codec = Codec::default();
+    let mut routes = GroupRoutes::new(routes);
     loop {
         tokio::select! {
             biased;
@@ -441,19 +703,10 @@ async fn run_socket_group(
                 };
                 match command {
                     GroupCommand::Add { publisher_id, route, completed } => {
-                        let result = if routes.contains_key(&publisher_id) {
-                            Err(anyhow::anyhow!("publisher {publisher_id} is already registered"))
-                        } else if routes.values().any(|existing| existing.endpoint == route.endpoint) {
-                            Err(anyhow::anyhow!("endpoint {} is already registered", route.endpoint))
-                        } else {
-                            socket.add_endpoint(&route.endpoint).map(|()| {
-                                routes.insert(publisher_id, route);
-                            })
-                        };
-                        let _ = completed.send(result);
+                        let _ = completed.send(routes.add(&mut socket, publisher_id, route));
                     }
                     GroupCommand::Remove { publisher_id, generation } => {
-                        if let Err(error) = remove_route(&mut socket, &mut routes, publisher_id, generation) {
+                        if let Err(error) = routes.remove(&mut socket, publisher_id, generation) {
                             tracing::warn!(
                                 %error,
                                 group_id,
@@ -479,7 +732,8 @@ async fn run_socket_group(
                             &topic,
                             message,
                             &codec,
-                            &routes,
+                            &routes.routes,
+                            shared_endpoints,
                             &cancellation_token,
                         )
                         .await;
@@ -497,27 +751,32 @@ async fn run_socket_group(
                     }
                 }
             }
-            message = socket.next() => {
+            message = next_group_message(&mut socket, raw_topics) => {
                 let Some(message) = message else {
                     tracing::warn!(group_id, topic = %topic, "Direct-ZMQ socket group stopped");
                     return;
                 };
-                let message = match message {
-                    Ok(message) => message,
+                let outcome = match message {
+                    Ok(GroupMessage::Envelope(message)) => {
+                        dispatch_group_message(
+                            group_id,
+                            &topic,
+                            message,
+                            &codec,
+                            &routes.routes,
+                            shared_endpoints,
+                            &cancellation_token,
+                        )
+                        .await
+                    }
+                    Ok(GroupMessage::Raw(frames)) => {
+                        dispatch_raw_message(group_id, frames, &routes, &cancellation_token).await
+                    }
                     Err(error) => {
                         tracing::warn!(%error, group_id, topic = %topic, "Direct-ZMQ socket group receive failed");
                         return;
                     }
                 };
-                let outcome = dispatch_group_message(
-                    group_id,
-                    &topic,
-                    message,
-                    &codec,
-                    &routes,
-                    &cancellation_token,
-                )
-                .await;
                 if !handle_dispatch_outcome(
                     outcome,
                     group_id,
@@ -538,7 +797,7 @@ fn handle_dispatch_outcome(
     group_id: u64,
     topic: &str,
     socket: &mut DynamicZmqSubSocket,
-    routes: &mut HashMap<u64, GroupRoute>,
+    routes: &mut GroupRoutes,
 ) -> bool {
     let DispatchOutcome::RouteClosed {
         publisher_id,
@@ -548,7 +807,7 @@ fn handle_dispatch_outcome(
         return outcome == DispatchOutcome::Delivered;
     };
 
-    if let Err(error) = remove_route(socket, routes, publisher_id, generation) {
+    if let Err(error) = routes.remove(socket, publisher_id, generation) {
         tracing::warn!(
             %error,
             group_id,
@@ -561,36 +820,36 @@ fn handle_dispatch_outcome(
     true
 }
 
-fn remove_route(
-    socket: &mut DynamicZmqSubSocket,
-    routes: &mut HashMap<u64, GroupRoute>,
-    publisher_id: u64,
-    generation: u64,
-) -> Result<()> {
-    match routes.get(&publisher_id) {
-        Some(route) if route.generation == generation => {
-            let route = routes.remove(&publisher_id).expect("route was present");
-            socket.remove_endpoint(&route.endpoint)
-        }
-        _ => Ok(()),
-    }
-}
-
 async fn dispatch_group_message(
     group_id: u64,
     topic: &str,
     message: ZmqWireMessage,
     codec: &Codec,
     routes: &HashMap<u64, GroupRoute>,
+    shared_endpoints: bool,
     cancellation_token: &CancellationToken,
 ) -> DispatchOutcome {
     let Some(route) = routes.get(&message.publisher_id) else {
-        tracing::warn!(
-            group_id,
-            topic,
-            publisher_id = message.publisher_id,
-            "Dropping direct-ZMQ envelope from an unknown publisher"
-        );
+        // A shared endpoint also carries co-located publishers this router has not
+        // discovered yet; that is expected rather than a misrouted connection.
+        if shared_endpoints {
+            tracing::trace!(
+                group_id,
+                topic,
+                publisher_id = message.publisher_id,
+                "Dropping direct-ZMQ envelope from an undiscovered co-located publisher"
+            );
+        } else {
+            tracing::warn!(
+                group_id,
+                topic,
+                publisher_id = message.publisher_id,
+                "Dropping direct-ZMQ envelope from an unknown publisher"
+            );
+        }
+        return DispatchOutcome::Delivered;
+    };
+    let RouteSender::Envelope(sender) = &route.sender else {
         return DispatchOutcome::Delivered;
     };
     let item = match codec.decode_envelope(&message.payload) {
@@ -630,27 +889,92 @@ async fn dispatch_group_message(
             DirectZmqSubItem::EnvelopeDecodeError
         }
     };
+    deliver(
+        sender,
+        item,
+        message.publisher_id,
+        route.generation,
+        cancellation_token,
+    )
+    .await
+}
 
-    match route.sender.try_send(item) {
+async fn dispatch_raw_message(
+    group_id: u64,
+    frames: tmq::Multipart,
+    routes: &GroupRoutes,
+    cancellation_token: &CancellationToken,
+) -> DispatchOutcome {
+    // Subscriptions are prefix filters; only an exact topic frame is this route's.
+    let route = frames
+        .0
+        .front()
+        .and_then(|topic| routes.by_topic.get(&topic[..]))
+        .and_then(|publisher_id| Some((*publisher_id, routes.routes.get(publisher_id)?)));
+    let Some((publisher_id, route)) = route else {
+        tracing::trace!(
+            group_id,
+            "Dropping raw ZMQ frames without an exact topic route"
+        );
+        return DispatchOutcome::Delivered;
+    };
+    let RouteSender::Raw(sender) = &route.sender else {
+        return DispatchOutcome::Delivered;
+    };
+    deliver(
+        sender,
+        multipart_message(frames),
+        publisher_id,
+        route.generation,
+        cancellation_token,
+    )
+    .await
+}
+
+/// Hand one item to its route, waiting while the route is full so a slow
+/// consumer backpressures the socket instead of losing frames.
+async fn deliver<T>(
+    sender: &mpsc::Sender<T>,
+    item: T,
+    publisher_id: u64,
+    generation: u64,
+    cancellation_token: &CancellationToken,
+) -> DispatchOutcome {
+    match sender.try_send(item) {
         Ok(()) => DispatchOutcome::Delivered,
         Err(mpsc::error::TrySendError::Full(item)) => {
             let result = tokio::select! {
                 biased;
                 _ = cancellation_token.cancelled() => return DispatchOutcome::GroupCancelled,
-                result = route.sender.send(item) => result,
+                result = sender.send(item) => result,
             };
             match result {
                 Ok(()) => DispatchOutcome::Delivered,
                 Err(_) => DispatchOutcome::RouteClosed {
-                    publisher_id: message.publisher_id,
-                    generation: route.generation,
+                    publisher_id,
+                    generation,
                 },
             }
         }
         Err(mpsc::error::TrySendError::Closed(_)) => DispatchOutcome::RouteClosed {
-            publisher_id: message.publisher_id,
-            generation: route.generation,
+            publisher_id,
+            generation,
         },
+    }
+}
+
+fn release_endpoint(endpoints: &mut HashMap<String, usize>, endpoint: &str) {
+    if let Some(count) = endpoints.get_mut(endpoint) {
+        *count -= 1;
+        if *count == 0 {
+            endpoints.remove(endpoint);
+        }
+    }
+}
+
+fn release_topic(topics: &mut HashSet<Vec<u8>>, topic: Option<&[u8]>) {
+    if let Some(topic) = topic {
+        topics.remove(topic);
     }
 }
 
@@ -949,7 +1273,8 @@ mod tests {
             GroupRoute {
                 endpoint: "tcp://127.0.0.1:1".to_string(),
                 generation: 1,
-                sender,
+                sender: RouteSender::Envelope(sender),
+                topic: None,
                 disconnected: CancellationToken::new(),
             },
         )]);
@@ -962,6 +1287,7 @@ mod tests {
                 wire_message("kv-events", 1, 1),
                 &codec,
                 &routes,
+                false,
                 &CancellationToken::new(),
             )
             .await,
@@ -974,6 +1300,7 @@ mod tests {
                 wire_message("kv_metrics", 1, 2),
                 &codec,
                 &routes,
+                false,
                 &CancellationToken::new(),
             )
             .await,
@@ -985,6 +1312,142 @@ mod tests {
             DirectZmqSubItem::IdentityMismatch
         ));
         assert_eq!(sequence(receiver.recv().await.unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn co_located_publishers_share_one_connection() {
+        let pool = pool("kv-state-events-v2", 2, 128).with_shared_endpoints();
+        let shared = "tcp://127.0.0.1:31100";
+        let DirectZmqSubConnection::Grouped(mut first) = pool.connect(1, shared, 1).await.unwrap()
+        else {
+            panic!("shared endpoints must not use a dedicated socket");
+        };
+        let mut second = pool.register_grouped(2, shared, 1).await.unwrap();
+        let other = register(&pool, 3, 1).await;
+        // The shared endpoint's group is full, but a co-located publisher must still
+        // join it rather than open a second connection.
+        let mut third = pool.register_grouped(4, shared, 1).await.unwrap();
+        assert_eq!(first.group_id, second.group_id);
+        assert_eq!(first.group_id, third.group_id);
+        assert_ne!(first.group_id, other.group_id);
+
+        delivered(&pool, first.group_id, 1, 0).await;
+        delivered(&pool, first.group_id, 2, 5).await;
+        delivered(&pool, first.group_id, 4, 7).await;
+        assert_eq!(sequence(first.receiver.recv().await.unwrap()), 0);
+        assert_eq!(sequence(second.receiver.recv().await.unwrap()), 5);
+        assert_eq!(sequence(third.receiver.recv().await.unwrap()), 7);
+
+        let group_id = first.group_id;
+        first.close().await;
+        delivered(&pool, group_id, 2, 6).await;
+        assert_eq!(sequence(second.receiver.recv().await.unwrap()), 6);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shared_endpoints_are_placed_by_discovered_publishers() {
+        // Discovery order is unrelated to which PUB a publisher sits on. Placed as
+        // one publisher each, both endpoints would share the first reader.
+        let pool = pool("kv-state-events-v2", 4, 128).with_shared_endpoints();
+        let endpoints = ["tcp://127.0.0.1:31300", "tcp://127.0.0.1:31301"];
+        for endpoint in endpoints {
+            for _ in 0..4 {
+                pool.expect_publisher(endpoint);
+            }
+        }
+        let mut registrations = Vec::new();
+        for publisher_id in 0..8 {
+            let endpoint = endpoints[publisher_id as usize % 2];
+            registrations.push(
+                pool.register_grouped(publisher_id, endpoint, 1)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let groups: Vec<_> = registrations.iter().map(|r| r.group_id).collect();
+        assert_ne!(groups[0], groups[1]);
+        for (index, group) in groups.iter().enumerate() {
+            assert_eq!(*group, groups[index % 2]);
+        }
+
+        // Endpoints with one publisher each still pack to the cap.
+        let mut singles = Vec::new();
+        for publisher_id in 10..15 {
+            pool.expect_publisher(&endpoint(publisher_id));
+            singles.push(register(&pool, publisher_id, 1).await);
+        }
+        let groups: Vec<_> = singles.iter().map(|r| r.group_id).collect();
+        assert!(groups[..4].iter().all(|group| *group == groups[0]));
+        assert_ne!(groups[4], groups[0]);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn raw_topics_route_exact_frames_and_separate_duplicates() {
+        use tmq::AsZmqSocket;
+
+        let pool = DirectZmqSubPool::new_raw(4, 128, CancellationToken::new()).unwrap();
+        let publisher = crate::utils::zmq::bind_pub_socket("tcp://127.0.0.1:*")
+            .await
+            .unwrap();
+        let endpoint = publisher
+            .lock()
+            .await
+            .get_socket()
+            .get_last_endpoint()
+            .unwrap()
+            .unwrap();
+        let mut first = pool
+            .register_raw(1, &endpoint, "slot-0001", 1)
+            .await
+            .unwrap();
+        // A prefix of another route's topic shares the socket; routing is exact.
+        let mut prefix = pool
+            .register_raw(2, "tcp://127.0.0.1:31201", "slot-000", 1)
+            .await
+            .unwrap();
+        // The same topic on another endpoint could not be told apart.
+        let duplicate = pool
+            .register_raw(3, "tcp://127.0.0.1:31202", "slot-0001", 1)
+            .await
+            .unwrap();
+        assert_eq!(first.group_id, prefix.group_id);
+        assert_ne!(first.group_id, duplicate.group_id);
+        assert!(
+            pool.register_raw(4, "tcp://127.0.0.1:31203", "", 1)
+                .await
+                .is_err()
+        );
+
+        let frames = |topic: &str, sequence: u64| {
+            vec![
+                topic.as_bytes().to_vec(),
+                sequence.to_be_bytes().to_vec(),
+                b"payload".to_vec(),
+            ]
+        };
+        let received = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Passes the "slot-0001" filter but is not that route's topic.
+                crate::utils::zmq::send_multipart(&publisher, frames("slot-00010", 0))
+                    .await
+                    .unwrap();
+                crate::utils::zmq::send_multipart(&publisher, frames("slot-0001", 1))
+                    .await
+                    .unwrap();
+                if let Ok(Some(frames)) =
+                    tokio::time::timeout(Duration::from_millis(50), first.receiver.recv()).await
+                {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("the exact topic route should receive frames");
+        assert_eq!(received, frames("slot-0001", 1));
+        assert!(prefix.receiver.try_recv().is_err());
+        pool.shutdown().await;
     }
 
     #[tokio::test]

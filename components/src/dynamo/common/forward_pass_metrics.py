@@ -188,6 +188,13 @@ class ForwardPassMetrics(
     # Requests that exist in the waiting queue but were not scheduled.
     queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
 
+    def is_idle(self) -> bool:
+        """Whether both scheduled and queued work are empty."""
+        return (
+            self.scheduled_requests == ScheduledRequestMetrics()
+            and self.queued_requests == QueuedRequestMetrics()
+        )
+
 
 _encoder = msgspec.msgpack.Encoder()
 _decoder = msgspec.msgpack.Decoder(ForwardPassMetrics)

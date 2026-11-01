@@ -111,12 +111,17 @@ def nvdec_available() -> bool:
     try:
         with warnings.catch_warnings():
             # A third-party deprecation must not decide whether the capability
-            # exists. PyNvVideoCodec 2.2.0's __init__ does `from ast import Str`,
+            # exists. PyNvVideoCodec 2.2.0's __init__ did `from ast import Str`,
             # which warns on Python 3.12; under pytest's filterwarnings=error
             # that warning is *raised*, the import "fails", and this lru_cache
             # then pins False for the whole process -- silently disabling NVDEC
             # for every test in the session (a second import would have
             # succeeded, since the warning is only raised once).
+            #
+            # 2.2.2 removed that import, so the shipped floor no longer trips
+            # this. The suppression is kept because it is not specific to that
+            # import: any third-party warning raised here would disable NVDEC
+            # for the session, and the only signal would be a debug log.
             warnings.simplefilter("ignore")
             import PyNvVideoCodec  # noqa: F401
     except Exception as exc:  # noqa: BLE001
@@ -162,7 +167,9 @@ def _frame_to_rgb_hwc(frame) -> np.ndarray:
 
     A 2.x ``DecodedFrame`` (``output_color_type=RGB``) holds a CUDA buffer and
     supports the DLPack protocol, so torch wraps it zero-copy on the GPU and
-    ``.cpu()`` copies to host. Validated on PyNvVideoCodec 2.1.1 for H.264/H.265.
+    ``.cpu()`` copies to host. Returns a single frame: ``decode_video_nvdec`` stacks
+    these into ``(num_frames, H, W, 3)``, so a batched replacement here has to drop
+    that stack too.
     """
     import torch
 
@@ -184,10 +191,10 @@ def _source_fps(decoder) -> float:
     indices into timestamps with ``idx / fps`` -- a zero raises
     ZeroDivisionError and the request 500s.
 
-    PyNvVideoCodec 2.2.0 exposes the rate as
-    ``get_stream_metadata().average_fps``; older probes are kept for other
-    versions, then ``num_frames / duration``, then a documented fallback so a
-    future API change degrades timestamp accuracy instead of failing requests.
+    PyNvVideoCodec exposes the rate as ``get_stream_metadata().average_fps``; older
+    probes are kept for other versions, then ``num_frames / duration``, then a
+    documented fallback so a future API change degrades timestamp accuracy instead
+    of failing requests.
     """
     meta = getattr(decoder, "get_stream_metadata", None)
     if callable(meta):

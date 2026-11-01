@@ -55,7 +55,7 @@ spec:
         - name: main
           image: example.invalid/vllm-target:test
           command: [python, -m, dynamo.vllm]
-          args: [--experimental-external-draft-endpoint, test-lpu-gpu-specdecode/backend/generate]
+          args: [--experimental-external-draft-endpoint, $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/backend/generate]
           resources:
             limits:
               nvidia.com/gpu: '1'

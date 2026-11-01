@@ -44,6 +44,28 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
+#[tokio::test]
+async fn binding_stream_rejects_invalid_config() {
+    let builder = || {
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .session_binding_replication(11)
+    };
+    let error = builder().build().await.err().expect("affinity disabled");
+    assert!(error.to_string().contains("requires session affinity"));
+    let error = builder()
+        .session_affinity(Duration::from_secs(10))
+        .replica_sync(0, Vec::new())
+        .build()
+        .await
+        .err()
+        .expect("mesh enabled");
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
 struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
@@ -176,6 +198,19 @@ async fn replica_sync_routes_are_mounted() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The shared peer routes must be merged before the JSON fallbacks.
+    let wrong_method = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/register_peer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(response_json(wrong_method).await["error"].is_string());
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
@@ -561,6 +596,58 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
 
     assert_ne!(salted.block_hashes, unsalted.block_hashes);
     assert_ne!(salted.sequence_hashes, unsalted.sequence_hashes);
+}
+
+#[test]
+fn prompt_carrying_requests_read_top_level_prompt_fields() {
+    let body = serde_json::json!({
+        "selection_id": "sel-1",
+        "worker_id": 7,
+        "token_ids": [1, 2, 3],
+        "cache_salt": "tenant-a",
+        "is_eagle": true,
+    });
+    let assert_prompt = |prompt: &PromptRequest| {
+        assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(prompt.is_eagle, Some(true));
+    };
+
+    let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&select.prompt);
+    assert_eq!(select.selection_id.as_deref(), Some("sel-1"));
+    assert_eq!(select.model_name, DEFAULT_MODEL_NAME);
+    let reserve: SelectAndReserveRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&reserve.prompt);
+    let booking: ReservationRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&booking.prompt);
+    assert_eq!(booking.worker_id, Some(7));
+    let loads: PotentialLoadsRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&loads.prompt);
+    let scores: OverlapScoresRequest = serde_json::from_value(body).unwrap();
+    assert_prompt(&scores.prompt);
+}
+
+#[tokio::test]
+async fn prompt_routes_keep_json_rejection_statuses() {
+    let untyped = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select")
+                .body(Body::from(r#"{"token_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(untyped.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let malformed = post(app(), "/select", "{").await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_shape = post(app(), "/select", r#"{"token_ids":"oops"}"#).await;
+    assert_eq!(wrong_shape.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response_json(wrong_shape).await["error"].is_string());
 }
 
 #[test]

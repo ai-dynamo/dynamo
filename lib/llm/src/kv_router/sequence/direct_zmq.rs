@@ -90,11 +90,13 @@ impl DirectZmqSequenceConfig {
 
 /// Direct-ZMQ ingress for active-sequence batches: one source per publisher,
 /// continuity tracked from zero, events forwarded into the partition's inbound
-/// replica channel. A full channel drops the event and counts it.
+/// replica channel. A full channel drops the event and counts it. The local
+/// replica's own publisher, if any, is not subscribed.
 pub(super) async fn start(
     endpoint: Endpoint,
     inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
     rcvhwm: i32,
+    local_publisher_id: Option<u64>,
     cancellation_token: CancellationToken,
 ) -> Result<JoinHandle<()>> {
     let metrics = ActiveSequenceZmqIngressMetrics::from_component(endpoint.component());
@@ -139,7 +141,7 @@ pub(super) async fn start(
         endpoint,
         ACTIVE_SEQUENCES_SUBJECT,
         rcvhwm,
-        None,
+        local_publisher_id,
         ContinuityMode::TrackFromZero,
         cancellation_token,
         handler,
@@ -238,8 +240,14 @@ mod tests {
             .endpoint("generate");
         let (inbound_tx, mut inbound_rx) = mpsc::channel(16);
         let cancel = CancellationToken::new();
-        let supervisor =
-            start(endpoint.clone(), inbound_tx, DEFAULT_RCVHWM, cancel.clone()).await?;
+        let supervisor = start(
+            endpoint.clone(),
+            inbound_tx,
+            DEFAULT_RCVHWM,
+            None,
+            cancel.clone(),
+        )
+        .await?;
 
         for request_id in ["before-recreation", "after-recreation"] {
             let publisher = EventPublisher::for_endpoint_with_transport(

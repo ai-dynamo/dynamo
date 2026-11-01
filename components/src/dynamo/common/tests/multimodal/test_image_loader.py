@@ -20,13 +20,20 @@ import base64
 import logging
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 
 import numpy as np
 import pytest
 from PIL import Image
 from redis.exceptions import RedisClusterException, RedisError
 
-from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import (
@@ -62,6 +69,16 @@ def _make_png_bytes() -> bytes:
 
 
 PNG_BYTES = _make_png_bytes()
+
+
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
 
 
 def _permissive_policy(
@@ -197,14 +214,52 @@ async def test_http_rejected_by_default() -> None:
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
     """Malformed base64 data URL should raise ValueError."""
-    with pytest.raises(ValueError, match="Invalid base64"):
+    with pytest.raises(ValueError, match="Malformed base64"):
         await loader.load_image("data:image/png;base64,NOT_VALID!!!")
 
 
-async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
+async def test_data_url_non_image_rejected(loader: ImageLoader, caplog) -> None:
     """data: URL with non-image media type should raise ValueError."""
-    with pytest.raises(ValueError, match="Data URL must be an image type"):
-        await loader.load_image("data:text/plain;base64,aGVsbG8=")
+    encoded = base64.b64encode(b"private inline reference" * 1000).decode()
+    with pytest.raises(ValueError, match="Data URL must be an image type") as exc_info:
+        await loader.load_image(f"data:text/plain;base64,{encoded}")
+    _assert_inline_reference_elided(caplog, encoded)
+    assert encoded[:32] not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+async def test_data_url_accepts_exact_byte_limit(escaped: bool) -> None:
+    loader = ImageLoader(max_bytes=len(PNG_BYTES))
+    encoded = base64.b64encode(PNG_BYTES).decode()
+    if escaped:
+        encoded = quote(encoded, safe="")
+
+    image = await loader.load_image(f"data:image/png;base64,{encoded}")
+
+    assert image.size == (2, 2)
+    assert image.getpixel((0, 0)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("limit_source", ["explicit", "environment"])
+async def test_data_url_rejects_oversized_input_before_decode(
+    limit_source: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    if limit_source == "explicit":
+        loader = ImageLoader(max_bytes=len(PNG_BYTES) - 1)
+        payload = PNG_BYTES
+    else:
+        loader = ImageLoader()
+        payload = PNG_BYTES + b"\0" * (1024 * 1024 + 1 - len(PNG_BYTES))
+    encoded = base64.b64encode(payload).decode()
+    reference = f"data:image/png;base64,{encoded}"
+
+    with patch("base64.b64decode", wraps=base64.b64decode) as decode:
+        with pytest.raises(ValueError, match="exceeds the maximum") as exc_info:
+            await loader.load_image(reference)
+
+    decode.assert_not_called()
+    assert reference not in str(exc_info.value)
 
 
 # --- HTTP error contract ---
@@ -273,6 +328,87 @@ async def test_http_status_error_propagated(loader: ImageLoader) -> None:
             await loader.load_image("https://example.com/img.png")
         assert exc_info.value.status == 404
         assert exc_info.value is error
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "status",
+        "timeout",
+        "connection",
+        "configuration",
+        "transport",
+        "validation",
+        "decode",
+        "empty",
+        "unsupported",
+    ],
+)
+async def test_http_failure_logs_redact_reference(
+    loader: ImageLoader, caplog, failure
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    errors = {
+        "status": HttpStatusError(503, "Unavailable", url),
+        "timeout": HttpTimeoutError(f"Timed out: {url}"),
+        "connection": HttpConnectionError(f"Connection failed: {url}"),
+        "configuration": HttpConfigurationError(f"Proxy rejected: {url}"),
+        "transport": HttpError(f"Transport failed: {url}"),
+        "validation": UrlValidationError(f"Redirect rejected: {url}"),
+        "decode": OSError(f"Decode failed: {url}"),
+    }
+    expected_type = type(errors[failure]) if failure in errors else ValueError
+    expected_status = {
+        "status": 503,
+        "timeout": 408,
+        "connection": 400,
+        "unsupported": 415,
+    }.get(failure)
+    if expected_status is not None:
+        expected_type = HttpStatusError
+    fetch = AsyncMock(return_value=b"" if failure == "empty" else b"not an image")
+    if failure == "decode":
+        loader._open_image = AsyncMock(side_effect=errors[failure])
+    elif failure in errors:
+        fetch.side_effect = errors[failure]
+
+    with patch(_FETCH_BYTES_PATH, fetch), pytest.raises(expected_type) as exc_info:
+        await loader.load_image(url)
+
+    if expected_status is not None:
+        assert exc_info.value.status == expected_status
+    if failure in errors and failure not in ("timeout", "connection"):
+        assert exc_info.value is errors[failure]
+    fetch.assert_awaited_once()
+    assert fetch.await_args.args[0] == url
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
+@pytest.mark.parametrize("error_type", [HttpStatusError, OSError])
+async def test_http_batch_logs_redact_reference(
+    loader: ImageLoader, caplog, error_type
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    if error_type is HttpStatusError:
+        error = HttpStatusError(503, f"Unavailable: {url}", url)
+    else:
+        error = OSError(f"Decode failed: {url}")
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
+
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(side_effect=error)):
+        with pytest.raises(Exception) as exc_info:
+            await loader.load_image_batch([{URL_VARIANT_KEY: url}])
+
+    if error_type is HttpStatusError:
+        assert exc_info.value is error
+    else:
+        assert not isinstance(exc_info.value, ValueError)
+        assert "Decode failed" in str(exc_info.value)
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
 # --- Cache behavior ---
@@ -458,8 +594,63 @@ async def test_leading_whitespace_does_not_collide_with_other_host(
     assert second.getpixel((0, 0)) == (0, 0, 255)
 
 
+async def test_http_cache_logs_redact_without_changing_cache_keys(
+    loader: ImageLoader, caplog
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    other_url = url.replace("private-token", "other-private-token")
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()) as fetch:
+        first = await loader.load_image(url)
+        assert await loader.load_image(url) is first
+        assert await loader.load_image(other_url) is not first
+
+    assert [call.args[0] for call in fetch.await_args_list] == [url, other_url]
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
 def _make_svg_bytes() -> bytes:
     return b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
+
+
+def _assert_inline_reference_elided(caplog, encoded: str) -> None:
+    assert caplog.records
+    assert encoded[:32] not in caplog.text
+    assert "payload elided" in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
+async def test_multi_picture_jpeg_loads_primary_frame(loader: ImageLoader) -> None:
+    primary = Image.new("RGB", (4, 3), color="red")
+    buf = BytesIO()
+    primary.save(
+        buf,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (2, 2), color="blue")],
+    )
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    image = await loader.load_image(f"data:image/jpeg;base64,{encoded}")
+
+    assert image.mode == "RGB"
+    assert image.size == (4, 3)
+    assert image.getpixel((0, 0))[0] > 200
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "BMP", "TIFF"])
+async def test_pillow_format_outside_allowlist_raises_415(
+    loader: ImageLoader, fmt: str
+) -> None:
+    buf = BytesIO()
+    Image.new("RGB", (4, 3), color="red").save(buf, format=fmt)
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/{fmt.lower()};base64,{encoded}")
+    assert exc_info.value.status == 415
 
 
 async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
@@ -548,15 +739,17 @@ async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
 
 
 async def test_unsupported_format_batch_data_url_raises_415(
-    loader: ImageLoader,
+    loader: ImageLoader, caplog
 ) -> None:
     """The batch path must preserve the 415 status for data: URLs as well."""
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
     svg_b64 = base64.b64encode(_make_svg_bytes()).decode()
     with pytest.raises(HttpStatusError) as exc_info:
         await loader.load_image_batch(
             [{URL_VARIANT_KEY: f"data:image/svg+xml;base64,{svg_b64}"}]
         )
     assert exc_info.value.status == 415
+    _assert_inline_reference_elided(caplog, svg_b64)
 
 
 # --- SSRF / URL-validation error contract ---
@@ -636,11 +829,11 @@ async def test_malformed_data_url_batch_raises_value_error(
         await loader.load_image_batch([{URL_VARIANT_KEY: bad_url}])
 
     assert not isinstance(exc_info.value, UrlValidationError)
-    assert "Failed to decoding image" in str(exc_info.value)
+    assert "Failed to decode image" in str(exc_info.value)
 
 
 async def test_unexpected_decoder_error_not_wrapped_as_value_error(
-    loader: ImageLoader,
+    loader: ImageLoader, caplog
 ) -> None:
     """An unexpected decoder failure must not be
     classified as a client validation error: it propagates unchanged from
@@ -659,22 +852,23 @@ async def test_unexpected_decoder_error_not_wrapped_as_value_error(
         )
     assert not isinstance(exc_info.value, ValueError)
     assert "decode engine fault" in str(exc_info.value)
+    _assert_inline_reference_elided(caplog, "aGVsbG8=")
 
 
-async def test_truncated_data_url_batch_raises_400(loader: ImageLoader) -> None:
+async def test_truncated_data_url_batch_raises_400(loader: ImageLoader, caplog) -> None:
     """Truncated image bytes are malformed client input, not a server fault:
     the batch path should return 400."""
     img = Image.new("RGB", (64, 64), color="red")
     buf = BytesIO()
     img.save(buf, format="JPEG")
-    truncated_url = (
-        f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()[:-20]).decode()}"
-    )
+    encoded = base64.b64encode(buf.getvalue()[:-20]).decode()
+    truncated_url = f"data:image/jpeg;base64,{encoded}"
 
     with pytest.raises(HttpStatusError) as exc_info:
         await loader.load_image_batch([{URL_VARIANT_KEY: truncated_url}])
     assert exc_info.value.status == 400
     assert "Invalid or truncated image data" in exc_info.value.message
+    _assert_inline_reference_elided(caplog, encoded)
 
 
 async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(
@@ -972,23 +1166,30 @@ async def test_shared_cache_delete_cluster_error_falls_back_to_origin(
     client.set.assert_awaited_once()
 
 
-async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) -> None:
+async def test_invalid_shared_cache_entry_is_deleted_and_refetched(
+    monkeypatch, caplog
+) -> None:
     _enable_shared_image_cache(monkeypatch)
     client = AsyncMock()
     client.get.return_value = b"not an image"
     origin_fetch = _mock_fetch_bytes()
+    url = "https://example.com/img.png?sig=private-token&padding=" + "x" * 2000
 
     with (
         patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
         patch(_FETCH_BYTES_PATH, origin_fetch),
     ):
         shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
-        image = await shared_loader.load_image("https://example.com/img.png")
+        image = await shared_loader.load_image(url)
 
     assert image.size == (2, 2)
     client.delete.assert_awaited_once()
     origin_fetch.assert_awaited_once()
+    assert origin_fetch.await_args.args[0] == url
     client.set.assert_awaited_once()
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
 async def test_truncated_shared_cache_entry_is_deleted_and_refetched(
@@ -1168,3 +1369,28 @@ async def test_session_scoped_cache_bypasses_when_scope_is_missing(monkeypatch) 
 )
 async def test_image_cache_scope_from_request(payload, expected) -> None:
     assert image_cache_scope_from_request(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "fetch",
+    [
+        _mock_fetch_bytes(side_effect=HttpTimeoutError("timed out")),
+        _mock_fetch_bytes(side_effect=HttpConnectionError("connection refused")),
+        _mock_fetch_bytes(content=b""),
+    ],
+    ids=["timeout", "connection_error", "empty_body"],
+)
+async def test_load_image_failure_keeps_signed_url_out(
+    loader: ImageLoader, fetch: AsyncMock, caplog
+) -> None:
+    url = _SIGNED_URL.format(name="img.png")
+    with (
+        patch(_FETCH_BYTES_PATH, fetch),
+        caplog.at_level(logging.DEBUG),
+        pytest.raises((HttpStatusError, ValueError)) as exc_info,
+    ):
+        await loader.load_image(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/img.png" in str(exc_info.value)

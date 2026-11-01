@@ -39,7 +39,7 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         &config.replica_sync_peers,
         cancel_token.child_token(),
     )?;
-    let (registry, peer_manager) = if let Some(replica_runtime) = &replica_runtime {
+    let (registry, replica) = if let Some(replica_runtime) = replica_runtime {
         let replica_config = replica_runtime.config();
         let process_id = replica_config.process_id();
         let registry = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
@@ -62,7 +62,7 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
             process_id,
             "Starting standalone slot tracker with replica sync"
         );
-        (registry, Some(peer_manager))
+        (registry, Some((replica_runtime, peer_manager)))
     } else {
         tracing::info!(
             port = config.port,
@@ -76,7 +76,9 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
 
     let app = create_router(
         Arc::new(AppState { registry }),
-        peer_manager.as_ref().map(Arc::clone),
+        replica
+            .as_ref()
+            .map(|(_, peer_manager)| Arc::clone(peer_manager)),
     );
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!("HTTP server listening on 0.0.0.0:{}", config.port);
@@ -86,7 +88,7 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
             tracing::info!("Received shutdown signal, stopping HTTP server");
         })
         .await;
-    if let (Some(peer_manager), Some(replica_runtime)) = (&peer_manager, &replica_runtime) {
+    if let Some((replica_runtime, peer_manager)) = &replica {
         tokio::join!(peer_manager.shutdown(), replica_runtime.shutdown());
     }
     result?;

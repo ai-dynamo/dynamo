@@ -1,0 +1,390 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Nemotron 3.5 Super VL, GB300: portable 3P2D serving intent, TP1 per worker.
+# MTP3, default prefix matching, fastokens and disabled Eagle block dropping.
+# Real acceptance is the default; synthetic acceptance is an optional benchmark setting.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: super-3-5-vllm-gb300-disagg-swebenchpro
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-port
+                - '8000'
+                - --router-kv-events
+                - --kv-cache-block-size
+                - '64'
+                - --router-session-affinity-mode
+                - hard
+                - --tokenizer
+                - fastokens
+                - --no-tokenizer-fallback
+              env:
+                - name: FASTOKENS_BPE_THREADS
+                  value: '16'
+                - name: DYN_ROUTER_MODE
+                  value: kv
+                - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
+                  value: '7200'
+                - name: HF_HUB_OFFLINE
+                  value: '1'
+                - name: TRANSFORMERS_OFFLINE
+                  value: '1'
+              resources:
+                requests:
+                  cpu: '16'
+                  memory: 128Gi
+    - name: PrefillWorker
+      type: prefill
+      replicas: 3
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: super-3-5-vllm-gb300-disagg-swebenchpro-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+              imagePullPolicy: IfNotPresent
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 480
+                successThreshold: 1
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 30
+                successThreshold: 1
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 30
+                successThreshold: 1
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --enable-multimodal
+                - --media-io-kwargs
+                - '{"video": {"fps": 2, "num_frames": 256, "backend": "pynvvideocodec"}}'
+                - --video-pruning-rate
+                - '0.5'
+                - --kernel-config
+                - '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}'
+                - --compilation-config
+                - '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+                - --gpu-memory-utilization
+                - '0.95'
+                - --tensor-parallel-size
+                - '1'
+                - --max-model-len
+                - '1048576'
+                - --max-num-batched-tokens
+                - '16384'
+                - --max-cudagraph-capture-size
+                - '4096'
+                - --kv-cache-dtype
+                - fp8
+                - --enable-prefix-caching
+                - --mamba-cache-mode
+                - align
+                - --block-size
+                - '64'
+                - --enable-mamba-shared-prefix-checkpoint
+                - --mamba-backend
+                - flashinfer
+                - --mamba-ssm-cache-dtype
+                - float16
+                - --enable-mamba-cache-stochastic-rounding
+                - --mamba-cache-philox-rounds
+                - '5'
+                - --speculative-config
+                - $(SPECULATIVE_CONFIG)
+                - --kv-events-config
+                - '{"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20080", "enable_kv_cache_events": true}'
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --reasoning-parser
+                - nemotron_v3
+                - --dyn-reasoning-parser
+                - nemotron_v3
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --disaggregation-mode
+                - prefill
+                - --enable-cumem-allocator
+                - --kv-cache-metrics
+                - --kv-cache-metrics-sample
+                - '0.01'
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"lazy_offload":false,"cpu_bytes_to_use":214748364800}}]}}'
+                - name: MODEL_NAME
+                  value: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: nvidia/nemotron-3.5-super-vl-120b-a12b
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: '1'
+                - name: TRANSFORMERS_OFFLINE
+                  value: '1'
+                - name: VLLM_VIDEO_LOADER_BACKEND
+                  value: nemotron_vl
+                - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+                  value: '1'
+                - name: TORCHINDUCTOR_CPP_CACHE_PRECOMPILE_HEADERS
+                  value: '0'
+                - name: VLLM_OMNI_USE_QUACK_FP8
+                  value: '0'
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: SPECULATIVE_CONFIG
+                  value: '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"auto","disable_eagle_block_drop":true}'
+                  # Synthetic benchmark alternative (disabled):
+                  # value: '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"auto","disable_eagle_block_drop":true,"rejection_sample_method":"synthetic","synthetic_acceptance_length":3.2418}'
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: 'y'
+                - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+                  value: "120"
+                - name: NIXL_TELEMETRY_ENABLE
+                  value: "y"
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: '16'
+                  memory: 328Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: '1'
+                limits:
+                  nvidia.com/gpu: '1'
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+    - name: DecodeWorker
+      type: decode
+      replicas: 2
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: super-3-5-vllm-gb300-disagg-swebenchpro-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+              imagePullPolicy: IfNotPresent
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 480
+                successThreshold: 1
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 30
+                successThreshold: 1
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 30
+                successThreshold: 1
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --enable-multimodal
+                - --media-io-kwargs
+                - '{"video": {"fps": 2, "num_frames": 256, "backend": "pynvvideocodec"}}'
+                - --video-pruning-rate
+                - '0.5'
+                - --kernel-config
+                - '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}'
+                - --compilation-config
+                - '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+                - --gpu-memory-utilization
+                - '0.95'
+                - --tensor-parallel-size
+                - '1'
+                - --max-model-len
+                - '1048576'
+                - --max-num-batched-tokens
+                - '16384'
+                - --max-cudagraph-capture-size
+                - '4096'
+                - --kv-cache-dtype
+                - fp8
+                - --enable-prefix-caching
+                - --mamba-cache-mode
+                - align
+                - --block-size
+                - '64'
+                - --enable-mamba-shared-prefix-checkpoint
+                - --mamba-backend
+                - flashinfer
+                - --mamba-ssm-cache-dtype
+                - float16
+                - --enable-mamba-cache-stochastic-rounding
+                - --mamba-cache-philox-rounds
+                - '5'
+                - --speculative-config
+                - $(SPECULATIVE_CONFIG)
+                - --kv-events-config
+                - '{"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20080", "enable_kv_cache_events": true}'
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --reasoning-parser
+                - nemotron_v3
+                - --dyn-reasoning-parser
+                - nemotron_v3
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --disaggregation-mode
+                - decode
+                - --enable-cumem-allocator
+                - --kv-cache-metrics
+                - --kv-cache-metrics-sample
+                - '0.01'
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"lazy_offload":false,"cpu_bytes_to_use":214748364800}}]}}'
+                - name: MODEL_NAME
+                  value: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: nvidia/nemotron-3.5-super-vl-120b-a12b
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: '1'
+                - name: TRANSFORMERS_OFFLINE
+                  value: '1'
+                - name: VLLM_VIDEO_LOADER_BACKEND
+                  value: nemotron_vl
+                - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+                  value: '1'
+                - name: TORCHINDUCTOR_CPP_CACHE_PRECOMPILE_HEADERS
+                  value: '0'
+                - name: VLLM_OMNI_USE_QUACK_FP8
+                  value: '0'
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: SPECULATIVE_CONFIG
+                  value: '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"auto","disable_eagle_block_drop":true}'
+                  # Synthetic benchmark alternative (disabled):
+                  # value: '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"auto","disable_eagle_block_drop":true,"rejection_sample_method":"synthetic","synthetic_acceptance_length":3.2418}'
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: 'y'
+                - name: NIXL_TELEMETRY_ENABLE
+                  value: "y"
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: '16'
+                  memory: 328Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: '1'
+                limits:
+                  nvidia.com/gpu: '1'
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: super-3-5-vllm-gb300-disagg-swebenchpro-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: super-3-5-vllm-gb300-disagg-swebenchpro-compute-domain-channel

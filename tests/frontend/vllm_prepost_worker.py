@@ -76,9 +76,7 @@ async def main():
     runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     runtime_config = ModelRuntimeConfig()
-    runtime_config.set_structural_tag_mode("on")
-    runtime_config.set_structural_tag_scope("always")
-    runtime_config.set_structural_tag_schema("strict")
+    runtime_config.set_structural_tag({"scope": "always", "schema": "strict"})
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

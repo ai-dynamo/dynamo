@@ -142,22 +142,33 @@ def test_dynamo_tensor_to_numpy_float32_preserves_shape():
     np.testing.assert_array_equal(arr, np.array([[1.0, 2.0], [3.0, 4.0]], np.float32))
 
 
-def test_dynamo_tensor_to_numpy_float16():
-    """Float16 goes to a native NumPy float16 array (DLPack-compatible on
-    the response side)."""
-    arr = dynamo_tensor_to_numpy(_tensor("IN", "Float16", [3], [1.5, -2.25, 0.5]))
+# The Rust `half::f16` / `half::bf16` types serialize as their u16 bit
+# patterns, so half-precision values arrive as ints that must be reinterpreted.
+_HALF_DECODED = (1.5, -2.25, 3.125, -4.0)
+
+
+def test_dynamo_tensor_to_numpy_float16_reinterprets_bit_patterns():
+    """NumPy float16 supports DLPack on the response side."""
+    bits = [0x3E00, 0xC080, 0x4240, 0xC400]
+    arr = dynamo_tensor_to_numpy(_tensor("IN", "Float16", [2, 2], bits))
     assert arr.dtype == np.float16
-    np.testing.assert_array_equal(arr, np.array([1.5, -2.25, 0.5], np.float16))
+    assert arr.shape == (2, 2)
+    np.testing.assert_array_equal(
+        arr, np.array(_HALF_DECODED, np.float16).reshape(2, 2)
+    )
 
 
-def test_dynamo_tensor_to_numpy_bfloat16():
-    """BFloat16 goes to an ml_dtypes.bfloat16 array. NumPy has no native
-    bfloat16, but tritonclient.utils.triton_to_np_dtype('BF16') returns
-    ml_dtypes.bfloat16, which is what tritonserver's Python bindings expect
-    for a BF16 input tensor."""
-    arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [3], [1.5, -2.25, 0.5]))
+def test_dynamo_tensor_to_numpy_bfloat16_reinterprets_bit_patterns():
+    """tritonclient maps BF16 to ml_dtypes.bfloat16, which tritonserver cannot
+    take directly. The handler wraps the array's bytes in a
+    tritonserver.Tensor(DataType.BF16, ...)."""
+    bits = [0x3FC0, 0xC010, 0x4048, 0xC080]
+    arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [2, 2], bits))
     assert arr.dtype == ml_dtypes.bfloat16
-    np.testing.assert_array_equal(arr, np.array([1.5, -2.25, 0.5], ml_dtypes.bfloat16))
+    assert arr.shape == (2, 2)
+    np.testing.assert_array_equal(
+        arr, np.array(_HALF_DECODED, ml_dtypes.bfloat16).reshape(2, 2)
+    )
 
 
 def test_dynamo_tensor_to_numpy_bytes_yields_object_array():

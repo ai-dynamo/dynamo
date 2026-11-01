@@ -646,6 +646,7 @@ mod tests {
 
         let responses = vec![
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "chatcmpl-1".to_string(),
                     choices: vec![ChatChoiceStream {
@@ -654,6 +655,7 @@ mod tests {
                             content: None,
                             function_call: None,
                             tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                                custom: None,
                                 index: 0,
                                 id: Some("call-1".to_string()),
                                 r#type: None,
@@ -677,9 +679,12 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "chatcmpl-1".to_string(),
                     choices: vec![ChatChoiceStream {
@@ -703,7 +708,9 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
         ];
         for response in &responses {
@@ -778,6 +785,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            echo: None,
         })];
         for response in &responses {
             record_completion_finish_reason_metadata(&trace_state.finish_reason_metadata, response);

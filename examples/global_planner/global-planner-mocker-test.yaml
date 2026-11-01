@@ -77,7 +77,8 @@ spec:
       spec:
         containers:
         - args:
-          - --no-operation
+          - --config
+          - '{"no_operation": true}'
           command:
           - python3
           - -m

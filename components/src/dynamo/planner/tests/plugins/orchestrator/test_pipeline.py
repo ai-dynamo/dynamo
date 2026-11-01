@@ -520,6 +520,29 @@ async def test_whole_tick_timeout_returns_skip_tick_timeout(ctx_factory):
     assert outcome.final_proposal is None
 
 
+@pytest.mark.asyncio
+async def test_no_tick_deadline_runs_a_slow_tick_to_completion(ctx_factory):
+    # ``None`` (replay): a tick longer than the 0.05 s deadline above runs to
+    # completion instead of becoming skip_tick_timeout.
+    import asyncio
+
+    ctx = ctx_factory(tick_max_duration_seconds=None)
+
+    async def slow_propose(req):
+        await asyncio.sleep(0.1)
+        return ProposeStageResponse(result_kind="accept", accept=AcceptResult())
+
+    ctx["orchestrator"].register_internal(
+        plugin_id="slow",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=slow_propose),
+    )
+    outcome = await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
+    assert outcome.execute_action == "apply"
+    assert "tick_timeout_total" not in outcome.audit_events
+
+
 # ---------------------------------------------------------------------------
 # CONSTRAIN.final is ignored (proto contract)
 # ---------------------------------------------------------------------------

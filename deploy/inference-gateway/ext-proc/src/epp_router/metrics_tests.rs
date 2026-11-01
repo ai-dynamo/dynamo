@@ -150,10 +150,14 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
     )
     .unwrap();
     let router = Arc::new(EppRouter {
-        renderer: RenderClient::Vllm(
-            VllmRenderClient::new(&cfg.tokenizer_service_url, Duration::from_secs(5), 1024)
-                .unwrap(),
-        ),
+        renderer: RenderClient::new(
+            cfg.renderer_protocol,
+            &cfg.tokenizer_service_url,
+            Duration::from_secs(5),
+            1024,
+        )
+        .unwrap(),
+        renderer_protocol: cfg.renderer_protocol,
         reflector: Arc::new(reflector),
         selector,
         _adapter: adapter,

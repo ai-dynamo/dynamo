@@ -17,6 +17,7 @@ use dynamo_kv_router::plugins::request_classifier::{
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -99,6 +100,7 @@ impl Inner {
         input_tokens: usize,
         progress: RequestProgress,
         session_final: bool,
+        pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
         self.state.lock().register(
@@ -108,7 +110,8 @@ impl Inner {
                 input_tokens,
                 progress,
                 session_final,
-            ),
+            )
+            .with_pinned_worker(pinned_worker),
             &capacities,
             Instant::now(),
         )
@@ -281,7 +284,11 @@ impl ThunderAgentClassifier {
 
 #[async_trait]
 impl RequestClassifier for ThunderAgentClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         let Some(session) = request.session_context() else {
             return Box::pin(async move { Ok(request) });
         };
@@ -292,14 +299,16 @@ impl RequestClassifier for ThunderAgentClassifier {
         };
         let session_id = session.session_id().to_owned();
         let session_final = session.session_final() == Some(true);
-        let input_tokens = request.input_tokens();
+        let input_tokens = request.isl_tokens();
         let progress = request.progress().clone();
+        let pinned_worker = request.pinned_worker();
         let notify = match self.inner.register(
             request_id.clone(),
             session_id,
             input_tokens,
             progress,
             session_final,
+            pinned_worker,
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -331,7 +340,7 @@ impl RequestClassifier for ThunderAgentClassifier {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::plugins::request_classifier::RequestClassifierWorker;
+    use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInfo};
     use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use super::scheduler::ProgramLifecycle;
@@ -343,8 +352,8 @@ mod tests {
         let worker_without_capacity = WorkerWithDpRank::new(2, 0);
         let context = RequestClassifierContext::new(16, move || {
             vec![
-                RequestClassifierWorker::new(worker_with_capacity, Some(10)),
-                RequestClassifierWorker::new(worker_without_capacity, None),
+                WorkerInfo::new(worker_with_capacity, WorkerCapacity::new(None, Some(10))),
+                WorkerInfo::new(worker_without_capacity, WorkerCapacity::default()),
             ]
         });
 
@@ -533,6 +542,7 @@ mod tests {
                 tokens,
                 progress,
                 session_final,
+                None,
             )
             .unwrap();
     }
@@ -1178,6 +1188,7 @@ mod tests {
             100,
             RequestProgress::new(100).0,
             false,
+            None,
         );
         assert!(matches!(
             result,

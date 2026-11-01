@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
+use super::{PublisherInput, ZmqRecoveryConfig};
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
@@ -24,8 +26,20 @@ pub(super) struct DecodedZmqKvBatch {
 ///
 /// Callers retain their own malformed-input and protocol-version policies.
 pub(super) fn decode_zmq_kv_batch(
-    mut frames: crate::utils::zmq::MultipartMessage,
+    frames: crate::utils::zmq::MultipartMessage,
 ) -> Result<DecodedZmqKvBatch> {
+    let (source_cursor, payload) = split_zmq_kv_batch(frames)?;
+    let batch = decode_event_batch(&payload).context("failed to decode KV event batch")?;
+    Ok(DecodedZmqKvBatch {
+        source_cursor,
+        batch,
+    })
+}
+
+/// Split the envelope into its sequence and still-encoded payload.
+pub(super) fn split_zmq_kv_batch(
+    mut frames: crate::utils::zmq::MultipartMessage,
+) -> Result<(u64, Vec<u8>)> {
     if frames.len() != 3 {
         anyhow::bail!("expected three ZMQ frames, received {}", frames.len());
     }
@@ -37,11 +51,7 @@ pub(super) fn decode_zmq_kv_batch(
             sequence.len()
         )
     })?;
-    let batch = decode_event_batch(&payload).context("failed to decode KV event batch")?;
-    Ok(DecodedZmqKvBatch {
-        source_cursor: u64::from_be_bytes(sequence),
-        batch,
-    })
+    Ok((u64::from_be_bytes(sequence), payload))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -49,12 +59,15 @@ pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+    tx: mpsc::UnboundedSender<PublisherInput>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
+    expected_rank: Option<u32>,
+    liveness: Option<(u32, std::time::Duration)>,
+    recovery: Option<ZmqRecoveryConfig>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -65,6 +78,24 @@ pub(super) async fn start_zmq_listener(
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id);
+    if let Some(recovery) = recovery {
+        let ingest = super::zmq_recovery::RecoveryIngest::new(
+            &mut normalizer,
+            &tx,
+            &next_event_id,
+            WorkerWithDpRank::new(worker_id, recovery.dp_rank),
+            expected_rank,
+        );
+        super::zmq_recovery::recovering_listener(
+            &zmq_endpoint,
+            &zmq_topic,
+            ingest,
+            recovery,
+            cancellation_token,
+        )
+        .await;
+        return;
+    }
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -73,13 +104,15 @@ pub(super) async fn start_zmq_listener(
         }
     };
     let mut socket = socket;
-    let metrics = kv_publisher_metrics();
 
     if cancellation_token.is_cancelled() {
         return;
     }
 
     let mut messages_processed = 0u64;
+    let mut last_source_cursors = HashMap::<u32, u64>::new();
+    let mut last_message = tokio::time::Instant::now();
+    let mut expired = false;
 
     let exit_reason = 'main: loop {
         tokio::select! {
@@ -88,6 +121,28 @@ pub(super) async fn start_zmq_listener(
             _ = cancellation_token.cancelled() => {
                 tracing::debug!("ZMQ listener received cancellation signal");
                 break 'main String::from("cancellation token cancelled");
+            }
+
+            _ = async {
+                if let Some((_, timeout)) = liveness {
+                    tokio::time::sleep_until(last_message + timeout).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !expired => {
+                let (rank, _) = liveness.expect("deadline requires negotiated liveness");
+                let worker = WorkerWithDpRank::new(worker_id, rank);
+                let clear = normalizer.preprocess_with_reason(
+                    RawKvEvent::AllBlocksCleared { ownership: None }, worker
+                ).expect("clear is accepted");
+                let clear = normalizer.normalize_preprocessed(
+                    clear, next_event_id.fetch_add(1, Ordering::SeqCst), worker
+                ).expect("clear normalizes");
+                if tx.send(PublisherInput::Events(vec![clear])).is_err() {
+                    break 'main String::from("channel receiver dropped");
+                }
+                expired = true;
+                tracing::warn!(%zmq_endpoint, rank, "KV event source heartbeat expired; cleared residency");
             }
 
             msg_result = socket.next() => {
@@ -119,44 +174,45 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
-                let mut events = Vec::with_capacity(batch.events.len());
-                for raw_event in batch.events {
-                    let event_type = raw_event.event_type_label();
-                    if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("received", event_type);
-                    }
-                    let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                    let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
-                        Ok(raw_event) => raw_event,
-                        Err(reason) => {
-                            if let Some(metrics) = &metrics {
-                                metrics.increment_zmq_filtered_event(event_type, reason.as_label());
-                            }
-                            continue;
-                        }
-                    };
-                    if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("accepted", event_type);
-                    }
+                if is_mismatched_rank(batch.data_parallel_rank, expected_rank) {
+                    tracing::warn!(%zmq_endpoint, dp_rank, ?expected_rank, "Ignoring mismatched KV source rank");
+                    continue;
+                }
+                last_message = tokio::time::Instant::now();
+                expired = false;
+                let discontinuity = last_source_cursors
+                    .insert(dp_rank, engine_seq)
+                    .is_some_and(|previous| previous.checked_add(1) != Some(engine_seq));
+                // Only sources that negotiate heartbeat-based residency invalidation
+                // opt into clearing on a gap. Legacy advisory streams warn and
+                // continue without discarding their cached residency.
+                let clear_on_gap = discontinuity && liveness.is_some();
+                if discontinuity {
+                    tracing::warn!(
+                        endpoint = %zmq_endpoint,
+                        source_cursor = engine_seq,
+                        dp_rank,
+                        clear_on_gap,
+                        "ZMQ KV event sequence discontinuity"
+                    );
+                }
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                let mut events = Vec::with_capacity(batch.events.len() + usize::from(clear_on_gap));
+                if clear_on_gap {
+                    let raw_event = RawKvEvent::AllBlocksCleared { ownership: None };
+                    let raw_event = normalizer
+                        .preprocess_with_reason(raw_event, worker)
+                        .expect("synthetic clear event is always accepted");
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
-                    let Some(event) =
-                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
-                    else {
-                        if let Some(metrics) = &metrics {
-                            metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
-                        }
-                        continue;
-                    };
-                    if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
-                        && let Some(metrics) = &metrics
-                    {
-                        metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
-                    }
+                    let event = normalizer
+                        .normalize_preprocessed(raw_event, event_id, worker)
+                        .expect("synthetic clear event always normalizes");
                     events.push(event);
                 }
+                normalize_batch(batch, &mut normalizer, worker, &next_event_id, &mut events);
                 if !events.is_empty() {
                     let event_count = events.len() as u64;
-                    if tx.send(events).is_err() {
+                    if tx.send(PublisherInput::Events(events)).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }
@@ -171,4 +227,52 @@ pub(super) async fn start_zmq_listener(
         exit_reason,
         messages_processed
     );
+}
+
+/// A source dedicated to one rank ignores batches without its rank label or with another rank.
+pub(super) fn is_mismatched_rank(rank: Option<i32>, expected_rank: Option<u32>) -> bool {
+    expected_rank.is_some_and(|expected_rank| rank.map(i32::cast_unsigned) != Some(expected_rank))
+}
+
+/// Shared by live and recovery ingestion so both use one normalizer and event ID allocator.
+pub(super) fn normalize_batch(
+    batch: KvEventBatch,
+    normalizer: &mut ZmqEventNormalizer,
+    worker: WorkerWithDpRank,
+    next_event_id: &AtomicU64,
+    events: &mut Vec<PlacementEvent>,
+) {
+    let metrics = kv_publisher_metrics();
+    events.reserve(batch.events.len());
+    for raw_event in batch.events {
+        let event_type = raw_event.event_type_label();
+        if let Some(metrics) = &metrics {
+            metrics.increment_zmq_event("received", event_type);
+        }
+        let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
+            Ok(raw_event) => raw_event,
+            Err(reason) => {
+                if let Some(metrics) = &metrics {
+                    metrics.increment_zmq_filtered_event(event_type, reason.as_label());
+                }
+                continue;
+            }
+        };
+        if let Some(metrics) = &metrics {
+            metrics.increment_zmq_event("accepted", event_type);
+        }
+        let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+        let Some(event) = normalizer.normalize_preprocessed(raw_event, event_id, worker) else {
+            if let Some(metrics) = &metrics {
+                metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
+            }
+            continue;
+        };
+        if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
+            && let Some(metrics) = &metrics
+        {
+            metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
+        }
+        events.push(event);
+    }
 }

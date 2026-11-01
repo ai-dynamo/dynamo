@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from dynamo.planner.config.planner_config import PlannerConfig
+
 
 @dataclass(frozen=True)
 class ScalingPolicy:
@@ -31,14 +33,20 @@ SCALING_POLICIES: dict[str, ScalingPolicy] = {
 
 FPM_SAMPLING: dict[str, dict[str, int]] = {
     "small": {"max_num_fpm_samples": 32, "fpm_sample_bucket_size": 4},
-    "default": {"max_num_fpm_samples": 64, "fpm_sample_bucket_size": 16},
+    "default": {
+        name: PlannerConfig.model_fields[name].default
+        for name in ("max_num_fpm_samples", "fpm_sample_bucket_size")
+    },
     "large": {"max_num_fpm_samples": 128, "fpm_sample_bucket_size": 16},
     "fine": {"max_num_fpm_samples": 128, "fpm_sample_bucket_size": 64},
 }
 
 LOAD_SENSITIVITY: dict[str, dict[str, int]] = {
     "aggressive": {"load_scaling_down_sensitivity": 70, "load_min_observations": 3},
-    "default": {"load_scaling_down_sensitivity": 80, "load_min_observations": 5},
+    "default": {
+        name: PlannerConfig.model_fields[name].default
+        for name in ("load_scaling_down_sensitivity", "load_min_observations")
+    },
     "conservative": {"load_scaling_down_sensitivity": 90, "load_min_observations": 8},
 }
 

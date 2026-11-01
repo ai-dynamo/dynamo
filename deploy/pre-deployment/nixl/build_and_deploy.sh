@@ -97,7 +97,7 @@ check_dependencies() {
                     echo "  unzip: sudo apt-get install unzip (Ubuntu/Debian) or yum install unzip (RHEL/CentOS)"
                     ;;
                 kubectl)
-                    echo "  kubectl: https://kubernetes.io/docs/tasks/tools/install-kubectl/"
+                    echo "  kubectl: https://kubernetes.io/docs/tasks/tools/#kubectl"
                     ;;
                 docker)
                     echo "  docker: https://docs.docker.com/get-docker/"

@@ -14,13 +14,11 @@
 # limitations under the License.
 
 import logging
-import shlex
 from dataclasses import dataclass
 from typing import Optional
 
 from pydantic import BaseModel
 
-from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
@@ -34,19 +32,17 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-MAIN_CONTAINER_NAME = "main"
 V1BETA1_COMPONENT_TYPES = {"prefill", "decode"}
 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE = "worker"
-GPU_RESOURCE_KEY = "nvidia.com/gpu"
 
 # Per-GPU power-limit annotation key (watts, positive integer).
 #
 # Ownership: this value is *authored* on the DGD worker component
 # ``podTemplate.metadata.annotations`` by a human or the profiler. The operator
 # renders it onto every worker Pod at create time; the Power Agent DaemonSet
-# reads the *live Pod* annotation and applies the NVML/DCGM cap. The Planner
-# only *reads* this value from the DGD to project a power budget — it never
-# writes it onto Pods. The Power Agent
+# reads the *live Pod* annotation and applies the NVML/DCGM cap. The operator
+# also projects the effective value into component status; the Planner reads
+# only that status to project a power budget and never writes it onto Pods. The Power Agent
 # keeps its own copy of this literal (deploy/power-agent/power_agent.py); the
 # two are asserted identical by a contract test rather than shared as a package
 # import, because the agent image does not install the ``dynamo`` package.
@@ -59,36 +55,6 @@ class ComponentGPUShape:
 
     gpus_per_engine: int
     gpus_per_replica: int
-
-
-def break_arguments(args: list[str] | None) -> list[str]:
-    ans: list[str] = []
-    if args is None:
-        return ans
-    if isinstance(args, str):
-        # Use shlex.split to properly handle quoted arguments and JSON values
-        ans = shlex.split(args)
-    else:
-        for arg in args:
-            if arg is not None:
-                # Use shlex.split to properly handle quoted arguments
-                ans.extend(shlex.split(arg))
-    return ans
-
-
-def _main_container_from_pod_template(component: dict) -> dict:
-    containers = (
-        component.get("podTemplate", {}).get("spec", {}).get("containers", []) or []
-    )
-    for container in containers:
-        if container.get("name") == MAIN_CONTAINER_NAME:
-            return container
-    return {}
-
-
-def get_main_container(component: dict) -> dict:
-    """Return the planner-relevant v1beta1 main container."""
-    return _main_container_from_pod_template(component)
 
 
 def get_components_by_name(deployment: dict) -> dict[str, dict]:
@@ -131,270 +97,74 @@ class Service(BaseModel):
     def number_replicas(self) -> int:
         return self.service.get("replicas", 0)
 
-    def is_mocker(self) -> bool:
-        """Whether the main container explicitly launches Dynamo mocker."""
-
-        container = get_main_container(self.service)
-        command = break_arguments(container.get("command"))
-        args = break_arguments(container.get("args"))
-        return "dynamo.mocker" in command + args
-
-    def get_model_name(self) -> Optional[str]:
-        args = get_main_container(self.service).get("args", [])
-
-        args = break_arguments(args)
-        if (
-            "--served-model-name" in args
-            and len(args) > args.index("--served-model-name") + 1
+    def _current_component_status(self, deployment: dict) -> dict:
+        deployment_status = deployment.get("status", {})
+        generation = deployment.get("metadata", {}).get("generation")
+        if generation is None or generation != deployment_status.get(
+            "observedGeneration"
         ):
-            return args[args.index("--served-model-name") + 1]
-        if (
-            "--model-name" in args and len(args) > args.index("--model-name") + 1
-        ):  # mocker use --model-name
-            return args[args.index("--model-name") + 1]
-        if "--model" in args and len(args) > args.index("--model") + 1:
-            return args[args.index("--model") + 1]
+            return {}
+        return deployment_status.get("components", {}).get(self.name, {})
 
-        return None
+    def get_model_name(self, deployment: dict) -> Optional[str]:
+        """Return the operator-projected primary served model name."""
+        return self._current_component_status(deployment).get("servedModelName")
 
-    def get_component_name_from_endpoint_arg(self) -> Optional[str]:
-        """Return the component name from ``--endpoint`` in the container args.
-
-        Worker backends (vLLM, SGLang, TRT-LLM) accept
-        ``--endpoint <namespace>.<component>.<endpoint_name>`` (optionally
-        prefixed with ``dyn://``) which overrides the default component
-        name written to the MDC ``component`` field. When the user sets
-        this, the Planner's MDC filter must match the user's value, not
-        the backend default. Returns ``None`` if ``--endpoint`` is not
-        present or malformed.
-        """
-        args = get_main_container(self.service).get("args", [])
-        args = break_arguments(args)
-        if "--endpoint" not in args:
-            return None
-        idx = args.index("--endpoint")
-        if len(args) <= idx + 1:
-            return None
-        try:
-            _, component, _ = parse_endpoint(args[idx + 1])
-            return component
-        except ValueError:
-            return None
-
-    def get_gpu_count(self) -> int:
-        """Get the GPU count from the component's resource specification.
-
-        GPU count is read from the v1beta1 main container resources
-        (``nvidia.com/gpu``).
-
-        Returns:
-            The number of GPUs configured for this component
-
-        Raises:
-            ValueError: If GPU count is not specified or invalid
-        """
-        resources = get_main_container(self.service).get("resources", {})
-        limits = resources.get("limits", {})
-        requests = resources.get("requests", {})
-
-        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
-        # typically treat requests and limits as equivalent since GPUs are
-        # non-compressible and allocated exclusively (no fractional sharing).
-        if GPU_RESOURCE_KEY in limits:
-            gpu_str = limits[GPU_RESOURCE_KEY]
-        else:
-            gpu_str = requests.get(GPU_RESOURCE_KEY)
-
-        if gpu_str is None:
-            raise ValueError(
-                f"No GPU count specified for component '{self.name}'. "
-                f"Please set main container resources.limits.{GPU_RESOURCE_KEY} "
-                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD."
-            )
-
-        try:
-            gpu_count = int(gpu_str)
-        except (ValueError, TypeError) as err:
-            raise ValueError(
-                f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
-                f"GPU count must be a positive integer."
-            ) from err
-        # A zero/negative GPU count is nonsensical and, for power projection,
-        # would make watts_per_replica zero — silently disabling enforcement for
-        # this role. Reject it so the deployment fails loudly instead.
-        if gpu_count <= 0:
-            raise ValueError(
-                f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
-                f"GPU count must be a positive integer."
-            )
-        return gpu_count
+    def get_runtime_component_name(self, deployment: dict) -> Optional[str]:
+        """Return the operator-projected Dynamo runtime component identity."""
+        return self._current_component_status(deployment).get("runtimeComponentName")
 
     def get_gpu_shape(self, deployment: dict) -> ComponentGPUShape:
-        """Return the current operator-projected shape or a scalar fallback."""
+        """Return the current operator-projected GPU shape."""
         deployment_status = deployment.get("status", {})
         component_status = deployment_status.get("components", {}).get(self.name, {})
         engine_raw = component_status.get("gpusPerEngine")
         replica_raw = component_status.get("gpusPerReplica")
-        if engine_raw is not None or replica_raw is not None:
-            generation = deployment.get("metadata", {}).get("generation")
-            observed_generation = deployment.get("status", {}).get("observedGeneration")
-            if (
-                generation is None
-                or observed_generation is None
-                or observed_generation != generation
-            ):
-                raise GPUShapeUnavailableError(
-                    self.name,
-                    f"Resolved GPU shape for component '{self.name}' is not current: "
-                    f"metadata.generation={generation}, "
-                    f"status.observedGeneration={observed_generation}.",
-                )
-            if engine_raw is None or replica_raw is None:
-                raise GPUShapeUnavailableError(
-                    self.name,
-                    f"Incomplete GPU shape for component '{self.name}': "
-                    "both gpusPerEngine and gpusPerReplica are required.",
-                )
-            try:
-                engine = int(engine_raw)
-                replica = int(replica_raw)
-            except (TypeError, ValueError) as err:
-                raise GPUShapeUnavailableError(
-                    self.name,
-                    f"Invalid GPU shape for component '{self.name}': "
-                    f"gpusPerEngine={engine_raw!r}, gpusPerReplica={replica_raw!r}.",
-                ) from err
-            if engine < 0 or replica < 0 or (replica == 0 and engine != 0):
-                raise GPUShapeUnavailableError(
-                    self.name,
-                    f"Invalid GPU shape for component '{self.name}': "
-                    f"gpusPerEngine={engine}, gpusPerReplica={replica}.",
-                )
-            return ComponentGPUShape(engine, replica)
-
-        if self.requires_authoritative_gpu_shape():
+        generation = deployment.get("metadata", {}).get("generation")
+        observed_generation = deployment_status.get("observedGeneration")
+        if generation is None or observed_generation != generation:
+            raise GPUShapeUnavailableError(
+                self.name,
+                f"Resolved GPU shape for component '{self.name}' is not current: "
+                f"metadata.generation={generation}, "
+                f"status.observedGeneration={observed_generation}.",
+            )
+        if engine_raw is None or replica_raw is None:
             deployment_state = deployment_status.get("state", "unknown")
             raise GPUShapeUnavailableError(
                 self.name,
-                "operator status has no gpusPerEngine/gpusPerReplica fields "
-                f"for a DRA or auxiliary-GPU component (deployment state {deployment_state!r})",
+                "operator status has no complete gpusPerEngine/gpusPerReplica "
+                f"shape for component '{self.name}' (deployment state {deployment_state!r})",
             )
-
-        per_node = self.get_gpu_count()
-        per_engine = per_node * self.get_node_count()
-        return ComponentGPUShape(per_engine, per_engine)
-
-    def requires_authoritative_gpu_shape(self) -> bool:
-        """Whether spec-only fallback could miss a distinct GPU allocation."""
-
-        pod_spec = self.service.get("podTemplate", {}).get("spec", {})
-        containers = list(pod_spec.get("containers", []))
-        containers.extend(pod_spec.get("initContainers", []))
-        for container in containers:
-            resources = container.get("resources", {})
-            if resources.get("claims"):
-                return True
-            is_main = container.get("name") == MAIN_CONTAINER_NAME
-            limits = resources.get("limits", {})
-            requests = resources.get("requests", {})
-            resource_names = set(limits) | set(requests)
-            for resource_name in resource_names:
-                if resource_name != GPU_RESOURCE_KEY and not resource_name.startswith(
-                    "nvidia.com/mig-"
-                ):
-                    continue
-                if is_main and resource_name == GPU_RESOURCE_KEY:
-                    continue
-                raw = limits.get(resource_name, requests.get(resource_name))
-                try:
-                    if int(raw) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    return True
-        return False
-
-    def get_node_count(self) -> int:
-        """Return multinode.nodeCount from the component spec, defaulting to 1.
-
-        The operator CRD defines total GPUs as nodeCount × per-pod GPU request.
-        Single-node components either omit the field or set it to 1.
-
-        Raises:
-            ValueError: nodeCount is present but not a positive integer (a
-                zero/negative value would zero out watts_per_replica and
-                silently disable power enforcement for the role).
-        """
-        raw = self.service.get("multinode", {}).get("nodeCount", 1)
         try:
-            node_count = int(raw)
-        except (ValueError, TypeError) as err:
-            raise ValueError(
-                f"Invalid multinode.nodeCount '{raw}' for component "
-                f"'{self.name}'. nodeCount must be a positive integer."
+            engine = int(engine_raw)
+            replica = int(replica_raw)
+        except (TypeError, ValueError) as err:
+            raise GPUShapeUnavailableError(
+                self.name,
+                f"Invalid GPU shape for component '{self.name}': "
+                f"gpusPerEngine={engine_raw!r}, gpusPerReplica={replica_raw!r}.",
             ) from err
-        if node_count <= 0:
-            raise ValueError(
-                f"Invalid multinode.nodeCount '{raw}' for component "
-                f"'{self.name}'. nodeCount must be a positive integer."
+        if engine < 0 or replica < 0 or (replica == 0 and engine != 0):
+            raise GPUShapeUnavailableError(
+                self.name,
+                f"Invalid GPU shape for component '{self.name}': "
+                f"gpusPerEngine={engine}, gpusPerReplica={replica}.",
             )
-        return node_count
+        return ComponentGPUShape(engine, replica)
 
-    def get_total_gpu_count(self) -> int:
-        """Return total GPUs consumed by one replica: get_gpu_count() × get_node_count().
-
-        For single-node components this equals get_gpu_count(). For multinode
-        components the operator allocates nodeCount pods per replica each
-        carrying the same per-pod GPU request, so power projection must
-        multiply both factors.
-        """
-        return self.get_gpu_count() * self.get_node_count()
-
-    def get_gpu_power_limit_annotation(self) -> str:
-        """Return the raw ``dynamo.nvidia.com/gpu-power-limit`` annotation string.
-
-        Validates the annotation (same rules as ``get_gpu_power_limit_watts``)
-        but returns the original string rather than the parsed integer.  The
-        operator propagates the raw DGD podTemplate annotation verbatim onto
-        each Pod, so callers that build settlement expected-values must use
-        this raw string — not the canonical ``str(int)`` — to get an exact
-        match against what the Pod actually carries.
-
-        Raises:
-            PowerAnnotationMissingError: annotation key is absent.
-            PowerAnnotationInvalidError: value is empty, non-integer, or <= 0.
-        """
-        annotations = (
-            self.service.get("podTemplate", {}).get("metadata", {}).get("annotations")
-            or {}
-        )
-        raw = annotations.get(POWER_ANNOTATION_KEY)
+    def get_gpu_power_limit_watts(self, deployment: dict) -> int:
+        """Return the operator-projected per-GPU power limit."""
+        raw = self._current_component_status(deployment).get("gpuPowerLimitWatts")
         if raw is None:
             raise PowerAnnotationMissingError(self.name)
-        raw_str = str(raw)
         try:
-            watts = int(raw_str.strip())
+            watts = int(raw)
         except (ValueError, TypeError) as err:
-            raise PowerAnnotationInvalidError(self.name, raw_str) from err
+            raise PowerAnnotationInvalidError(self.name, str(raw)) from err
         if watts <= 0:
-            raise PowerAnnotationInvalidError(self.name, raw_str)
-        return raw_str
-
-    def get_gpu_power_limit_watts(self) -> int:
-        """Return ``dynamo.nvidia.com/gpu-power-limit`` as a validated integer.
-
-        The per-GPU cap is read from the worker component's
-        ``podTemplate.metadata.annotations``. This is the *desired* static cap
-        the operator stamps onto Pods and the Power Agent enforces; the Planner
-        only reads it for power projection.
-
-        For verbatim annotation comparison (settlement), use
-        ``get_gpu_power_limit_annotation()`` instead.
-
-        Raises:
-            PowerAnnotationMissingError: annotation key is absent.
-            PowerAnnotationInvalidError: value is empty, non-integer, or <= 0.
-        """
-        return int(self.get_gpu_power_limit_annotation().strip())
+            raise PowerAnnotationInvalidError(self.name, str(raw))
+        return watts
 
 
 def get_component_from_type_or_name(
@@ -458,7 +228,7 @@ class ComponentPowerConfig:
     component_name: str
     role: str  # prefill | decode | worker
     gpu_power_limit_watts: int
-    gpus_per_replica: int  # Service.get_total_gpu_count() (nodeCount × per-pod GPUs)
+    gpus_per_replica: int
 
     @property
     def watts_per_replica(self) -> int:
@@ -510,8 +280,13 @@ def _resolve_one_power_config(
 ) -> ComponentPowerConfig:
     """Resolve a single role's power config, or raise a typed error."""
     service = _resolve_one_power_service(deployment, sub_component_type, component_name)
-    watts = service.get_gpu_power_limit_watts()
-    gpus_per_replica = service.get_total_gpu_count()
+    watts = service.get_gpu_power_limit_watts(deployment)
+    gpus_per_replica = service.get_gpu_shape(deployment).gpus_per_replica
+    if gpus_per_replica <= 0:
+        raise ValueError(
+            f"Invalid operator-projected GPU count '{gpus_per_replica}' for "
+            f"component '{service.name}'. GPU count must be a positive integer."
+        )
     role = get_component_type(service.service) or sub_component_type.value
     return ComponentPowerConfig(
         component_name=service.name,
