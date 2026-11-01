@@ -621,41 +621,94 @@ readiness. No post-deployment S3 patch is needed.
 
 Wait for the control plane and node runtime:
 
-```bash
+```bash title="Command"
 kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
 kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
 kubectl -n ate-system rollout status deployment/ate-controller --timeout=600s
+kubectl -n ate-system rollout status deployment/ate-idp-server --timeout=600s
+kubectl -n ate-system rollout status deployment/atenet-egress --timeout=600s
+kubectl -n podcertificate-controller-system rollout status deployment/podcertificate-controller --timeout=600s
 kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
-kubectl -n ate-system get pods -o wide
-kubectl -n ate-system get podcertificaterequests
-kubectl get clustertrustbundles
 ```
 
-Check that `atelet` is ready on every node intended for sandbox placement.
-For the certificate configuration, verify that:
+```text title="Expected output (completion messages)"
+deployment "ate-api-server" successfully rolled out
+deployment "atenet-router" successfully rolled out
+deployment "ate-controller" successfully rolled out
+deployment "ate-idp-server" successfully rolled out
+deployment "atenet-egress" successfully rolled out
+deployment "podcertificate-controller" successfully rolled out
+daemon set "atelet" successfully rolled out
+```
 
-- The admitted Pod specifications retain both `podCertificate` and
-  `clusterTrustBundle` volume sources. API-server feature gates can cause
-  unsupported fields to be silently pruned, so a successful dry run is insufficient.
-- `PodCertificateRequest`: the Pods' requests reach `Issued=True`, and the
-  running containers receive nonempty credential bundles containing their
-  certificates and private keys at the configured projection paths.
-- `ClusterTrustBundle`: Substrate publishes trust bundles matching the Pods'
-  configured signer names and label selectors. The running containers receive
-  nonempty CA files at the configured projection paths.
+For a port-443 permission error, see [Resolve low-port permission failures](#resolve-low-port-permission-failures-when-needed).
 
-Check the Pods on each node that hosts Substrate components. Inspect request
-status and Pod events if issuance or volume mounting fails. Check credential
-files without printing private keys.
+Check Pod readiness and placement:
 
-Inspect requests during Pod startup or certificate renewal; Kubernetes removes
-old requests after issuance.
+```bash title="Command"
+kubectl -n ate-system get pods -o wide
+```
 
-Readiness alone does not verify a workload's client permissions, guest image,
-or durable snapshot restoration; check those when configuring the workload.
+```text title="Example output (excerpt)"
+NAME                              READY   STATUS      RESTARTS   AGE   IP            NODE        NOMINATED NODE   READINESS GATES
+ate-api-server-7dddb4c4fc-abcde     2/2     Running     0          5m    10.244.1.10   worker-01   <none>           <none>
+ate-api-server-7dddb4c4fc-fghij     2/2     Running     0          5m    10.244.2.10   worker-02   <none>           <none>
+atelet-abcde                      2/2     Running     0          5m    10.244.1.11   worker-01   <none>           <none>
+atelet-fghij                      2/2     Running     0          5m    10.244.2.11   worker-02   <none>           <none>
+rustfs-bucket-init-abcde           0/1     Completed   0          8m    10.244.1.12   worker-01   <none>           <none>
+```
 
-If a Pod reports a port-443 permission error, use the conditional fix below
-and repeat these checks.
+Service Pods should be ready, with one atelet on each eligible sandbox node.
+The bucket-initialization Job should be `Completed`.
+
+Check certificate issuance:
+
+```bash title="Command"
+kubectl -n ate-system get podcertificaterequests \
+  -o custom-columns='NAME:.metadata.name,POD:.metadata.ownerReferences[0].name,CONDITIONS:.status.conditions[*].type,STATUS:.status.conditions[*].status'
+```
+
+```text title="Example output (excerpt)"
+NAME        POD                               CONDITIONS   STATUS
+req-abcde   ate-api-server-7dddb4c4fc-abcde     Issued       True
+req-fghij   atelet-abcde                      Issued       True
+```
+
+Requests should reach `Issued=True`. Completed requests are eventually removed,
+so an empty list alone does not indicate failure.
+
+Check the published Substrate trust bundles:
+
+```bash title="Command"
+kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live \
+  -o custom-columns='NAME:.metadata.name,SIGNER:.spec.signerName'
+```
+
+```text title="Example output"
+NAME                                                    SIGNER
+egress-mitm.ate.dev:mitm:primary-bundle                   egress-mitm.ate.dev/mitm
+podidentity.podcert.ate.dev:identity:primary-bundle        podidentity.podcert.ate.dev/identity
+postgres.podcert.ate.dev:identity:primary-bundle           postgres.podcert.ate.dev/identity
+servicedns.podcert.ate.dev:identity:primary-bundle         servicedns.podcert.ate.dev/identity
+```
+
+Verify that admitted API-server and atelet Pods retain both certificate projections:
+
+```bash title="Command"
+kubectl -n ate-system get pods -l 'app in (ate-api-server,atelet)' \
+  -o custom-columns='POD:.metadata.name,CERTIFICATE_PATHS:.spec.volumes[*].projected.sources[*].podCertificate.credentialBundlePath,TRUST_BUNDLE_PATHS:.spec.volumes[*].projected.sources[*].clusterTrustBundle.path'
+```
+
+```text title="Example output (excerpt)"
+POD                               CERTIFICATE_PATHS                                                                                   TRUST_BUNDLE_PATHS
+ate-api-server-7dddb4c4fc-abcde     credential-bundle.pem,credential-bundle.pem,substrate_owner_user.pem,substrate_readwrite_user.pem   trust-bundle.pem,trust-bundle.pem
+atelet-abcde                      credential-bundle.pem                                                                               trust-bundle.pem,trust-bundle.pem
+```
+
+Both path columns must be populated. These checks verify issuance, published
+trust bundles, admitted projection configuration, and readiness; they do not
+inspect projected file contents. If a check fails, inspect the affected Pod's
+events with `kubectl -n ate-system describe pod <pod-name>`.
 
 </Step>
 
@@ -668,8 +721,8 @@ To configure and run a coding-agent workload, continue with
 
 <Accordion title="Fix a port-443 permission error">
 
-If a Substrate API or worker Pod cannot bind port 443, the installation may
-need a Pod-local sysctl:
+If an API-server or worker Pod reports `bind: permission denied` on port 443,
+add this Pod-level setting to the affected Deployment:
 
 ```yaml
 spec:
@@ -681,10 +734,32 @@ spec:
             value: "0"
 ```
 
-Apply it only to the affected deployment through the installation's supported
-configuration. The rc1 WorkerPool API does not expose Pod sysctls. When a manual
-patch to its generated Deployment is necessary, record it and reapply after
-recreation. The generated deployment has the same name as its WorkerPool.
-This is a Pod setting, not a host sysctl change.
+| Affected component | Where to change |
+| --- | --- |
+| API server | The Deployment in `deps/substrate/manifests/ate-install/ate-api-server.yaml`, under `spec.template.spec.securityContext` |
+| Worker | The Deployment generated from its WorkerPool, under `spec.template.spec.securityContext`. For Harbor: `harbor-workers` in namespace `ate-env` |
+
+For an existing API-server deployment, apply the same setting directly:
+
+```bash
+kubectl -n ate-system patch deployment ate-api-server --type=strategic \
+  -p '{"spec":{"template":{"spec":{"securityContext":{"sysctls":[{"name":"net.ipv4.ip_unprivileged_port_start","value":"0"}]}}}}}'
+kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
+```
+
+Keep the API-server manifest change so subsequent installer runs retain it.
+
+The rc1 WorkerPool API does not expose Pod sysctls in `workerpool.yaml`.
+Patch the generated Deployment, which has the same name as its WorkerPool.
+For the Harbor tutorial:
+
+```bash
+kubectl -n ate-env patch deployment harbor-workers --type=strategic \
+  -p '{"spec":{"template":{"spec":{"securityContext":{"sysctls":[{"name":"net.ipv4.ip_unprivileged_port_start","value":"0"}]}}}}}'
+kubectl -n ate-env rollout status deployment/harbor-workers --timeout=600s
+```
+
+Reapply the worker patch if the controller recreates the Deployment or overwrites
+the setting. The sysctl affects all containers in the affected Pod, not the host.
 
 </Accordion>
