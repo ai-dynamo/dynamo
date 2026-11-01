@@ -4852,7 +4852,7 @@ class EmbeddingWorkerHandler:
         ``--chat-template``."""
         if not self.config.custom_jinja_template:
             return None
-        from vllm.entrypoints.chat_utils import load_chat_template
+        from vllm.renderers.chat_utils import load_chat_template
 
         return load_chat_template(self.config.custom_jinja_template)
 
