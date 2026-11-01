@@ -1001,8 +1001,11 @@ async def test_engine_data_uses_effective_engine_prompt(
     input_ids, engine_ids, opted_in, first_chunk_only
 ):
     handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.config.require_dp_rank = True
+    handler.dp_range = (0, 2)
     request = {
         "token_ids": input_ids,
+        "routing": {"dp_rank": 1},
         "sampling_options": {},
         "stop_conditions": {"max_tokens": 2},
         "output_options": {"logprobs": 1},
@@ -1020,7 +1023,10 @@ async def test_engine_data_uses_effective_engine_prompt(
     handler._resolve_lora_request = MagicMock(return_value=None)
     handler._abort_monitor = MagicMock(return_value=nullcontext())
 
+    selected_ranks = []
+
     async def fake_generate(*args, **kwargs):
+        selected_ranks.append(kwargs.get("data_parallel_rank"))
         for i, token in enumerate([11, 12]):
             yield RequestOutput(
                 request_id="req-engine-prompt",
@@ -1049,6 +1055,7 @@ async def test_engine_data_uses_effective_engine_prompt(
         )
     ]
     assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
+    assert selected_ranks == [1]
     assert "engine_data" not in chunks[0]
     if opted_in:
         metadata = chunks[-1]["engine_data"]
