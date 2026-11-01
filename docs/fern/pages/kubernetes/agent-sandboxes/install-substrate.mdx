@@ -390,6 +390,9 @@ Open the checked-in
 and edit it for your cluster. Continue working from
 `examples/agents/harbor-substrate`.
 
+For an existing installation, update its managed configuration instead of
+replacing it with a new document.
+
 `ate-setup --config` reads this installer configuration. Do not apply it with
 `kubectl`. The file uses bundled PostgreSQL and the RustFS bucket created above:
 
@@ -503,6 +506,38 @@ with a `gs://` location and real transfer-service-account settings; keep
 `ATE_STORAGE_BACKEND=gcs` and omit the AWS entries.
 </Note>
 
+### Check optional router monitoring
+
+The upstream manifests include a `PodMonitoring` resource for
+[Google Managed Service for Prometheus](https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed).
+It configures scraping of the router's Envoy metrics. This service can run on
+GKE or other Kubernetes clusters, so check API availability before deployment:
+
+```bash
+kubectl api-resources --api-group=monitoring.googleapis.com
+```
+
+If the output lists `PodMonitoring` with API version
+`monitoring.googleapis.com/v1`, keep the monitoring resource.
+If it does not, edit
+`deps/substrate/manifests/ate-install/base/kustomization.yaml` and remove this
+entry from `resources`:
+
+```yaml
+  - ../atenet-router-monitoring.yaml
+```
+
+Keep the referenced YAML file. The installer no longer applies that resource,
+so it does not require the Google monitoring API. Substrate still runs, and
+the Envoy metrics endpoint remains available for another scraper.
+
+The Harbor tutorial's
+[sandbox metrics setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#deploy-the-metrics-bridge)
+uses a Prometheus Operator `ServiceMonitor` to scrape an OpenTelemetry
+Collector. That setup collects Substrate's native metrics and Collector
+self-metrics without the Google API. It does not scrape Envoy's separate
+`/stats/prometheus` endpoint.
+
 </Step>
 
 <Step title="Deploy the control plane" id="deploy-the-control-plane">
@@ -519,10 +554,6 @@ you to your chosen working directory afterward:
     --config ../../substrate-install.yaml
 )
 ```
-
-Omit or adapt optional Google `PodMonitoring` resources on clusters without
-that API. For an existing installation, update its managed configuration
-instead of replacing it with a new document.
 
 The installer reads the plugin settings edited above before it waits for
 readiness. No post-deployment S3 patch is needed.
