@@ -139,6 +139,7 @@ navigation:
                   path: pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx
 
       - section: Agent Sandboxes
+        icon: cube
         collapsed: true
         contents:
           - page: Install Substrate
