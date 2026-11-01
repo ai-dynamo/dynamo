@@ -195,6 +195,23 @@ The supplied
 [`gvisor-default` SandboxConfig](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/sandboxconfig-gvisor.yaml)
 selects the runtime assets for each node.
 
+### Choose nodes for Substrate (optional)
+
+For mixed-architecture clusters or dedicated node pools, configure `nodeSelector`
+and any required `tolerations` before deployment. Infrastructure and sandbox
+workloads can use different nodes. Run atelet on every node eligible for workers.
+Upstream manifest paths below are relative to
+`deps/substrate/manifests/ate-install/`.
+
+| Placement | Manifest files | Scheduling fields go under |
+| --- | --- | --- |
+| Substrate infrastructure | [ate-api-server.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/ate-api-server.yaml), [ate-controller.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/ate-controller.yaml), [ate-idp-server.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/ate-idp-server.yaml), [atenet-router.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/atenet-router.yaml), [atenet-egress.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/atenet-egress.yaml), [pod-certificate-controller.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/pod-certificate-controller.yaml) | Deployment `spec.template.spec` |
+| Bundled PostgreSQL | [postgres/postgres.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/postgres/postgres.yaml) | StatefulSet `spec.template.spec` |
+| RustFS and bucket initialization | [kind/rustfs.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/kind/rustfs.yaml) | Deployment and Job `spec.template.spec` |
+| Sandbox nodes (atelet) | [atelet.yaml](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/atelet.yaml) | DaemonSet `spec.template.spec` |
+| Harbor workers | [workerpool.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/workerpool.yaml) | WorkerPool `spec.template`; select nodes that run atelet |
+| Harbor runner | [harbor-runner.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/harbor-runner.yaml) | Pod `spec` |
+
 </Step>
 
 <Step title="Prepare the installation tools" id="prepare-the-installation-tools">
