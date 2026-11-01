@@ -1,0 +1,8 @@
+# lib/kv-hints
+
+- This crate owns the KV transfer hint wire (`KvHint`, `KvHintAction`, `KvSourceLocationsPayload`, the `KV_HINT_TRANSFER_*` runtime keys, `KvTransferCandidateSource`), the source choice (`WorkerKvTransferKeys`, `KvTransferTarget`, `KvTransferScope`, `ResolvedTransferSource`, `KvTransferSourceSummary`), and the worker transfer keys (`label_key`, `topology_keys`, `WorkerKvTransferKeys::from_worker`, `WorkerKvTransferKeysCache`, `KvHintTransferWorkerMetadata`, `KvTransferEnforcement`). Nothing else belongs here.
+- Depend only on `dynamo-router-protocol`, serde, serde_json, rustc-hash. Never add `dynamo-runtime`, `dynamo-kv-router`, a stage crate (`dynamo-kv-indexer`, `dynamo-slot-tracker`, `dynamo-session-affinity`, `dynamo-worker-selection`, `dynamo-admission`), `dynamo-scheduler`, `dynamo-kv-events`, tokio, zmq, axum, reqwest, or prometheus; the gate rejects them.
+- Stage logic stays out: `KvTransferCandidates` and `CacheOwnerKvTransferKeys` belong to `dynamo-kv-indexer` (they carry its residency snapshot); `resolve_transfer_sources` and the `WorkerConfigLike` adapter belong to `dynamo-scheduler`. A function that needs a stage's type goes in that stage or the kernel.
+- Changing a wire shape here changes what engines and sidecars receive. Keep serde compatibility tests next to the type.
+- Every public item is documented; no `#[doc(hidden)]`. The public surface is a committed snapshot (`public-api.txt`); run `scripts/router_public_api_check.sh --update` and review the diff when it changes.
+- Run `scripts/router_layering_check.sh` before committing.

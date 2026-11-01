@@ -9,16 +9,16 @@
 //! plugin names lives here: the [`WorkerFilter`], [`WorkerScorer`], and [`WorkerPicker`]
 //! traits, the [`WorkerSelectionContext`] view of the request, the candidate rows and
 //! their views, runtime parameter updates, the selection slice of the router config, the
-//! conditional-disaggregation policies, the LoRA narrowing filter, and the kv-transfer
-//! source summary. The kernel's `WorkerSelector`, its request-to-row materialization, and
-//! the config- and projection-derived columns stay in `lib/kv-router`.
+//! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
+//! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
+//! [`WorkerTransferInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
+//! materialization, and the config- and projection-derived columns stay in `lib/kv-router`.
 
 pub mod conditional_disagg;
 mod context;
 mod error;
 pub mod host;
 mod inputs;
-pub mod kv_transfer;
 pub mod lora_filter;
 mod policy;
 #[cfg(any(test, feature = "testing", feature = "bench"))]

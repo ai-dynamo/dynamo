@@ -1,0 +1,17 @@
+[package]
+name = "dynamo-kv-hints"
+description = "KV transfer hints the router hands engines: the wire, the source choice, and the worker transfer keys"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[dependencies]
+dynamo-router-protocol = { workspace = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }

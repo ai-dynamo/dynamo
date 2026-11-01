@@ -17,8 +17,9 @@ use std::hash::Hash;
 
 use rustc_hash::FxHashMap;
 
-use dynamo_router_protocol::kv_hints::KvTransferCandidateSource;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
+
+use crate::wire::KvTransferCandidateSource;
 
 /// A worker's router-hint identity, with its labels hashed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,8 +37,9 @@ pub struct WorkerKvTransferKeys {
 }
 
 impl WorkerKvTransferKeys {
-    /// Assemble the keys from already-hashed labels. The router derives them from a worker's
-    /// runtime config; see `WorkerKvTransferKeysExt` in `dynamo_kv_router::kv_hints`.
+    /// Assemble the keys from already-hashed labels. [`Self::from_worker`] derives them from
+    /// the fields of a worker's runtime config; the scheduler kernel's
+    /// `WorkerKvTransferKeysExt` reads those fields off its `WorkerConfigLike`.
     pub fn from_parts(
         worker_type: Option<u64>,
         source_ranks: Vec<u32>,
@@ -197,7 +199,9 @@ pub struct ResolvedTransferSource {
 /// The source a target fetches from, and the prefix it holds in blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvTransferSourceChoice {
+    /// The source the target fetches from.
     pub source: KvTransferCandidateSource,
+    /// The prefix the source holds, in blocks.
     pub prefix_blocks: usize,
 }
 

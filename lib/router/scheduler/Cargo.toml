@@ -23,6 +23,7 @@ bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "
 dynamo-admission = { workspace = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-session-affinity = { workspace = true }

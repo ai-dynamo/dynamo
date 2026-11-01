@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 use dynamo_admission::host::AbortCause;
-pub use dynamo_router_protocol::kv_hints::{
+pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
 use dynamo_router_protocol::mm::BlockExtraInfo;

@@ -11,12 +11,11 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_router_protocol::kv_hints::{
+use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHintTransferWorkerMetadata, KvTransferEnforcement,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
-use dynamo_scheduler::host::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;

@@ -154,32 +154,6 @@ impl core::str::traits::FromStr for dynamo_router_protocol::identity::StableDpSl
 pub type dynamo_router_protocol::identity::StableDpSlotId::Err = dynamo_router_protocol::identity::IdentityParseError
 pub fn dynamo_router_protocol::identity::StableDpSlotId::from_str(&str) -> core::result::Result<Self, Self::Err>
 pub const dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP: &str
-pub mod dynamo_router_protocol::kv_hints
-pub enum dynamo_router_protocol::kv_hints::KvTransferCandidateSource
-pub dynamo_router_protocol::kv_hints::KvTransferCandidateSource::CacheOwner(dynamo_router_protocol::residency::ResidencyOwnerKey)
-pub dynamo_router_protocol::kv_hints::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
-impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::kv_hints::KvTransferCandidateSource
-pub fn dynamo_router_protocol::kv_hints::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
-pub struct dynamo_router_protocol::kv_hints::KvHint
-pub dynamo_router_protocol::kv_hints::KvHint::actions: alloc::vec::Vec<dynamo_router_protocol::kv_hints::KvHintAction>
-pub dynamo_router_protocol::kv_hints::KvHint::message_id: alloc::string::String
-pub dynamo_router_protocol::kv_hints::KvHint::protocol_version: alloc::string::String
-impl dynamo_router_protocol::kv_hints::KvHint
-pub fn dynamo_router_protocol::kv_hints::KvHint::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<dynamo_router_protocol::kv_hints::KvHintAction>) -> Self
-pub struct dynamo_router_protocol::kv_hints::KvHintAction
-pub dynamo_router_protocol::kv_hints::KvHintAction::action_id: alloc::string::String
-pub dynamo_router_protocol::kv_hints::KvHintAction::action_type: alloc::string::String
-pub dynamo_router_protocol::kv_hints::KvHintAction::action_version: alloc::string::String
-pub dynamo_router_protocol::kv_hints::KvHintAction::payload: alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>
-impl dynamo_router_protocol::kv_hints::KvHintAction
-pub fn dynamo_router_protocol::kv_hints::KvHintAction::fetch(impl core::convert::Into<alloc::string::String>, dynamo_router_protocol::kv_hints::KvSourceLocationsPayload) -> Self
-pub fn dynamo_router_protocol::kv_hints::KvHintAction::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>) -> Self
-pub struct dynamo_router_protocol::kv_hints::KvSourceLocationsPayload
-pub dynamo_router_protocol::kv_hints::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>
-pub dynamo_router_protocol::kv_hints::KvSourceLocationsPayload::source_control_endpoint: alloc::string::String
-pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
-pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
-pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
 pub mod dynamo_router_protocol::metadata
 pub struct dynamo_router_protocol::metadata::RouterHintSourceMetadata
 pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::source_control_endpoint: alloc::string::String
@@ -280,8 +254,6 @@ pub dynamo_router_protocol::worker::WorkerWithDpRank::worker_id: dynamo_router_p
 impl dynamo_router_protocol::worker::WorkerWithDpRank
 pub fn dynamo_router_protocol::worker::WorkerWithDpRank::from_worker_id(dynamo_router_protocol::worker::WorkerId) -> Self
 pub fn dynamo_router_protocol::worker::WorkerWithDpRank::new(dynamo_router_protocol::worker::WorkerId, dynamo_router_protocol::worker::DpRank) -> Self
-impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::kv_hints::KvTransferCandidateSource
-pub fn dynamo_router_protocol::kv_hints::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
 impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::worker::WorkerAffinityTarget
 pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
 pub const dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS: u64

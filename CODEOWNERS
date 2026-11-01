@@ -75,6 +75,7 @@
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/zmq/                                                                                               @ai-dynamo/dynamo-router-codeowners
 /lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
+/lib/kv-hints/                                                                                          @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners

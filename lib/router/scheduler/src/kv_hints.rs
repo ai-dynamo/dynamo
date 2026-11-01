@@ -1,15 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed KV-cache hints attached to selected backend requests.
+//! Typed KV-cache hints attached to selected backend requests: the kernel's view of
+//! `dynamo-kv-hints` (re-exported by name), the [`WorkerConfigLike`] adapter that derives a
+//! worker's transfer keys, and [`resolve_transfer_sources`], which joins the indexer's
+//! candidates with worker keys under a selection scope.
 
-pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
-pub use dynamo_worker_selection::kv_transfer::{
+pub use dynamo_kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
-    ResolvedTransferSource, WorkerKvTransferKeys,
+    ResolvedTransferSource, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
+pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
 
-pub use dynamo_router_protocol::kv_hints::{
+pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
@@ -17,14 +20,12 @@ pub use dynamo_router_protocol::kv_hints::{
 pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
-use dynamo_kv_indexer::kv_hints::{label_key, topology_keys};
-
-use crate::protocols::{KvTransferEnforcement, WorkerConfigLike, WorkerId};
+use crate::protocols::{WorkerConfigLike, WorkerId};
 
 /// Derives a worker's hashed hint identity from its runtime config. Lives beside
-/// [`WorkerConfigLike`] because the selection stage does not know the config trait.
+/// [`WorkerConfigLike`] because the vocabulary crate does not know the config trait; the
+/// body is [`WorkerKvTransferKeys::from_worker`] over the config's fields.
 pub trait WorkerKvTransferKeysExt: Sized {
     /// Hash the worker's hint labels and collect its source ranks.
     fn of<C: WorkerConfigLike + ?Sized>(config: &C) -> Self;
@@ -32,50 +33,14 @@ pub trait WorkerKvTransferKeysExt: Sized {
 
 impl WorkerKvTransferKeysExt for WorkerKvTransferKeys {
     fn of<C: WorkerConfigLike + ?Sized>(config: &C) -> Self {
-        let start = config.data_parallel_start_rank();
-        let mut worker_type = None;
-        let mut source_ranks = Vec::new();
-        for rank in start..start.saturating_add(config.data_parallel_size()) {
-            let Some(metadata) = config.kv_hint_transfer_metadata_for_dp_rank(rank) else {
-                continue;
-            };
-            worker_type.get_or_insert_with(|| label_key(metadata.worker_type));
-            if metadata
-                .source_control_endpoint
-                .is_some_and(|endpoint| !endpoint.is_empty())
-            {
-                source_ranks.push(rank);
-            }
-        }
-        let topology = config
-            .topology_domains()
-            .map(topology_keys)
-            .unwrap_or_default();
-        let transfer_domain = config.kv_transfer_domain().map(label_key);
-        WorkerKvTransferKeys::from_parts(
-            worker_type,
-            source_ranks,
-            topology,
-            transfer_domain,
-            config.kv_transfer_enforcement() == Some(KvTransferEnforcement::Preferred),
+        WorkerKvTransferKeys::from_worker(
+            config.data_parallel_start_rank(),
+            config.data_parallel_size(),
+            |rank| config.kv_hint_transfer_metadata_for_dp_rank(rank),
+            config.topology_domains(),
+            config.kv_transfer_domain(),
+            config.kv_transfer_enforcement(),
         )
-    }
-}
-
-/// [`WorkerKvTransferKeys`] derived from a worker config on first use. The
-/// config's other fields decide equality, and it must not change afterwards.
-#[derive(Clone, Debug, Default)]
-pub struct WorkerKvTransferKeysCache(OnceLock<WorkerKvTransferKeys>);
-
-impl WorkerKvTransferKeysCache {
-    pub fn get_or_init<C: WorkerConfigLike + ?Sized>(&self, config: &C) -> &WorkerKvTransferKeys {
-        self.0.get_or_init(|| WorkerKvTransferKeys::of(config))
-    }
-}
-
-impl PartialEq for WorkerKvTransferKeysCache {
-    fn eq(&self, _other: &Self) -> bool {
-        true
     }
 }
 
@@ -147,63 +112,80 @@ pub fn resolve_transfer_sources<C: WorkerConfigLike>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::protocols::ExternalSequenceBlockHash;
+    use crate::protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 
-    #[test]
-    fn serializes_versioned_fetch_action() {
-        let hint = KvHint::new(
-            "msg-123",
-            vec![KvHintAction::fetch(
-                "a1",
-                KvSourceLocationsPayload {
-                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(11),
-                        ExternalSequenceBlockHash(22),
-                    ],
-                },
-            )],
-        );
+    /// Two ranks, the second a source, two topology labels, a transfer domain, `preferred`.
+    struct Worker {
+        topology: HashMap<String, String>,
+    }
 
-        assert_eq!(
-            serde_json::to_value(hint).unwrap(),
-            serde_json::json!({
-                "protocol_version": "0.1",
-                "message_id": "msg-123",
-                "actions": [{
-                    "action_id": "a1",
-                    "action_type": "kv.fetch",
-                    "action_version": "1.0",
-                    "payload": {
-                        "source_control_endpoint": "tcp://127.0.0.1:23280",
-                        "block_hashes": [11, 22],
-                    },
-                }],
+    impl WorkerConfigLike for Worker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            4
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            2
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn kv_hint_transfer_metadata_for_dp_rank(
+            &self,
+            dp_rank: u32,
+        ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+            Some(KvHintTransferWorkerMetadata {
+                worker_type: "prefill",
+                source_control_endpoint: (dp_rank == 5).then_some("tcp://worker:23280"),
             })
-        );
+        }
+
+        fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+            Some(&self.topology)
+        }
+
+        fn kv_transfer_domain(&self) -> Option<&str> {
+            Some("rdma-island")
+        }
+
+        fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
+            Some(KvTransferEnforcement::Preferred)
+        }
     }
 
     #[test]
-    fn deserializes_unknown_action_as_opaque_transport_data() {
-        let value = serde_json::json!({
-            "protocol_version": "0.1",
-            "message_id": "msg-future",
-            "actions": [{
-                "action_id": "a-future",
-                "action_type": "kv.future_action",
-                "action_version": "7.3",
-                "payload": {
-                    "nested": {"enabled": true},
-                    "items": [1, 2, 3],
-                },
-            }],
-        });
+    fn adapter_equals_the_direct_call() {
+        let config = Worker {
+            topology: HashMap::from([
+                ("rdma-island".to_string(), "a".to_string()),
+                ("zone".to_string(), "z1".to_string()),
+            ]),
+        };
+        let direct = WorkerKvTransferKeys::from_worker(
+            4,
+            2,
+            |rank| config.kv_hint_transfer_metadata_for_dp_rank(rank),
+            Some(&config.topology),
+            Some("rdma-island"),
+            Some(KvTransferEnforcement::Preferred),
+        );
 
-        let hint: KvHint = serde_json::from_value(value.clone()).unwrap();
+        let keys = WorkerKvTransferKeys::of(&config);
 
-        assert_eq!(hint.actions[0].action_type, "kv.future_action");
-        assert_eq!(serde_json::to_value(hint).unwrap(), value);
+        assert_eq!(keys, direct);
+        assert!(keys.worker_type().is_some());
+        assert!(keys.is_source(5) && !keys.is_source(4));
+        assert_eq!(keys.topology().len(), 2);
+        assert_eq!(keys.target(), direct.target());
     }
 }
 

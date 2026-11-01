@@ -17,16 +17,10 @@ pub use dynamo_router_protocol::mm::{
     BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,
 };
 
-/// TRANSFER hint metadata exposed by a worker config for one global DP rank.
-///
-/// This is borrowed from the underlying worker config so candidate filtering can
-/// check capability, role compatibility, and source endpoint presence without
-/// allocating. `source_control_endpoint` is optional because targets only need
-/// to consume hints, while sources must provide an endpoint.
+pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 pub use dynamo_scheduler::protocols::{
-    KvHintTransferWorkerMetadata, KvTransferEnforcement, PotentialLoad, RouterEventSink,
-    RouterRequest, RouterResponse, RoutingConstraints, SelectionLogFields, WorkerConfigLike,
-    WorkerSelectionResult,
+    PotentialLoad, RouterEventSink, RouterRequest, RouterResponse, RoutingConstraints,
+    SelectionLogFields, WorkerConfigLike, WorkerSelectionResult,
 };
 
 pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};

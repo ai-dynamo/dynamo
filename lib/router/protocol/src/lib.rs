@@ -8,17 +8,17 @@
 //! runs: no tasks, no IO, no traits with behavior, no hashing. Dependencies are exactly
 //! `serde`, `serde_json`, and `thiserror`, and the layering gate checks that by equality.
 //!
-//! Deliberately elsewhere: KV event types and their engine codec (`dynamo-kv-events`),
-//! the hash functions (`dynamo-kv-hashing`), the scheduling request, eligibility, and
-//! host hooks (`dynamo-scheduler`), candidate rows (`dynamo-worker-selection`), queue
-//! rejection (`dynamo-admission`), and the fullness rule and the scheduler-load replica
-//! wire (`dynamo-slot-tracker`).
+//! Deliberately elsewhere: KV event types and their engine codec (`dynamo-kv-events`), KV
+//! transfer hints and the worker transfer keys (`dynamo-kv-hints`), the hash functions
+//! (`dynamo-kv-hashing`), the scheduling request, eligibility, and host hooks
+//! (`dynamo-scheduler`), candidate rows (`dynamo-worker-selection`), queue rejection
+//! (`dynamo-admission`), and the fullness rule and the scheduler-load replica wire
+//! (`dynamo-slot-tracker`).
 
 pub mod attempt;
 pub mod block_hash;
 pub mod columns;
 pub mod identity;
-pub mod kv_hints;
 pub mod metadata;
 pub mod mm;
 pub mod residency;

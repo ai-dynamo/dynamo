@@ -26,6 +26,7 @@ pub use dynamo_kv_hashing::routing::{
     compute_block_hash_for_seq_with_seed, compute_next_seq_hash, compute_seq_hash_for_block,
     compute_seq_hash_for_tokens_with_seeds, hash_mm_identifier, pad_value_for_mm_hash,
 };
+pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 pub use dynamo_kv_indexer::overlap::OverlapScores;
 pub use dynamo_kv_indexer::residency::{
     ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError, ResidencyRoutingSnapshot,
@@ -51,12 +52,6 @@ pub use dynamo_slot_tracker::wire::{
 pub use dynamo_worker_selection::{
     SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SharedCacheHits,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KvHintTransferWorkerMetadata<'a> {
-    pub worker_type: &'a str,
-    pub source_control_endpoint: Option<&'a str>,
-}
 
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
 ///
@@ -130,15 +125,6 @@ pub trait WorkerConfigLike {
     fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
         Cow::Owned(WorkerKvTransferKeys::of(self))
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum KvTransferEnforcement {
-    /// Put the generated topology taint in `RoutingConstraints.required_taints`.
-    Required,
-    /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
-    Preferred,
 }
 
 /// Request-level taint constraints evaluated against each worker's published taints.
@@ -380,19 +366,6 @@ mod tests {
             request,
             RouterRequest::MarkFree { request_id: None }
         ));
-    }
-
-    #[test]
-    fn test_kv_transfer_enforcement_serde() {
-        assert_eq!(
-            serde_json::to_string(&KvTransferEnforcement::Required).unwrap(),
-            r#""required""#
-        );
-        assert_eq!(
-            serde_json::from_str::<KvTransferEnforcement>(r#""preferred""#).unwrap(),
-            KvTransferEnforcement::Preferred
-        );
-        assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
     }
 
     #[test]

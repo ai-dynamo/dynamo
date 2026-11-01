@@ -2198,6 +2198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-hints"
+version = "1.7.0"
+dependencies = [
+ "dynamo-router-protocol",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-kv-indexer"
 version = "1.7.0"
 dependencies = [
@@ -2208,6 +2218,7 @@ dependencies = [
  "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-hints",
  "dynamo-router-protocol",
  "dynamo-tokens",
  "fastrand",
@@ -2242,6 +2253,7 @@ dependencies = [
  "dynamo-admission",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-hints",
  "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-scheduler",
@@ -2306,6 +2318,7 @@ dependencies = [
  "dynamo-decisions",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-hints",
  "dynamo-kv-indexer",
  "dynamo-kv-router",
  "dynamo-memory",
@@ -2706,6 +2719,7 @@ dependencies = [
  "dynamo-admission",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-hints",
  "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "dynamo-session-affinity",

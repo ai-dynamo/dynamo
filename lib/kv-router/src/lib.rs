@@ -24,13 +24,13 @@ pub mod identity;
 pub mod indexer;
 #[deprecated(
     since = "1.7.0",
-    note = "owned by dynamo_router_protocol::kv_hints, dynamo_kv_indexer::kv_hints, and dynamo_scheduler::kv_hints; see lib/kv-router/README.md, Deprecated paths"
+    note = "owned by dynamo_kv_hints, dynamo_kv_indexer::kv_hints, and dynamo_scheduler::kv_hints; see lib/kv-router/README.md, Deprecated paths"
 )]
 pub mod kv_hints;
 pub mod plugins;
 #[deprecated(
     since = "1.7.0",
-    note = "the owners are dynamo_router_protocol, dynamo_kv_events, dynamo_kv_hashing, and dynamo_scheduler::protocols; see lib/kv-router/README.md, Deprecated paths"
+    note = "the owners are dynamo_router_protocol, dynamo_kv_events, dynamo_kv_hashing, dynamo_kv_hints, and dynamo_scheduler::protocols; see lib/kv-router/README.md, Deprecated paths"
 )]
 pub mod protocols;
 #[deprecated(

@@ -5,7 +5,7 @@ mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_policy;
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_scheduler::host::WorkerSelector;
+use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -322,7 +322,7 @@ impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
     fn kv_transfer_keys(
         &self,
     ) -> std::borrow::Cow<'_, dynamo_kv_router::plugins::prelude::WorkerKvTransferKeys> {
-        std::borrow::Cow::Borrowed(self.keys.get_or_init(self))
+        std::borrow::Cow::Borrowed(self.keys.get_or_init(|| WorkerKvTransferKeys::of(self)))
     }
 }
 

@@ -568,16 +568,15 @@ mod tests {
         };
         config.taints.insert("gpu=h100".to_string());
         config.runtime_data.insert(
-            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY.to_string(),
+            dynamo_kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
         config.runtime_data.insert(
-            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY.to_string(),
+            dynamo_kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY.to_string(),
             serde_json::Value::String("decode".to_string()),
         );
         config.runtime_data.insert(
-            dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
-                .to_string(),
+            dynamo_kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY.to_string(),
             serde_json::json!({"2": "tcp://w:9002", "3": "tcp://w:9003"}),
         );
         let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);

@@ -5,7 +5,8 @@
 //! response vocabulary, eligibility, the queue actor and `LocalScheduler`, the overlap and
 //! prefill-load analysis, the selection kernel over the worker-selection stage, the validated
 //! kernel configuration, and the tracking hash. Hosts and the composed router
-//! (`dynamo-kv-router`) sit above it; the five stages, protocol, and kv-hashing sit below.
+//! (`dynamo-kv-router`) sit above it; the five stages, protocol, kv-hashing, and kv-hints sit
+//! below.
 
 pub mod classifier_rows;
 pub mod config;

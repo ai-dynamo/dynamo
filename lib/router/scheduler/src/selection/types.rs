@@ -11,7 +11,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::config::RouterConfigOverride;
 use crate::identity::{RoutingPartitionId, default_routing_group};
-use crate::kv_hints::{KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache};
+use crate::kv_hints::{
+    KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache, WorkerKvTransferKeysExt,
+};
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{
     BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
@@ -134,7 +136,10 @@ impl WorkerConfigLike for SelectionWorkerConfig {
     }
 
     fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
-        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
+        Cow::Borrowed(
+            self.kv_transfer_keys
+                .get_or_init(|| WorkerKvTransferKeys::of(self)),
+        )
     }
 }
 

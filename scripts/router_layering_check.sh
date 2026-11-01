@@ -48,13 +48,14 @@ export LC_ALL=C
 TABLE=(
   "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
   "dynamo-kv-events | dynamo-router-protocol dynamo-kv-hashing | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq | dynamo-kv-hashing dynamo-router-protocol rmp-serde rustc-hash serde serde_json thiserror tracing | -"
+  "dynamo-kv-hints | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler tokio anyhow async-trait prometheus axum hyper reqwest zmq | dynamo-router-protocol rustc-hash serde serde_json | -"
   "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing prometheus axum hyper reqwest | anyhow tokio tracing zmq | -"
-  "dynamo-kv-indexer | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq | anyhow arc-swap async-trait blake3 dashmap dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens fastrand flume parking_lot prometheus rustc-hash seqlock serde serde_json slotmap thiserror tokio tokio-util tracing xxhash-rust | -"
+  "dynamo-kv-indexer | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq | anyhow arc-swap async-trait blake3 dashmap dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-router-protocol dynamo-tokens fastrand flume parking_lot prometheus rustc-hash seqlock serde serde_json slotmap thiserror tokio tokio-util tracing xxhash-rust | -"
   "dynamo-slot-tracker | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | anyhow crossbeam-utils dashmap dynamo-router-protocol dynamo-tokens fastrand indexmap parking_lot rustc-hash seqlock serde slotmap thiserror tokio tokio-util tracing | -"
   "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | blake3 dashmap dynamo-router-protocol serde thiserror tokio tokio-util tracing | -"
   "dynamo-worker-selection | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait crossbeam-queue dynamo-router-protocol dynamo-slot-tracker fastrand parking_lot rustc-hash serde serde_json thiserror tracing | -"
   "dynamo-admission | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait dynamo-router-protocol dynamo-slot-tracker dynamo-tokens futures-util ordered-float parking_lot rustc-hash serde serde_json thiserror tokio tokio-util tracing | -"
-  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | anyhow arc-swap async-trait blake3 crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection fastrand futures-util http once_cell ordered-float parking_lot rmp-serde rustc-hash serde serde_json thiserror tokio tokio-util tracing uuid zeroize | -"
+  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-hints dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | anyhow arc-swap async-trait blake3 crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection fastrand futures-util http once_cell ordered-float parking_lot rmp-serde rustc-hash serde serde_json thiserror tokio tokio-util tracing uuid zeroize | -"
   "dynamo-error | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-tokens tokio anyhow thiserror tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json | -"
   "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
@@ -62,7 +63,7 @@ TABLE=(
 # Every crate the split produces (SPLIT_V2 3a-final). Column 2 counts any of
 # these found in a tree as a router dependency, so a crate that reaches for the
 # monolith or a sibling fails before that sibling has a row of its own.
-ROUTER_FAMILY="dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-zmq dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
+ROUTER_FAMILY="dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-kv-hints dynamo-zmq dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
 
 # Features no normal (non-dev) dependency may enable on a table crate, checked
 # on the workspace graph (`cargo tree --workspace -e normal,features`).
@@ -239,7 +240,7 @@ done
 # carries the kernel and the stages and none of the transport crates.
 # ---------------------------------------------------------------------------
 COMPOSITION="dynamo-kv-router"
-COMPOSITION_ROUTER_DEPS="dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-worker-selection"
+COMPOSITION_ROUTER_DEPS="dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-worker-selection"
 in_workspace "$COMPOSITION" || die "$COMPOSITION is not a workspace package"
 tree "$COMPOSITION" "$COMPOSITION" --no-default-features >"$tmp/comp_tree.txt"
 awk -v c="$COMPOSITION" '$1 != c { print $1 }' "$tmp/comp_tree.txt" | lines >"$tmp/comp_names.txt"
@@ -256,7 +257,7 @@ if [ ! -s "$tmp/comp_hits.txt" ]; then
 else
   bad "$COMPOSITION: transport crates in its no-features tree: $(show <"$tmp/comp_hits.txt")"
 fi
-COMPOSITION_DIRECT_DEPS="anyhow arc-swap async-trait axum blake3 chrono crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-truthy dynamo-worker-selection dynamo-zmq fastrand flume futures-util http parking_lot prometheus reqwest rmp-serde rustc-hash serde serde_json serde_yaml thiserror tokio tokio-util tracing tracing-appender uuid xxhash-rust zeroize zmq"
+COMPOSITION_DIRECT_DEPS="anyhow arc-swap async-trait axum blake3 chrono crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-truthy dynamo-worker-selection dynamo-zmq fastrand flume futures-util http parking_lot prometheus reqwest rmp-serde rustc-hash serde serde_json serde_yaml thiserror tokio tokio-util tracing tracing-appender uuid xxhash-rust zeroize zmq"
 direct_deps "$COMPOSITION" | lines >"$tmp/comp_direct.txt"
 words "$COMPOSITION_DIRECT_DEPS" >"$tmp/comp_direct_want.txt"
 if cmp -s "$tmp/comp_direct.txt" "$tmp/comp_direct_want.txt"; then
@@ -294,7 +295,7 @@ fi
 # README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate's
 # deprecated shims are glob re-exports by design until their removal release.
 # ---------------------------------------------------------------------------
-ROUTER_CRATE_DIRS="lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/zmq"
+ROUTER_CRATE_DIRS="lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints lib/zmq"
 GLOB_EXEMPT_DIRS="lib/kv-router"
 for d in $ROUTER_CRATE_DIRS; do [ -d "$d/src" ] || die "$d/src does not exist"; done
 mapfile -t src_files < <(for d in $ROUTER_CRATE_DIRS; do find "$d/src" -type f -name '*.rs'; done | sort)

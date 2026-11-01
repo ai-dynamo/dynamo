@@ -11,10 +11,11 @@ use std::{
 
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
+use dynamo_kv_hints::KvTransferEnforcement;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_scheduler::host::{KvTransferEnforcement, PrefillLoadEstimator, RoutingConstraints};
+use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;

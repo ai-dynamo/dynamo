@@ -8,6 +8,7 @@
 
 pub use crate::config::{CacheHitWeights, RouterPrefillLoadModel};
 pub use crate::config::{RouterConfig, RouterConfigOverride, Validated};
+pub use crate::kv_hints::{WorkerKvTransferKeysCache, WorkerKvTransferKeysExt};
 pub use crate::local::LocalScheduler;
 pub use crate::overlap::{OverlapAnalysis, OverlapScoresResponse, OverlapSignals};
 pub use crate::overlap_summary::MooncakeOverlapSummary;

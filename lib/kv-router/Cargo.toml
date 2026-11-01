@@ -39,6 +39,7 @@ dynamo-admission = { workspace = true }
 dynamo-scheduler = { workspace = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
 dynamo-session-affinity = { workspace = true }

@@ -2403,6 +2403,7 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 #[cfg(test)]
 mod tests {
     use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_hints::KvTransferCandidateSource;
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
         KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
@@ -2413,7 +2414,6 @@ mod tests {
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,
     };
-    use dynamo_router_protocol::kv_hints::KvTransferCandidateSource;
     use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
     use dynamo_router_protocol::residency::ResidencyOwner;
     use dynamo_router_protocol::worker::WorkerWithDpRank;

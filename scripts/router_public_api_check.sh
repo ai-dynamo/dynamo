@@ -4,8 +4,9 @@
 #
 # The public surfaces of the tier-1 router crates are committed snapshots (SPLIT_V2
 # section 10): dynamo-kv-router, the one crate plugins and standalone consumers name;
-# dynamo-router-protocol, the vocabulary every crate names; and dynamo-error, the error
-# contract every component classifies with. This script regenerates each
+# dynamo-router-protocol, the vocabulary every crate names; dynamo-kv-hints, the KV transfer
+# hints engines consume; and dynamo-error, the error contract every component classifies
+# with. This script regenerates each
 # with cargo-public-api and fails when a committed file differs; --update rewrites them.
 # Needs cargo-public-api (cargo install cargo-public-api@0.52.0 --locked) and the nightly
 # toolchain it drives rustdoc with.
@@ -15,6 +16,7 @@ cd "$(git rev-parse --show-toplevel)"
 SNAPSHOTS=(
   "lib/kv-router | lib/kv-router/public-api.txt | http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics"
   "lib/router/protocol | lib/router/protocol/public-api.txt | -"
+  "lib/kv-hints | lib/kv-hints/public-api.txt | -"
   "lib/error | lib/error/public-api.txt | -"
 )
 update=0
