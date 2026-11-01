@@ -25,7 +25,8 @@ around limitations in that release's installer.
   50 GiB `ReadWriteOnce` volume.
 - For the bundled PostgreSQL installation, storage capacity for its default
   500 GiB `ReadWriteOnce` volume.
-- Git, Go 1.27 or newer, and `kubectl` on the installation workstation.
+- Git, Go 1.27 or newer, `kubectl`, `curl`, and `shasum` on the installation
+  workstation.
 
 ## What this installs
 
@@ -154,21 +155,37 @@ selects the runtime assets for each node.
 
 </Step>
 
-<Step title="Build the installation tools" id="build-the-installation-tools">
+<Step title="Prepare the installation tools" id="prepare-the-installation-tools">
 
-Fetch the pinned release and build the installation tools:
+Fetch the pinned release for its installer and manifests:
 
 ```bash
 mkdir -p deps/bin
 git clone --branch v1.0.0-rc.1 https://github.com/agent-substrate/substrate deps/substrate
-go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
-go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
-export PATH="$PWD/deps/bin:$PATH"
 ```
 
-Keep this `bin` directory on `PATH` in shells where you manage Substrate or run
-its tutorials. `ate-setup` installs the platform; `kubectl-ate` manages its API
-objects.
+Download `kubectl-ate` and its checksum from the
+[rc1 release](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1).
+Set `ATE_CLI` to the asset for your workstation: `linux` or `darwin` for the
+operating system, and `amd64` or `arm64` for the architecture. The example below
+uses Linux x86-64:
+
+```bash
+ATE_CLI=kubectl-ate-linux-amd64
+ATE_RELEASE=https://github.com/agent-substrate/substrate/releases/download/v1.0.0-rc.1
+curl -fL "$ATE_RELEASE/$ATE_CLI" -o "deps/bin/$ATE_CLI"
+curl -fL "$ATE_RELEASE/$ATE_CLI.sha256" -o "deps/bin/$ATE_CLI.sha256"
+(
+  cd deps/bin
+  shasum -a 256 -c "$ATE_CLI.sha256" && install -m 0755 "$ATE_CLI" kubectl-ate
+)
+export PATH="$PWD/deps/bin:$PATH"
+kubectl-ate --help
+```
+
+The checksum check must report `OK`, and the CLI must print its help text.
+Keep this `bin` directory on `PATH` when managing Substrate. The deployment
+step runs `ate-setup` directly from the checkout with `go run`.
 
 </Step>
 
@@ -303,7 +320,7 @@ Choose a starting configuration, then review the shared settings below.
 Open the checked-in
 [`substrate-install.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/substrate-install.yaml)
 in your local clone and edit it in place. Run this installation procedure from
-`examples/agents/harbor-substrate`, including the earlier build and storage
+`examples/agents/harbor-substrate`, including the earlier tool and storage
 steps. No copy or generated configuration is needed.
 
 The file selects the pinned multi-architecture release, bundled PostgreSQL,
@@ -348,7 +365,7 @@ checked-in YAML.
 
 | Setting | Example default and what to change |
 | --- | --- |
-| `images.repo`, `images.tag` | Pin the control-plane and node-runtime images to `v1.0.0-rc.1`, matching the tools built earlier. |
+| `images.repo`, `images.tag` | Pin the control-plane and node-runtime images to `v1.0.0-rc.1`, matching the downloaded CLI and installer checkout. |
 | `ateapi.postgres.storageClass` | An empty string uses the cluster's default StorageClass for bundled PostgreSQL's 500 GiB volume. Set a class name if needed. |
 | `ateapi.authz.bootstrapOwners` | The example keeps the upstream development default, `system:serviceaccount:ate-system:ate-client`. For a shared installation, replace it with your administrators' authenticated principal IDs using the [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md#bootstrap-owners). Multiple principals form one comma-separated string. |
 | `storage.snapshotLocation` | `s3://ate-snapshots/` points to the bucket created in the RustFS step. Object storage remains required when golden snapshots are disabled. See the plugin configuration below. |
@@ -447,7 +464,7 @@ you to your chosen working directory afterward:
 ```bash
 (
   cd deps/substrate
-  ate-setup deploy ate-system --context "$(kubectl config current-context)" \
+  go run ./cmd/ate-setup deploy ate-system --context "$(kubectl config current-context)" \
     --config ../../substrate-install.yaml
 )
 ```
