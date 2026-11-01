@@ -17,8 +17,11 @@ around limitations in that release's installer.
 
 ## Prerequisites
 
-- A Kubernetes cluster with permission to install controllers, CRDs, and the
-  native certificate APIs and projections described below.
+- Kubernetes 1.35 or newer, including kubelets on nodes that run Substrate or
+  its clients. Kubernetes 1.37 or newer is recommended because the required
+  certificate APIs and volume projections are stable and enabled by default.
+  On 1.35 and 1.36, complete the explicit configuration in
+  [Check cluster capabilities](#check-cluster-capabilities).
 - Linux nodes compatible with your selected sandbox runtime and its assets.
 - PostgreSQL, object storage, and network access configured according to the
   pinned [Substrate operator installation guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
@@ -103,17 +106,88 @@ that directory. Keep the installer configuration for future updates.
 
 <Step title="Check cluster capabilities" id="check-cluster-capabilities">
 
-Check that Kubernetes serves both native certificate APIs:
+Substrate 1.0.0, pinned here to `v1.0.0-rc.1`, requires native
+`PodCertificateRequest` and `ClusterTrustBundle` APIs and their Pod volume
+projections. These APIs are built into Kubernetes; do not install CRDs for
+them. The pinned [certificate client](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/cmd/podcertcontroller/internal/podcertificate/client.go)
+supports `v1` and `v1beta1` PodCertificateRequests. Kubernetes 1.34's
+`v1alpha1` API is incompatible, even with its feature gates enabled.
+
+| Kubernetes version | Required preparation |
+| --- | --- |
+| 1.37 or newer, recommended | The certificate APIs and projections are stable and enabled by default. Verify API discovery below and check node versions, especially during upgrades. |
+| 1.35 or 1.36 | Enable the feature gates on the API servers and kubelets, serve both beta APIs, and enable request cleanup in the controller manager as shown below. |
+
+See the Kubernetes feature-gate reference for
+[`PodCertificateRequest`](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#PodCertificateRequest),
+[`ClusterTrustBundle`](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#ClusterTrustBundle),
+and [`ClusterTrustBundleProjection`](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#ClusterTrustBundleProjection).
+
+<Accordion title="Configure Kubernetes 1.35 and 1.36">
+
+Merge these settings into your cluster's existing configuration. For a managed
+cluster, confirm that your provider supports these settings before proceeding.
+The Substrate installer does not configure Kubernetes components for you.
+
+On every **kube-apiserver**, enable the APIs and projection fields, and expose
+both beta resource endpoints:
+
+```text
+--feature-gates=PodCertificateRequest=true,ClusterTrustBundle=true,ClusterTrustBundleProjection=true
+--runtime-config=certificates.k8s.io/v1beta1/podcertificaterequests=true,certificates.k8s.io/v1beta1/clustertrustbundles=true
+```
+
+Feature gates alone do not expose these APIs. The `--runtime-config` entries
+enable their REST endpoints. See the Kubernetes 1.35
+[projected-volume requirements](https://v1-35.docs.kubernetes.io/docs/concepts/storage/projected-volumes/).
+
+On every **kubelet** that hosts Substrate components or client Pods, merge
+these gates into its `KubeletConfiguration`:
+
+```yaml
+featureGates:
+  PodCertificateRequest: true
+  ClusterTrustBundleProjection: true
+```
+
+Include nodes hosting the Substrate control plane, router, and workload clients as well
+as sandbox workers. The kubelet requests certificates and mounts and refreshes
+the certificate, private key, and trust-bundle files.
+
+On every **kube-controller-manager**, enable cleanup of old certificate
+requests:
+
+```text
+--feature-gates=PodCertificateRequest=true
+```
+
+This enables Kubernetes request cleanup; Substrate's certificate controller
+issues the workload certificates. Preserve other configured gates and
+runtime settings, then roll out the control-plane changes and restart the
+affected kubelets using your cluster's configuration mechanism.
+
+</Accordion>
+
+Check the API-server and node versions, then discover the certificate APIs:
 
 ```bash
+kubectl version
+kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion
 kubectl api-resources --api-group=certificates.k8s.io
 ```
 
-Require `PodCertificateRequest` and `ClusterTrustBundle`, and their respective
-Pod volume projections. Check API-server and kubelet feature configuration
-with your cluster administrator. A server-side dry run is insufficient if
-unsupported fields are silently pruned. Verify that the admitted Pod retains
-both projections and that a real Pod receives its files.
+The resource list must include `podcertificaterequests` and
+`clustertrustbundles` with API version `certificates.k8s.io/v1beta1` on 1.35
+and 1.36, or `certificates.k8s.io/v1` on 1.37. API discovery does not verify
+kubelet projections or certificate issuance. Complete those checks after
+deployment in [Verify the installation](#verify-the-installation).
+
+Substrate's certificate controller issues certificates and publishes CA trust
+bundles. Substrate components use the projected credentials and trust bundles
+for TLS. A mounted trust bundle does not update a container's system trust
+store; custom clients must configure their TLS library to use it. Follow the
+pinned [authentication setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authentication.md)
+for signer and trust configuration.
 
 The node architecture, sandbox runtime build, and workload image architecture
 must match. Every node eligible for sandbox placement needs `atelet` and the
@@ -285,14 +359,26 @@ kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
 kubectl -n ate-system rollout status deployment/ate-controller --timeout=600s
 kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
 kubectl -n ate-system get pods -o wide
+kubectl -n ate-system get podcertificaterequests
 kubectl get clustertrustbundles
 ```
 
-Check that `atelet` is ready on every node intended for sandbox placement and
-that the admitted Pods retain their certificate projections and receive their
-credential files. Readiness alone does not verify a workload's client
-permissions, guest image, or durable snapshot restoration; check those when
-configuring the workload.
+Check that `atelet` is ready on every node intended for sandbox placement.
+For the certificate configuration, verify that:
+
+- The admitted Pod specifications retain both `podCertificate` and
+  `clusterTrustBundle` volume sources. API-server feature gates can cause
+  unsupported fields to be silently pruned, so a successful dry run is insufficient.
+- The Pods' certificate requests have an `Issued` condition with status `True`.
+  Inspect request status and Pod events if issuance or volume mounting fails.
+- The running containers receive nonempty certificate, private-key, and CA
+  bundle files at the paths declared by their volume mounts and projections.
+
+Inspect requests during Pod startup or certificate renewal; Kubernetes removes
+old requests after issuance.
+
+Readiness alone does not verify a workload's client permissions, guest image,
+or durable snapshot restoration; check those when configuring the workload.
 
 If a Pod reports a port-443 permission error, use the conditional fix below
 and repeat these checks.
