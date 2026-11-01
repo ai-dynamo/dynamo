@@ -119,17 +119,50 @@ and the versioned documentation for
 [`podCertificate` projections](https://v1-35.docs.kubernetes.io/docs/concepts/storage/projected-volumes/#podcertificate-projected-volumes)
 and [`clusterTrustBundle` projections](https://v1-35.docs.kubernetes.io/docs/concepts/storage/projected-volumes/#clustertrustbundle-projected-volumes).
 
-Check the API-server and node versions, then discover the certificate APIs:
+Check the API-server version:
 
-```bash
+```bash title="Command"
 kubectl version
+```
+
+```text title="Example output (excerpt)"
+Client Version: v1.37.0
+Server Version: v1.37.0
+```
+
+The server version must be 1.35 or newer.
+
+Check the node versions:
+
+```bash title="Command"
 kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion
+```
+
+```text title="Example output"
+NAME            KUBELET
+control-plane   v1.37.0
+worker-01       v1.37.0
+worker-02       v1.37.0
+```
+
+Nodes that run Substrate or its clients must use Kubernetes 1.35 or newer.
+
+Discover the certificate APIs:
+
+```bash title="Command"
 kubectl api-resources --cached=false --api-group=certificates.k8s.io
 ```
 
-Confirm that `podcertificaterequests` and `clustertrustbundles` appear with API
-version `certificates.k8s.io/v1` or `certificates.k8s.io/v1beta1`. Nodes that run
-Substrate or its clients must also meet the Kubernetes version requirement.
+```text title="Example output" {3-4}
+NAME                         SHORTNAMES   APIVERSION               NAMESPACED   KIND
+certificatesigningrequests   csr          certificates.k8s.io/v1   false        CertificateSigningRequest
+clustertrustbundles                       certificates.k8s.io/v1   false        ClusterTrustBundle
+podcertificaterequests                    certificates.k8s.io/v1   true         PodCertificateRequest
+```
+
+Confirm that `clustertrustbundles` and `podcertificaterequests` appear with API
+version `certificates.k8s.io/v1` or `certificates.k8s.io/v1beta1`. Other resources
+in this group require no additional checks here.
 
 These checks confirm API availability. After deploying Substrate, verify
 certificate issuance and volume projection in
@@ -141,9 +174,18 @@ This guide assumes the Substrate control plane, atelets, workers, and actors
 run on nodes with the same CPU architecture. Identify that architecture before
 continuing:
 
-```bash
+```bash title="Command"
 kubectl get nodes -L kubernetes.io/arch
 ```
+
+```text title="Example output"
+NAME            STATUS   ROLES           AGE   VERSION   ARCH
+control-plane   Ready    control-plane   1d    v1.37.0   amd64
+worker-01       Ready    <none>          1d    v1.37.0   amd64
+worker-02       Ready    <none>          1d    v1.37.0   amd64
+```
+
+Read the `ARCH` column: `amd64` means x86-64, and `arm64` means ARM64.
 
 Use this architecture for workload builds and configuration. If your deployment
 uses both architectures, match each component's binaries, images, and runtime
