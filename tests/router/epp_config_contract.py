@@ -30,7 +30,9 @@ are unverified candidates until fixed-SHA Linux execution.
 remote-load Item as an unverified candidate. ``shared_cache_type`` binds
 one ordinary owned HiCache client-construction Item as an unverified
 candidate. ``shared_cache_multiplier`` is a supported_candidate profile
-pending runtime evidence. Remaining rows stay pending.
+pending runtime evidence. ``kv_cache_block_size`` stays pending until the
+ordinary Dynamic cross-input Items execute; collected Items are not a
+binding. Remaining rows stay pending.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -4099,7 +4101,9 @@ def _plain_chat_token_case(model_name: str):
 def _write_tracking_key_file(path: Path, payload: bytes) -> dict[str, Any]:
     path.write_bytes(payload)
     if path.read_bytes() != payload:
-        raise AssertionError(f"tracking key file {path} was not written as public bytes")
+        raise AssertionError(
+            f"tracking key file {path} was not written as public bytes"
+        )
     return {
         "path": str(path),
         "length": len(payload),

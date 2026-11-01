@@ -25,6 +25,8 @@ The 31-byte size control is parameterized over independent frontend/epp
 arms. active_decode_blocks_threshold is an ordinary unverified-candidate
 worker-monitor remote-load test, not xfail. shared_cache_type is an
 ordinary unverified-candidate HiCache client-construction test, not xfail.
+Dynamic block-size cross-input cases are ordinary first-selection
+experiments and stay unbound while kv_cache_block_size is pending.
 """
 
 import pytest
@@ -265,4 +267,34 @@ def test_shared_cache_type_consumer(
         monkeypatch,
         ROUTER_MODEL_NAME,
         EppFrontendParityStack,
+    )
+
+
+@pytest.mark.parametrize(
+    "worker_block_size,frontend_cli_block_size",
+    [
+        pytest.param(32, 8, id="worker_card32_frontend_cli8"),
+        pytest.param(32, 64, id="worker_card32_frontend_cli64"),
+        pytest.param(16, 64, id="worker_card16_frontend_cli64"),
+    ],
+)
+def test_dynamic_block_size_consumer(
+    request,
+    predownload_tokenizers,
+    tmp_path,
+    worker_block_size,
+    frontend_cli_block_size,
+):
+    """Attribute Dynamic FE model block size to the worker card across CLI sizes."""
+    from tests.router.common import run_dynamic_block_size_consumer
+    from tests.router.epp_parity import EppFrontendRoutingParityStack
+
+    _ = predownload_tokenizers
+    run_dynamic_block_size_consumer(
+        request,
+        tmp_path,
+        ROUTER_MODEL_NAME,
+        EppFrontendRoutingParityStack,
+        worker_block_size=worker_block_size,
+        frontend_cli_block_size=frontend_cli_block_size,
     )

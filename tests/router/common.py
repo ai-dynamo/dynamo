@@ -12,13 +12,14 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 import aiohttp
 import requests
 
 from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
-from dynamo.prometheus_names import frontend_service, name_prefix
+from dynamo.prometheus_names import frontend_service, labels, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
@@ -35,6 +36,7 @@ from tests.router.helper import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import reserved_ports
+from tests.utils.prometheus import find_metric_samples
 from tests.utils.router_logs import (
     parse_kv_event_diagnostics,
     select_kv_event_diagnostics,
@@ -4480,9 +4482,7 @@ def run_keyed_tracking_runtime_config(
             expected=expected,
             defaults=defaults,
         )
-        run_frontend_epp_token_parity(
-            stack, cases, include_negative_control=False
-        )
+        run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
         case = cases[0]
         generation = collect_frontend_generation_route(
             stack.frontend_url,
@@ -4577,7 +4577,9 @@ def run_keyed_tracking_key_file_size(
     key_path = tmp_path / f"parity-public-tracking-key-31-{arm}.bin"
     provenance = _write_tracking_key_file(key_path, TRACKING_KEY_INVALID_BYTES)
     if provenance["length"] != 31:
-        raise AssertionError(f"invalid tracking key length {provenance['length']} != 31")
+        raise AssertionError(
+            f"invalid tracking key length {provenance['length']} != 31"
+        )
     consumer_env = _keyed_tracking_consumer_env(key_path)
     include_frontend = arm == "frontend"
     include_epp = arm == "epp"
@@ -5491,7 +5493,165 @@ def _assert_provider_snapshot_unchanged(
     )
 
 
-def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
+def _instance_worker_block_size(stack) -> int:
+    size = stack.worker_block_size
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise AssertionError(
+            f"stack worker_block_size {size!r} is not a positive instance size"
+        )
+    return size
+
+
+def _require_overlap_block_size(
+    scores: Mapping[str, Any], worker_block_size: int, *, label: str
+) -> None:
+    got = scores.get("block_size")
+    if got != worker_block_size:
+        raise AssertionError(
+            f"{label}: provider overlap block_size={got!r} != instance "
+            f"worker_block_size={worker_block_size}"
+        )
+
+
+def observe_owned_frontend_model_block_size(
+    stack,
+    *,
+    expected: int,
+    node_name: str,
+    deadline: float,
+    tokens: list[int],
+) -> None:
+    """Read the owned Frontend model block-size gauge and provider query under one deadline."""
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected <= 0:
+        raise AssertionError(
+            f"expected model block size {expected!r} is not a positive worker-card value"
+        )
+    if not tokens:
+        raise AssertionError("provider overlap query requires nonempty tokens")
+    process = stack.frontend_process
+    if process is None or process.proc is None:
+        raise AssertionError("owned frontend_process was not saved")
+    if process.proc.poll() is not None:
+        raise AssertionError("owned frontend_process is not live")
+    pid = process.proc.pid
+    port = stack.frontend_port
+    if port is None:
+        raise AssertionError("owned frontend HTTP port was not saved")
+    if not process.log_path:
+        raise AssertionError("owned frontend_process has no log_path")
+    log_path = Path(process.log_path)
+    pair_label = stack.consumer_pair_label
+    if not pair_label:
+        raise AssertionError("owned consumer pair label was not saved")
+    posix = log_path.as_posix()
+    if node_name not in posix:
+        raise AssertionError(
+            f"frontend_process log_path {log_path} is not this node {node_name}"
+        )
+    if pair_label not in posix:
+        raise AssertionError(
+            f"frontend_process log_path {log_path} is not this pair {pair_label}"
+        )
+    metric_name = f"{name_prefix.FRONTEND}_{frontend_service.MODEL_KV_CACHE_BLOCK_SIZE}"
+    model = stack.model_name
+    if not model:
+        raise AssertionError("owned model label is missing")
+    worker_card = _instance_worker_block_size(stack)
+    cli_size = stack.frontend_cli_block_size
+    while True:
+        if stack.frontend_process is not process:
+            raise AssertionError("owned frontend_process is not the captured process")
+        if process.proc is None or process.proc.poll() is not None:
+            raise AssertionError("owned frontend_process is not live")
+        if process.proc.pid != pid:
+            raise AssertionError(
+                f"owned frontend_process moved from pid={pid} to {process.proc.pid}"
+            )
+        if stack.frontend_port != port:
+            raise AssertionError("owned frontend HTTP port changed during observation")
+        if Path(process.log_path) != log_path:
+            raise AssertionError(
+                f"owned frontend_process log moved from {log_path} to {process.log_path}"
+            )
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
+        if response.status_code != 200:
+            raise AssertionError(
+                f"frontend_process pid={pid} HTTP /metrics on port {port} "
+                f"returned HTTP {response.status_code}"
+            )
+        family = find_metric_samples(response.text, metric_name)
+        samples = find_metric_samples(
+            response.text, metric_name, {labels.MODEL: model}
+        )
+        if family and samples:
+            if len(family) != 1 or len(samples) != 1:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} {metric_name} "
+                    f"model={model!r} is ambiguous: family={len(family)} "
+                    f"model_samples={len(samples)}"
+                )
+            value = samples[0]
+            if value != float(expected):
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} {metric_name} "
+                    f"model={model!r} value={value!r} != worker-card {expected}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} provider overlap "
+                    "query exhausted the readiness budget"
+                )
+
+            async def _provider_block_size() -> Any:
+                return await asyncio.wait_for(
+                    stack.provider_router.get_overlap_scores(
+                        tokens, include_shared=False
+                    ),
+                    timeout=remaining,
+                )
+
+            try:
+                scores = stack.run_until_complete(_provider_block_size())
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} provider overlap "
+                    "query outlived the remaining readiness budget"
+                ) from exc
+            _require_overlap_block_size(
+                scores, expected, label=f"{pair_label}-provider-query"
+            )
+            logger.info(
+                "owned frontend model block-size pid=%s port=%s model=%s "
+                "metric=%s worker_card=%s cli=%s provider_block_size=%s "
+                "pair=%s",
+                pid,
+                port,
+                model,
+                value,
+                worker_card,
+                cli_size,
+                scores.get("block_size"),
+                pair_label,
+            )
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"frontend_process pid={pid} port={port} missing "
+                f"{metric_name} model={model!r} worker-card={expected}"
+            )
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.05, max(remaining, 0.0)))
+
+
+def _prepare_first_selection_snapshot(
+    stack,
+    cases: list[FirstSelectionCase],
+    *,
+    expected_model_block_size: int | None = None,
+):
     # Unrelated router tests import common; keep epp_parity/grpc_tools
     # selected-test-only so ordinary collection does not require them.
     from tests.router.epp_parity import (
@@ -5502,6 +5662,7 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
     if stack.provider_router is None:
         raise AssertionError("first-selection readiness requires a served KvRouter")
 
+    worker_block_size = _instance_worker_block_size(stack)
     policy = _require_cache_sensitive_policy(stack)
     worker_a = stack.worker_ids["A"]
     worker_b = stack.worker_ids["B"]
@@ -5526,7 +5687,9 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                         f"budget after {attempt} probes key={key}"
                     )
                 attempt += 1
-                probe = [random.randint(1, 10000) for _ in range(32)]
+                probe = [
+                    random.randint(1, 10000) for _ in range(2 * worker_block_size)
+                ]
                 try:
                     await asyncio.wait_for(
                         send_request_via_python_kv_router(
@@ -5570,6 +5733,11 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                                 "the 45s readiness budget"
                             )
                         break
+                    _require_overlap_block_size(
+                        scores,
+                        worker_block_size,
+                        label=f"publisher-{label}",
+                    )
                     blocks = {
                         (row["worker_id"], row["dp_rank"]): row["device_blocks"]
                         for row in scores["workers"]
@@ -5594,6 +5762,14 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                 case.payload,
                 path=case.path,
                 request_id=unique_request_id(f"fe-ready-{case.name}"),
+            )
+        if expected_model_block_size is not None:
+            observe_owned_frontend_model_block_size(
+                stack,
+                expected=expected_model_block_size,
+                node_name=stack.request.node.name,
+                deadline=time.monotonic() + READINESS_DEADLINE_S,
+                tokens=token_ids_by_label[cases[0].label],
             )
     finally:
         stack.close_consumer_pair()
@@ -5627,11 +5803,12 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                     f"{case.name}: pinned warmup request/stream outlived the "
                     "45s readiness budget"
                 ) from exc
-            complete_blocks = len(tokens) // 16
+            complete_blocks = len(tokens) // worker_block_size
             if complete_blocks < 2:
                 raise AssertionError(
                     f"{case.name}: readiness tokens must cover at least two full "
-                    f"blocks, got {len(tokens)} tokens"
+                    f"blocks, got {len(tokens)} tokens for "
+                    f"worker_block_size={worker_block_size}"
                 )
         while time.monotonic() < deadline:
             ready = True
@@ -5653,6 +5830,9 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                         f"{case.name}: get_overlap_scores outlived the remaining "
                         "45s readiness budget"
                     ) from exc
+                _require_overlap_block_size(
+                    scores, worker_block_size, label=case.name
+                )
                 blocks = {
                     (row["worker_id"], row["dp_rank"]): row["device_blocks"]
                     for row in scores["workers"]
@@ -5662,7 +5842,7 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
                 other = worker_b if case.label == "A" else worker_a
                 preferred_blocks = blocks.get((preferred, 0), 0)
                 other_blocks = blocks.get((other, 0), 0)
-                complete_blocks = len(tokens) // 16
+                complete_blocks = len(tokens) // worker_block_size
                 if (
                     preferred_blocks < complete_blocks
                     or preferred_blocks <= other_blocks
@@ -5724,13 +5904,20 @@ def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
 
 
 def run_frontend_epp_first_selection_parity(
-    stack, cases: list[FirstSelectionCase]
+    stack,
+    cases: list[FirstSelectionCase],
+    *,
+    expected_model_block_size: int | None = None,
 ) -> None:
     """Compare live FE query-only and first EPP selections on a frozen snapshot."""
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
     if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
         raise AssertionError("first-selection parity requires opposite A/B cases")
 
-    _prepare_first_selection_snapshot(stack, cases)
+    _prepare_first_selection_snapshot(
+        stack, cases, expected_model_block_size=expected_model_block_size
+    )
     frozen_events = _provider_cache_snapshot(stack)
     logger.info(
         "first-selection frozen snapshot events=%s workers=%s provider=%s",
@@ -5743,6 +5930,14 @@ def run_frontend_epp_first_selection_parity(
     for case in cases:
         stack.open_consumer_pair()
         try:
+            if expected_model_block_size is not None:
+                observe_owned_frontend_model_block_size(
+                    stack,
+                    expected=expected_model_block_size,
+                    node_name=stack.request.node.name,
+                    deadline=time.monotonic() + READINESS_DEADLINE_S,
+                    tokens=stack.token_ids_by_label[case.label],
+                )
             before = _stable_provider_query_baseline(stack, arm=f"{case.name}-frontend")
             frontend_route = stack.collect_frontend_route(
                 case.payload,
@@ -5822,6 +6017,14 @@ def run_frontend_epp_first_selection_parity(
     control_b = cases[0] if cases[0].label == "B" else cases[1]
     stack.open_consumer_pair()
     try:
+        if expected_model_block_size is not None:
+            observe_owned_frontend_model_block_size(
+                stack,
+                expected=expected_model_block_size,
+                node_name=stack.request.node.name,
+                deadline=time.monotonic() + READINESS_DEADLINE_S,
+                tokens=stack.token_ids_by_label[control_a.label],
+            )
         before = _stable_provider_query_baseline(stack, arm="negative-frontend")
         frontend_route = stack.collect_frontend_route(
             control_a.payload,
@@ -5870,6 +6073,31 @@ def run_frontend_epp_first_selection_parity(
         raise AssertionError(
             "Loopback Kubernetes API recorded unexpected requests: "
             + "; ".join(stack.kube_api.failures)
+        )
+
+
+def run_dynamic_block_size_consumer(
+    request,
+    tmp_path,
+    model_name: str,
+    stack_cls,
+    *,
+    worker_block_size: int,
+    frontend_cli_block_size: int,
+) -> None:
+    """Attribute Dynamic FE/EPP block size to the worker card, not the FE CLI."""
+    cases = frontend_epp_first_selection_cases(model_name)
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        worker_block_size=worker_block_size,
+        frontend_cli_block_size=frontend_cli_block_size,
+    ) as stack:
+        run_frontend_epp_first_selection_parity(
+            stack,
+            cases,
+            expected_model_block_size=worker_block_size,
         )
 
 

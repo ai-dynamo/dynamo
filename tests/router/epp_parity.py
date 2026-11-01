@@ -2532,7 +2532,11 @@ class EppFrontendParityStack:
         if self.consumer_env:
             reserved = [
                 name
-                for name in ("DYN_SYSTEM_PORT", "DYN_SYSTEM_HOST", "DYN_EPP_METRICS_PORT")
+                for name in (
+                    "DYN_SYSTEM_PORT",
+                    "DYN_SYSTEM_HOST",
+                    "DYN_EPP_METRICS_PORT",
+                )
                 if name in self.consumer_env
             ]
             if reserved:
@@ -2678,7 +2682,9 @@ class EppFrontendParityStack:
             self.frontend_process = self._stack.enter_context(frontend)
 
         if self.include_epp:
-            epp_env = loopback_process_env(kubeconfig, self.identity, EPP_CONTAINER_NAME)
+            epp_env = loopback_process_env(
+                kubeconfig, self.identity, EPP_CONTAINER_NAME
+            )
             epp_env.update(
                 {
                     "DYN_NAMESPACE": self.mockers.namespace,
@@ -3134,15 +3140,41 @@ class EppFrontendRoutingParityStack:
         indexer_mode: str = INDEXER_MODE_EVENT,
         enable_worker_topology: bool = False,
         session_affinity_ttl_secs: int | None = None,
+        worker_block_size: int = WORKER_BLOCK_SIZE,
+        frontend_cli_block_size: int | None = None,
     ) -> None:
         if indexer_mode not in {INDEXER_MODE_EVENT, INDEXER_MODE_APPROXIMATE}:
             raise ValueError(f"unsupported indexer_mode {indexer_mode!r}")
+        if (
+            not isinstance(worker_block_size, int)
+            or isinstance(worker_block_size, bool)
+            or worker_block_size <= 0
+        ):
+            raise ValueError(
+                f"worker_block_size {worker_block_size!r} is not a positive "
+                "instance block size"
+            )
+        if frontend_cli_block_size is None:
+            cli_block_size = worker_block_size
+        elif (
+            not isinstance(frontend_cli_block_size, int)
+            or isinstance(frontend_cli_block_size, bool)
+            or frontend_cli_block_size <= 0
+        ):
+            raise ValueError(
+                f"frontend_cli_block_size {frontend_cli_block_size!r} is not a "
+                "positive instance block size"
+            )
+        else:
+            cli_block_size = frontend_cli_block_size
         self.request = request
         self.tmp_path = tmp_path
         self.model_name = model_name
         self.indexer_mode = indexer_mode
         self.enable_worker_topology = enable_worker_topology
         self.session_affinity_ttl_secs = session_affinity_ttl_secs
+        self.worker_block_size = worker_block_size
+        self.frontend_cli_block_size = cli_block_size
         self.identity = resolve_pod_identity()
         self._stack = ExitStack()
         self._lock: FileLock | None = None
@@ -3170,6 +3202,8 @@ class EppFrontendRoutingParityStack:
         self._allocated_ports: list[int] = []
         self._consumer_stack: ExitStack | None = None
         self._consumer_pair_seq = 0
+        self.frontend_process: FrontendRouterProcess | None = None
+        self.consumer_pair_label: str | None = None
 
     @property
     def frontend_url(self) -> str:
@@ -3332,7 +3366,7 @@ class EppFrontendRoutingParityStack:
             )
         worker_args = {
             "speedup_ratio": 10.0,
-            "block_size": WORKER_BLOCK_SIZE,
+            "block_size": self.worker_block_size,
             "dp_size": WORKER_DP_SIZE,
             "enable_prefix_caching": True,
         }
@@ -3430,7 +3464,7 @@ class EppFrontendRoutingParityStack:
             self.provider_router = _create_kv_router_with_timeout(
                 router_factory=lambda: KvRouter(
                     endpoint=endpoint,
-                    block_size=WORKER_BLOCK_SIZE,
+                    block_size=self.worker_block_size,
                     kv_router_config=self.provider_router_config,
                 ),
                 num_workers=2,
@@ -3632,6 +3666,8 @@ class EppFrontendRoutingParityStack:
         self._consumer_pair_seq += 1
         pair_label = f"pair-{self._consumer_pair_seq}"
         stack = ExitStack()
+        self.frontend_process = None
+        self.consumer_pair_label = None
         try:
             use_kv_events = self.indexer_mode != INDEXER_MODE_APPROXIMATE
             frontend_env = loopback_process_env(
@@ -3653,7 +3689,7 @@ class EppFrontendRoutingParityStack:
                 frontend_env.update(session_env)
             frontend = FrontendRouterProcess(
                 self.request,
-                WORKER_BLOCK_SIZE,
+                self.frontend_cli_block_size,
                 self.frontend_port,
                 self.namespace,
                 "kubernetes",
@@ -3670,6 +3706,8 @@ class EppFrontendRoutingParityStack:
             )
             frontend.log_dir = f"{self.request.node.name}/{pair_label}-frontend"
             stack.enter_context(frontend)
+            self.frontend_process = frontend
+            self.consumer_pair_label = pair_label
             if include_epp:
                 epp_env = loopback_process_env(
                     self.kubeconfig, self.identity, EPP_CONTAINER_NAME
@@ -3701,6 +3739,8 @@ class EppFrontendRoutingParityStack:
                 stack.enter_context(epp)
             wait_for_frontend_models(self.frontend_url)
         except Exception:
+            self.frontend_process = None
+            self.consumer_pair_label = None
             stack.close()
             raise
         self._consumer_stack = stack
@@ -3714,6 +3754,8 @@ class EppFrontendRoutingParityStack:
     def close_consumer_pair(self) -> None:
         stack = self._consumer_stack
         self._consumer_stack = None
+        self.frontend_process = None
+        self.consumer_pair_label = None
         if stack is not None:
             stack.close()
 
@@ -3980,7 +4022,7 @@ class EppFrontendRoutingParityStack:
             config = models.get(worker_id)
             if config is None:
                 return False
-            if config.get("kv_cache_block_size") != WORKER_BLOCK_SIZE:
+            if config.get("kv_cache_block_size") != self.worker_block_size:
                 return False
             if config.get("data_parallel_size") != WORKER_DP_SIZE:
                 return False
