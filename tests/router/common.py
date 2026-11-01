@@ -4699,6 +4699,178 @@ def run_approximate_cache_policy_metrics(
             )
 
 
+def run_active_decode_threshold_consumer(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Observe owned FE/EPP remote-load decode thresholds for default and 0.25."""
+    from tests.router.epp_config_contract import (
+        DECODE_THRESHOLD_CONFIGURED,
+        DECODE_THRESHOLD_ENV,
+        DECODE_THRESHOLD_PROFILES,
+        DECODE_THRESHOLD_ROW,
+        _plain_chat_token_case,
+        clear_known_manifest_router_envs,
+        decode_threshold_consumer_env,
+        mark_owned_log_cursor,
+        observe_owned_decode_load_threshold,
+    )
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_generation_route,
+    )
+
+    observed: dict[str, tuple[float | None, float | None]] = {}
+    for profile_name in DECODE_THRESHOLD_PROFILES:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        consumer_env = decode_threshold_consumer_env(profile_name)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        cases = _plain_chat_token_case(model_name)
+        log_label = f"decode-{profile_name}"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            node_name = request.node.name
+            frontend_pid, frontend_log, frontend_offset = mark_owned_log_cursor(
+                frontend_proc,
+                label="frontend_process",
+                node_name=node_name,
+                log_label=log_label,
+            )
+            epp_pid, epp_log, epp_offset = mark_owned_log_cursor(
+                epp_proc,
+                label="epp_process",
+                node_name=node_name,
+                log_label=log_label,
+            )
+            run_frontend_epp_token_parity(
+                stack, cases, include_negative_control=False
+            )
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-decode-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-decode-plain_chat"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            deadline = time.monotonic() + READINESS_DEADLINE_S
+            frontend_value = observe_owned_decode_load_threshold(
+                frontend_proc,
+                label="frontend_process",
+                node_name=node_name,
+                pid=frontend_pid,
+                log=frontend_log,
+                offset=frontend_offset,
+                worker_id=generation.worker_id,
+                dp_rank=generation.dp_rank,
+                deadline=deadline,
+            )
+            epp_value = observe_owned_decode_load_threshold(
+                epp_proc,
+                label="epp_process",
+                node_name=node_name,
+                pid=epp_pid,
+                log=epp_log,
+                offset=epp_offset,
+                worker_id=generation.worker_id,
+                dp_rank=generation.dp_rank,
+                deadline=deadline,
+            )
+            if profile_name == "default":
+                if frontend_value is not None or epp_value is not None:
+                    raise AssertionError(
+                        "default decode-threshold control is not None: "
+                        f"frontend={frontend_value!r} epp={epp_value!r}"
+                    )
+            else:
+                wanted = float(DECODE_THRESHOLD_CONFIGURED)
+                if frontend_value != wanted:
+                    raise AssertionError(
+                        "configured frontend "
+                        f"{DECODE_THRESHOLD_ROW}={frontend_value!r} != "
+                        f"Some({DECODE_THRESHOLD_CONFIGURED})"
+                    )
+            if stack.mockers is None:
+                raise AssertionError("owned mocker endpoint was not saved")
+            namespace = stack.mockers.namespace
+            logger.info(
+                "decode threshold profile=%s env=%s frontend pid=%s log=%s "
+                "value=%s epp pid=%s log=%s value=%s namespace=%s "
+                "worker=%s/%s",
+                profile_name,
+                consumer_env.get(DECODE_THRESHOLD_ENV),
+                frontend_pid,
+                frontend_log,
+                frontend_value,
+                epp_pid,
+                epp_log,
+                epp_value,
+                namespace,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+            observed[profile_name] = (frontend_value, epp_value)
+    if set(observed) != set(DECODE_THRESHOLD_PROFILES):
+        raise AssertionError(
+            f"decode-threshold evidence {sorted(observed)} != "
+            f"{list(DECODE_THRESHOLD_PROFILES)}"
+        )
+    frontend_value, epp_value = observed["configured"]
+    if frontend_value != epp_value:
+        raise AssertionError(
+            "configured decode-threshold mismatch after default and route "
+            f"controls: frontend={frontend_value!r} epp={epp_value!r}"
+        )
+
+
 def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
     """Reusable actual-token scenarios for tool schema and tool-history rendering.
 

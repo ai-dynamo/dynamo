@@ -22,7 +22,8 @@ Overlap refresh is an ordinary owned-process queue-INFO plus plain-chat
 token-parity test, not xfail. Keyed tracking and approximate-policy
 core-metrics rows are ordinary unverified-candidate tests, not xfail.
 The 31-byte size control is parameterized over independent frontend/epp
-arms. Candidate collection is 41 nodes, not an executed claim.
+arms. active_decode_blocks_threshold is an ordinary unverified-candidate
+worker-monitor remote-load test, not xfail.
 """
 
 import pytest
@@ -229,4 +230,21 @@ def test_approximate_cache_policy_metrics(
         ROUTER_MODEL_NAME,
         EppFrontendParityStack,
         policy_name,
+    )
+
+
+def test_active_decode_threshold_consumer(
+    request, predownload_tokenizers, tmp_path, monkeypatch
+):
+    """Observe default None and configured 0.25 decode-threshold load events."""
+    from tests.router.common import run_active_decode_threshold_consumer
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_active_decode_threshold_consumer(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
     )
