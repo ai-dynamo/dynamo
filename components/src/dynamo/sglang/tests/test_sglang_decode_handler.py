@@ -31,6 +31,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
     _kv_cache_hit_engine_data,
+    _model_default_sampling_params,
     _native_payload_is_batched,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
@@ -1410,6 +1411,74 @@ def test_build_sampling_params_forwards_sampling_options_for_token_requests():
     assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
+
+
+def _engine_with_sampling_defaults(defaults):
+    model_config = SimpleNamespace(get_default_sampling_params=lambda: defaults)
+    return SimpleNamespace(tokenizer_manager=SimpleNamespace(model_config=model_config))
+
+
+def test_model_default_sampling_params_keeps_only_sampling_fields():
+    engine = _engine_with_sampling_defaults(
+        {
+            "temperature": 0.6,
+            "top_k": 20,
+            "top_p": 0.95,
+            "min_p": None,
+            "max_new_tokens": 9,
+        }
+    )
+
+    assert _model_default_sampling_params(engine) == {
+        "temperature": 0.6,
+        "top_k": 20,
+        "top_p": 0.95,
+    }
+    assert _model_default_sampling_params(SimpleNamespace()) == {}
+
+
+@pytest.mark.parametrize("use_sglang_tokenizer", [False, True])
+def test_build_sampling_params_fills_unset_fields_from_model_defaults(
+    use_sglang_tokenizer,
+):
+    handler = _new_decode_handler(use_sglang_tokenizer=use_sglang_tokenizer)
+    handler._default_sampling_params = _model_default_sampling_params(
+        _engine_with_sampling_defaults({"temperature": 0.6, "top_k": 20, "top_p": 0.95})
+    )
+    if use_sglang_tokenizer:
+        request = {"temperature": 1.0, "max_tokens": 8}
+    else:
+        request = {
+            "sampling_options": {"temperature": 1.0},
+            "stop_conditions": {"max_tokens": 8},
+        }
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params["temperature"] == 1.0
+    assert sampling_params["top_k"] == 20
+    assert sampling_params["top_p"] == 0.95
+
+
+@pytest.mark.parametrize(
+    ("enable_rl", "nvext", "expect_defaults"),
+    [
+        (True, {"token_data": [1, 2]}, False),
+        (True, {}, True),
+        (False, {"token_data": [1, 2]}, True),
+    ],
+)
+def test_build_sampling_params_skips_model_defaults_for_rl_token_in(
+    enable_rl, nvext, expect_defaults
+):
+    handler = _new_decode_handler(enable_rl=enable_rl)
+    handler._default_sampling_params = {"top_k": 20}
+
+    sampling_params = handler._build_sampling_params(
+        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8}, "nvext": nvext}
+    )
+
+    assert ("top_k" in sampling_params) is expect_defaults
 
 
 def test_build_sampling_params_maps_thinking_budget_for_token_requests():
