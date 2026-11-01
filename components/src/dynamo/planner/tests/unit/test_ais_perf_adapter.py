@@ -308,8 +308,11 @@ def test_ais_config_requests_raw_spec_decode_iteration_time(
     assert ais_config["nextn"] == int(expected_nextn)
 
 
+@pytest.mark.parametrize("init_fails", [False, True])
 def test_capability_nextn_update_rebuilds_without_replaying_old_width_timings(
     fake_engine_factory,
+    monkeypatch,
+    init_fails,
 ):
     first = _FakeEngineModel(
         diagnostics={
@@ -340,6 +343,17 @@ def test_capability_nextn_update_rebuilds_without_replaying_old_width_timings(
         }
     )
     fake_engine_factory.next_model = second
+
+    if init_fails:
+
+        def unavailable(**_kwargs):
+            raise RuntimeError("temporarily unavailable estimator")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fake_engine_factory, "best_available", unavailable)
+            model.update_capabilities(_caps(speculative_nextn=3))
+        assert model._engine_model is None
+        assert model._retained_iterations == [[fpm]]
 
     model.update_capabilities(_caps(speculative_nextn=3))
 
