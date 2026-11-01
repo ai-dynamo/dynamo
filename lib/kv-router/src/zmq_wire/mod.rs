@@ -249,6 +249,17 @@ impl ZmqEventNormalizer {
         self.normalize_preprocessed(raw, event_id, worker)
     }
 
+    /// Learn group kinds from a `BlockStored` without classifying or consuming it.
+    /// Unknown kinds are skipped so owner removals for them stay forwarded hash-only.
+    pub fn learn_group_metadata(&mut self, raw: &RawKvEvent, dp_rank: DpRank) {
+        let metadata = raw.metadata();
+        if matches!(raw, RawKvEvent::BlockStored { .. })
+            && metadata.kv_cache_spec_kind != Some(KvCacheSpecKind::Unknown)
+        {
+            self.learn_metadata(metadata, dp_rank);
+        }
+    }
+
     fn learn_metadata(&mut self, metadata: KvCacheEventMetadata, dp_rank: DpRank) {
         let (Some(group_idx), Some(kind)) = (metadata.group_idx, metadata.kv_cache_spec_kind)
         else {
