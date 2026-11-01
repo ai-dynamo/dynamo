@@ -50,10 +50,24 @@ flowchart LR
    exists because `RoutingHost` is specific to the LLM types. It is less complete than
    `RoutingHost`; see [What the direct engine lacks](#what-the-direct-engine-lacks).
 
-New routing orchestration belongs in `RoutingHost` (a new `RoutingPolicy` mode in
-`routing_host.rs`) or in a worker-selection policy that `RoutingHost` runs: a first-party policy
-in `lib/runtime/src/routing_policy/`, or a router plugin under `lib/router-plugins/`. Do not add
-it as a new `PushRouter` selection mode.
+Add new selection logic as a worker-selection policy that `RoutingHost` runs: a router plugin
+under `lib/router-plugins/`, or a first-party policy in `lib/runtime/src/routing_policy/`. Add
+a variant to `RoutingHost`'s `RoutingPolicy` enum (`routing_host.rs`) only when the request
+lifecycle itself differs. Do not add a `RouterMode` selection path to `PushRouter`.
+
+## Occupancy modes
+
+PowerOfTwoChoices, LeastLoaded and DeviceAwareWeighted choose a worker by the number of
+requests it is already handling (`RouterMode::requires_occupancy`). Each endpoint has one shared
+per-worker counter, `RoutingOccupancyState`. Choosing a worker and adding 1 to its counter
+happen in one locked step, so two concurrent requests cannot both pick the same "least loaded"
+worker. The added 1 is an `OccupancyReservation`, released when the request ends:
+
+- On the direct engine, the response stream (`OccupancyTrackedStream`) holds it.
+- Under `RoutingHost`, the `RequestGuard` holds it.
+
+If transport fallback switches workers, the holder moves the reservation to the new worker.
+RoundRobin, Random and Direct do not count requests.
 
 ## Public API by use case
 
@@ -82,7 +96,7 @@ booking (`retarget_worker`) and set the DP rank.
 |----------|----------|-----------|
 | `dispatch_kv_admitted` | `Deny`; skips the overload recheck because KV admission already booked the load | `routing_host/kv.rs` (KV mode only) |
 | `dispatch_exact` | `Deny` | `routing_host/builtin.rs` for request-supplied or affinity-pinned targets |
-| `dispatch_preselected_prepared` | `Allow`, after confirming the worker is still discovered | `routing_host/builtin.rs` for PowerOfTwoChoices, LeastLoaded, DeviceAwareWeighted |
+| `dispatch_preselected_prepared` | `Allow`, after confirming the worker is still discovered | `routing_host/builtin.rs` for the [occupancy modes](#occupancy-modes) |
 | `direct_within_prepared(.., None)` | `Allow` | `routing_host/builtin.rs` for RoundRobin, Random, and Direct mode |
 | `direct_within_prepared(.., Some(set))` | `Within(set)` | `routing_host/builtin.rs` for LoRA-filtered selection |
 

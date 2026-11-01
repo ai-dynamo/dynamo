@@ -16,11 +16,11 @@ compared with `RoutingHost`.
   only dispatches: address lookup, transport fallback and fault detection. `RoutingHost` owns
   worker selection, occupancy booking, affinity, LoRA filtering, Direct mode and the request
   lifecycle (`RequestGuard`). Do not move any of these into `PushRouter`.
-- Add new routing orchestration as a `RoutingHost` mode (its `RoutingPolicy`) or as a
-  worker-selection policy that `RoutingHost` runs (a first-party policy in
-  `lib/runtime/src/routing_policy/`, or a router plugin under `lib/router-plugins/`). Do not add
-  a `RouterMode` selection path to `PushRouter`, and do not add selection logic to the direct
-  engine's mode methods.
+- Add new selection logic as a worker-selection policy that `RoutingHost` runs: a router plugin
+  under `lib/router-plugins/`, or a first-party policy in `lib/runtime/src/routing_policy/`.
+  Add a variant to `RoutingHost`'s `RoutingPolicy` enum (`routing_host.rs`) only when the
+  request lifecycle itself differs. Do not add a `RouterMode` selection path to `PushRouter`,
+  and do not add selection logic to the direct engine's mode methods.
 - The direct engine (`AsyncEngine::generate`, `round_robin`, `random`, `power_of_two_choices`,
   `least_loaded`, `device_aware_weighted`) is for callers with generic `T`/`U` types. Keep its
   behavior stable. The Python bindings call these methods by name.
@@ -35,8 +35,10 @@ compared with `RoutingHost`.
 discovery:
 
 - `Allow`: send to any other free worker. Used by the direct-engine modes, the bidirectional
-  engine, and `RoutingHost` RoundRobin, Random, Direct and the occupancy modes
-  (`direct_within_prepared(.., None)`, `dispatch_preselected_prepared`).
+  engine, and `RoutingHost` RoundRobin, Random and Direct (`direct_within_prepared(.., None)`)
+  and the occupancy modes (`dispatch_preselected_prepared`). The occupancy modes are
+  PowerOfTwoChoices, LeastLoaded and DeviceAwareWeighted, which count each worker's in-flight
+  requests; see the README.
 - `Within(set)`: send only to another free worker in `set`. Used by `RoutingHost` LoRA
   routing (`direct_within_prepared(.., Some(set))`).
 - `Deny`: fail with `CannotConnect`. Used by `direct`, `dispatch_exact` and
