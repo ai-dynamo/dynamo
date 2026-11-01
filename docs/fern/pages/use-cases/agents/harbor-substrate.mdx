@@ -233,9 +233,29 @@ does not advertise its limit. Dynamo advertises the engine's serving limit.
 
 <Step title="Configure Harbor access to Substrate" id="create-the-namespace-atespace-and-access-policy">
 
-A Kubernetes namespace and a Substrate atespace are separate objects. This
-tutorial uses `ate-env` for both. Run the Substrate commands as an administrator
-with global ownership; an atespace-scoped owner cannot create an atespace:
+The Harbor runner runs outside the sandboxes. Through the Substrate adapter,
+it creates and deletes actors, executes guest commands inside them, and
+transfers task files and results. It needs access to both the Substrate API
+and the router:
+
+| Access | Purpose | Authorization |
+| --- | --- | --- |
+| Substrate API | Manage actors and egress policies; list templates | Projected ServiceAccount token authorized by `runner-access-policy.yaml` |
+| Substrate router | Execute guest commands and transfer files | Projected Pod certificate whose SPIFFE identity is allowed by the router |
+
+### Create the namespace and access policy
+
+This tutorial uses `ate-env` for both the Kubernetes namespace and the Substrate
+atespace. These are separate objects. Run the Substrate commands as an
+administrator with global ownership.
+
+<Accordion title="Use an existing atespace">
+
+Inspect and reuse an existing namespace, atespace, or access policy instead of
+creating it again. When updating an access policy, preserve its current
+bindings and supply its `uid` and `version`.
+
+</Accordion>
 
 ```bash title="Workstation"
 kubectl create namespace ate-env
@@ -244,53 +264,37 @@ kubectl-ate create access-policy \
   -a ate-env -f runner-access-policy.yaml
 ```
 
-The policy grants the runner's ServiceAccount token the editor role on the
-atespace. That covers creating and deleting actors, creating egress policies,
-and listing templates. The ServiceAccount itself is created with the runner
-Pod in the tutorial. If these objects already exist, inspect and reuse them.
-For an existing access policy, preserve its current bindings and update with
-its `uid` and `version`.
+The policy grants the `harbor-runner` ServiceAccount the editor role in
+`ate-env`. You will create this ServiceAccount when deploying the Harbor runner.
 
-The same ServiceAccount supplies two credentials for different operations:
+### Authorize the Harbor runner at the router
 
-| Operation | Credential | Authorization control |
-| --- | --- | --- |
-| Create/delete actors and list templates | Projected token; principal `user:system:serviceaccount:ate-env:harbor-runner` | Atespace access policy (`runner-access-policy.yaml`) |
-| Execute guest commands and transfer files | Projected pod certificate with the runner's SPIFFE ID | Router `ingressAllowedSPIFFEIDs` allowlist |
+Update the `atenet-router` Deployment's container arguments:
 
-### Configure the router
+- Append `spiffe://cluster.local/ns/ate-env/sa/harbor-runner` to the comma-separated
+  `--ingress-allowed-spiffe-ids` value. Add the argument if absent. Use your
+  installation's trust domain if it differs from `cluster.local`.
+- Set `--route-timeout=60m` to accommodate the task's 3,000-second command
+  deadlines. The rc1 default is five minutes.
 
-In the `atenet-router` Deployment's container arguments, append
-`spiffe://cluster.local/ns/ate-env/sa/harbor-runner` to the comma-separated
-`--ingress-allowed-spiffe-ids` value. Use your installation's trust domain if it
-differs from `cluster.local`, and preserve existing identities. If the argument
-is absent, add it with this identity as its value.
-
-In the same edit, set `--route-timeout=60m`. The rc1 default is five minutes,
-which also bounds guest process-output streams. A 60-minute timeout accommodates
-the task's 3,000-second deadlines:
+Preserve existing identities and other arguments. On a shared installation,
+have its operator make these changes:
 
 ```bash title="Workstation"
 kubectl -n ate-system edit deployment atenet-router
 kubectl -n ate-system rollout status deployment/atenet-router --timeout=300s
 ```
 
-Preserve the other arguments. If you change the task deadlines, keep the route
-timeout longer than the longest command.
-
-Also add the identity to `ingressAllowedSPIFFEIDs` in `substrate-install.yaml`
-(or your installation's managed configuration) so a later deploy preserves it.
-For the example's initially empty allowlist, set:
+To preserve these settings across deployments, save the allowlist in
+`substrate-install.yaml` and the timeout in your managed router manifest,
+`deps/substrate/manifests/ate-install/atenet-router.yaml`. The installer accepts
+the allowlist as a comma-separated string. For an initially empty allowlist:
 
 ```yaml
 ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/ate-env/sa/harbor-runner
 ```
 
-The installer accepts a comma-separated string, not a YAML list. Append to
-existing identities rather than replacing them. On a shared installation,
-have its operator make these changes.
-
-Check the router arguments before creating actors:
+Check the router arguments:
 
 ```bash title="Workstation"
 kubectl -n ate-system get deployment atenet-router \
@@ -298,9 +302,13 @@ kubectl -n ate-system get deployment atenet-router \
   | grep -E 'ingress-allowed-spiffe-ids|route-timeout'
 ```
 
-The allowlist must include `spiffe://cluster.local/ns/ate-env/sa/harbor-runner`,
-and the route timeout must be `60m`. Keep that timeout in the installation's
-managed router configuration when updating Substrate.
+```text title="Example output"
+--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-env/sa/harbor-runner
+--route-timeout=60m
+```
+
+The allowlist may contain additional identities. If you change the task
+deadlines, keep the route timeout longer than the longest command.
 
 </Step>
 
