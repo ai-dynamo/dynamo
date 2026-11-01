@@ -4871,6 +4871,207 @@ def run_active_decode_threshold_consumer(
         )
 
 
+def run_shared_cache_type_consumer(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Observe omitted none and explicit hicache shared-cache construction."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        SHARED_CACHE_TYPE_FIELDS,
+        SHARED_CACHE_TYPE_HICACHE,
+        SHARED_CACHE_TYPE_NONE,
+        SHARED_CACHE_TYPE_PROFILES,
+        SHARED_CACHE_TYPE_ROW,
+        _plain_chat_token_case,
+        assert_frontend_expected_fields,
+        clear_known_manifest_router_envs,
+        compare_effective_fields,
+        frontend_native_projection,
+        native_default_projection,
+        observe_epp_init_event,
+        observe_owned_hicache_constructor,
+        owned_process_log_identity,
+        shared_cache_type_consumer_env,
+    )
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_generation_route,
+    )
+
+    for profile_name in SHARED_CACHE_TYPE_PROFILES:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        consumer_env = shared_cache_type_consumer_env(profile_name)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        expected = {SHARED_CACHE_TYPE_ROW: profile_name}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            frontend = frontend_native_projection(SHARED_CACHE_TYPE_FIELDS)
+        defaults = native_default_projection(SHARED_CACHE_TYPE_FIELDS)
+        if profile_name == SHARED_CACHE_TYPE_NONE:
+            if frontend.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                raise AssertionError(
+                    f"{profile_name} FE {SHARED_CACHE_TYPE_ROW}="
+                    f"{frontend.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                    f"{SHARED_CACHE_TYPE_NONE!r}"
+                )
+            if defaults.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                raise AssertionError(
+                    f"{profile_name} native default {SHARED_CACHE_TYPE_ROW}="
+                    f"{defaults.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                    f"{SHARED_CACHE_TYPE_NONE!r}"
+                )
+        else:
+            assert_frontend_expected_fields(
+                profile=profile_name,
+                frontend=frontend,
+                expected=expected,
+                defaults=defaults,
+            )
+        cases = _plain_chat_token_case(model_name)
+        log_label = f"shared-cache-{profile_name}"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            node_name = request.node.name
+            epp = observe_epp_init_event(
+                stack.epp_process,
+                node_name=node_name,
+                expected=expected,
+            )
+            if profile_name == SHARED_CACHE_TYPE_NONE:
+                if epp.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                    raise AssertionError(
+                        f"{profile_name} EPP {SHARED_CACHE_TYPE_ROW}="
+                        f"{epp.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                        f"{SHARED_CACHE_TYPE_NONE!r}"
+                    )
+                if frontend[SHARED_CACHE_TYPE_ROW] != epp[SHARED_CACHE_TYPE_ROW]:
+                    raise AssertionError(
+                        f"{profile_name} {SHARED_CACHE_TYPE_ROW} mismatch "
+                        f"frontend={frontend[SHARED_CACHE_TYPE_ROW]!r} "
+                        f"epp={epp[SHARED_CACHE_TYPE_ROW]!r}"
+                    )
+            else:
+                compare_effective_fields(
+                    profile=profile_name,
+                    frontend=frontend,
+                    epp=epp,
+                    expected=expected,
+                    defaults=defaults,
+                )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if stack.mockers is None:
+                raise AssertionError("owned mocker endpoint was not saved")
+            component = stack.mockers.component_name
+            if not component:
+                raise AssertionError(
+                    f"owned mocker component is missing: {component!r}"
+                )
+            if profile_name == SHARED_CACHE_TYPE_HICACHE:
+                frontend_pid, frontend_log = owned_process_log_identity(
+                    frontend_proc,
+                    label="frontend_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                )
+                epp_pid, epp_log = owned_process_log_identity(
+                    epp_proc,
+                    label="epp_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                )
+                deadline = time.monotonic() + READINESS_DEADLINE_S
+                observe_owned_hicache_constructor(
+                    frontend_proc,
+                    label="frontend_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                    pid=frontend_pid,
+                    log=frontend_log,
+                    component=component,
+                    deadline=deadline,
+                )
+                observe_owned_hicache_constructor(
+                    epp_proc,
+                    label="epp_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                    pid=epp_pid,
+                    log=epp_log,
+                    component=component,
+                    deadline=deadline,
+                )
+            run_frontend_epp_token_parity(
+                stack, cases, include_negative_control=False
+            )
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-shared-cache-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-shared-cache-plain_chat"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            logger.info(
+                "shared-cache-type profile=%s frontend=%s epp=%s "
+                "component=%s worker=%s/%s",
+                profile_name,
+                frontend[SHARED_CACHE_TYPE_ROW],
+                epp[SHARED_CACHE_TYPE_ROW],
+                component,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+
+
 def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
     """Reusable actual-token scenarios for tool schema and tool-history rendering.
 

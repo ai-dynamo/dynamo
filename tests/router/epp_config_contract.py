@@ -27,7 +27,9 @@ frontend/epp size-control Items. ``router_approximate_cache_policy``
 binds the owned core-metrics LRU and default-TTL Items. These four rows
 are unverified candidates until fixed-SHA Linux execution.
 ``active_decode_blocks_threshold`` binds one ordinary owned worker-monitor
-remote-load Item as an unverified candidate. ``shared_cache_multiplier`` is a supported_candidate profile
+remote-load Item as an unverified candidate. ``shared_cache_type`` binds
+one ordinary owned HiCache client-construction Item as an unverified
+candidate. ``shared_cache_multiplier`` is a supported_candidate profile
 pending runtime evidence. Remaining rows stay pending.
 
 The EPP observer reads the post-parse INFO event from
@@ -273,6 +275,44 @@ _DECODE_THRESHOLD_RE = re.compile(
     r"(?:^|\s)active_decode_blocks_threshold=(None|Some\(([^)]+)\))(?:\s|$)"
 )
 _DECODE_SKIP = object()
+SHARED_CACHE_TYPE_ROW = "shared_cache_type"
+SHARED_CACHE_TYPE_OBSERVER = (
+    "fe_native_to_json+epp_init_event+owned_hicache_constructor+"
+    "plain_chat_token_parity+fe_generation+epp_route+default_none_control"
+)
+SHARED_CACHE_TYPE_TEST = "test_shared_cache_type_consumer"
+SHARED_CACHE_TYPE_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{SHARED_CACHE_TYPE_TEST}"
+)
+SHARED_CACHE_TYPE_ENV = "DYN_SHARED_CACHE_TYPE"
+SHARED_CACHE_TYPE_PROFILES = ("none", "hicache")
+SHARED_CACHE_TYPE_NONE = "none"
+SHARED_CACHE_TYPE_HICACHE = "hicache"
+SHARED_CACHE_TYPE_FIELDS = (SHARED_CACHE_TYPE_ROW,)
+HICACHE_CONSTRUCTOR_EVENT = "Using HiCache shared KV cache"
+HICACHE_CONSTRUCTOR_TARGET = "dynamo_llm::discovery::model_manager"
+_SHARED_CACHE_TYPE_EVENT_VALUES = MappingProxyType(
+    {
+        SHARED_CACHE_TYPE_NONE: SHARED_CACHE_TYPE_NONE,
+        SHARED_CACHE_TYPE_HICACHE: SHARED_CACHE_TYPE_HICACHE,
+    }
+)
+_HICACHE_TARGET_RE = re.compile(
+    r"(?:^|\s)" + re.escape(HICACHE_CONSTRUCTOR_TARGET) + r"(?::|\s|$)"
+)
+_HICACHE_COMPONENT_RE = re.compile(
+    r'(?:^|\s|,)worker_component=("(?:\\.|[^"\\])*")(?:\s|,|$)'
+)
+_SHARED_CACHE_TYPE_BINDING = MappingProxyType(
+    {
+        "observer": SHARED_CACHE_TYPE_OBSERVER,
+        "flags": ("--shared-cache-type",),
+        "env": (SHARED_CACHE_TYPE_ENV,),
+        "schema_fields": (SHARED_CACHE_TYPE_ROW,),
+        "affected_fields": (SHARED_CACHE_TYPE_ROW,),
+        "items": (SHARED_CACHE_TYPE_ITEM,),
+    }
+)
 QUEUE_RS = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
 INDEXER_BACKEND_RS = REPO_ROOT / "lib/kv-router/src/services/indexer/backend.rs"
 WORKERS_RS = REPO_ROOT / "lib/kv-router/src/services/selection/core/workers.rs"
@@ -1211,16 +1251,19 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "shared_cache_multiplier. Pending actual runtime evidence.",
     ),
     SettingDecision(
-        "shared_cache_type",
+        SHARED_CACHE_TYPE_ROW,
         ("--shared-cache-type",),
-        ("DYN_SHARED_CACHE_TYPE",),
-        ("shared_cache_type",),
-        STATUS_PENDING,
-        None,
+        (SHARED_CACHE_TYPE_ENV,),
+        (SHARED_CACHE_TYPE_ROW,),
+        STATUS_SUPPORTED,
+        SHARED_CACHE_TYPE_OBSERVER,
         (),
-        (),
-        "FE/EPP field exists. No profile exercises it. No live observer in "
-        "this increment.",
+        (SHARED_CACHE_TYPE_ROW,),
+        "Unverified candidate until fixed-SHA Linux execution. Omitted-env "
+        "none and explicit hicache are observed on FE native JSON, the owned "
+        "EPP init event, and HiCache client construction. This is not a "
+        "remote cache-hit claim. Existing aliases stay owned, not independently "
+        "executed.",
     ),
     SettingDecision(
         "use_remote_indexer",
@@ -1626,6 +1669,14 @@ def assert_decision_identifier_ownership() -> None:
             raise AssertionError(
                 f"{row.name} may not use {DECODE_THRESHOLD_OBSERVER}; only "
                 f"{DECODE_THRESHOLD_ROW} may"
+            )
+        if (
+            row.observer == SHARED_CACHE_TYPE_OBSERVER
+            and row.name != SHARED_CACHE_TYPE_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {SHARED_CACHE_TYPE_OBSERVER}; only "
+                f"{SHARED_CACHE_TYPE_ROW} may"
             )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
@@ -2067,6 +2118,28 @@ def _assert_decode_threshold_binding(
     _assert_ordinary_collected_item(DECODE_THRESHOLD_ITEM, item)
 
 
+def _assert_shared_cache_type_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    if row.name != SHARED_CACHE_TYPE_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {SHARED_CACHE_TYPE_ROW} contract"
+        )
+    if row.status != STATUS_SUPPORTED:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+        )
+    for field in ("observer", "flags", "env", "schema_fields", "affected_fields"):
+        got = getattr(row, field)
+        wanted = _SHARED_CACHE_TYPE_BINDING[field]
+        if got != wanted:
+            raise AssertionError(f"{row.name} {field} {got!r} != {wanted!r}")
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    item = _require_unique_nodeid_item(items, SHARED_CACHE_TYPE_ITEM)
+    _assert_ordinary_collected_item(SHARED_CACHE_TYPE_ITEM, item)
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -2090,6 +2163,8 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     router_approximate_cache_policy binds the ordinary LRU and omitted-env
     default-TTL core-metrics Items. active_decode_blocks_threshold binds
     only its ordinary owned worker-monitor remote-load Item.
+    shared_cache_type binds only its ordinary owned HiCache
+    client-construction Item.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -2174,6 +2249,9 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == DECODE_THRESHOLD_ROW:
             _assert_decode_threshold_binding(row, item_list)
+            continue
+        if row.name == SHARED_CACHE_TYPE_ROW:
+            _assert_shared_cache_type_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -2312,6 +2390,10 @@ def _decode_event_value(name: str, raw: str, expected: Any) -> Any:
                 text = text[1:-1]
             if text == expected:
                 return text
+        if name == SHARED_CACHE_TYPE_ROW:
+            mapped_type = _SHARED_CACHE_TYPE_EVENT_VALUES.get(payload)
+            if mapped_type is not None:
+                return mapped_type
         raise AssertionError(
             f"{name}={raw!r} is not a known enum display/serde tracing form"
         )
@@ -3757,6 +3839,96 @@ def observe_owned_decode_load_threshold(
         time.sleep(min(0.05, max(remaining, 0.0)))
 
 
+def owned_process_log_identity(
+    process, *, label: str, node_name: str, log_label: str
+) -> tuple[int, Path]:
+    if not log_label:
+        raise AssertionError(f"{label} log_label must be nonempty")
+    pid, log, _text = _owned_process_log_text(
+        process, label=label, node_name=node_name
+    )
+    if log_label not in log.as_posix():
+        raise AssertionError(
+            f"{label} log_path {log} is not this profile label {log_label}"
+        )
+    return pid, log
+
+
+def observe_owned_hicache_constructor(
+    process,
+    *,
+    label: str,
+    node_name: str,
+    log_label: str,
+    pid: int,
+    log: Path,
+    component: str,
+    deadline: float,
+) -> None:
+    if not log_label:
+        raise AssertionError(f"{label} log_label must be nonempty")
+    if not component:
+        raise AssertionError(f"{label} worker_component must be nonempty")
+    while True:
+        current_pid, current_log, text = _owned_process_log_text(
+            process, label=label, node_name=node_name
+        )
+        if current_pid != pid or current_log != log:
+            raise AssertionError(
+                f"{label} owner moved from pid={pid} log={log} to "
+                f"pid={current_pid} log={current_log}"
+            )
+        if log_label not in current_log.as_posix():
+            raise AssertionError(
+                f"{label} log_path {current_log} is not this profile label "
+                f"{log_label}"
+            )
+        matches: list[str] = []
+        for line in text.splitlines():
+            cleaned = ANSI_RE.sub("", line)
+            if HICACHE_CONSTRUCTOR_EVENT not in cleaned:
+                continue
+            if _HICACHE_TARGET_RE.search(cleaned) is None:
+                continue
+            found = _HICACHE_COMPONENT_RE.search(cleaned)
+            if found is None:
+                raise AssertionError(
+                    f"owned {HICACHE_CONSTRUCTOR_TARGET} "
+                    f"{HICACHE_CONSTRUCTOR_EVENT} is missing quoted "
+                    f"worker_component: {cleaned}"
+                )
+            try:
+                decoded = json.loads(found.group(1))
+            except json.JSONDecodeError as exc:
+                raise AssertionError(
+                    f"owned {HICACHE_CONSTRUCTOR_TARGET} "
+                    f"{HICACHE_CONSTRUCTOR_EVENT} worker_component is not a "
+                    f"quoted readable JSON string: {cleaned}"
+                ) from exc
+            if not isinstance(decoded, str) or decoded != component:
+                raise AssertionError(
+                    f"owned {HICACHE_CONSTRUCTOR_TARGET} "
+                    f"{HICACHE_CONSTRUCTOR_EVENT} worker_component="
+                    f"{decoded!r} != {component!r}: {cleaned}"
+                )
+            matches.append(cleaned)
+        if len(matches) > 1:
+            raise AssertionError(
+                f"{label} pid={pid} log={log} has {len(matches)} "
+                f"{HICACHE_CONSTRUCTOR_EVENT} records for "
+                f"worker_component={component}"
+            )
+        if len(matches) == 1:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{label} pid={pid} log={log} has no "
+                f"{HICACHE_CONSTRUCTOR_EVENT} for worker_component={component}"
+            )
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.05, max(remaining, 0.0)))
+
+
 def _overlap_refresh_log_lines(text: str) -> list[str]:
     lines: list[str] = []
     for raw in text.splitlines():
@@ -3969,6 +4141,22 @@ def decode_threshold_consumer_env(profile_name: str) -> dict[str, str | None]:
         env[name] = None
     if profile_name == "configured":
         env[DECODE_THRESHOLD_ENV] = DECODE_THRESHOLD_CONFIGURED
+    return env
+
+
+def shared_cache_type_consumer_env(profile_name: str) -> dict[str, str | None]:
+    if profile_name not in SHARED_CACHE_TYPE_PROFILES:
+        raise AssertionError(f"unknown shared-cache-type profile {profile_name!r}")
+    env: dict[str, str | None] = {
+        SHARED_CACHE_TYPE_ENV: None,
+        "DYN_MOONCAKE_KV_EVENTS_ENDPOINT": None,
+        "DYN_LOG": "info",
+        "RUST_LOG": "info",
+        "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
+        "DYN_LOGGING_CONSOLE_FORMAT": "readable",
+    }
+    if profile_name == SHARED_CACHE_TYPE_HICACHE:
+        env[SHARED_CACHE_TYPE_ENV] = SHARED_CACHE_TYPE_HICACHE
     return env
 
 

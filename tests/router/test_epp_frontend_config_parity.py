@@ -23,7 +23,8 @@ token-parity test, not xfail. Keyed tracking and approximate-policy
 core-metrics rows are ordinary unverified-candidate tests, not xfail.
 The 31-byte size control is parameterized over independent frontend/epp
 arms. active_decode_blocks_threshold is an ordinary unverified-candidate
-worker-monitor remote-load test, not xfail.
+worker-monitor remote-load test, not xfail. shared_cache_type is an
+ordinary unverified-candidate HiCache client-construction test, not xfail.
 """
 
 import pytest
@@ -242,6 +243,23 @@ def test_active_decode_threshold_consumer(
 
     _ = predownload_tokenizers
     run_active_decode_threshold_consumer(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+    )
+
+
+def test_shared_cache_type_consumer(
+    request, predownload_tokenizers, tmp_path, monkeypatch
+):
+    """Observe omitted none and explicit hicache shared-cache construction."""
+    from tests.router.common import run_shared_cache_type_consumer
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_shared_cache_type_consumer(
         request,
         tmp_path,
         monkeypatch,
