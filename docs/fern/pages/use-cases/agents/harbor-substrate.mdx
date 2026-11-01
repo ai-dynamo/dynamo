@@ -10,7 +10,8 @@ Run one SWE-bench Verified task with Harbor and Pi inside an Agent Substrate
 sandbox, then inspect its agent logs and verification results. Use NVIDIA
 Dynamo to serve the model, or connect to a compatible external API from a
 cluster without GPUs. Optional steps add traces, sandbox metrics, golden
-snapshots, and concurrent trials.
+snapshots, and concurrent trials. The final section outlines a planned
+full-dataset workflow using published SWE-bench images.
 
 The runnable files are in the
 [Harbor Substrate example](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/harbor-substrate).
@@ -428,7 +429,30 @@ includes the conditional low-port permission fix for platforms that need it.
 
 </Step>
 
-<Step title="Prepare the sandbox images" id="prepare-the-sandbox-images">
+<Step title="Prepare the images for the first task" id="prepare-the-sandbox-images">
+
+Each SWE-bench task has its own instance image containing the repository
+checkout and task environment. This tutorial adds Pi, the Dynamo provider,
+and dependencies needed by the task verifier. The guest daemon uses a separate
+image shared across tasks. An ActorTemplate references both images. Each trial
+creates a fresh actor from the template.
+
+For the first task, prepare the additional tools and dependencies ahead of time
+to reduce trial startup latency. The planned full-dataset workflow uses the
+published instance images and installs these additions during trial setup:
+
+| | Single-task walkthrough | Planned full-dataset workflow |
+| --- | --- | --- |
+| Task image | Prepared Astropy instance image | Published instance image for each task |
+| Pi and Dynamo provider | Installed during image build | Installed during trial setup |
+| Verifier dependencies | Prepared for offline use | Downloaded as needed |
+| Actor egress | Inference endpoint and optional telemetry | Also allows installation destinations |
+| ActorTemplates | One | One per task, generated from the task catalog |
+
+The single-task path needs no package-download egress during the trial. Pi
+still needs access to the inference endpoint. See
+[Run the full dataset](#run-the-full-dataset) for the planned extension and its
+remaining implementation and validation work.
 
 Build the guest and task images for the worker pool's architecture. The supplied
 configuration defaults to `amd64`; use the `arm64` instructions for ARM64 nodes.
@@ -483,7 +507,7 @@ digest reference. The actor template mounts this image as a volume at `/ate`,
 so the task image stays untouched. The same checkout supplies the Python client the
 runner installs later; the adapter uses its generated gRPC stubs for the guest.
 
-### Prepare Pi and the task image
+### Prepare Pi and the task dependencies
 
 Fetch the pinned Pi integration and task dataset:
 
@@ -830,9 +854,10 @@ checks guest execution and the offline verifier. The first Pi trial checks the
 prepared Pi runtime and model interaction. Every trial starts a fresh actor;
 changes made in one trial's workspace do not carry into the next.
 
-A prepared image avoids repeated package installation. Prewarming caches its
-layers on the selected node. When adding nodes, repeat these checks with
-placement constrained to each eligible node. A warm image on one worker does
+A prepared image avoids Pi installation and dependency downloads during the
+trial. The verifier can still reinstall the modified repository using cached
+dependencies. Prewarming caches the image layers on the selected node. When
+adding nodes, repeat these checks with placement constrained to each eligible node. A warm image on one worker does
 not establish warmth on other workers.
 
 ### Check the verifier offline with the oracle
@@ -897,6 +922,20 @@ Exit the runner shell before saving results on your workstation:
 ```bash title="Harbor runner"
 exit
 ```
+
+### Compare trial latency
+
+Measure trial wall time from environment setup through cleanup, including Pi
+execution and verification. Record image build and push time separately. The
+first pull and unpack are cold-start costs; the disposable actor above warms
+the image cache on its execution node before the trial.
+
+Keep the task, model settings, and cache state consistent when comparing runs.
+Use Harbor's trial timestamps for the complete trial and
+`substrate-timing.jsonl` for the environment phases. Those phase timings alone
+do not include the complete agent and verifier execution. The
+[golden snapshot extension](#optionally-restore-from-a-golden-snapshot) compares another startup
+path for the same prepared task.
 
 ### Save and inspect the results
 
@@ -1082,9 +1121,10 @@ Repeat [Save and inspect the results](#save-and-inspect-the-results) with
 
 ### Increase concurrency
 
-On the workstation, repeat the image build and template
-creation for each task. Give every template its own name, copy the corresponding
-dataset directories to `/work/tasks`, and add each task to both `tasks` and
+For a small batch of prepared tasks, repeat the image build and template
+creation for each task on the workstation. Give every template its own name,
+copy the corresponding dataset directories to `/work/tasks`, and add each task
+to both `tasks` and
 `environment.kwargs.template_map` in a copy of the job YAML. Keep each image
 digest in its template.
 
@@ -1109,7 +1149,8 @@ kubectl -n ate-env exec harbor-runner -- \
 
 The selected node needs capacity for both worker Pods. Prewarm each additional
 task image and validate any golden snapshots before starting the batch. Start
-with a small task selection before expanding to the full Verified dataset.
+with a small task selection. For the full dataset, use the planned approach
+below to avoid building and publishing a custom image for every task.
 
 A Harbor concurrency slot covers environment setup, agent setup, execution,
 verification, and cleanup. It is not a count of simultaneous model requests.
@@ -1119,6 +1160,58 @@ not automatically suspend Pi between model calls.
 
 Repeat [Save and inspect the results](#save-and-inspect-the-results) with
 `JOB_NAME=swe-batch`. Inspect each trial before adding more tasks or workers.
+
+### Run the full dataset
+
+<Note>
+This section describes the planned workflow for all 500 SWE-bench Verified
+tasks. The example does not yet include the task-catalog generator or complete
+runtime verifier bootstrap, and this path has not been validated end to end.
+The supplied job and egress policy configure the prepared single-task path.
+Changing only the task image is insufficient.
+</Note>
+
+Use each task's published SWE-bench instance image and install the tutorial's
+additional tools during trial setup. This avoids building and pushing hundreds
+of custom task images. The shared guest image is still built once per sandbox
+architecture. Instance images still consume registry bandwidth and node cache
+space when pulled.
+
+The extension requires these changes:
+
+1. Generate one ActorTemplate per task and a batch job from the pinned task
+   catalog. Resolve each instance image to a digest for the sandbox architecture,
+   retain the shared guest image, and populate `tasks` and `template_map`.
+   Report unavailable images rather than silently skipping tasks.
+2. Upload the Dynamo provider from the runner's `/work/pi-plugin` directory to
+   `/opt/pi-dynamo-provider` in each actor through `environment.kwargs.uploads`.
+   Without `/opt/pi-runtime.json`, the patched Pi adapter falls back to installing
+   Pi and building the provider. Add the tools required by each task's Harbor
+   `environment/Dockerfile`, such as `uv`; referencing the instance image does
+   not execute that Dockerfile.
+3. Use separate batch job and egress files. Allow the model endpoint and the
+   package and download hosts needed by Pi, the provider, and the verifier.
+   Remove `UV_OFFLINE`, `PIP_NO_INDEX`, and `PIP_FIND_LINKS` from the batch job's
+   verifier environment because the instance images do not contain our prepared
+   dependency caches. Validate installation and oracle trials across different
+   task environments before starting the full run.
+4. Size the worker pool and runner storage, then set Harbor concurrency to the
+   validated resident actor capacity. Select all 500 tasks; Harbor starts new
+   trials as concurrency slots become available. Save the results and account
+   for every selected task, distinguishing setup failures from failed solutions.
+
+The proposed starting point is eight workers with capacity for four actors each
+and `n_concurrent_trials: 32`. This requires resizing the workers and validating
+actor packing first. The checked-in pool still requests 2 CPUs and 6 GiB per
+worker and accommodates one actor with the current 1 CPU and 4 GiB template.
+Worker replicas count Pods, not nodes; replace the example's fixed hostname
+selector to allow placement across eligible sandbox nodes. Lower concurrency
+if the inference endpoint becomes the bottleneck.
+
+Every fresh trial on this path pays the runtime installation cost. Include that
+cost in trial wall time and report setup separately when comparing it with the
+prepared single-task path. Actors remain resident through each trial; automatic
+suspend and resume between model calls is outside this workflow.
 
 ## Clean up
 

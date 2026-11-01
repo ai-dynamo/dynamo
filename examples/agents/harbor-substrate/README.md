@@ -9,6 +9,9 @@ Use a model served by NVIDIA Dynamo or a compatible external API.
 Start with [Run SWE-bench Verified with Harbor, Pi, and Substrate](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx).
 That page owns the walkthrough, including prerequisites, prepared task images,
 golden snapshots, one trial, a concurrent batch, result inspection, and cleanup.
+It also outlines a planned full-dataset path using published task images and
+runtime installation. Batch generation and verifier bootstrap for that path
+are not yet included or validated.
 
 This directory contains the runnable files:
 
@@ -16,7 +19,8 @@ This directory contains the runnable files:
   to Substrate directly: `kubectl-ate` for actor lifecycle, and the Substrate
   router for commands and files inside the actor.
 - `harbor-job.yaml`: editable Harbor job with task-to-template mappings.
-- `Dockerfile.pi`: prepared task image with pinned Pi and provider dependencies.
+- `Dockerfile.pi`: reusable preparation recipe for one task instance image,
+  adding pinned Pi, provider, and offline-verifier dependencies.
 - `substrate-install.yaml`: generic platform configuration for `ate-setup`, with
   the pinned release, bundled PostgreSQL, and RustFS storage defaults. Follow
   the installation guide to review its defaults and configure the storage plugins.
