@@ -155,6 +155,36 @@ def test_optional_dp_rank_retains_internal_selection_fallback():
         handler._to_local_dp_rank("4")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rank", [None, 2, -1, True, "1"])
+async def test_required_dp_rank_rejects_request_before_engine_dispatch(rank):
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.config.require_dp_rank = True
+    handler.dp_range = (0, 2)
+    request = {
+        "token_ids": [1, 2],
+        "routing": {} if rank is None else {"dp_rank": rank},
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[1, 2])
+    )
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler.engine_client = MagicMock()
+
+    with pytest.raises(ValueError, match="required|integer|outside worker range"):
+        async for _ in handler._generate_token_mode(request, MagicMock(), "req-rank"):
+            pass
+    handler.engine_client.generate.assert_not_called()
+
+
 def _make_handler(
     config: MagicMock | None = None,
     encode_worker_client: MagicMock | None = None,
