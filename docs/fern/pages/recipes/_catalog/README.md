@@ -168,6 +168,9 @@ a certified target, an optimized one, and a community one side by side.
 
 Contributors outside NVIDIA use `community`; NVIDIA sets the other three.
 
+`certification.date` must be a quoted string, for example `date: "2026-10-20"`;
+an unquoted date fails the check.
+
 `badge_backfill.yaml` lists the recipes that predate required badges; they may
 leave targets without one until they are backfilled. The list only shrinks:
 remove an id once all of its targets carry a badge, and never add one.

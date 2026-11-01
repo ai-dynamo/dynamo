@@ -39,6 +39,7 @@ Runnable from the repo root as:
     python3 docs/fern/pages/recipes/_catalog/validate.py
 """
 
+import datetime
 import importlib.util
 import json
 import os
@@ -487,6 +488,17 @@ CERTIFICATION_KEYS = ("source", "ref", "image", "date")
 BADGE_BACKFILL = os.path.join(RECIPES_CAT, "badge_backfill.yaml")
 
 
+def _is_iso_date(value):
+    # An unquoted YAML date loads as a date object, so require a string.
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
 def recipe_badge_errors(obj, label, pending=False):
     """Return badge errors for each target of a recipe.
 
@@ -529,6 +541,11 @@ def recipe_badge_errors(obj, label, pending=False):
                 errors.append(
                     "%s nvidia-certified needs a certification record with %s"
                     % (where, ", ".join(CERTIFICATION_KEYS))
+                )
+            elif not _is_iso_date(cert["date"]):
+                errors.append(
+                    "%s certification.date must be a quoted YYYY-MM-DD string, got %r"
+                    % (where, cert["date"])
                 )
         elif "certification" in t:
             errors.append(

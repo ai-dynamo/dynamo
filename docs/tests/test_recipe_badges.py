@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import datetime
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ BACKFILL_BASELINE = {
     "kimi-k2-6",
     "kimi-k3",
     "minimax-m3",
+    "minimax-m3-1",
+    "mistral-large-4",
     "motif-3",
     "muse-spark-open-816b-a42b",
     "nemotron-3-5-lightning",
@@ -132,6 +135,21 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
             "nvidia-certified needs a benchmark asset",
         ),
         (
+            recipe(
+                target(
+                    "nvidia-certified",
+                    certification={**CERT, "date": datetime.date(2026, 10, 20)},
+                )
+            ),
+            "certification.date must be a quoted YYYY-MM-DD string",
+        ),
+        (
+            recipe(
+                target("nvidia-certified", certification={**CERT, "date": "2026-13-45"})
+            ),
+            "certification.date must be a quoted YYYY-MM-DD string",
+        ),
+        (
             recipe(target("optimized", certification=CERT)),
             "has a certification record but badge is optimized",
         ),
@@ -150,6 +168,8 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
         "certified-no-record",
         "certified-empty-ref",
         "certified-no-benchmark",
+        "certified-unquoted-date",
+        "certified-impossible-date",
         "certification-on-optimized",
         "community-no-maintainer",
         "community-recipe-maintainer-only",
@@ -191,7 +211,8 @@ def test_badge_backfill_list_rejects_stale_ids(
 
 
 def test_badge_backfill_list_only_shrinks() -> None:
-    backfill = yaml.safe_load((CATALOG / "badge_backfill.yaml").read_text())
+    path = CATALOG / "badge_backfill.yaml"
+    backfill = (yaml.safe_load(path.read_text()) or {}) if path.exists() else {}
     pending = set(backfill.get("pending") or [])
 
     added = sorted(pending - BACKFILL_BASELINE)
