@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -26,11 +27,11 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 )
 
 const alternateAdmissionModel = "Qwen/Qwen3-8B"
@@ -56,18 +57,28 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		"spec":{"components":[{"name":"VllmPrefillWorker"}]}
 	}`
 
+	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
+	discoveredH100 := gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
+
 	tests := []struct {
 		name               string
 		request            runtime.Object
 		oldRequest         runtime.Object
 		gpuDiscovery       bool
 		seedWithoutWebhook bool
-		wantImage          string
-		wantSchemaErr      string
-		wantCELErr         string
-		wantStatusErr      string
-		wantWebhook        []string
-		wantWarnings       []string
+		// discovered and discoveryErr are what cluster GPU discovery reports while the case
+		// runs; beforeUpdate may change them between the seed and the update.
+		discovered   gpu.GPUInfo
+		discoveryErr error
+		beforeUpdate func(*testing.T)
+		// check inspects the object the API server returned.
+		check         func(*testing.T, *unstructured.Unstructured)
+		wantImage     string
+		wantSchemaErr string
+		wantCELErr    string
+		wantStatusErr string
+		wantWebhook   []string
+		wantWarnings  []string
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
@@ -103,15 +114,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:    "v1beta2 create bypasses legacy v1beta1 validation",
-			request: beta2DGDRForAdmission(nil),
+			name:       "v1beta2 create bypasses legacy v1beta1 validation",
+			request:    beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			discovered: discoveredH100,
 		},
 		{
 			name:       "v1beta2 update bypasses legacy v1beta1 validation",
-			oldRequest: beta2DGDRForAdmission(nil),
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
 			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
 				request.Labels = map[string]string{"updated": "true"}
 			}),
+			discovered: discoveredH100,
 		},
 		{
 			name: "v1beta1 empty native representation is rejected by envelope validation",
@@ -297,11 +311,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "auto apply can be enabled after reviewing a ready request",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -310,12 +324,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "auto apply activation can add a missing runtime version override",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -324,12 +338,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "auto apply activation requires a missing runtime version override",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -342,12 +356,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "runtime version override can be added while ready with auto apply disabled",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -355,11 +369,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "runtime version override can change while ready with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = "1.2.0"
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -368,11 +382,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "runtime version override can change while profiling with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = "1.2.0"
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			}),
@@ -381,11 +395,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "other spec updates remain forbidden while ready with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.Model = alternateAdmissionModel
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -532,10 +546,228 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				`spec.searchStrategy: Invalid value: "thorough": is incompatible with spec.backend "auto"; set spec.backend to a specific backend (sglang, trtllm, or vllm)`,
 			},
 		},
+
+		{
+			name: "v1beta2 unknown hardware without capacity or topology recommends the manual override",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{
+					"sku": "future_accelerator",
+				}}
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec.hardware.gpu.budget: Required value: cannot discover GPU capacity or topology for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget and spec.hardware.numGpusPerNode explicitly`,
+			},
+		},
+		{
+			name: "v1beta2 unknown explicit hardware is passed through with a warning",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{
+					"gpu":            map[string]any{"sku": "future_accelerator", "budget": int64(4)},
+					"numGpusPerNode": int64(2),
+				}
+			}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("discovery must not run for complete explicit hardware"),
+			wantWarnings: []string{
+				`spec.hardware.gpu.sku: "future_accelerator" is not known to the AISimulate release bundled with this operator; the value is passed through unchanged and may work with an external AISimulate systems catalog`,
+			},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != "future_accelerator" {
+					t.Fatalf("spec.hardware.gpu.sku = %q, want unchanged override", got)
+				}
+			},
+		},
+		{
+			name: "v1beta2 bundled hardware does not warn",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{
+					"gpu":            map[string]any{"sku": "h200_sxm", "budget": int64(4)},
+					"numGpusPerNode": int64(8),
+				}
+			}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("discovery must not run for complete explicit hardware"),
+		},
+
+		{
+			name: "v1beta2 public input overrides may configure non-reserved dgdr run fields",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": map[string]any{
+					"generator":                 "aic",
+					"snapshot_interval_seconds": int64(30),
+				}})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "dgdr_run", "generator"); got != "aic" {
+					t.Fatalf("dgdr_run.generator = %q, want aic", got)
+				}
+			},
+		},
+		{
+			name: "v1beta2 operator-owned dgdr run input cannot be overridden",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": map[string]any{
+					"derive_runtime_images":    false,
+					"max_candidates":           int64(3),
+					"name":                     "foreign-run",
+					"namespace":                "other",
+					"num_gpus_per_node":        int64(4),
+					"runtime_image":            "example.invalid/runtime:latest",
+					"runtime_version_override": "1.2.3",
+					"snapshot_dir":             "/tmp/snapshots",
+				}})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisimulate.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
+			},
+		},
+		{
+			name: "v1beta2 dgdr run input cannot be deleted",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": nil})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+			},
+		},
+		{
+			name: "v1beta2 dgdr run input cannot be replaced by a scalar",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": "wrong"})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+			},
+		},
+		{
+			name: "v1beta2 dgdr run input cannot be replaced by a list",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": []any{"wrong"}})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+			},
+		},
+		{
+			name: "v1beta2 pareto objective is reserved until Candidate publication supports it",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.objective.mode: Unsupported value: "Pareto": supported values: "Optimize"`,
+		},
+		{
+			name: "v1beta2 optimize rejects the reserved Pareto metrics field",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["objective"] = map[string]any{"mode": "Optimize", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec.objective: Invalid value: metrics is reserved for the future Pareto implementation`,
+		},
+		{
+			name: "v1beta2 duplicate backends are rejected on create",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"vllm", "vllm"}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.backends[1]: Duplicate value: "vllm"`,
+		},
+		{
+			name:         "v1beta2 missing model is rejected by the representation CEL",
+			request:      v1beta2DGDRForAdmission(func(spec map[string]any) { delete(spec, "model") }),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec: Invalid value: exactly one of native v1beta2 fields or v1beta1 must be specified`,
+		},
+		{
+			name: "v1beta2 empty model name is rejected by the schema",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["model"] = map[string]any{"name": ""}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.model.name: Invalid value: "": spec.model.name in body should be at least 1 chars long`,
+		},
+		{
+			name: "v1beta2 KV capacity fraction range needs min below max",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
+					"kvCapacityFraction": map[string]any{"range": map[string]any{"min": 0.9, "max": 0.1}},
+				}}}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec.workload.static.load.kvCapacityFraction.range: Invalid value: min must be less than max`,
+		},
+		{
+			name: "v1beta2 KV capacity fraction must be positive",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
+					"kvCapacityFraction": map[string]any{"value": 0.0},
+				}}}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.workload.static.load.kvCapacityFraction.value: Invalid value: 0: spec.workload.static.load.kvCapacityFraction.value in body should be greater than 0`,
+		},
+		{
+			name: "v1beta2 load requires exactly one variant",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
+					"concurrency": int64(10), "requestsPerSecond": 10.0,
+				}}}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec.workload.static.load: Invalid value: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified`,
+		},
+		{
+			name: "v1beta2 empty load is not a second default opt-out",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{}}}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec.workload.static.load: Invalid value: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified`,
+		},
+		{
+			name:       "v1beta2 update to duplicate backends is rejected",
+			oldRequest: v1beta2DGDRForAdmission(nil),
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"sglang", "sglang"}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.backends[1]: Duplicate value: "sglang"`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			admissionHardware.set(tt.discovered, tt.discoveryErr)
+			t.Cleanup(func() { admissionHardware.set(gpu.GPUInfo{}, nil) })
+
 			gates := features.Gates{GPUDiscovery: tt.gpuDiscovery}
 			test := admissionTestCase{
 				object:             tt.request,
@@ -547,6 +779,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				wantStatusError:    tt.wantStatusErr,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
+				beforeUpdate:       tt.beforeUpdate,
 			}
 
 			if tt.oldRequest != nil && !tt.gpuDiscovery {
@@ -555,6 +788,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.check != nil {
+				tt.check(t, actual)
+			}
 			if tt.wantImage != "" {
 				image, found, err := unstructured.NestedString(actual.Object, "spec", "image")
 				if err != nil || !found {
@@ -563,6 +799,85 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				if image != tt.wantImage {
 					t.Fatalf("defaulted spec.image = %q, want %q", image, tt.wantImage)
 				}
+			}
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldRun     *nvidiacomv1beta2.DynamoGraphDeploymentRun
+		run        *nvidiacomv1beta2.DynamoGraphDeploymentRun
+		wantCELErr string
+	}{
+		{
+			name:   "metadata-only update keeps the immutable spec",
+			oldRun: v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
+			run:    v1beta2RunForAdmission(v1beta2AdmissionModel, map[string]string{"updated": "true"}),
+		},
+		{
+			name:       "spec update is rejected by the API server",
+			oldRun:     v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
+			run:        v1beta2RunForAdmission(alternateAdmissionModel, nil),
+			wantCELErr: `<nil>: Invalid value: spec is immutable`,
+		},
+		{
+			name:       "model-only Run is rejected before controller reconciliation",
+			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "empty hardware is an accepted resolved opt-out",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+				return run
+			}(),
+		},
+		{
+			name: "partial hardware is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+					SKU: new("h200_sxm"), Budget: new(int32(8)),
+				}}
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "partial static workload is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Workload.Static.InputTokens = new(int32(1024))
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "missing SLA snapshot is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Objective.SLA = nil
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			test := admissionTestCase{
+				object:       tt.run,
+				wantCELError: tt.wantCELErr,
+			}
+			if tt.oldRun != nil {
+				test.oldObject = tt.oldRun
+			}
+			actual := runAdmissionTest(t, test)
+			if tt.wantCELErr == "" && actual.GetGeneration() != 1 {
+				t.Fatalf("generation = %d, want 1 for a metadata-only update", actual.GetGeneration())
 			}
 		})
 	}
@@ -583,7 +898,7 @@ func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.
 		},
 		{
 			name:         "v1alpha1 v1beta2 spec rejects native status",
-			createObject: beta2DGDRForAdmission(nil),
+			createObject: beta2DGDRForAdmission(setBeta2AdmissionHardware),
 			statusObject: alphaDGDRForAdmission(nil),
 			status:       map[string]any{"state": string(nvidiacomv1alpha1.DGDRStatePending)},
 		},
@@ -595,13 +910,13 @@ func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.
 		},
 		{
 			name:         "v1beta1 v1beta2 spec rejects native status",
-			createObject: beta2DGDRForAdmission(nil),
+			createObject: beta2DGDRForAdmission(setBeta2AdmissionHardware),
 			statusObject: betaDGDRForAdmission(nil),
 			status:       map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)},
 		},
 		{
 			name:         "v1beta2 native spec rejects v1beta1 status",
-			createObject: beta2DGDRForAdmission(nil),
+			createObject: beta2DGDRForAdmission(setBeta2AdmissionHardware),
 			statusObject: beta2DGDRForAdmission(nil),
 			status:       map[string]any{"v1beta1": map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)}},
 		},
@@ -618,6 +933,7 @@ func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.
 			t.Log("Create a request through the production API and conversion path")
 			env := admissionEnv.ForTest(t)
 			admissionGate.set(features.Gates{GPUDiscovery: true})
+			setAdmissionH100Topology()
 			warnings := &warningRecorder{}
 			createClient := newAdmissionResourceClient(t, env, test.createObject, "", warnings)
 			object, _ := admissionObject(t, test.createObject, env.Namespace(), nil)
@@ -649,9 +965,11 @@ func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testi
 	t.Log("Create a native v1beta2 request with empty status")
 	env := admissionEnv.ForTest(t)
 	admissionGate.set(features.Gates{GPUDiscovery: true})
+	setAdmissionH100Topology()
 	warnings := &warningRecorder{}
 	beta2Fixture := beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 		request.Name = "empty-status-alpha-bridge"
+		setBeta2AdmissionHardware(request)
 	})
 	beta2Client := newAdmissionResourceClient(t, env, beta2Fixture, "", warnings)
 	object, _ := admissionObject(t, beta2Fixture, env.Namespace(), nil)
@@ -701,11 +1019,9 @@ func betaDGDRForAdmission(
 	mutate func(*nvidiacomv1beta1.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                nvidiacomv1beta1.BackendTypeVllm,
@@ -724,11 +1040,9 @@ func alphaDGDRForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1alpha1.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                "vllm",
@@ -748,11 +1062,9 @@ func beta2DGDRForAdmission(
 	mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
 			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
@@ -763,4 +1075,95 @@ func beta2DGDRForAdmission(
 		mutate(request)
 	}
 	return request
+}
+
+func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
+	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
+		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRun",
+		Name:       "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels,
+		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+			Model:    &nvidiacomv1beta2.ModelSpec{Name: model},
+			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
+			Hardware: &nvidiacomv1beta2.HardwareSpec{
+				GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
+				NumGPUsPerNode: new(int32(8)),
+			},
+			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
+			Objective: &nvidiacomv1beta2.ObjectiveSpec{
+				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
+			},
+			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
+		}},
+	}
+}
+
+func v1beta2ModelOnlyRunForAdmission(model string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	run := v1beta2RunForAdmission(model, nil)
+	run.Spec.NativeSearchInput = nvidiacomv1beta2.NativeSearchInput{
+		Model: &nvidiacomv1beta2.ModelSpec{Name: model},
+	}
+	return run
+}
+
+const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
+
+// v1beta2DGDRForAdmission builds a v1beta2 Request as a client sends it, before the CRD
+// defaults. It is unstructured on purpose: an omitted field,
+// an explicit empty object and a null are different requests, and typed Go cannot tell them
+// apart.
+func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Unstructured {
+	spec := map[string]any{"model": map[string]any{"name": v1beta2AdmissionModel}}
+	if mutate != nil {
+		mutate(spec)
+	}
+	metadata := map[string]any{"name": "test-v1beta2-dgdr", "namespace": "default"}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1beta2",
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata":   metadata,
+		"spec":       spec,
+	}}
+}
+
+func v1beta2Field(t *testing.T, obj *unstructured.Unstructured, path ...string) (any, bool) {
+	t.Helper()
+	value, found, err := unstructured.NestedFieldNoCopy(obj.Object, path...)
+	if err != nil {
+		t.Fatalf("read %v: %v", path, err)
+	}
+	return value, found
+}
+
+func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string) string {
+	t.Helper()
+	value, found := v1beta2Field(t, obj, path...)
+	if !found {
+		t.Fatalf("%v is not set", path)
+	}
+	text, ok := value.(string)
+	if !ok {
+		t.Fatalf("%v = %#v, want a string", path, value)
+	}
+	return text
+}
+
+// setV1beta2InputOverrides replaces any input overrides the fixture carried.
+func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
+	aisimulate, _ := spec["aisimulate"].(map[string]any)
+	if aisimulate == nil {
+		aisimulate = map[string]any{}
+		spec["aisimulate"] = aisimulate
+	}
+	aisimulate["inputOverrides"] = overrides
+}
+
+// setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.
+func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	sku, budget, numGPUsPerNode := "h100_sxm", int32(4), int32(4)
+	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
+		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
+		NumGPUsPerNode: &numGPUsPerNode,
+	}
 }

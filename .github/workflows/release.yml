@@ -5,9 +5,9 @@ name: Release Pipeline
 
 # workflow_dispatch is capped at 10 inputs by GitHub (this block has 9).
 # on_demand/release_version are workflow_call-only: the sole on-demand entry
-# point is stage-release-rc.yml. The ops gate and the manual approval gate live
-# HERE (authorize/approval jobs), so they bind every caller; stage-release-rc.yml
-# repeats only the ops gate, as a fast-fail before its long ECR wait.
+# point is stage-release-rc.yml. The ops gate lives HERE (authorize job), so it
+# binds every caller; stage-release-rc.yml repeats it as a fast-fail before its
+# long ECR wait.
 on:
   workflow_dispatch:
     inputs:
@@ -226,29 +226,9 @@ jobs:
       - name: Gate mode
         run: echo "ops gate applied=${{ !(inputs.nightly && github.event_name == 'schedule') }} (only scheduled nightly is exempt)"
 
-  # APPROVAL GATE — operator runs also require a manual-release-approval reviewer.
-  # Dynamic environment: empty (no gate) on the nightly path so unattended runs are
-  # not blocked. Enforced by the environment's required-reviewers rule; no secrets
-  # here, so its environment scope is independent of the RELEASE_APP secrets.
-  approval:
-    name: Approval gate
-    needs: [authorize]
-    runs-on: prod-default-small-v2
-    environment: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && 'manual-release-approval' || '' }}
-    permissions:
-      contents: read
-    steps:
-      - name: Record approval
-        env:
-          SHA: ${{ inputs.commit_sha }}
-          VER: ${{ inputs.release_version }}
-          RC: ${{ inputs.rc_number }}
-          ACTOR: ${{ github.actor }}
-        run: echo "Release gate cleared for ${VER:-<branch-derived>} rc.${RC} @ ${SHA} by ${ACTOR}"
-
   prepare-release:
     name: Prepare Release
-    needs: [approval]
+    needs: [authorize]
     runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}

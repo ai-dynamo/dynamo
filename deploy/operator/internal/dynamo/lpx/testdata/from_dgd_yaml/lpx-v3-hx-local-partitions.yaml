@@ -225,6 +225,8 @@ spec:
               value: 0,2,3,4,5,6,7,8,9,10,11,12,13
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/gpt-oss-20b-lp30-hx-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:

@@ -27,7 +27,7 @@ use dynamo_bench::kv_router_common::issuer::{
 };
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{
     CanonicalSequenceBlockHash, CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
@@ -428,7 +428,7 @@ fn actor_loop(
         RoutingScopeId::new([1; 16], IdentitySource::Explicit),
     );
     let identity = ProducerIdentity::new(
-        PoolId::new(domain, DcId::new(dc_ordinal as u64)),
+        PoolId::new(domain, ClusterId::new(dc_ordinal as u64)),
         1,
         1,
         state.format(),

@@ -350,7 +350,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			ComponentName:          "extra-worker",
 			ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 			RuntimeVersionOverride: "1.0.0",
-			Replicas:               ptr.To(int32(1)),
+			Replicas:               new(int32(1)),
 			PodTemplate:            envtestDSTestPodTemplate(),
 		})
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
@@ -391,11 +391,9 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			PodTemplate:            envtestDSTestPodTemplate(),
 		}
 		historicalDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            dynamo.GetDCDResourceName(current, historicalComponent.ComponentName, ""),
-				Namespace:       current.Namespace,
-				OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(current)},
-			},
+			Name:            dynamo.GetDCDResourceName(current, historicalComponent.ComponentName, ""),
+			Namespace:       current.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(current)},
 			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 				BackendFramework:                    current.Spec.BackendFramework,
 				DynamoComponentDeploymentSharedSpec: historicalComponent,
@@ -523,18 +521,16 @@ func markDisaggregatedSetReady(
 		desiredReplicas := ptr.Deref(role.Spec.Replicas, int32(1))
 		for slice := range sliceCount {
 			child := &leaderworkersetv1.LeaderWorkerSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role.Name),
-					Namespace: ds.GetNamespace(),
-					Labels:    disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role.Name),
-					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: disaggregatedsetv1.GroupVersion.String(),
-						Kind:       "DisaggregatedSet",
-						Name:       ds.GetName(),
-						UID:        ds.GetUID(),
-						Controller: ptr.To(true),
-					}},
-				},
+				Name:      disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role.Name),
+				Namespace: ds.GetNamespace(),
+				Labels:    disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role.Name),
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: disaggregatedsetv1.GroupVersion.String(),
+					Kind:       "DisaggregatedSet",
+					Name:       ds.GetName(),
+					UID:        ds.GetUID(),
+					Controller: new(true),
+				}},
 				Spec: role.Spec,
 			}
 			Expect(k8sClient.Create(ctx, child)).To(Succeed())
@@ -575,13 +571,11 @@ func ownedEnvtestCutoverDCDs(
 
 func newEnvtestDSHappyPathDGD(name string) *nvidiacomv1beta1.DynamoGraphDeployment {
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: envtestNamespace,
-			UID:       types.UID(fmt.Sprintf("%s-uid", name)),
-			Annotations: map[string]string{
-				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
-			},
+		Name:      name,
+		Namespace: envtestNamespace,
+		UID:       types.UID(fmt.Sprintf("%s-uid", name)),
+		Annotations: map[string]string{
+			consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
 		},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",

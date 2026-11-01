@@ -19,9 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -101,7 +99,7 @@ func TestResolveGPUShapeUsesRoleTemplatesForEngineWidth(t *testing.T) {
 	workerPodSpec := corev1.PodSpec{
 		ResourceClaims: []corev1.PodResourceClaim{{
 			Name:                      "gpu",
-			ResourceClaimTemplateName: ptr.To("worker-gpu"),
+			ResourceClaimTemplateName: new("worker-gpu"),
 		}},
 		Containers: []corev1.Container{workerMain},
 	}
@@ -121,7 +119,7 @@ func TestResolveGPUShapeUsesRoleTemplatesForEngineWidth(t *testing.T) {
 		},
 	}
 	template := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker-gpu", Namespace: "default"},
+		Name: "worker-gpu", Namespace: "default",
 		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
 			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
 				Name: "gpu",
@@ -137,7 +135,7 @@ func TestResolveGPUShapeUsesRoleTemplatesForEngineWidth(t *testing.T) {
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		template,
-		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+		&resourcev1.DeviceClass{Name: "gpu.nvidia.com"},
 	).Build()
 
 	shape, err := ResolveGPUShape(t.Context(), reader, "default", component, []PodSpecMultiplicity{
@@ -186,7 +184,7 @@ func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T
 			multinodeMain := gpuContainer(commonconsts.MainContainerName, "4")
 			sidecar := gpuContainer("sidecar", sidecarGPU)
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{
 						ComponentName: "custom",
@@ -228,7 +226,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 	podSpec := corev1.PodSpec{
 		ResourceClaims: []corev1.PodResourceClaim{{
 			Name:                      "rdma",
-			ResourceClaimTemplateName: ptr.To("frontend-rdma"),
+			ResourceClaimTemplateName: new("frontend-rdma"),
 		}},
 		Containers: []corev1.Container{{
 			Name: commonconsts.MainContainerName,
@@ -238,7 +236,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 		}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "frontend",
 			PodTemplate:   &corev1.PodTemplateSpec{Spec: podSpec},
@@ -254,7 +252,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 		}},
 	}}
 	template := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "frontend-rdma", Namespace: "default"},
+		Name: "frontend-rdma", Namespace: "default",
 		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
 			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
 				Name: "nic",
@@ -267,7 +265,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 		}},
 	}
 	deviceClass := &resourcev1.DeviceClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "rdma-nic.example.com"},
+		Name: "rdma-nic.example.com",
 		Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
 			CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.net.example.com"`},
 		}}},
@@ -291,7 +289,7 @@ func TestResolveGPUShapeDeduplicatesConcreteClaimAcrossNodes(t *testing.T) {
 	podSpec := corev1.PodSpec{
 		ResourceClaims: []corev1.PodResourceClaim{{
 			Name:              "gpu",
-			ResourceClaimName: ptr.To("shared-gpu"),
+			ResourceClaimName: new("shared-gpu"),
 		}},
 		Containers: []corev1.Container{main},
 	}
@@ -302,7 +300,7 @@ func TestResolveGPUShapeDeduplicatesConcreteClaimAcrossNodes(t *testing.T) {
 		PodTemplate:   &corev1.PodTemplateSpec{Spec: podSpec},
 	}
 	claim := &resourcev1.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "shared-gpu", Namespace: "default"},
+		Name: "shared-gpu", Namespace: "default",
 		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
 			Requests: []resourcev1.DeviceRequest{{
 				Name: "gpu",
@@ -318,7 +316,7 @@ func TestResolveGPUShapeDeduplicatesConcreteClaimAcrossNodes(t *testing.T) {
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		claim,
-		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+		&resourcev1.DeviceClass{Name: "gpu.nvidia.com"},
 	).Build()
 
 	shape, err := ResolveGPUShape(t.Context(), reader, "default", component, []PodSpecMultiplicity{
@@ -342,7 +340,7 @@ func TestResolveGroveGPUShapesCountsInterPodSharedGPUsOnce(t *testing.T) {
 			main := gpuContainer(commonconsts.MainContainerName, "4")
 			sidecar := gpuContainer("sidecar", tt.sidecarGPU)
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+				Name: "graph", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{

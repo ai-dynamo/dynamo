@@ -17,7 +17,7 @@ lib/sidecar/
 │   ├── error.rs                # Inline tests: transport status mapping
 │   ├── json.rs                 # Inline tests: shared JSON/protobuf conversion
 │   ├── transport.rs            # Production policy and existing socket test
-│   └── transport/tests.rs      # Retry/pool policy using paused time, no sockets
+│   └── transport/tests.rs      # Retry/pool policy using paused time
 ├── vllm/src/
 │   ├── model.rs                # Inline tests: discovery metadata and configuration
 │   ├── engine.rs               # Inline tests: worker configuration and local lifecycle
@@ -51,6 +51,7 @@ lib/sidecar/
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
     │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
     │       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
+    │       ├── lpx.rs         # LPX peer and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -268,7 +269,7 @@ Build the sidecar binary and run the testkit together from the repository root:
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
   cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
-    -p dynamo-trtllm-sidecar \
+    -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar \
     -p dynamo-sidecar-testkit
 ```
 
@@ -277,7 +278,7 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar executables through their executable integration targets. A testkit-only command can instead pick up an older binary from the build directory. Always build all three sidecar packages alongside testkit when validating source changes. After that build, you can select a suite or test by name:
+The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar executables through their executable integration targets. A testkit-only command can instead pick up an older binary from the build directory. Always build all four sidecar packages alongside testkit when validating source changes. After that build, you can select a suite or test by name:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration

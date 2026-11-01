@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -68,11 +67,6 @@ const (
 	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
-// rbacManager interface for managing RBAC resources
-type rbacManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
-}
-
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
@@ -82,7 +76,6 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              events.EventRecorder
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
-	RBACManager           rbacManager
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -487,7 +480,7 @@ func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Requ
 		return nil
 	}
 	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: dgdName}}
 }
 
 func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -505,5 +498,5 @@ func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx co
 	if dgdName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: snapshotJob.Namespace, Name: dgdName}}}
+	return []ctrl.Request{{Namespace: snapshotJob.Namespace, Name: dgdName}}
 }

@@ -201,7 +201,7 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Refresh a running workload while preserving its downloaded builds")
 			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 1}
 			child.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{
 				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &metav1.Time{Time: tt.checkedAt},
 			}
@@ -273,7 +273,7 @@ func TestModelDownloadCacheAcrossRevisions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Retain a previous build's successful download while changing the desired input")
 			dgd := newModelDownloadDGD(tc.build)
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 1}
 			if tc.observed {
 				child.Status.ObservedGeneration = child.Generation
 			}
