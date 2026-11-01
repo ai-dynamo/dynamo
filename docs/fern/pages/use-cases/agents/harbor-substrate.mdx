@@ -72,24 +72,17 @@ runs have not been validated. SWE-bench describes ARM64 support as
 [experimental](https://github.com/SWE-bench/SWE-bench/blob/main/README.md).
 </Note>
 
-From the root of your Dynamo clone, enter the example directory. Run workstation
-commands here unless a step identifies the runner shell. Edit the supplied
-configuration files in place as you follow the tutorial.
+Follow [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx)
+to install and verify the platform.
+
+From the root of your Dynamo clone, enter the tutorial directory:
 
 ```bash title="Workstation"
 cd examples/agents/harbor-substrate
 ```
 
-If you need to install Substrate, follow
-[Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx)
-from this directory and select **Use the Dynamo example** in its configuration
-step. Edit the supplied `substrate-install.yaml` in place, complete the
-[installation verification](../../kubernetes/agent-sandboxes/install-substrate.mdx#verify-the-installation),
-then return here. For an existing installation, complete those checks before
-continuing. Atelet must be ready on every node you select for sandbox placement.
-
-The commands use your current Kubernetes context. Keep API keys out of
-configuration files.
+The steps below use the configuration files in this directory. Edit them as
+directed.
 
 <Accordion title="Configuration files">
 
@@ -103,9 +96,6 @@ configuration files.
 | `harbor-job.yaml` | Harbor: `harbor run` | Model, tasks, template mapping, and concurrency |
 
 </Accordion>
-
-Complete the numbered steps to save your first trial's results. Tracing,
-sandbox metrics, golden snapshots, and batch runs follow as optional extensions.
 
 <Steps toc={true}>
 
