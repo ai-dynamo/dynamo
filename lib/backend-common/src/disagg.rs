@@ -70,6 +70,16 @@ impl DisaggregationMode {
         }
     }
 
+    /// Component a worker of this role registers under: aggregated workers
+    /// keep the operator-configured `configured` component, and every
+    /// disaggregated role uses its [`Self::discovery_component`].
+    pub fn registration_component<'a>(&self, configured: &'a str) -> &'a str {
+        match self {
+            Self::Aggregated => configured,
+            _ => self.discovery_component(),
+        }
+    }
+
     /// `true` when this worker only runs the prefill phase.
     pub fn is_prefill(&self) -> bool {
         matches!(self, Self::Prefill)
@@ -196,6 +206,24 @@ mod tests {
             DisaggregationMode::Aggregated.discovery_component(),
             "backend"
         );
+    }
+
+    #[test]
+    fn registration_component_keeps_configured_only_when_aggregated() {
+        assert_eq!(
+            DisaggregationMode::Aggregated.registration_component("custom"),
+            "custom"
+        );
+        for mode in [
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+            DisaggregationMode::Encode,
+        ] {
+            assert_eq!(
+                mode.registration_component("custom"),
+                mode.discovery_component()
+            );
+        }
     }
 
     #[test]

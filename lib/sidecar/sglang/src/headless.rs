@@ -16,7 +16,9 @@ use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::distributed::DistributedRuntime;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    GrpcEndpoint, GrpcTransportConfig, invalid_argument, startup_deadline,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::Instant;
@@ -42,7 +44,7 @@ struct LeaderKvConfig {
 impl HeadlessSidecar {
     pub(crate) fn from_args(args: Args) -> Result<Self, DynamoError> {
         if args.sidecar.common.route_to_encoder || args.sidecar.common.enable_rl {
-            return Err(client::invalid_arg(
+            return Err(invalid_argument(
                 "telemetry mode cannot register encoder or RL request routes",
             ));
         }
@@ -62,7 +64,7 @@ impl HeadlessSidecar {
         // model discovery, HealthCheck, connection pool, or native HTTP client.
         let (mut client, metadata, mode) = self.connect_local_engine().await?;
         let group_id = metadata
-            .worker_group_id(Instant::now() + self.transport.startup_deadline)
+            .worker_group_id(startup_deadline(self.transport.startup_deadline)?)
             .await?
             .context("telemetry-only mode requires a multinode group")?;
 
@@ -79,7 +81,7 @@ impl HeadlessSidecar {
     async fn connect_local_engine(
         &self,
     ) -> Result<(client::Client, NodeMetadata, DisaggregationMode)> {
-        let deadline = Instant::now() + self.transport.startup_deadline;
+        let deadline = startup_deadline(self.transport.startup_deadline)?;
         let mut client =
             client::connect(&self.grpc_endpoint, &self.transport, deadline, false).await?;
         let info = client::get_server_info(&mut client, deadline).await?;
@@ -95,11 +97,7 @@ impl HeadlessSidecar {
         mode: DisaggregationMode,
         group_id: &str,
     ) -> Result<()> {
-        let component = if mode == DisaggregationMode::Aggregated {
-            &self.common.component
-        } else {
-            mode.discovery_component()
-        };
+        let component = mode.registration_component(&self.common.component);
         let endpoint = drt
             .namespace(&self.common.namespace)?
             .component(component)?

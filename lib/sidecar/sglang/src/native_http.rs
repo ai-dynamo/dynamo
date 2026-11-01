@@ -9,7 +9,10 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext, LLMEngineOutput,
     PreprocessedRequest, PromptTokensDetails, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
+use dynamo_sidecar_common::{
+    GrpcEndpoint, HttpEndpoint, cancelled, cannot_connect, connection_timeout, engine_error,
+    invalid_argument,
+};
 use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
@@ -58,9 +61,9 @@ pub(crate) fn request(
     let mut body = payload
         .as_object()
         .cloned()
-        .ok_or_else(|| client::invalid_arg("extra_args.sglang_tito must be a JSON object"))?;
+        .ok_or_else(|| invalid_argument("extra_args.sglang_tito must be a JSON object"))?;
     if request.token_ids.is_empty() || request.prompt_embeds.is_some() {
-        return Err(client::invalid_arg(
+        return Err(invalid_argument(
             "native SGLang Generate requires token input",
         ));
     }
@@ -85,7 +88,7 @@ pub(crate) fn request(
         }
         let sampling = sampling
             .as_object_mut()
-            .ok_or_else(|| client::invalid_arg("sampling_params must be an object"))?;
+            .ok_or_else(|| invalid_argument("sampling_params must be an object"))?;
         sampling.insert("n".into(), Value::from(1));
         sampling.insert("max_new_tokens".into(), Value::from(1));
         sampling.remove("min_new_tokens");
@@ -238,7 +241,7 @@ fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, Dynam
         .pool_idle_timeout(Duration::from_secs(2))
         .build()
         .map_err(|error| {
-            client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
+            invalid_argument(format!("could not configure SGLang HTTP client: {error}"))
         })
 }
 
@@ -256,7 +259,7 @@ impl NativeHttp {
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port != 0)
             .ok_or_else(|| {
-                client::protocol_error(format!(
+                engine_error(format!(
                     "SGLang GetServerInfo.port must be in 1..=65535, got {raw_port}"
                 ))
             })?;
@@ -272,9 +275,8 @@ impl NativeHttp {
             );
             return Ok(None);
         }
-        let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
-            client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
-        })?;
+        let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port)
+            .map_err(|error| engine_error(format!("invalid SGLang HTTP endpoint: {error}")))?;
         let client = build_http_client(connect_timeout)?;
         Ok(Some(Self {
             client,
@@ -302,7 +304,7 @@ impl NativeHttp {
                         return Err(authentication_error("/health", status));
                     }
                     if status.is_client_error() {
-                        return Err(client::protocol_error(format!(
+                        return Err(engine_error(format!(
                             "SGLang HTTP readiness probe returned HTTP {status}"
                         )));
                     }
@@ -310,14 +312,14 @@ impl NativeHttp {
                 }
                 Ok(Err(error)) => error.to_string(),
                 Err(_) => {
-                    return Err(client::connection_timeout(format!(
+                    return Err(connection_timeout(format!(
                         "SGLang HTTP readiness probe at {endpoint} exceeded the startup deadline"
                     )));
                 }
             };
 
             if Instant::now() >= deadline {
-                return Err(client::cannot_connect(format!(
+                return Err(cannot_connect(format!(
                     "SGLang HTTP endpoint {endpoint} did not become ready: {failure}"
                 )));
             }
@@ -388,7 +390,7 @@ impl NativeHttp {
             };
             let Some(response) = opened else {
                 drop(abort_guard);
-                yield Err(client::cancelled(format!(
+                yield Err(cancelled(format!(
                     "SGLang native request {} was cancelled",
                     ctx.id()
                 )));
@@ -405,7 +407,7 @@ impl NativeHttp {
             abort_guard.stream = response_stream(response, self.max_event_bytes);
             if is_prefill {
                 let Some(handoff) = prefill_handoff.take() else {
-                    yield Err(client::protocol_error(
+                    yield Err(engine_error(
                         "SGLang native prefill request is missing disaggregated params",
                     ));
                     return;
@@ -429,7 +431,7 @@ impl NativeHttp {
                 };
                 let Some(response) = selected else {
                     drop(abort_guard);
-                    yield Err(client::cancelled(format!(
+                    yield Err(cancelled(format!(
                         "SGLang native request {} was cancelled",
                         ctx.id()
                     )));
@@ -498,7 +500,7 @@ impl NativeHttp {
 fn output_ids(response: &Value) -> Result<Vec<u32>, DynamoError> {
     response.get("output_ids").map_or(Ok(Vec::new()), |ids| {
         Vec::<u32>::deserialize(ids)
-            .map_err(|error| client::protocol_error(format!("invalid SGLang output_ids: {error}")))
+            .map_err(|error| engine_error(format!("invalid SGLang output_ids: {error}")))
     })
 }
 
@@ -523,13 +525,13 @@ async fn next_response(
             .next()
             .await
             .ok_or_else(|| {
-                client::protocol_error("SGLang /generate closed before a terminal response")
+                engine_error("SGLang /generate closed before a terminal response")
             })?
             .map_err(|error| match error {
-                LinesCodecError::MaxLineLengthExceeded => client::protocol_error(format!(
+                LinesCodecError::MaxLineLengthExceeded => engine_error(format!(
                     "SGLang /generate event exceeded {max_event_bytes} bytes; raise --native-http-max-event-bytes (DYN_SGLANG_NATIVE_HTTP_MAX_EVENT_BYTES)"
                 )),
-                error => client::protocol_error(format!("invalid SGLang /generate stream: {error}")),
+                error => engine_error(format!("invalid SGLang /generate stream: {error}")),
             })?;
         let Some(data) = line.strip_prefix("data:") else {
             continue;
@@ -539,12 +541,12 @@ async fn next_response(
             continue;
         }
         if data == "[DONE]" {
-            return Err(client::protocol_error(
+            return Err(engine_error(
                 "SGLang /generate finished without a terminal response",
             ));
         }
         return serde_json::from_str(data).map_err(|error| {
-            client::protocol_error(format!("SGLang /generate returned invalid JSON: {error}"))
+            engine_error(format!("SGLang /generate returned invalid JSON: {error}"))
         });
     }
 }
@@ -642,16 +644,16 @@ fn decode_terminal(meta: &Value, finish: &Value) -> LLMEngineOutput {
 
 fn request_error(error: reqwest::Error) -> DynamoError {
     if error.is_timeout() {
-        client::connection_timeout(format!("SGLang /generate HTTP request timed out: {error}"))
+        connection_timeout(format!("SGLang /generate HTTP request timed out: {error}"))
     } else if error.is_connect() {
-        client::cannot_connect(format!("could not connect to SGLang /generate: {error}"))
+        cannot_connect(format!("could not connect to SGLang /generate: {error}"))
     } else {
-        client::protocol_error(format!("SGLang /generate HTTP request failed: {error}"))
+        engine_error(format!("SGLang /generate HTTP request failed: {error}"))
     }
 }
 
 fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
-    client::protocol_error(format!(
+    engine_error(format!(
         "SGLang HTTP {operation} returned HTTP {status}; the sidecar does not have backend authentication configured"
     ))
 }
@@ -662,11 +664,11 @@ fn response_error(status: StatusCode, detail: String) -> DynamoError {
     }
     let message = format!("SGLang /generate returned HTTP {status}: {detail}");
     if status.is_client_error() {
-        client::invalid_arg(message)
+        invalid_argument(message)
     } else if matches!(status.as_u16(), 502..=504) {
-        client::cannot_connect(message)
+        cannot_connect(message)
     } else {
-        client::protocol_error(message)
+        engine_error(message)
     }
 }
 
@@ -1469,10 +1471,7 @@ mod tests {
         );
 
         let error = stream.next().await.unwrap().unwrap_err();
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::Cancelled)
-        );
+        assert_eq!(error.error_type(), ErrorType::Cancelled);
         assert!(stream.next().await.is_none());
     }
 

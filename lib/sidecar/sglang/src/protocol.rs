@@ -9,9 +9,9 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
     PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
+use dynamo_sidecar_common::{engine_error, invalid_argument, invalid_request};
 use serde_json::{Map, Value};
 
-use crate::client;
 use crate::proto as pb;
 
 pub(crate) fn build_generate_request(
@@ -26,7 +26,7 @@ pub(crate) fn build_generate_request(
         .token_ids
         .iter()
         .map(|token| {
-            i32::try_from(*token).map_err(|_| client::invalid_request("token ids must fit in i32"))
+            i32::try_from(*token).map_err(|_| invalid_request("token ids must fit in i32"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let max_new_tokens = if mode.is_prefill() {
@@ -37,7 +37,7 @@ pub(crate) fn build_generate_request(
             .max_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_request("max_tokens does not fit in i32"))?
+            .map_err(|_| invalid_request("max_tokens does not fit in i32"))?
     };
     let min_new_tokens = if mode.is_prefill() {
         None
@@ -47,7 +47,7 @@ pub(crate) fn build_generate_request(
             .min_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
+            .map_err(|_| invalid_request("min_tokens does not fit in i32"))?
     };
 
     // SGLang keeps a matched stop token in `output_ids` and trims only text,
@@ -64,7 +64,7 @@ pub(crate) fn build_generate_request(
     {
         for token in tokens {
             let token = i32::try_from(*token)
-                .map_err(|_| client::invalid_request("stop token ids must fit in i32"))?;
+                .map_err(|_| invalid_request("stop token ids must fit in i32"))?;
             if !stop_token_ids.contains(&token) {
                 stop_token_ids.push(token);
             }
@@ -132,7 +132,7 @@ pub(crate) fn build_generate_request(
             .max(output_options.prompt_logprobs.unwrap_or(0))
     };
     let top_logprobs_num = i32::try_from(top_logprobs_num)
-        .map_err(|_| client::invalid_request("requested logprobs does not fit in i32"))?;
+        .map_err(|_| invalid_request("requested logprobs does not fit in i32"))?;
     let logprob_start_len = if mode.is_prefill() {
         -1
     } else {
@@ -141,7 +141,7 @@ pub(crate) fn build_generate_request(
     let routed_dp_rank = routed_dp_rank(request, mode)
         .map(i32::try_from)
         .transpose()
-        .map_err(|_| client::invalid_request("routed dp_rank does not fit in i32"))?;
+        .map_err(|_| invalid_request("routed dp_rank does not fit in i32"))?;
     let lora_path = request
         .routing
         .as_ref()
@@ -224,30 +224,28 @@ pub(crate) fn routed_dp_rank(
 fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     // prompt_embeds requests arrive with empty token_ids, so check them first.
     if request.prompt_embeds.is_some() {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "prompt_embeds are not supported by SGLang's native gRPC proto",
         ));
     }
     if request.token_ids.is_empty() {
-        return Err(client::invalid_request("token_ids must not be empty"));
+        return Err(invalid_request("token_ids must not be empty"));
     }
     if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "multimodal payloads are not supported by SGLang's native Generate RPC",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
-        return Err(client::invalid_request(
-            "n must be 1 for the SGLang sidecar",
-        ));
+        return Err(invalid_request("n must be 1 for the SGLang sidecar"));
     }
     if request.sampling_options.best_of.unwrap_or(1) != 1 {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "best_of is not represented by SGLang's native gRPC proto",
         ));
     }
     if request.sampling_options.use_beam_search.unwrap_or(false) {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -264,7 +262,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "length_penalty is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -273,7 +271,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .include_stop_str_in_output
         .unwrap_or(false)
     {
-        return Err(client::invalid_request(
+        return Err(invalid_request(
             "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -292,7 +290,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .filter(|is_set| *is_set)
         .count();
         if constraint_count > 1 {
-            return Err(client::invalid_request(
+            return Err(invalid_request(
                 "the native SGLang gRPC proto accepts only one guided-decoding constraint",
             ));
         }
@@ -302,7 +300,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             .is_some_and(|value| !value.is_empty())
             || guided.whitespace_pattern.is_some()
         {
-            return Err(client::invalid_request(
+            return Err(invalid_request(
                 "guided-decoding backend and whitespace modifiers are not represented by SGLang's native gRPC proto",
             ));
         }
@@ -332,15 +330,15 @@ pub(crate) fn resolve_disaggregated_params(
     }
     if mode.is_prefill() {
         let host = bootstrap_host.ok_or_else(|| {
-            client::invalid_arg("prefill request has no bootstrap host from discovery")
+            invalid_argument("prefill request has no bootstrap host from discovery")
         })?;
         let port = bootstrap_port.ok_or_else(|| {
-            client::invalid_arg("prefill request has no bootstrap port from discovery")
+            invalid_argument("prefill request has no bootstrap port from discovery")
         })?;
         let room = rand::random::<u64>() & (i64::MAX as u64);
         return bootstrap_values_to_proto(host, u64::from(port), room).map(Some);
     }
-    Err(client::invalid_arg(
+    Err(invalid_argument(
         "decode request has neither bootstrap_info nor prefill_result",
     ))
 }
@@ -349,15 +347,15 @@ fn disaggregated_json_to_proto(value: &Value) -> Result<pb::DisaggregatedParams,
     let host = value
         .get("bootstrap_host")
         .and_then(Value::as_str)
-        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_host is missing"))?;
+        .ok_or_else(|| invalid_argument("disaggregated_params.bootstrap_host is missing"))?;
     let port = value
         .get("bootstrap_port")
         .and_then(Value::as_u64)
-        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_port is missing"))?;
+        .ok_or_else(|| invalid_argument("disaggregated_params.bootstrap_port is missing"))?;
     let room = value
         .get("bootstrap_room")
         .and_then(Value::as_u64)
-        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_room is missing"))?;
+        .ok_or_else(|| invalid_argument("disaggregated_params.bootstrap_room is missing"))?;
     bootstrap_values_to_proto(host, port, room)
 }
 
@@ -367,12 +365,12 @@ fn bootstrap_values_to_proto(
     room: u64,
 ) -> Result<pb::DisaggregatedParams, DynamoError> {
     if host.trim().is_empty() {
-        return Err(client::invalid_arg("bootstrap_host must not be empty"));
+        return Err(invalid_argument("bootstrap_host must not be empty"));
     }
     let bootstrap_port = i32::try_from(port)
-        .map_err(|_| client::invalid_arg(format!("bootstrap_port is out of range: {port}")))?;
+        .map_err(|_| invalid_argument(format!("bootstrap_port is out of range: {port}")))?;
     let bootstrap_room = i64::try_from(room).map_err(|_| {
-        client::invalid_arg(format!(
+        invalid_argument(format!(
             "bootstrap_room must fit SGLang's signed int64 field: {room}"
         ))
     })?;
@@ -401,9 +399,8 @@ fn json_value_to_string(value: &Value) -> String {
 pub(crate) fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
     ids.iter()
         .map(|id| {
-            u32::try_from(*id).map_err(|_| {
-                client::protocol_error(format!("SGLang returned a negative token id: {id}"))
-            })
+            u32::try_from(*id)
+                .map_err(|_| engine_error(format!("SGLang returned a negative token id: {id}")))
         })
         .collect()
 }
@@ -426,12 +423,12 @@ pub(crate) fn terminal_from_meta(
     stop_conditions: &StopConditions,
 ) -> Result<LLMEngineOutput, DynamoError> {
     let finish = meta_value(meta, "finish_reason")
-        .ok_or_else(|| client::protocol_error("SGLang terminal is missing finish_reason"))?;
+        .ok_or_else(|| engine_error("SGLang terminal is missing finish_reason"))?;
     let finish_type = finish
         .get("type")
         .and_then(Value::as_str)
         .or_else(|| finish.as_str())
-        .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
+        .ok_or_else(|| engine_error("SGLang finish_reason is missing a type"))?;
     let mut completion_usage = usage(prompt_tokens, generated);
     completion_usage.prompt_tokens_details = cached_prompt_tokens(meta, prompt_tokens);
     let mut output = match finish_type {
@@ -440,7 +437,7 @@ pub(crate) fn terminal_from_meta(
         "cancelled" => LLMEngineOutput::cancelled(),
         "abort" | "error" => return Err(terminal_failure(finish_type, &finish)),
         other => {
-            return Err(client::protocol_error(format!(
+            return Err(engine_error(format!(
                 "SGLang returned unsupported finish_reason type `{other}`"
             )));
         }
@@ -490,9 +487,9 @@ pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError
         err_type.unwrap_or("unknown")
     );
     if matches!(status_code, Some(400..=499)) {
-        client::invalid_arg(detail)
+        invalid_argument(detail)
     } else {
-        client::protocol_error(detail)
+        engine_error(detail)
     }
 }
 
@@ -536,7 +533,7 @@ fn prompt_logprobs_from_meta(meta: &HashMap<String, String>) -> Result<Option<Va
         if input_top_logprobs.len() != input_logprobs.len()
             || top_has_native_sentinel != has_native_sentinel
         {
-            return Err(client::protocol_error(
+            return Err(engine_error(
                 "input_token_logprobs and input_top_logprobs use inconsistent position encoding",
             ));
         }
@@ -570,15 +567,15 @@ fn prompt_logprobs_from_meta(meta: &HashMap<String, String>) -> Result<Option<Va
 fn prompt_logprob_entry(value: &Value, label: &str) -> Result<(String, Value), DynamoError> {
     let parts = value
         .as_array()
-        .ok_or_else(|| client::protocol_error(format!("invalid {label} entry from SGLang")))?;
+        .ok_or_else(|| engine_error(format!("invalid {label} entry from SGLang")))?;
     let logprob = parts
         .first()
         .and_then(Value::as_f64)
-        .ok_or_else(|| client::protocol_error(format!("missing logprob in {label}")))?;
+        .ok_or_else(|| engine_error(format!("missing logprob in {label}")))?;
     let token_id = parts
         .get(1)
         .and_then(Value::as_i64)
-        .ok_or_else(|| client::protocol_error(format!("missing token id in {label}")))?;
+        .ok_or_else(|| engine_error(format!("missing token id in {label}")))?;
     let mut entry = Map::new();
     entry.insert("logprob".to_string(), Value::from(logprob));
     if let Some(decoded) = parts.get(2).and_then(Value::as_str) {
@@ -606,9 +603,7 @@ pub(crate) fn extract_logprobs(
             .as_array()
             .and_then(|parts| parts.first())
             .and_then(Value::as_f64)
-            .ok_or_else(|| {
-                client::protocol_error("invalid output_token_logprobs entry from SGLang")
-            })?;
+            .ok_or_else(|| engine_error("invalid output_token_logprobs entry from SGLang"))?;
         log_probs.push(value);
     }
 
@@ -623,17 +618,18 @@ pub(crate) fn extract_logprobs(
                 let mut mapped = Vec::with_capacity(entries.len());
                 for (index, entry) in entries.iter().enumerate() {
                     let parts = entry.as_array().ok_or_else(|| {
-                        client::protocol_error("invalid output_top_logprobs entry from SGLang")
+                        engine_error("invalid output_top_logprobs entry from SGLang")
                     })?;
-                    let logprob = parts.first().and_then(Value::as_f64).ok_or_else(|| {
-                        client::protocol_error("missing top-logprob value from SGLang")
-                    })?;
-                    let token_id = parts.get(1).and_then(Value::as_u64).ok_or_else(|| {
-                        client::protocol_error("missing top-logprob token id from SGLang")
-                    })?;
-                    let token_id = u32::try_from(token_id).map_err(|_| {
-                        client::protocol_error("top-logprob token id does not fit u32")
-                    })?;
+                    let logprob = parts
+                        .first()
+                        .and_then(Value::as_f64)
+                        .ok_or_else(|| engine_error("missing top-logprob value from SGLang"))?;
+                    let token_id = parts
+                        .get(1)
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| engine_error("missing top-logprob token id from SGLang"))?;
+                    let token_id = u32::try_from(token_id)
+                        .map_err(|_| engine_error("top-logprob token id does not fit u32"))?;
                     let token = if return_tokens_as_ids {
                         Some(format!("token_id:{token_id}"))
                     } else {

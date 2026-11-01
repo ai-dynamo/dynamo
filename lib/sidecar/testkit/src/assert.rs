@@ -36,12 +36,16 @@ pub fn terminal(outputs: Outputs, tokens: &[u32], prompt_tokens: u32, reason: Fi
     );
 }
 
-pub fn failure(mut outputs: Outputs, tokens: &[u32], kind: BackendError) -> DynamoError {
+pub fn failure(outputs: Outputs, tokens: &[u32], kind: BackendError) -> DynamoError {
+    failure_with(outputs, tokens, ErrorType::Backend(kind))
+}
+
+pub fn failure_with(mut outputs: Outputs, tokens: &[u32], error_type: ErrorType) -> DynamoError {
     let error = outputs
         .pop()
         .expect("error output")
         .expect_err("truncation must fail");
-    assert_eq!(error.error_type(), ErrorType::Backend(kind));
+    assert_eq!(error.error_type(), error_type);
     let preceding: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
     assert!(preceding.iter().all(|o| o.finish_reason.is_none()));
     assert_eq!(
