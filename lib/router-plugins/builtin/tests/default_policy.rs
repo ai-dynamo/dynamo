@@ -201,9 +201,11 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }
             }
             if name == "shared_cache_multiplier" {
-                request.shared_cache_hits = Some(dynamo_kv_router::SharedCacheHits::from_ranges(
-                    std::iter::once(0..10).collect(),
-                ));
+                request.shared_cache_hits = Some(
+                    dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(
+                        std::iter::once(0..10).collect(),
+                    ),
+                );
             }
             // A nonzero multiplier also reads fetch inputs, which updates cannot add, so the
             // shared case starts with a credit too small to change the choice.
@@ -266,11 +268,12 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     ..Default::default()
                 };
                 if mode % 8 >= 4 {
-                    request.shared_cache_hits =
-                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
+                    request.shared_cache_hits = Some(
+                        dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![
                             1..3,
                             5..12,
-                        ]));
+                        ]),
+                    );
                 }
                 match mode % 4 {
                     1 => request.overlap.tier_overlap_blocks = Default::default(),
@@ -278,7 +281,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     3 => request.track_prefill_tokens = false,
                     _ => {}
                 }
-                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
                     Some(SelectionConfig::from(&config)),
                     "test",
                     42,
@@ -337,7 +340,7 @@ fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
                     overlap_score_credit_decay: 0.6,
                     ..Default::default()
                 };
-                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
                     Some(SelectionConfig::from(&config)),
                     "prefill",
                     42,
@@ -385,7 +388,7 @@ fn empty_prompt_routes_by_load() {
     request.overlap = Default::default();
     for (worker, load) in &mut request.worker_loads {
         let unloaded = worker.worker_id == 2;
-        *load = dynamo_kv_router::WorkerLoadProjection {
+        *load = dynamo_kv_router::plugins::prelude::WorkerLoadProjection {
             active_prefill_tokens: if unloaded { 1616 } else { 1600 },
             active_decode_blocks: if unloaded { 0 } else { 50 },
             ..Default::default()
@@ -427,7 +430,7 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
                     router_temperature: temperature,
                     ..Default::default()
                 };
-                let reference = dynamo_kv_router::DefaultWorkerSelector::new(
+                let reference = dynamo_scheduler::host::DefaultWorkerSelector::new(
                     Some(SelectionConfig::from(&config)),
                     "prefill",
                 );
@@ -497,7 +500,7 @@ fn prepared_values_follow_each_request_when_reusing_a_policy() {
                 disk_cache_hit_weight: 0.1,
                 ..Default::default()
             };
-            let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+            let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
                 Some(SelectionConfig::from(&config)),
                 label,
                 42,
@@ -692,7 +695,7 @@ fn pin_does_not_advance_seeded_random_stream() {
         router_temperature: 0.7,
         ..Default::default()
     };
-    let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+    let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
         Some(SelectionConfig::from(&config)),
         "prefill",
         42,
@@ -784,7 +787,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
             .insert(*worker, if worker.worker_id == 0 { 3 } else { 0 });
     }
     #[allow(clippy::single_range_in_vec_init)]
-    let hits = dynamo_kv_router::SharedCacheHits::from_ranges(vec![0..4]);
+    let hits = dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![0..4]);
     request.shared_cache_hits = Some(hits);
 
     let mut registry = default_registry();

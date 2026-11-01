@@ -212,7 +212,7 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                 router_temperature: temperature,
                 ..config(multiplier)
             };
-            let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+            let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
                 Some(SelectionConfig::from(&config)),
                 "test",
                 42,

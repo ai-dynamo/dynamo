@@ -353,7 +353,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     let error = select().unwrap_err();
     assert!(matches!(
         error,
-        dynamo_kv_router::KvSchedulerError::WorkerSelectionPolicy(
+        dynamo_kv_router::plugins::prelude::KvSchedulerError::WorkerSelectionPolicy(
             WorkerSelectionPolicyError::NonFiniteCost {
                 scorer_index: 1,
                 row: 0
