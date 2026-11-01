@@ -9,6 +9,10 @@ pub(crate) mod common;
 #[cfg(feature = "ingest-zmq")]
 pub mod indexer;
 
+#[deprecated(
+    since = "1.7.0",
+    note = "dynamo_scheduler::overlap_summary; see lib/kv-router/README.md, Deprecated paths"
+)]
 pub mod overlap;
 
 // The selection service: its composition needs no adapter. The ZMQ-direct ingress needs

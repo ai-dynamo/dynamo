@@ -69,3 +69,28 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
         Ok(ExternalSequenceBlockHash(value))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_local_block_hash_serialization() {
+        let hash = LocalBlockHash(12345);
+        let serialized = serde_json::to_string(&hash).unwrap();
+        assert_eq!(serialized, "12345");
+
+        let deserialized: LocalBlockHash = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, hash);
+    }
+
+    #[test]
+    fn test_external_sequence_block_hash_serialization() {
+        let hash = ExternalSequenceBlockHash(67890);
+        let serialized = serde_json::to_string(&hash).unwrap();
+        assert_eq!(serialized, "67890");
+
+        let deserialized: ExternalSequenceBlockHash = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, hash);
+    }
+}

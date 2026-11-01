@@ -4,6 +4,7 @@
 //! Compile legacy plugin import paths against the canonical registry and contracts.
 //! Scorer implementations use the current batch signature; old scalar signatures must migrate.
 //! TODO(v1.7): Remove the legacy import coverage when the compatibility exports are removed.
+#![allow(deprecated)]
 
 use std::sync::Arc;
 

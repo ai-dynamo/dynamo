@@ -89,6 +89,32 @@ The crate's public surface is a committed snapshot, `public-api.txt`; `bash
 scripts/router_public_api_check.sh` regenerates it with `cargo-public-api` and fails on a
 difference (`--update` rewrites it; review the diff in the PR).
 
+## Deprecated paths
+
+`dynamo-kv-router` is the composition crate. Every path below is a shim over a stage, the kernel,
+or a vocabulary crate; it carries `#[deprecated]` for one release and goes away in the next.
+In-tree hosts import the owner's `host` module; plugins import `plugins::prelude`.
+
+| Deprecated path | Owner |
+|---|---|
+| root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
+| `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events::event`, `dynamo_kv_hashing::routing`, `dynamo_scheduler::protocols` |
+| `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer::identity`) |
+| `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
+| `sequences`, `multi_worker_sequence`, `sequence` | `dynamo_slot_tracker` (`host`) |
+| `scheduling::{queue, selector, overlap, overlap_refresh, prefill_load, protocols, router_config, shared_cache, tracking_hash, classifier_rows}` and its kernel re-exports | `dynamo_scheduler` (`host`) |
+| `scheduling::{policy_queue, request_classifier, admission_config, queue_admission}` | `dynamo_admission` (`host`) |
+| `scheduling::lora_filter`, `conditional_disagg` | `dynamo_worker_selection` (`host`) |
+| `kv_hints` | `dynamo_router_protocol::kv_hints`, `dynamo_kv_indexer::kv_hints`, `dynamo_scheduler::kv_hints` |
+| `recovery` | `dynamo_kv_events::cursor` |
+| `zmq_wire` | `dynamo_kv_events::zmq_wire` |
+| `worker_type` | `dynamo_router_protocol::WorkerType` |
+| `services::selection::{affinity, SelectionCore, SelectionHost, PromptRequest, SelectRequest, ...}` | `dynamo_scheduler::host`, `dynamo_session_affinity::host` |
+| `services::overlap` | `dynamo_scheduler::overlap_summary` |
+
+The `standalone-indexer`, `standalone-slot-tracker`, and `standalone-selection` features stay as
+aliases of the adapter features for the same release; `runtime-protocols` is empty.
+
 ## Further Reading
 
 - Router guide: <https://docs.nvidia.com/dynamo/components/router>

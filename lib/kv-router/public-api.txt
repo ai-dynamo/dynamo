@@ -84,7 +84,9 @@ pub use dynamo_kv_router::compute_block_hash_for_seq
 pub use dynamo_kv_router::concurrent_radix_tree_compressed
 pub use dynamo_kv_router::multi_worker_sequence
 pub use dynamo_kv_router::nested_map
+pub use dynamo_kv_router::queue
 pub use dynamo_kv_router::radix_tree
+pub use dynamo_kv_router::selector
 pub use dynamo_kv_router::sequence
 pub use dynamo_kv_router::sequences
 pub use dynamo_kv_router::session_prefix_index
@@ -669,8 +671,6 @@ pub use dynamo_kv_router::protocols::compute_seq_hash_for_block
 pub use dynamo_kv_router::protocols::compute_seq_hash_for_tokens_with_seeds
 pub use dynamo_kv_router::protocols::hash_mm_identifier
 pub use dynamo_kv_router::protocols::pad_value_for_mm_hash
-pub mod dynamo_kv_router::queue
-pub use dynamo_kv_router::queue::<<dynamo_scheduler::queue::*>>
 pub mod dynamo_kv_router::recovery
 pub use dynamo_kv_router::recovery::CursorObservation
 pub use dynamo_kv_router::recovery::CursorState
@@ -953,8 +953,6 @@ impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_r
 pub fn dynamo_router_protocol::load::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
 pub type dynamo_kv_router::scheduling::RequestClassifierFactory = alloc::sync::Arc<(dyn core::ops::function::Fn(dynamo_admission::classifier::inputs::RequestClassifierContext) -> alloc::boxed::Box<dyn dynamo_admission::classifier::RequestClassifier> + core::marker::Send + core::marker::Sync)>
 pub type dynamo_kv_router::scheduling::RequestClassifierProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::scheduling::RequestClassifierParameters) -> core::result::Result<dynamo_kv_router::scheduling::RequestClassifierFactory, dynamo_kv_router::scheduling::RequestClassifierProviderError> + core::marker::Send + core::marker::Sync)>
-pub mod dynamo_kv_router::selector
-pub use dynamo_kv_router::selector::<<dynamo_scheduler::selector::*>>
 pub mod dynamo_kv_router::services
 pub mod dynamo_kv_router::services::indexer
 pub use dynamo_kv_router::services::indexer::backend
