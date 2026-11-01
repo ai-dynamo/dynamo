@@ -97,9 +97,11 @@ runs have not been validated. SWE-bench describes ARM64 support as
 [experimental](https://github.com/SWE-bench/SWE-bench/blob/main/README.md).
 </Note>
 
-Complete the installation and its capability checks before continuing. Golden
-snapshots require working durable snapshot storage. The steps below configure
-Harbor on that installation.
+Complete the installation and its capability checks before continuing.
+Object storage is required by the pinned Substrate release, including for this
+initial run with golden snapshots disabled. The installation guide deploys
+in-cluster RustFS and creates the `ate-snapshots` bucket by default. The steps
+below configure Harbor on that installation.
 
 From the root of your Dynamo clone, enter the example directory. Run workstation
 commands here unless a step identifies the runner shell. Edit the supplied
@@ -1042,6 +1044,12 @@ for actor correlation, without assuming a shared distributed trace across all
 three viewers.
 
 ## Optionally restore from a golden snapshot
+
+This optional feature uses the object storage configured during Substrate
+installation. With the default setup, golden snapshots go to
+`s3://ate-snapshots/` in RustFS; no additional storage deployment is needed.
+If you use remote S3 or GCS, verify that the configured bucket and credentials
+are working before enabling snapshots.
 
 Create separate files for the optional golden configuration on the workstation:
 

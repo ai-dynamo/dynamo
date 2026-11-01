@@ -5,7 +5,9 @@ title: Install Substrate
 subtitle: Prepare a Kubernetes cluster to run agent sandboxes with Agent Substrate.
 ---
 
-Install Agent Substrate's control plane, node runtime, and snapshot storage.
+Install Agent Substrate's control plane, node runtime, and an in-cluster RustFS
+object store for snapshots. Object storage is required by this Substrate release,
+even when a workload does not use golden snapshots or suspend/resume.
 Workloads configure their own client identities, worker pools, and actor images
 after installation. This procedure does not require Harbor, Pi, or a model server.
 
@@ -24,8 +26,12 @@ around limitations in that release's installer.
   [Check cluster capabilities](#check-cluster-capabilities).
 - Linux x86-64 (`amd64`) or ARM64 (`arm64`) nodes, with images and sandbox
   runtime assets built for the nodes where each component runs.
-- PostgreSQL, object storage, and network access configured according to the
-  pinned [Substrate operator installation guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
+- For the default RustFS path, a StorageClass that can provision a
+  `ReadWriteOnce` volume. This guide uses 50 GiB as a starting allocation;
+  size it for retained snapshots.
+- PostgreSQL and network access configured according to the pinned
+  [Substrate operator installation guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
+  This guide deploys object storage in the cluster; an external service is not required.
 - Git, Go 1.27 or newer, and `kubectl` on the installation workstation, with the
   intended Kubernetes context already selected.
 
@@ -282,6 +288,128 @@ objects.
 
 </Step>
 
+<Step title="Deploy in-cluster object storage" id="deploy-in-cluster-object-storage">
+
+Deploy RustFS from the pinned Substrate checkout. Its manifest includes a
+persistent volume claim, a single RustFS server, a ClusterIP Service, a bucket
+initialization Job, and a NetworkPolicy allowing Substrate's snapshot plugins
+and that Job to reach the S3 API.
+
+<Note>
+If you already have remote object storage, skip this RustFS deployment. Follow
+Substrate's [snapshot storage setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md#snapshot-storage)
+and [object-store plugin configuration](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/architecture.md#system-components).
+Update the bucket, endpoint, region, and credentials below for an existing S3
+service. For GCS, use the upstream service-account setup and retain the plugins'
+`gcs` backend instead of applying the S3 settings.
+For static S3 credentials, create `ate-objectstore` in `ate-system` with the
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` keys expected below. If you use
+workload identity instead, omit those two Secret references from the plugins.
+</Note>
+
+The defaults used throughout this guide are:
+
+| Setting | Value |
+| --- | --- |
+| Namespace | `ate-system` |
+| S3 endpoint | `http://rustfs.ate-system.svc:9000` |
+| Bucket | `ate-snapshots` |
+| Snapshot location | `s3://ate-snapshots/` |
+| Region | `us-east-1` |
+| Credentials Secret | `ate-objectstore` |
+| PersistentVolumeClaim | `rustfs-data` |
+
+Create the namespace and a shared Secret for RustFS, the bucket Job, and
+Substrate's object-store plugins. Enter an access key and secret key of your
+choice; these become the RustFS credentials:
+
+```bash
+kubectl apply -f deps/substrate/manifests/ate-install/ate-system-namespace.yaml
+read -rp 'RustFS access key: ' RUSTFS_ACCESS_KEY_ID
+read -rsp 'RustFS secret key: ' RUSTFS_SECRET_ACCESS_KEY
+printf '\n'
+kubectl -n ate-system create secret generic ate-objectstore \
+  --from-literal=AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY_ID" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_ACCESS_KEY"
+unset RUSTFS_ACCESS_KEY_ID RUSTFS_SECRET_ACCESS_KEY
+```
+
+Edit `deps/substrate/manifests/ate-install/kind/rustfs.yaml` in place before
+applying it. Despite the directory name, this manifest uses standard Kubernetes
+resources and can run on a cluster with a suitable StorageClass.
+
+In the `rustfs-data` PersistentVolumeClaim, increase the upstream `1Gi` request
+to your chosen capacity:
+
+```yaml
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+```
+
+If the cluster has no default StorageClass, add `spec.storageClassName` with
+your class name. Check available classes with `kubectl get storageclass`.
+Snapshots can include actor memory and writable filesystems. Retain the PVC
+across RustFS restarts; deleting it can remove the snapshots stored there.
+This single-server setup depends on that volume's availability.
+
+In the `rustfs` Deployment's container `env`, replace the two literal credential
+entries with Secret references. Preserve the other environment entries:
+
+```yaml
+- name: RUSTFS_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_ACCESS_KEY_ID
+- name: RUSTFS_SECRET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_SECRET_ACCESS_KEY
+```
+
+In the `rustfs-bucket-init` Job's container `env`, replace its two literal
+credential entries with the same Secret. Keep its endpoint, region, and
+`ate-snapshots` bucket name:
+
+```yaml
+- name: AWS_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_ACCESS_KEY_ID
+- name: AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_SECRET_ACCESS_KEY
+```
+
+The pinned RustFS and AWS CLI images contain both `linux/amd64` and
+`linux/arm64` variants. Keep their image references for either architecture;
+RustFS can run on a different node architecture from the sandbox workers.
+Apply the edited manifest and wait for the bucket:
+
+```bash
+kubectl apply -f deps/substrate/manifests/ate-install/kind/rustfs.yaml
+kubectl -n ate-system rollout status deployment/rustfs --timeout=300s
+kubectl -n ate-system wait --for=condition=complete \
+  job/rustfs-bucket-init --timeout=300s
+kubectl -n ate-system logs job/rustfs-bucket-init
+kubectl -n ate-system get pvc rustfs-data
+```
+
+The Job must report that `ate-snapshots` was created or already exists, and
+the PVC must be `Bound`. If the Job fails, inspect its logs and the PVC and Pod
+events before continuing. The completed Job confirms that the endpoint accepts
+the configured credentials and the bucket exists.
+
+</Step>
+
 <Step title="Configure the installation" id="configure-the-installation">
 
 Create `substrate-install.yaml` in your chosen working directory. The pinned
@@ -292,7 +420,7 @@ services and node assets before deployment:
 | Requirement | Preparation and verification |
 | --- | --- |
 | PostgreSQL | Follow [PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md) for the database, schema, roles, and connection settings. Ensure the cluster can reach it. |
-| Snapshot storage | Create a bucket and configure access using [snapshot storage settings](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md#snapshot-storage); use the S3 workaround below when applicable. |
+| Snapshot storage | Complete [Deploy in-cluster object storage](#deploy-in-cluster-object-storage), then use the RustFS settings below. Object storage remains required when golden snapshots are disabled. |
 | Runtime assets | Check [sandbox asset caching](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/sandbox-asset-cache.md) for the selected runtime's binaries, versions, and node cache. Ensure eligible nodes can obtain matching assets. |
 | Certificates | Complete the API/projection checks above and the [authentication setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authentication.md). Verify projected files after deployment. |
 | Administrative access | Configure a global owner using the [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md). This identity creates workload atespaces later. |
@@ -340,33 +468,72 @@ actor ingress. Add approved client identities through your installation
 configuration when you configure a workload. Preserve existing identities when
 adding another client.
 
-For Google Cloud Storage, follow the upstream bucket and transfer-service-account
-setup. For an S3-compatible store, use the release-specific settings below.
+### Point Substrate at RustFS
 
-### Use an S3-compatible snapshot store
-
-In `v1.0.0-rc.1`, the installer assumes Google Cloud Storage on every cluster
-that is not kind.
-It refuses to deploy `ate-api-server` unless `storage.transferGSAName` and
-`gcp.projectID` are set, because on GCS the object-store plugin impersonates
-that service account to mint per-actor credentials. The S3 backend never reads
-the value. Its plugin transfers with the Pod's own credentials and answers the
-credential exchange as unimplemented. Give the two settings placeholder values
-to pass the check:
+Add these defaults to `substrate-install.yaml`:
 
 ```yaml
 storage:
-  snapshotLocation: s3://your-bucket/
+  snapshotLocation: s3://ate-snapshots/
   transferGSAName: unused
 gcp:
   projectID: not-a-gcp-project
 ```
 
-The deploy command below passes the current Kubernetes context explicitly,
-which skips the installer's GKE credential lookup. Any S3-compatible service
-works, including the small in-cluster RustFS from
-upstream's `manifests/ate-install/kind/rustfs.yaml`. Create the bucket before
-the first actor.
+The pinned installer requires `storage.transferGSAName` and `gcp.projectID`
+on clusters that are not kind, even for S3. These two values satisfy that
+check; the S3 backend does not use the GCS credential exchange. The deploy
+command passes your current Kubernetes context to skip the GKE credential lookup.
+
+The installer does not expose S3 endpoint or credential fields in
+`SubstrateInstall`. Before deploying, edit these files in the pinned checkout:
+
+- `deps/substrate/manifests/ate-install/ate-api-server.yaml`
+- `deps/substrate/manifests/ate-install/atelet.yaml`
+
+In each workload's `spec.template.spec.initContainers`, find the container
+named `objectstore-plugin`. Change its existing `ATE_STORAGE_BACKEND` entry
+to `s3` and add the following AWS entries to its `env` list. Preserve its
+other environment entries, arguments, and mounts:
+
+```yaml
+- name: ATE_STORAGE_BACKEND
+  value: s3
+- name: AWS_REGION
+  value: us-east-1
+- name: AWS_ENDPOINT_URL
+  value: http://rustfs.ate-system.svc:9000
+- name: AWS_S3_USE_PATH_STYLE
+  value: "true"
+- name: AWS_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_ACCESS_KEY_ID
+- name: AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ate-objectstore
+      key: AWS_SECRET_ACCESS_KEY
+```
+
+These settings belong on the plugin sidecars. The `ate-api-server` and `atelet`
+main containers do not read S3 credentials. The API server's plugin manages
+stored snapshots; the node plugin uploads and downloads their contents.
+
+<Note>
+For another S3 service, update `storage.snapshotLocation`, `AWS_ENDPOINT_URL`,
+`AWS_REGION`, path-style addressing, and the credentials or workload identity
+to match that service. For Amazon S3, omit `AWS_ENDPOINT_URL` when using the
+standard regional endpoint. For GCS, follow the upstream
+[snapshot storage instructions](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md#snapshot-storage)
+with a `gs://` location and real transfer-service-account settings; keep
+`ATE_STORAGE_BACKEND=gcs` and omit the AWS entries.
+</Note>
+
+Keep these manifest edits with your installation configuration. `ate-setup`
+renders this checkout, so subsequent deploys reuse the settings. Reapply your
+edits if you replace or upgrade the checkout.
 
 </Step>
 
@@ -389,38 +556,8 @@ Omit or adapt optional Google `PodMonitoring` resources on clusters without
 that API. For an existing installation, update its managed configuration
 instead of replacing it with a new document.
 
-### Configure S3 plugin credentials
-
-Complete this step only when using S3-compatible snapshot storage.
-
-The installer does not carry S3 endpoint or credential settings yet, so point
-the object-store plugin at your store after the deploy. The plugin runs as the
-`objectstore-plugin` init container of both the `ate-api-server` Deployment and
-the `atelet` DaemonSet:
-
-```bash
-kubectl -n ate-system create secret generic ate-objectstore \
-  --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
-  --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key
-cat > objectstore-s3.json <<'EOF'
-{"spec":{"template":{"spec":{"initContainers":[{"name":"objectstore-plugin","env":[
-  {"name":"ATE_STORAGE_BACKEND","value":"s3"},
-  {"name":"AWS_REGION","value":"us-east-1"},
-  {"name":"AWS_ENDPOINT_URL","value":"http://rustfs.ate-system.svc:9000"},
-  {"name":"AWS_S3_USE_PATH_STYLE","value":"true"},
-  {"name":"AWS_ACCESS_KEY_ID","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_ACCESS_KEY_ID"}}},
-  {"name":"AWS_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_SECRET_ACCESS_KEY"}}}
-]}]}}}}
-EOF
-kubectl -n ate-system patch deployment ate-api-server --patch-file objectstore-s3.json
-kubectl -n ate-system patch daemonset atelet --patch-file objectstore-s3.json
-kubectl -n ate-system rollout status deployment/ate-api-server --timeout=300s
-kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
-```
-
-Replace the endpoint and region with your store's values. Running
-`ate-setup deploy` again rewrites both workloads, so reapply the patch after
-each deploy.
+The installer reads the plugin settings edited above before it waits for
+readiness. No post-deployment S3 patch is needed.
 
 </Step>
 
