@@ -233,19 +233,30 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
     assert replay_spec.runtime_hooks[0].config["ais_perf_config"] is None
 
 
-def test_public_router_search_without_policy_searches_both_policies() -> None:
-    plan = create_provider().generate_search_space(
-        {"prefill_load_model": {"type": "none"}},
+def test_public_router_search_without_policy_matches_recommendation() -> None:
+    adapter = create_provider()
+    plan = adapter.generate_search_space(
+        {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}},
         _sweep_context(),
     )
 
     assert plan.state["public_schema"] is True
-    choices = plan.fragment.choices_by_branch["agg"]
-    assert choices["mode"] == ["kv_router", "round_robin"]
-    assert choices["prefill_load_model_type"] == ["none"]
+    assert plan.fragment.choices_by_branch["agg"] == {
+        "mode": ["round_robin", "kv_router"]
+    }
+    (conditional,) = plan.fragment.conditional_by_branch["agg"]
+    assert conditional.values == ["kv_router"]
+    assert conditional.choices["prefill_load_model_type"] == ["none", "ais"]
+    replay_spec = adapter.materialize_replay(
+        plan, {"mode": "round_robin"}, _candidate_context()
+    )
+    assert replay_spec.config == {
+        "policy": "round_robin",
+        "prefill_load_model": {"type": "none"},
+    }
 
 
-def test_public_router_search_rejects_unknown_load_model_fields() -> None:
+def test_public_router_search_without_policy_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError, match="types"):
         create_provider().generate_search_space(
             {"prefill_load_model": {"types": "ais"}},

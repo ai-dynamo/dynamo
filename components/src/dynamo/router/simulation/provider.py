@@ -32,7 +32,6 @@ from .config import (
     RouterPredictionConfig,
     RouterRecommendationConfig,
     RouterSearchSpace,
-    is_public_search_spec,
 )
 
 _PROVIDER_API_VERSION = 1
@@ -348,7 +347,13 @@ class DynamoRouterSweepConfigProvider:
         search_spec: Mapping[str, JSONValue],
         context: SweepContext,
     ) -> AdapterSearchPlan:
-        public_schema = is_public_search_spec(search_spec)
+        if "policy" not in search_spec and "prefill_load_model" in search_spec:
+            # Without policy this is a recommendation spec: both policies, with
+            # the load model and knobs searched only under kv_router.
+            return self._compile_public_search(
+                RouterRecommendationConfig.model_validate(search_spec), context
+            )
+        public_schema = "policy" in search_spec or "prefill_load_model" in search_spec
         space = RouterSearchSpace.model_validate(search_spec)
         choices: dict[str, list[JSONValue]] = {"mode": list(space.mode)}
         kv_router_possible = "kv_router" in space.mode
