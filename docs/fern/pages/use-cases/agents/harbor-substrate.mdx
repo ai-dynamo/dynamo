@@ -6,10 +6,11 @@ sidebar-title: Sandboxed coding agents
 subtitle: Prepare task sandboxes, run coding agents against an inference endpoint, and inspect their results.
 ---
 
-Run a SWE-bench Verified task with Harbor and Pi inside an Agent Substrate
-sandbox. Then run a small concurrent batch and inspect its agent logs,
-inference timings, and sandbox metrics. Use NVIDIA Dynamo to serve the model,
-or connect to a compatible external API from a cluster without GPUs.
+Run one SWE-bench Verified task with Harbor and Pi inside an Agent Substrate
+sandbox, then inspect its agent logs and verification results. Use NVIDIA
+Dynamo to serve the model, or connect to a compatible external API from a
+cluster without GPUs. Optional steps add traces, sandbox metrics, golden
+snapshots, and concurrent trials.
 
 The runnable files are in the
 [Harbor Substrate example](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/harbor-substrate).
@@ -45,24 +46,17 @@ flowchart LR
 | **Substrate** | Provides the sandboxes: places actors on CPU workers, controls their lifecycle and network access, and supports checkpoint and restore. |
 | **Dynamo** | Serves model inference outside the sandboxes: accepts Pi's API requests and routes them to the inference engine. A compatible external API can fill this role instead. |
 
-Harbor connects to Substrate through the environment adapter. For each trial,
-the adapter creates an actor from the task's template, then runs commands and
-transfers files through the Substrate router to the guest daemon inside that
-actor. Pi runs there alongside the task repository and coding tools; the model
-runs separately behind Dynamo or an external endpoint.
-
-Pi alternates between model requests and local tool execution until it finishes
-the task. Harbor then runs the task's verifier inside the same actor, collects
-the agent logs and verification results, and asks the adapter to delete the
-actor. The verifier determines the reward; the model does not grade its own
-answer.
+For each trial, Harbor creates a sandbox actor, runs Pi and the task verifier
+inside it, collects the results, and deletes the actor. Pi calls the model
+endpoint and executes tools against the task workspace. The verifier grades
+the resulting solution.
 
 ## Check prerequisites
 
 Prepare these resources:
 
 - A local clone of the Dynamo repository.
-- A Kubernetes cluster with [Substrate installed](../../kubernetes/agent-sandboxes/install-substrate.mdx)
+- A Kubernetes cluster with [Substrate installed and verified](../../kubernetes/agent-sandboxes/install-substrate.mdx#verify-the-installation)
   and the pinned `kubectl-ate` CLI on `PATH`. Administrative access is needed
   to create the tutorial's atespace and authorize its runner.
 - Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with matching gVisor
@@ -77,8 +71,6 @@ Prepare these resources:
   Docker with BuildKit, image build and push support, Go 1.27 or newer, and `ko`
   on the preparation workstation. Use a native builder for the target sandbox
   architecture, or configure [Docker cross-platform builds](https://docs.docker.com/build/building/multi-platform/).
-- For Grafana panels, Prometheus Operator and Grafana. The example can use an
-  existing `kube-prometheus-stack` installation.
 
 Use the same node architecture for the guest image, worker pool, and task image.
 The supplied configuration defaults to `amd64`; follow the `arm64` instructions
@@ -104,21 +96,17 @@ If you need to install Substrate, follow
 [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx)
 from this directory and select **Use the Dynamo example** in its configuration
 step. Edit the supplied `substrate-install.yaml` in place, complete the
-installation's capability and readiness checks, then return here. If Substrate
-is already installed, retain its operator-managed configuration and continue
-with the verification step below.
+[installation verification](../../kubernetes/agent-sandboxes/install-substrate.mdx#verify-the-installation),
+then return here. For an existing installation, complete those checks before
+continuing. Atelet must be ready on every node you select for sandbox placement.
 
-Object storage is required by the pinned Substrate release, including for this
-initial run with golden snapshots disabled. The installation guide deploys
-in-cluster RustFS and creates the `ate-snapshots` bucket by default. The steps
-below configure Harbor on that installation.
+The commands use your current Kubernetes context. Keep API keys out of
+configuration files.
 
-The commands use your current Kubernetes context. The configuration lives
-in the YAML files below. Keep API keys out of those files.
+<Accordion title="Configuration files">
 
 | File | Consumer | What you configure |
 | --- | --- | --- |
-| `substrate-install.yaml` | Installer: `ate-setup --config` | Generic platform release, database, administrator, and storage settings |
 | `workerpool.yaml` | Kubernetes: `kubectl apply` | CPU worker placement and capacity |
 | `harbor-runner.yaml` | Kubernetes: `kubectl apply` | Harbor runner Pod, ServiceAccount, and credentials |
 | `runner-access-policy.yaml` | Substrate: `kubectl-ate` | Runner permissions within the atespace |
@@ -126,26 +114,12 @@ in the YAML files below. Keep API keys out of those files.
 | `egress.yaml` | Environment adapter | Hosts and ports each actor may reach |
 | `harbor-job.yaml` | Harbor: `harbor run` | Model, tasks, template mapping, and concurrency |
 
+</Accordion>
+
 Complete the numbered steps to save your first trial's results. Tracing,
 sandbox metrics, golden snapshots, and batch runs follow as optional extensions.
 
 <Steps toc={true}>
-
-<Step title="Verify Substrate" id="verify-substrate">
-
-Confirm that the installed platform is ready:
-
-```bash title="Workstation"
-kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
-kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
-kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
-kubectl -n ate-system get pods -o wide
-```
-
-`atelet` must be ready on each node eligible for sandbox placement. If these
-checks fail, return to [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx).
-
-</Step>
 
 <Step title="Choose an inference endpoint" id="choose-an-inference-endpoint">
 
@@ -247,7 +221,7 @@ selected endpoint and that the policy allows its hostname and port. Use port
 
 </Step>
 
-<Step title="Create the namespace, atespace, and access policy" id="create-the-namespace-atespace-and-access-policy">
+<Step title="Configure Harbor access to Substrate" id="create-the-namespace-atespace-and-access-policy">
 
 A Kubernetes namespace and a Substrate atespace are separate objects. This
 tutorial uses `ate-env` for both. Run the Substrate commands as an administrator
@@ -274,18 +248,25 @@ The same ServiceAccount supplies two credentials for different operations:
 | Create/delete actors and list templates | Projected token; principal `user:system:serviceaccount:ate-env:harbor-runner` | Atespace access policy (`runner-access-policy.yaml`) |
 | Execute guest commands and transfer files | Projected pod certificate with the runner's SPIFFE ID | Router `ingressAllowedSPIFFEIDs` allowlist |
 
-### Authorize the runner at the router
+### Configure the router
 
 In the `atenet-router` Deployment's container arguments, append
 `spiffe://cluster.local/ns/ate-env/sa/harbor-runner` to the comma-separated
 `--ingress-allowed-spiffe-ids` value. Use your installation's trust domain if it
 differs from `cluster.local`, and preserve existing identities. If the argument
-is absent, add it with this identity as its value:
+is absent, add it with this identity as its value.
+
+In the same edit, set `--route-timeout=60m`. The rc1 default is five minutes,
+which also bounds guest process-output streams. A 60-minute timeout accommodates
+the task's 3,000-second deadlines:
 
 ```bash title="Workstation"
 kubectl -n ate-system edit deployment atenet-router
 kubectl -n ate-system rollout status deployment/atenet-router --timeout=300s
 ```
+
+Preserve the other arguments. If you change the task deadlines, keep the route
+timeout longer than the longest command.
 
 Also add the identity to `ingressAllowedSPIFFEIDs` in `substrate-install.yaml`
 (or your installation's managed configuration) so a later deploy preserves it.
@@ -298,23 +279,6 @@ ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/ate-env/sa/harbor-runner
 The installer accepts a comma-separated string, not a YAML list. Append to
 existing identities rather than replacing them. On a shared installation,
 have its operator make these changes.
-
-### Align request timeouts
-
-The rc1 router defaults to a five-minute route timeout, which also bounds guest
-process-output streams. In the `atenet-router` container's deployment arguments,
-set `--route-timeout=60m` for the unmodified 3,000-second task deadlines:
-
-```bash title="Workstation"
-kubectl -n ate-system edit deployment atenet-router
-kubectl -n ate-system rollout status \
-  deployment/atenet-router --timeout=300s
-```
-
-Preserve the other arguments. Make this change before running actors. If you
-choose shorter task deadlines, choose a route budget longer than the longest
-command. The parking retry budget is a separate setting and does not suspend
-actors to free capacity.
 
 Check the router arguments before creating actors:
 
@@ -330,56 +294,7 @@ managed router configuration when updating Substrate.
 
 </Step>
 
-<Step title="Build the guest image" id="build-the-guest-image">
-
-`ate-env-guest` is the daemon that runs commands and moves files inside an
-actor. It comes from the env repository and does not depend on the Substrate Go
-module, so it builds from the pinned commit without changes. Replace
-`registry.example.com/harbor-substrate` in the build command with your image
-repository:
-
-```bash title="Workstation"
-git clone https://github.com/agent-substrate/env deps/env
-git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
-```
-
-Build the guest image for your node architecture:
-
-<Tabs>
-<Tab title="x86-64 (amd64)">
-
-```bash title="Workstation"
-(
-	cd deps/env
-	umask 022
-	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
-	  --platform=linux/amd64 ./cmd/ate-env-guest
-)
-```
-
-</Tab>
-<Tab title="ARM64 (arm64)">
-
-```bash title="Workstation"
-(
-	cd deps/env
-	umask 022
-	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
-	  --platform=linux/arm64 ./cmd/ate-env-guest
-)
-```
-
-</Tab>
-</Tabs>
-
-In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
-digest reference. The actor template mounts this image as a volume at `/ate`,
-so the task image stays untouched. The same checkout supplies the Python client the
-runner installs later; the adapter uses its generated gRPC stubs for the guest.
-
-</Step>
-
-<Step title="Create sandbox capacity" id="create-sandbox-capacity">
+<Step title="Create the worker pool" id="create-sandbox-capacity">
 
 In `workerpool.yaml`, select a node that runs `atelet`. Replace the hostname
 in the selected tab with that node's name, and check its architecture:
@@ -476,7 +391,56 @@ includes the conditional low-port permission fix for platforms that need it.
 
 </Step>
 
-<Step title="Prepare Pi and the task image" id="prepare-pi-and-the-task-image">
+<Step title="Prepare the sandbox images" id="prepare-the-sandbox-images">
+
+### Build the guest image
+
+`ate-env-guest` is the daemon that runs commands and moves files inside an
+actor. It comes from the env repository and does not depend on the Substrate Go
+module, so it builds from the pinned commit without changes. Replace
+`registry.example.com/harbor-substrate` in the build command with your image
+repository:
+
+```bash title="Workstation"
+git clone https://github.com/agent-substrate/env deps/env
+git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
+```
+
+Build the guest image for your node architecture:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+```bash title="Workstation"
+(
+	cd deps/env
+	umask 022
+	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
+	  --platform=linux/amd64 ./cmd/ate-env-guest
+)
+```
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+```bash title="Workstation"
+(
+	cd deps/env
+	umask 022
+	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
+	  --platform=linux/arm64 ./cmd/ate-env-guest
+)
+```
+
+</Tab>
+</Tabs>
+
+In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
+digest reference. The actor template mounts this image as a volume at `/ate`,
+so the task image stays untouched. The same checkout supplies the Python client the
+runner installs later; the adapter uses its generated gRPC stubs for the guest.
+
+### Prepare Pi and the task image
 
 Fetch the pinned Pi integration and task dataset:
 
@@ -554,7 +518,7 @@ the prepared image. Build time and the first image pull are preparation costs.
 
 </Step>
 
-<Step title="Prepare the Harbor runner" id="prepare-the-harbor-runner">
+<Step title="Set up the Harbor runner" id="prepare-the-harbor-runner">
 
 For an authenticated endpoint, provide the key as `DYNAMO_API_KEY`, the name
 used by the current Dynamo Pi adapter. The optional Secret reference in
@@ -681,7 +645,7 @@ intend to compare.
 
 </Step>
 
-<Step title="Configure the task template and Harbor job" id="configure-the-task-template-and-harbor-job">
+<Step title="Register the task and configure the job" id="configure-the-task-template-and-harbor-job">
 
 Open `actor-template.yaml`. Check that `containers[0].image` contains the
 prepared task image digest and `volumes[0].image.reference` contains the guest
@@ -692,41 +656,6 @@ Both image digests must match the architecture selected by `workerSelector`.
 The actor template is a Substrate API object. Register it with `kubectl-ate`.
 The Harbor job is a client configuration file, consumed by `harbor run`.
 Neither file is a Kubernetes Job or a manifest for `kubectl apply`.
-
-Each trial follows this lifecycle:
-
-```mermaid
-flowchart TD
-    T[Harbor selects a task] --> M[template_map selects its actor template]
-    M --> A[Substrate creates and starts an actor]
-    A --> P[Pi calls the model and runs tools]
-    P --> V[Harbor runs the task verifier]
-    V --> R[Harbor collects results and logs]
-    R --> D[Adapter deletes the actor]
-```
-
-The template defines the sandbox that each trial starts:
-
-| Field | Purpose and adjustment |
-| --- | --- |
-| `metadata.name` | Identifies this task image and runtime configuration. Choose a new name when either changes. |
-| `containers[].image` | Pins the prepared task image. Each task needs its own image. |
-| `volumes[].image.reference` | Supplies the environment guest executable mounted at `/ate`. |
-| `containers[].wakeupProbe` | Requires the guest's `/readyz` endpoint before the actor is ready. |
-| `resources.limits` | Allocates one CPU and 4 GiB to the actor. Increase these limits for tasks that need more resources, and increase worker capacity accordingly. |
-| `workerSelector` | Matches the worker pool's sandbox and architecture labels. Keep the architecture aligned with the task and guest images; add placement constraints for prewarming or capacity isolation. |
-| `snapshotConfig` | Starts with golden snapshots disabled. Enable them in a separate template after checking the prepared image. |
-
-The job controls the trial lifecycle:
-
-| Field | Purpose and adjustment |
-| --- | --- |
-| `tasks[].path` | Selects a dataset task copied into the runner. |
-| `environment.kwargs.template_map` | Maps each task directory name to its prepared actor template. |
-| `agents[].kwargs.version` | Must match the Pi version baked into the task image. |
-| `verifier.env` | Directs pip and uv to offline dependencies in that image. |
-| `n_concurrent_trials` | Limits whole trials, including setup, verification, and cleanup. Start at one. |
-| `environment.delete` | Deletes the actor after artifact collection when `true`. |
 
 In `harbor-job.yaml`, keep the initial one-trial settings and the Astropy
 task-to-template mapping. The model settings are the ones you edited earlier:
@@ -768,6 +697,33 @@ The task directory name must match a key in `template_map`, and its value must
 name the template built for that task. Set `DYN_AGENT_SESSION_FINAL` to `"0"`
 for an external API. All values under `agents[].env` are strings.
 
+<Accordion title="Actor template and Harbor job fields">
+
+The template defines the sandbox that each trial starts:
+
+| Field | Purpose and adjustment |
+| --- | --- |
+| `metadata.name` | Identifies this task image and runtime configuration. Choose a new name when either changes. |
+| `containers[].image` | Pins the prepared task image. Each task needs its own image. |
+| `volumes[].image.reference` | Supplies the environment guest executable mounted at `/ate`. |
+| `containers[].wakeupProbe` | Requires the guest's `/readyz` endpoint before the actor is ready. |
+| `resources.limits` | Allocates one CPU and 4 GiB to the actor. Increase these limits for tasks that need more resources, and increase worker capacity accordingly. |
+| `workerSelector` | Matches the worker pool's sandbox and architecture labels. Keep the architecture aligned with the task and guest images; add placement constraints for prewarming or capacity isolation. |
+| `snapshotConfig` | Starts with golden snapshots disabled. Enable them in a separate template after checking the prepared image. |
+
+The job controls the trial lifecycle:
+
+| Field | Purpose and adjustment |
+| --- | --- |
+| `tasks[].path` | Selects a dataset task copied into the runner. |
+| `environment.kwargs.template_map` | Maps each task directory name to its prepared actor template. |
+| `agents[].kwargs.version` | Must match the Pi version baked into the task image. |
+| `verifier.env` | Directs pip and uv to offline dependencies in that image. |
+| `n_concurrent_trials` | Limits whole trials, including setup, verification, and cleanup. Start at one. |
+| `environment.delete` | Deletes the actor after artifact collection when `true`. |
+
+</Accordion>
+
 Copy the original task without changing its instructions or verifier. The
 selected task retains its 3,000-second agent and verifier deadlines:
 
@@ -795,7 +751,12 @@ mapping must name it before you continue.
 
 </Step>
 
-<Step title="Prewarm and check the environment" id="prewarm-and-check-the-environment">
+<Step title="Verify the sandbox and task verifier" id="prewarm-and-check-the-environment">
+
+Check actor startup, then run the oracle to verify the task image without
+calling a model.
+
+### Start a disposable actor
 
 Open a runner shell:
 
@@ -864,6 +825,12 @@ kubectl -n ate-env exec harbor-runner -- \
   sh -c 'cat /work/jobs/swe-oracle/*/verifier/reward.txt'
 ```
 
+Expected reward:
+
+```text title="Expected output"
+1
+```
+
 Require a reward of 1 before running Pi. If the oracle fails, inspect the trial's
 `result.json`, `exception_info`, and `verifier/test-stdout.txt`. Missing packages,
 egress restrictions, timeouts, or task failures can cause an unsuccessful run;
@@ -871,7 +838,7 @@ no model was called. Repeat this check for every new task image.
 
 </Step>
 
-<Step title="Run one trial" id="run-one-trial">
+<Step title="Run one SWE-bench task with Pi" id="run-one-trial">
 
 Open a runner shell:
 
@@ -886,26 +853,13 @@ cd /work
 harbor run --config /work/harbor-job.yaml -y
 ```
 
-Inspect `/work/jobs/swe-one`.
-A complete integration run has a trial result,
-Pi tool events, a verifier report, and collected artifacts. Check
-`exception_info` in the trial result and assistant errors in `agent/pi.txt`.
-A zero reward can mean the agent failed to fix the bug even when the system
-worked. A reward alone does not establish successful model transport.
-
-Before a batch, confirm that Pi can call a tool, receive its result, and make
-another model request from inside the actor. This validates endpoint semantics
-and actor egress together.
-
 Exit the runner shell before saving results on your workstation:
 
 ```bash title="Harbor runner"
 exit
 ```
 
-</Step>
-
-<Step title="Save and inspect the results" id="save-and-inspect-the-results">
+### Save and inspect the results
 
 On the workstation, copy the job before removing resources:
 
@@ -928,11 +882,18 @@ files together. Each trial directory contains:
 | `agent/pi.txt` | Raw Pi events: a tool call, its result, and a subsequent model request; inspect assistant errors. |
 | `verifier/` | Verifier logs and reward; distinguish a failed solution from an execution failure. |
 
-A successful integration run includes model/tool continuation and collected
-verifier output. Reward measures the solution's correctness; it does not by
-itself establish that all integration steps worked.
+Before continuing, confirm that:
 
-### Inspect the job in Harbor
+- `result.json` contains no setup or execution exception.
+- `agent/pi.txt` shows a tool call, its result, and a subsequent model request,
+  without assistant errors.
+- The `verifier/` directory contains the verifier output and reward.
+
+A reward of `0` can mean Pi did not fix the bug even though the integration
+worked. A single task result does not establish full-dataset accuracy. Repeat
+this check after changing an endpoint, dependency, image, or cluster configuration.
+
+<Accordion title="Inspect the job in Harbor (optional)">
 
 In a separate workstation terminal, use a viewer environment so its version
 does not change the pinned execution environment. Keep the viewer running:
@@ -949,11 +910,21 @@ example does not convert Pi events to ATIF, so it does not populate Harbor's
 structured trajectory view. Differences between raw event timestamps are not
 isolated inference durations.
 
+</Accordion>
+
 </Step>
 
 </Steps>
 
-## Optionally capture traces and sandbox metrics
+## Optional extensions
+
+Choose any of the following extensions after saving the first trial. Each can
+be used independently.
+
+### Optionally capture traces and sandbox metrics
+
+For sandbox metrics, prepare Prometheus Operator and Grafana, such as an
+existing `kube-prometheus-stack` installation.
 
 After saving the first trial, add either or both views below. Stop active jobs
 before changing telemetry because those changes can restart workers. Harbor's
@@ -987,7 +958,7 @@ kubectl -n ate-env exec harbor-runner -- \
 Repeat [Save and inspect the results](#save-and-inspect-the-results) with
 `JOB_NAME=swe-observed`. Then inspect the views you configured:
 
-### Inspect measured spans in Perfetto
+#### Inspect measured spans in Perfetto
 
 Export the native capture using the commands in
 [Capture inference and tool traces](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md#export-the-completed-capture).
@@ -995,7 +966,7 @@ Use the session ID to find the same trial in Perfetto. Inspect model requests,
 time to first token, and measured tool spans. Check tool IDs against Pi's log.
 Do not present inferred waits as measured tool execution.
 
-### Inspect sandbox activity in Grafana
+#### Inspect sandbox activity in Grafana
 
 Use the [metrics validation checklist](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#validate-with-one-task)
 for the completed trial.
@@ -1010,7 +981,7 @@ session waited, and their duration can include restoration. Use `substrate.json`
 for actor correlation, without assuming a shared distributed trace across all
 three viewers.
 
-## Optionally restore from a golden snapshot
+### Optionally restore from a golden snapshot
 
 This optional feature uses the object storage configured during Substrate
 installation. With the default setup, golden snapshots go to
@@ -1070,7 +1041,7 @@ and golden-snapshot runs in separate output directories.
 Repeat [Save and inspect the results](#save-and-inspect-the-results) with
 `JOB_NAME=swe-golden` before comparing the runs.
 
-## Increase concurrency
+### Increase concurrency
 
 On the workstation, repeat the image build and template
 creation for each task. Give every template its own name, copy the corresponding
@@ -1128,19 +1099,3 @@ Collector. If you added tracing to an existing frontend, remove the tutorial's
 trace additions by comparing with `.build/frontend-before.yaml`. For Kustomize,
 remove those additions from the source or overlay and regenerate the manifest.
 Apply the updated frontend manifest and stop the local viewer.
-
-## Validation scope
-
-| Check | What it establishes |
-| --- | --- |
-| Disposable actor | Template, placement, and actor startup |
-| Oracle trial | Guest execution, reference patch, and offline verification under the selected policy |
-| Pi trial | Prepared Pi runtime, model/tool interaction, verification, and artifact collection |
-
-These checks do not constitute an isolation test or validate access to every
-possible network destination.
-
-After changing a dependency pin, endpoint, image, or cluster configuration,
-repeat the one-trial check before running a batch. Golden restore and external
-API compatibility need validation on the selected environment. A saved task
-result does not establish a full-dataset accuracy score or a performance gain.
