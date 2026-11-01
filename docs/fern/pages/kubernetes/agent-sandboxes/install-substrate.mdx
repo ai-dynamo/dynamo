@@ -506,6 +506,46 @@ with a `gs://` location and real transfer-service-account settings; keep
 `ATE_STORAGE_BACKEND=gcs` and omit the AWS entries.
 </Note>
 
+### Configure image-pull authentication
+
+Atelet pulls actor images directly. The supplied manifest uses GKE's node
+credential-provider paths. Before deploying, edit the DaemonSet in
+`deps/substrate/manifests/ate-install/atelet.yaml` for your registry:
+
+<Tabs>
+<Tab title="Public images">
+
+For images that allow anonymous pulls, remove:
+
+- The `--image-credential-provider-config` and
+  `--image-credential-provider-bin-dir` arguments from the `atelet` container.
+- The `image-credential-provider-config` and `image-credential-provider-bin`
+  entries from the container's `volumeMounts`.
+- The entries with those same names from the Pod's `volumes`.
+
+Atelet will pull images without authentication and will no longer require the
+host credential-provider files.
+
+</Tab>
+<Tab title="Private images">
+
+Configure the two `hostPath.path` values to match your nodes:
+
+| Volume | Required host path | Supplied GKE default |
+| --- | --- | --- |
+| `image-credential-provider-config` | Kubelet `CredentialProviderConfig` file | `/etc/srv/kubernetes/cri_auth_config.yaml` |
+| `image-credential-provider-bin` | Directory containing the credential-provider executables | `/home/kubernetes/bin` |
+
+The configuration file and executables must exist on every node where atelet
+runs, and the provider must supply credentials for your registry. Keep the
+container arguments and mount paths unchanged.
+
+For provider setup, see the Kubernetes
+[image credential-provider documentation](https://kubernetes.io/docs/tasks/administer-cluster/kubelet-credential-provider/).
+
+</Tab>
+</Tabs>
+
 ### Check optional router monitoring
 
 The upstream manifests include a `PodMonitoring` resource for

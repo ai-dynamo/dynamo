@@ -68,8 +68,11 @@ Prepare these resources:
 - Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with matching gVisor
   assets and task images. Start with capacity for a worker requesting two CPUs
   and 6 GiB of memory, plus separate capacity for the control plane and Harbor runner.
-- An image registry that the workers can pull from. The prepared task images
-  can be large; reserve node image-cache space before adding tasks.
+- An image registry where you can publish the guest and prepared task images.
+  This tutorial assumes atelet can pull those images without authentication.
+  For private repositories, [configure atelet's image-pull authentication](../../kubernetes/agent-sandboxes/install-substrate.mdx#configure-image-pull-authentication)
+  during Substrate installation. Prepared task images can be large; reserve
+  node image-cache space before adding tasks.
 - Git, `kubectl`, `curl`, `sha256sum`, OpenSSL, Python 3.12 or newer,
   Docker with BuildKit, image build and push support, Go 1.27 or newer, and `ko`
   on the preparation workstation. Use a native builder for the target sandbox
@@ -371,8 +374,7 @@ Build the guest image for your node architecture:
 
 In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
 digest reference. The actor template mounts this image as a volume at `/ate`,
-so the task image stays untouched. Configure image-pull credentials separately
-if the registry is private. The same checkout supplies the Python client the
+so the task image stays untouched. The same checkout supplies the Python client the
 runner installs later; the adapter uses its generated gRPC stubs for the guest.
 
 </Step>
