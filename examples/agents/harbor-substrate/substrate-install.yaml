@@ -16,15 +16,18 @@
 # Consumed by ate-setup --config, not kubectl apply.
 apiVersion: install.ate.dev/v1alpha1
 kind: SubstrateInstall
+# Install Substrate resources in the namespace created earlier.
 namespace: ate-system
 images:
+  # Control-plane and node-runtime images for amd64 and arm64.
+  # Keep the version aligned with the CLI and installer checkout.
   repo: ghcr.io/agent-substrate/substrate
   tag: v1.0.0-rc.1
 
 ateapi:
   authz:
-    # Upstream development default, used by kubectl-ate without --token-file.
-    # For a shared installation, replace with your administrators' principals.
+    # Initial global administrators. Replace the development identity for shared use.
+    # Use one comma-separated string for multiple authenticated principals.
     bootstrapOwners: system:serviceaccount:ate-system:ate-client
   postgres:
     # Use the default StorageClass for the bundled PostgreSQL PVC (500 GiB).
@@ -32,17 +35,20 @@ ateapi:
     storageClass: ""
 
 storage:
+  # Snapshot bucket created in the RustFS step. Object storage is required.
   snapshotLocation: s3://ate-snapshots/
-  # Required by the rc1 installer on non-kind clusters; unused by the S3 backend.
+  # GCS transfer identity: required by rc1 on non-kind clusters, unused with S3.
   transferGSAName: unused
 gcp:
+  # GCP project: required by rc1 on non-kind clusters, unused with S3.
   projectID: not-a-gcp-project
 
 atenet:
   egress:
-    # Workloads supply their own model/API credentials.
+    # Disable gateway credential injection. Workloads supply their own credentials.
+    # Keep an explicit setting: the installer rejects an omitted choice.
     credentialProvider: '{"enabled":false}'
 
 # No actor ingress until a workload adds its clients' SPIFFE IDs.
-# Use one comma-separated string, not a YAML list.
+# Use one comma-separated string. Preserve existing clients when adding another.
 ingressAllowedSPIFFEIDs: ""

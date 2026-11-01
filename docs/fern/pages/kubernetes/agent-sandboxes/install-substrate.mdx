@@ -385,74 +385,70 @@ the Job logs and the PVC and Pod events.
 
 <Step title="Configure the installation" id="configure-the-installation">
 
-Choose a starting configuration, then review the shared settings below.
-`SubstrateInstall` is an installer configuration consumed by
-`ate-setup --config`; do not apply it with `kubectl`.
-
-<Tabs>
-<Tab title="Use the Dynamo example">
-
 Open the checked-in
 [`substrate-install.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/substrate-install.yaml)
-in your local clone and edit it in place. Run this installation procedure from
-`examples/agents/harbor-substrate`, including the earlier tool and storage
-steps. No copy or generated configuration is needed.
+and edit it for your cluster. Continue working from
+`examples/agents/harbor-substrate`.
 
-The file selects the pinned multi-architecture release, bundled PostgreSQL,
-the RustFS snapshot bucket, and disabled egress credential injection. It uses
-the upstream development administrator identity and leaves actor ingress
-closed until a workload authorizes its clients. It contains no Harbor-specific
-identities, worker pools, or task settings.
-
-</Tab>
-<Tab title="Bring your own configuration">
-
-Create `substrate-install.yaml` in your chosen working directory using the
-pinned [operator installation reference](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
-For an existing installation, update its managed configuration instead of
-replacing it. Review the requirements below and retain your database,
-identity, and storage settings where they differ from the example.
-
-Set these release fields:
+`ate-setup --config` reads this installer configuration. Do not apply it with
+`kubectl`. The file uses bundled PostgreSQL and the RustFS bucket created above:
 
 ```yaml
+# Consumed by ate-setup --config, not kubectl apply.
 apiVersion: install.ate.dev/v1alpha1
 kind: SubstrateInstall
+# Install Substrate resources in the namespace created earlier.
 namespace: ate-system
 images:
+  # Control-plane and node-runtime images for amd64 and arm64.
+  # Keep the version aligned with the CLI and installer checkout.
   repo: ghcr.io/agent-substrate/substrate
   tag: v1.0.0-rc.1
+
+ateapi:
+  authz:
+    # Initial global administrators. Replace the development identity for shared use.
+    # Use one comma-separated string for multiple authenticated principals.
+    bootstrapOwners: system:serviceaccount:ate-system:ate-client
+  postgres:
+    # Use the default StorageClass for the bundled PostgreSQL PVC (500 GiB).
+    # Set a StorageClass name here if your cluster has no suitable default.
+    storageClass: ""
+
+storage:
+  # Snapshot bucket created in the RustFS step. Object storage is required.
+  snapshotLocation: s3://ate-snapshots/
+  # GCS transfer identity: required by rc1 on non-kind clusters, unused with S3.
+  transferGSAName: unused
+gcp:
+  # GCP project: required by rc1 on non-kind clusters, unused with S3.
+  projectID: not-a-gcp-project
+
+atenet:
+  egress:
+    # Disable gateway credential injection. Workloads supply their own credentials.
+    # Keep an explicit setting: the installer rejects an omitted choice.
+    credentialProvider: '{"enabled":false}'
+
+# No actor ingress until a workload adds its clients' SPIFFE IDs.
+# Use one comma-separated string. Preserve existing clients when adding another.
+ingressAllowedSPIFFEIDs: ""
 ```
 
-This fragment selects the release. Complete the remaining settings described
-below before deploying.
+To use an external database, follow
+[Substrate's PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md).
+Supply connection credentials through the installer's supported environment
+settings. Keep them out of the checked-in YAML.
 
-</Tab>
-</Tabs>
-
-### Review the installation settings
-
-The example configuration uses bundled PostgreSQL. To use an external database,
-follow [Substrate's PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md)
-and update `substrate-install.yaml` before deployment. Supply connection credentials
-through the installer's supported environment settings. Keep them out of the
-checked-in YAML.
-
-| Setting | Example default and what to change |
-| --- | --- |
-| `images.repo`, `images.tag` | Pin the control-plane and node-runtime images to `v1.0.0-rc.1`, matching the downloaded CLI and installer checkout. |
-| `ateapi.postgres.storageClass` | An empty string uses the cluster's default StorageClass for bundled PostgreSQL's 500 GiB volume. Set a class name if needed. |
-| `ateapi.authz.bootstrapOwners` | The example keeps the upstream development default, `system:serviceaccount:ate-system:ate-client`. For a shared installation, replace it with your administrators' authenticated principal IDs using the [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md#bootstrap-owners). Multiple principals form one comma-separated string. |
-| `storage.snapshotLocation` | `s3://ate-snapshots/` points to the bucket created in the RustFS step. Object storage remains required when golden snapshots are disabled. See the plugin configuration below. |
-| `atenet.egress.credentialProvider` | `'{"enabled":false}'` disables gateway credential injection when workloads supply their own credentials. To have the gateway manage credentials, configure a provider using [egress credential injection](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-credential-injection.md). An omitted choice is rejected by the installer. |
-| `ingressAllowedSPIFFEIDs` | An empty string denies actor ingress. Workload setup adds approved client identities as one comma-separated string. Preserve existing clients when adding another. |
-
-The development owner allows `kubectl-ate` to use its default `ate-client`
+For a shared installation, select administrator principals using the
+[authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md#bootstrap-owners).
+The development owner lets `kubectl-ate` use its default `ate-client`
 ServiceAccount token. Anyone who can mint that token has global ownership.
 If you replace the owner, authenticate subsequent CLI commands with the
 configured administrator's token using `--token-file`.
 
-The supplied release images support both `amd64` and `arm64`.
+To have the egress gateway supply credentials, configure a provider using
+[egress credential injection](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-credential-injection.md).
 
 Before deploying, also check [sandbox asset caching](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/sandbox-asset-cache.md)
 for your runtime's binaries and node cache, and complete the certificate
@@ -460,22 +456,6 @@ API/projection checks above. Verify projected files after deployment using
 [authentication setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authentication.md).
 
 ### Point Substrate at RustFS
-
-The Dynamo example already contains these values. For your own configuration
-using the RustFS deployment above, add them to `substrate-install.yaml`:
-
-```yaml
-storage:
-  snapshotLocation: s3://ate-snapshots/
-  transferGSAName: unused
-gcp:
-  projectID: not-a-gcp-project
-```
-
-The pinned installer requires `storage.transferGSAName` and `gcp.projectID`
-on clusters that are not kind, even for S3. These two values satisfy that
-check; the S3 backend does not use the GCS credential exchange. The deploy
-command passes your current Kubernetes context to skip the GKE credential lookup.
 
 The installer does not expose S3 endpoint or credential fields in
 `SubstrateInstall`. Before deploying, edit these files in the pinned checkout:
