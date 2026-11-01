@@ -203,7 +203,7 @@ Add this mapping under `environment.kwargs`:
 
 ```yaml
 uploads:
-  /work/tool-trace: /opt/tool-trace
+  /etc/harbor-tool-trace: /opt/tool-trace
 ```
 
 The upload supplies the public certificate and stunnel configuration. The Pi
@@ -211,20 +211,22 @@ adapter starts stunnel, and the provider publishes tool events to its loopback
 listener. These settings require the Dynamo frontend capture configured above.
 Omit them when using an external endpoint.
 
-Copy the policy and public client files to the runner:
+Create the ConfigMap that the runner mounts at `/etc/harbor-tool-trace`.
+Include only the public certificate and client configuration; keep the server's
+private key in its Secret:
 
 ```bash
-kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
-kubectl -n ate-env exec harbor-runner -- mkdir -p /work/tool-trace
-kubectl -n ate-env cp .trace/public/tls.crt harbor-runner:/work/tool-trace/tls.crt
-kubectl -n ate-env cp stunnel-client.conf harbor-runner:/work/tool-trace/stunnel-client.conf
+kubectl -n ate-env create configmap harbor-tool-trace \
+  --from-file=tls.crt=.trace/public/tls.crt \
+  --from-file=stunnel-client.conf \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ## Setup complete
 
 Return to [the tutorial's capture step](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx#optionally-capture-traces-and-sandbox-metrics)
-to set a new job name, upload the edited job, and run one trial. Continue with
-the export procedure below only after that trial finishes.
+to set a new job name, update the run ConfigMap, and submit a runner Job.
+Continue with the export procedure below only after that trial finishes.
 
 ## Export the completed capture
 

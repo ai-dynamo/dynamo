@@ -61,7 +61,9 @@ Prepare these resources:
   the pinned `kubectl-ate` CLI on `PATH`, and administrative access.
 - Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with capacity for a
   worker requesting 2 CPUs and 6 GiB of memory.
-- An image registry for publishing guest and task images. The tutorial assumes
+- A StorageClass for a 10-GiB results PVC. Set `storageClassName` in
+  `harbor-results.yaml` if the cluster has no suitable default.
+- An image registry for publishing runner, guest, and task images. The tutorial assumes
   anonymous image pulls; for private registries, follow
   [Configure image-pull authentication](../../kubernetes/agent-sandboxes/install-substrate.mdx#configure-image-pull-authentication).
 - Git, `kubectl`, `curl`, `sha256sum`, OpenSSL, Python 3.12 or newer,
@@ -90,7 +92,10 @@ directed.
 | File | Consumer | What you configure |
 | --- | --- | --- |
 | `workerpool.yaml` | Kubernetes: `kubectl apply` | CPU worker placement and capacity |
-| `harbor-runner.yaml` | Kubernetes: `kubectl apply` | Harbor runner Pod, ServiceAccount, and credentials |
+| `Dockerfile.harbor` | Docker | Pinned Harbor runner dependencies and adapters |
+| `harbor-runner.yaml` | Kubernetes: `kubectl create` | Runner Job, dataset download, configuration, and volume mounts |
+| `harbor-runner-rbac.yaml` | Kubernetes: `kubectl apply` | Runner ServiceAccount and trust-bundle permissions |
+| `harbor-results.yaml` | Kubernetes: `kubectl apply` | Persistent storage for results |
 | `runner-access-policy.yaml` | Substrate: `kubectl-ate` | Runner permissions within the atespace |
 | `actor-template.yaml` | Substrate: `kubectl-ate` | Task image, guest executable, actor resources, and placement |
 | `egress.yaml` | Environment adapter | Hosts and ports each actor may reach |
@@ -159,7 +164,7 @@ kubectl-ate create access-policy \
 ```
 
 The policy grants the `harbor-runner` ServiceAccount the editor role in
-`ate-env`. You will create this ServiceAccount when deploying the Harbor runner.
+`ate-env`. You will create this ServiceAccount when setting up the Harbor runner.
 
 ### Authorize the Harbor runner at the router
 
@@ -348,8 +353,8 @@ Build the guest image for your node architecture:
 </Tabs>
 
 Record the digest reference printed by `ko build` for task registration.
-The actor mounts this image at `/ate`. Keep `deps/env`; runner setup also uses
-its Python client.
+The actor mounts this image at `/ate`. The runner Dockerfile installs the
+Python client from the same pinned revision.
 
 ### Build the prepared task image
 
@@ -365,9 +370,6 @@ for patch in pi-provider-limits pi-harbor-adapter; do
 	git -C deps/agent-plugins apply < "$patch.patch"
 done
 
-git clone https://github.com/harbor-framework/harbor-datasets deps/harbor-datasets
-git -C deps/harbor-datasets checkout 86723674f04e4209ac479d0fb75d9d9f44b4377e
-export TASK=astropy__astropy-12907
 mkdir -p .build/image
 cp -a deps/agent-plugins/pi-plugin .build/image/pi-plugin
 ```
@@ -618,22 +620,47 @@ what a passing benchmark result means. Keep the default policy for results you
 intend to compare.
 
 The ActorTemplate belongs to the Substrate API; the Harbor job is consumed by
-`harbor run`. Neither file is a manifest for `kubectl apply`. Runner setup
-uploads the completed job and egress files. For later runs, upload any changed
-files again and use a new `job_name` for results you want to compare.
+`harbor run`. Neither file is a manifest for `kubectl apply`. Each runner Job
+mounts the Harbor configuration and egress policy from a ConfigMap. Use a new `job_name`
+for each run so results on the PVC stay separate.
 
 </Step>
 
 <Step title="Set up the Harbor runner" id="prepare-the-harbor-runner">
 
-Harbor runs in a separate Pod; Pi, its tools, and the verifier run inside
-actors. The runner does not need Docker.
+Harbor runs as a Kubernetes Job. Its image contains Harbor, `kubectl-ate`, the
+env Python client, and the patched adapters. Pi and the verifier run inside
+Substrate actors. The runner does not need Docker.
 
-### Start the runner
+### Build the runner image
+
+On a native Linux x86-64 or ARM64 build machine, run these commands from the
+example directory. Replace the registry path with your own:
+
+```bash title="Build machine"
+docker build -f Dockerfile.harbor \
+  -t registry.example.com/harbor-substrate/runner:prepared .
+docker push registry.example.com/harbor-substrate/runner:prepared
+```
+
+[`Dockerfile.harbor`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/Dockerfile.harbor)
+fetches the pinned sources, applies the patches, and verifies the
+architecture-specific CLI download. The adapters live under `/opt/harbor`,
+outside the mounted input and results directories. No local `deps/` checkout
+is required for this build.
+
+In
+[`harbor-runner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/harbor-runner.yaml),
+set the `&runnerImage` reference to the pushed repository and digest. The main
+container reuses that reference through `*runnerImage`. Set
+`spec.template.spec.nodeSelector.kubernetes.io/arch` to the image architecture:
+`amd64` for x86-64 or `arm64` for ARM64. The runner and sandbox workers may use
+different architectures.
+
+### Prepare credentials and results storage
 
 For an authenticated model endpoint, create the Secret that supplies
-`DYNAMO_API_KEY` before starting the runner. Skip this command for an
-unauthenticated endpoint.
+`DYNAMO_API_KEY`. Skip this command for an unauthenticated endpoint.
 
 <Warning>
 The pinned adapter passes the key through Harbor's command environment,
@@ -649,204 +676,150 @@ printf '%s' "$MODEL_API_KEY" | kubectl -n ate-env \
 unset MODEL_API_KEY
 ```
 
-Apply
-[`harbor-runner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/harbor-runner.yaml)
-and wait for the Pod. Its supplied image supports both architectures:
+Review the StorageClass and size in
+[`harbor-results.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/harbor-results.yaml),
+then create the runner identity and results PVC:
 
 ```bash title="Workstation"
-kubectl apply -f harbor-runner.yaml
-kubectl -n ate-env wait --for=condition=Ready \
-  pod/harbor-runner --timeout=300s
+kubectl apply -f harbor-runner-rbac.yaml
+kubectl apply -f harbor-results.yaml
 ```
 
-### Install dependencies and upload the inputs
+A StorageClass with `WaitForFirstConsumer` leaves the PVC pending until the
+first Job is scheduled. The results PVC survives Job deletion.
 
-Download and verify `kubectl-ate` for the runner's architecture, which may
-differ from the sandbox workers:
+### Review the mounted inputs
 
-```bash title="Workstation"
-RUNNER_MACHINE="$(kubectl -n ate-env exec harbor-runner -- uname -m)"
-case "$RUNNER_MACHINE" in
-	x86_64) RUNNER_ARCH=amd64 ;;
-	aarch64) RUNNER_ARCH=arm64 ;;
-	*) echo "Unsupported runner architecture: $RUNNER_MACHINE" >&2; exit 1 ;;
-esac
-export RUNNER_ARCH
-mkdir -p deps/runner-bin
-export ATE_RELEASE=https://github.com/agent-substrate/substrate/releases/download/v1.0.0-rc.1
-curl -fL "$ATE_RELEASE/kubectl-ate-linux-$RUNNER_ARCH" -o deps/runner-bin/kubectl-ate
-curl -fL "$ATE_RELEASE/kubectl-ate-linux-$RUNNER_ARCH.sha256" -o deps/runner-bin/kubectl-ate.sha256
-(cd deps/runner-bin && printf '%s  kubectl-ate\n' "$(cut -d ' ' -f1 kubectl-ate.sha256)" | sha256sum -c -)
-chmod +x deps/runner-bin/kubectl-ate
-```
+Each Job uses these inputs and outputs:
 
-Install Harbor and copy the prepared sources, configuration, and original
-task. Keep the task's instructions, verifier, and 3,000-second deadlines unchanged:
+| Path | Source and lifetime |
+| --- | --- |
+| `/etc/harbor` | Job YAML, egress policy, and kubeconfig from `harbor-run-config`, mounted read-only |
+| `/work/tasks` | Pinned dataset downloaded by an init container into a fresh `emptyDir`, mounted read-only in Harbor |
+| `/work/jobs` | `harbor-results` PVC, retained across Jobs |
+| `/var/run/secrets/ateapi` and `/run/substrate` | Projected API token, Pod certificate, and trust bundle |
 
-```bash title="Workstation"
-kubectl -n ate-env exec harbor-runner -- \
-  mkdir -p /work/example /work/tasks
-kubectl -n ate-env cp deps/runner-bin/kubectl-ate harbor-runner:/work/kubectl-ate
-kubectl -n ate-env cp deps/env/clients/python harbor-runner:/work/env-client
-kubectl -n ate-env cp deps/agent-plugins/pi-plugin harbor-runner:/work/pi-plugin
-kubectl -n ate-env cp substrate_environment.py harbor-runner:/work/example/substrate_environment.py
-kubectl -n ate-env cp runner-kubeconfig.yaml harbor-runner:/work/kubeconfig
-kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
-kubectl -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
-kubectl -n ate-env cp "deps/harbor-datasets/datasets/swebench-verified/$TASK" "harbor-runner:/work/tasks/$TASK"
-kubectl -n ate-env exec harbor-runner -- \
-  pip install harbor==0.16.0 /work/env-client
-```
+The init container downloads the SWE-bench Verified task definitions from
+`harbor-datasets` revision `86723674f04e4209ac479d0fb75d9d9f44b4377e`.
+It preserves the original instructions and verifier; it does not download task
+container images. A sparse Git checkout fetches only this dataset's files.
+Each new Job repeats the download and needs access to GitHub. This network
+access is separate from actor egress.
 
-The runner needs package-download access for this installation. Actor egress
-remains restricted by `egress.yaml`.
-
-<Note>
-The runner stores `/work` in an `emptyDir` volume. Deleting the Pod loses that
-volume and the packages installed in the container. Export results before
-deleting the Pod, and repeat setup after recreating it.
-</Note>
-
-### Check control-plane access
-
-```bash title="Workstation"
-kubectl -n ate-env exec harbor-runner -- \
-  /work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 \
-  --token-file /var/run/secrets/ateapi/token get actor-templates -a ate-env
-```
-
-The command must list `swe-astropy-12907-pi`. It checks the CLI connection and
-runner authorization; the next step checks guest execution and the verifier.
-A `PermissionDenied` error names the principal that is missing a role.
-
-<Accordion title="Runner credentials and clients">
-
-`runner-kubeconfig.yaml` selects the in-cluster Kubernetes API and projected
-ServiceAccount token. The Pod sets `KUBECONFIG` to that file. Substrate uses a
-separate token projected for audience `api.ate-system.svc`. The job supplies
-the token path and API endpoint to `kubectl-ate`, and the Pod certificate and
-trust bundle paths for the router. The env client supplies generated gRPC
-stubs for guest commands and file transfers.
-
-</Accordion>
+The next steps create the ConfigMap and start separate oracle and Pi Jobs
+from the same manifest. Run one Job at a time with this shared configuration
+and `ReadWriteOnce` results PVC. Keep the ConfigMap unchanged while a Job runs.
+`backoffLimit: 0` prevents Kubernetes from repeating a failed evaluation.
+`activeDeadlineSeconds: 10800` limits the entire Job to three hours, including
+initialization and all trials. Increase it for batches that need more time.
 
 </Step>
 
 <Step title="Verify the sandbox and task verifier" id="prewarm-and-check-the-environment">
 
-Check actor startup, then run the oracle to verify the task image without
-calling a model.
-
-### Start a disposable actor
-
-Open a runner shell:
-
-```bash title="Workstation"
-kubectl -n ate-env exec -it harbor-runner -- \
-  bash
-```
-
-Inside the runner, create a disposable actor, resume it, and watch it start.
-Creation leaves the actor suspended; `resume` starts the guest:
-
-```bash title="Harbor runner"
-ATE="/work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 --token-file /var/run/secrets/ateapi/token"
-$ATE create actor harbor-check-one -a ate-env --template swe-astropy-12907-pi
-$ATE resume actor harbor-check-one -a ate-env
-$ATE get actor harbor-check-one -a ate-env
-```
-
-The first image pull can take several minutes. Repeat the `get` until the
-state is `ACTOR_STATE_RUNNING` and a worker Pod is listed. Investigate a start
-that takes longer than the job's 1,200-second readiness budget. Then delete
-the actor:
-
-```bash title="Harbor runner"
-$ATE delete actor harbor-check-one -a ate-env
-exit
-```
-
-This pulls the image onto the worker that placed the actor and proves that the
-template, the access policy, and the worker pool fit together. The oracle below
-checks guest execution and the offline verifier. The first Pi trial checks the
-prepared Pi runtime and model interaction. Every trial starts a fresh actor;
-changes made in one trial's workspace do not carry into the next.
-
-A prepared image avoids Pi installation and dependency downloads during the
-trial. The verifier can still reinstall the modified repository using cached
-dependencies. Prewarming caches the image layers on the selected node. When
-adding nodes, repeat these checks with placement constrained to each eligible node. A warm image on one worker does
-not establish warmth on other workers.
-
-### Check the verifier offline with the oracle
-
 Harbor's oracle agent applies the task's reference patch instead of calling a
-model, then the verifier runs as usual. Under the default egress policy, a
-reward of 1 proves that the image and the job carry everything the verifier
-needs. Copy the job on the workstation:
+model, then runs the verifier. This checks actor creation, guest execution,
+and offline verification. It also pulls the images onto the selected worker
+before the Pi trial.
+
+Copy the Harbor configuration on the workstation:
 
 ```bash title="Workstation"
 cp harbor-job.yaml oracle-job.yaml
 ```
 
-In `oracle-job.yaml`, set `job_name: swe-oracle` and replace the `agents` list
-with the built-in agent:
+In `oracle-job.yaml`, set `job_name: swe-oracle` and replace the `agents` list:
 
 ```yaml
 agents:
   - name: oracle
 ```
 
-Upload and run it, then read the reward:
+Create the mounted configuration and submit the Job. The manifest uses
+`generateName`, so `kubectl create` assigns a new Kubernetes Job name:
 
 ```bash title="Workstation"
-kubectl -n ate-env cp oracle-job.yaml harbor-runner:/work/oracle-job.yaml
-kubectl -n ate-env exec harbor-runner -- \
-  harbor run --config /work/oracle-job.yaml -y
-kubectl -n ate-env exec harbor-runner -- \
+kubectl -n ate-env create configmap harbor-run-config \
+  --from-file=harbor-job.yaml=oracle-job.yaml \
+  --from-file=egress.yaml --from-file=kubeconfig=runner-kubeconfig.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+ORACLE_JOB=$(kubectl create -f harbor-runner.yaml -o jsonpath='{.metadata.name}')
+kubectl -n ate-env wait --for=jsonpath='{.status.ready}'=1 "job/$ORACLE_JOB" --timeout=600s
+kubectl -n ate-env logs -f "job/$ORACLE_JOB" -c runner
+kubectl -n ate-env wait --for=condition=Complete "job/$ORACLE_JOB" --timeout=30s
+```
+
+The first image pull can take several minutes. Harbor allows 1,200 seconds for
+actor readiness and retains the task's 3,000-second agent and verifier
+deadlines. The first wait allows the dataset init container to finish before
+streaming Harbor logs. If startup or completion fails, inspect the Job before
+deleting it:
+
+```bash title="Workstation"
+kubectl -n ate-env describe job "$ORACLE_JOB"
+kubectl -n ate-env logs "job/$ORACLE_JOB" -c dataset
+kubectl -n ate-env logs "job/$ORACLE_JOB" -c runner
+```
+
+After the Job completes, delete it to release the PVC, then mount the results
+in the read-only inspection Pod:
+
+```bash title="Workstation"
+kubectl -n ate-env delete job "$ORACLE_JOB" --wait=true
+kubectl apply -f results-reader.yaml
+kubectl -n ate-env wait --for=condition=Ready pod/harbor-results --timeout=300s
+kubectl -n ate-env exec harbor-results -- \
   sh -c 'cat /work/jobs/swe-oracle/*/verifier/reward.txt'
 ```
 
-Expected reward:
-
-```text title="Expected output"
+```text title="Expected reward"
 1
 ```
 
-Require a reward of 1 before running Pi. If the oracle fails, inspect the trial's
-`result.json`, `exception_info`, and `verifier/test-stdout.txt`. Missing packages,
-egress restrictions, timeouts, or task failures can cause an unsuccessful run;
-no model was called. Repeat this check for every new task image.
+Require a reward of 1 before running Pi. A completed Kubernetes Job alone does
+not prove that the trial passed. On failure, inspect the saved trial's
+`result.json`, `exception_info`, and `verifier/test-stdout.txt`. Repeat this
+check for every new task image.
+
+Delete the inspection Pod before the next Job so the PVC can attach to its
+node. The results remain on the PVC:
+
+```bash title="Workstation"
+kubectl -n ate-env delete pod harbor-results --wait=true
+```
+
+Every trial creates a fresh actor. The oracle's reference patch does not carry
+into the Pi trial. Cached image layers remain on the worker node; repeat the
+oracle on each eligible node when validating placement across multiple nodes.
 
 </Step>
 
 <Step title="Run one SWE-bench task with Pi" id="run-one-trial">
 
-Open a runner shell:
+Replace the ConfigMap's oracle configuration with `harbor-job.yaml`, then
+submit another Job using the same runner image:
 
 ```bash title="Workstation"
-kubectl -n ate-env exec -it harbor-runner -- sh
+kubectl -n ate-env create configmap harbor-run-config \
+  --from-file=harbor-job.yaml \
+  --from-file=egress.yaml --from-file=kubeconfig=runner-kubeconfig.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+PI_JOB=$(kubectl create -f harbor-runner.yaml -o jsonpath='{.metadata.name}')
+kubectl -n ate-env wait --for=jsonpath='{.status.ready}'=1 "job/$PI_JOB" --timeout=600s
+kubectl -n ate-env logs -f "job/$PI_JOB" -c runner
+kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 ```
 
-Inside the runner, run the uploaded job:
-
-```bash title="Harbor runner"
-cd /work
-harbor run --config /work/harbor-job.yaml -y
-```
-
-Exit the runner shell before saving results on your workstation:
-
-```bash title="Harbor runner"
-exit
-```
+If the Job fails, inspect its `dataset` and `runner` logs before deleting it.
+Use a new Harbor `job_name` when retrying so existing results are preserved.
 
 ### Compare trial latency
 
 Measure trial wall time from environment setup through cleanup, including Pi
 execution and verification. Record image build and push time separately. The
-first pull and unpack are cold-start costs; the disposable actor above warms
-the image cache on its execution node before the trial.
+first pull and unpack are cold-start costs; the oracle warms the image cache
+on its execution node before the Pi trial. Runner startup and the init
+container's dataset download happen before Harbor's trial timings.
 
 Keep the task, model settings, and cache state consistent when comparing runs.
 Use Harbor's trial timestamps for the complete trial and
@@ -857,15 +830,25 @@ path for the same prepared task.
 
 ### Save and inspect the results
 
-On the workstation, copy the job before removing resources:
+After the Job completes, delete it and mount the PVC in the inspection Pod.
+Copy the selected results to your workstation:
 
 ```bash title="Workstation"
+kubectl -n ate-env delete job "$PI_JOB" --wait=true
+kubectl apply -f results-reader.yaml
+kubectl -n ate-env wait --for=condition=Ready pod/harbor-results --timeout=300s
 mkdir -p results
 # For later runs, replace swe-one with swe-observed, swe-golden, or swe-batch.
 export JOB_NAME=swe-one
 kubectl -n ate-env cp \
-  "harbor-runner:/work/jobs/$JOB_NAME" "results/$JOB_NAME"
+  "harbor-results:/work/jobs/$JOB_NAME" "results/$JOB_NAME"
+kubectl -n ate-env delete pod harbor-results --wait=true
 ```
+
+The copy remains available locally, and the original stays on the PVC. Delete
+the inspection Pod before starting another Job; a `ReadWriteOnce` volume may
+not mount on two nodes at once. For the optional runs below, `PI_JOB` records
+the latest Kubernetes Job name.
 
 Retain the edited job YAML, templates, policies, dataset revision, and result
 files together. Each trial directory contains:
@@ -943,12 +926,17 @@ source manifest or Kustomize overlay as directed by the guide. For metrics,
 require healthy scrape targets and emitting services before continuing.
 
 Set `job_name: swe-observed` in `harbor-job.yaml` to keep this run separate from
-`swe-one`. Upload the edited job and run one trial from the workstation:
+`swe-one`. Update the ConfigMap and start another Job:
 
 ```bash title="Workstation"
-kubectl -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
-kubectl -n ate-env exec harbor-runner -- \
-  harbor run --config /work/harbor-job.yaml -y
+kubectl -n ate-env create configmap harbor-run-config \
+  --from-file=harbor-job.yaml=harbor-job.yaml \
+  --from-file=egress.yaml --from-file=kubeconfig=runner-kubeconfig.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+PI_JOB=$(kubectl create -f harbor-runner.yaml -o jsonpath='{.metadata.name}')
+kubectl -n ate-env wait --for=jsonpath='{.status.ready}'=1 "job/$PI_JOB" --timeout=600s
+kubectl -n ate-env logs -f "job/$PI_JOB" -c runner
+kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 ```
 
 Repeat [Save and inspect the results](#save-and-inspect-the-results) with
@@ -1020,13 +1008,20 @@ kubectl-ate get tag "$GOLDEN_TAG" -a ate-env -o json
 
 Wait for `status.snapshot.durableSnapshot.state` to become
 `SNAPSHOT_STORAGE_STATE_COMPLETED`, and require `SNAPSHOT_FIDELITY_MEMORY`.
-Repeat the prewarm actor creation, resume, status check, and deletion with
-`--template swe-astropy-12907-pi-golden`. Then upload and run the golden job:
+Run an oracle Job against the golden template using the
+[verifier check](#prewarm-and-check-the-environment) before running Pi. Give
+that oracle a new `job_name`, such as `swe-golden-oracle`. Then submit the
+Pi configuration:
 
 ```bash title="Workstation"
-kubectl -n ate-env cp golden-job.yaml harbor-runner:/work/golden-job.yaml
-kubectl -n ate-env exec harbor-runner -- \
-  harbor run --config /work/golden-job.yaml -y
+kubectl -n ate-env create configmap harbor-run-config \
+  --from-file=harbor-job.yaml=golden-job.yaml \
+  --from-file=egress.yaml --from-file=kubeconfig=runner-kubeconfig.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+PI_JOB=$(kubectl create -f harbor-runner.yaml -o jsonpath='{.metadata.name}')
+kubectl -n ate-env wait --for=jsonpath='{.status.ready}'=1 "job/$PI_JOB" --timeout=600s
+kubectl -n ate-env logs -f "job/$PI_JOB" -c runner
+kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 ```
 
 Golden snapshots reuse initial sandbox state. The prepared guest snapshot does
@@ -1041,10 +1036,10 @@ Repeat [Save and inspect the results](#save-and-inspect-the-results) with
 
 For a small batch of prepared tasks, repeat the image build and template
 creation for each task on the workstation. Give every template its own name,
-copy the corresponding dataset directories to `/work/tasks`, and add each task
-to both `tasks` and
+and add each task to both `tasks` and
 `environment.kwargs.template_map` in a copy of the job YAML. Keep each image
-digest in its template.
+digest in its template. The init container already downloads the pinned
+SWE-bench Verified task directories to `/work/tasks`.
 
 Copy the job before configuring a batch:
 
@@ -1054,23 +1049,28 @@ cp harbor-job.yaml batch-job.yaml
 
 For a two-task batch, set `job_name: swe-batch` and
 `n_concurrent_trials: 2` in `batch-job.yaml`. In `workerpool.yaml`, set
-`spec.replicas: 2` to provide two workers. Apply the pool, upload the edited
-job, and run it:
+`spec.replicas: 2` to provide two workers. Apply the pool, update the
+ConfigMap, and submit the Job:
 
 ```bash title="Workstation"
 kubectl apply -f workerpool.yaml
 kubectl -n ate-env rollout status deployment/harbor-workers --timeout=600s
-kubectl -n ate-env cp batch-job.yaml harbor-runner:/work/batch-job.yaml
-kubectl -n ate-env exec harbor-runner -- \
-  harbor run --config /work/batch-job.yaml -y
+kubectl -n ate-env create configmap harbor-run-config \
+  --from-file=harbor-job.yaml=batch-job.yaml \
+  --from-file=egress.yaml --from-file=kubeconfig=runner-kubeconfig.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+PI_JOB=$(kubectl create -f harbor-runner.yaml -o jsonpath='{.metadata.name}')
+kubectl -n ate-env wait --for=jsonpath='{.status.ready}'=1 "job/$PI_JOB" --timeout=600s
+kubectl -n ate-env logs -f "job/$PI_JOB" -c runner
+kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 ```
 
 The selected node needs capacity for both worker Pods. To spread workers over
 more nodes, install `atelet` and matching runtime assets there, then adjust
 `nodeSelector`. To fit more actors per worker, increase worker resources while
 preserving per-actor limits. Prewarm each additional task image and validate
-any golden snapshots before starting the batch. Start with a small task selection. For the full dataset, use the planned approach
-below to avoid building and publishing a custom image for every task.
+any golden snapshots before starting the batch. Start with a small task
+selection. For the full dataset, use the planned approach below to avoid building and publishing a custom image for every task.
 
 A Harbor concurrency slot covers environment setup, agent setup, execution,
 verification, and cleanup. It is not a count of simultaneous model requests.
@@ -1103,8 +1103,9 @@ The extension requires these changes:
    catalog. Resolve each instance image to a digest for the sandbox architecture,
    retain the shared guest image, and populate `tasks` and `template_map`.
    Report unavailable images rather than silently skipping tasks.
-2. Upload the Dynamo provider from the runner's `/work/pi-plugin` directory to
-   `/opt/pi-dynamo-provider` in each actor through `environment.kwargs.uploads`.
+2. Upload the Dynamo provider from `/opt/harbor/agent-plugins/pi-plugin` in the
+   runner to `/opt/pi-dynamo-provider` in each actor through
+   `environment.kwargs.uploads`.
    Without `/opt/pi-runtime.json`, the patched Pi adapter falls back to installing
    Pi and building the provider. Add the tools required by each task's Harbor
    `environment/Dockerfile`, such as `uv`; referencing the instance image does
@@ -1115,8 +1116,10 @@ The extension requires these changes:
    verifier environment because the instance images do not contain our prepared
    dependency caches. Validate installation and oracle trials across different
    task environments before starting the full run.
-4. Size the worker pool and runner storage, then set Harbor concurrency to the
-   validated resident actor capacity. Select all 500 tasks; Harbor starts new
+4. Size the worker pool and results PVC, then set Harbor concurrency to the
+   validated resident actor capacity. Increase the runner Job's
+   `activeDeadlineSeconds` to cover initialization and all queued trials; the
+   default is three hours for the whole Job. Select all 500 tasks; Harbor starts new
    trials as concurrency slots become available. Save the results and account
    for every selected task, distinguishing setup failures from failed solutions.
 
@@ -1140,9 +1143,14 @@ actors. Use the CLI to list actors before removing any retained resources:
 
 ```bash title="Workstation"
 kubectl-ate get actors -a ate-env
-kubectl -n ate-env delete pod harbor-runner
+kubectl -n ate-env delete jobs -l app=harbor-runner
+kubectl -n ate-env delete pod harbor-results --ignore-not-found
+kubectl -n ate-env delete configmap harbor-run-config --ignore-not-found
 kubectl -n ate-env delete workerpool harbor-workers
 ```
+
+Keep the `harbor-results` PVC until you have exported every run you need.
+Delete it separately when those results are no longer needed.
 
 Delete only templates, golden tags, Secrets, and collector resources created
 for this walkthrough. Keep shared Substrate services, storage, and inference

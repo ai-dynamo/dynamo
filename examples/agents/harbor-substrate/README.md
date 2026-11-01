@@ -18,13 +18,20 @@ This directory contains the runnable files:
 - `substrate_environment.py`: Harbor's external environment provider. It talks
   to Substrate directly: `kubectl-ate` for actor lifecycle, and the Substrate
   router for commands and files inside the actor.
-- `harbor-job.yaml`: editable Harbor job with task-to-template mappings.
+- `Dockerfile.harbor`: runner image with pinned Harbor, Substrate CLI, env client,
+  and patched adapters under `/opt/harbor`.
+- `harbor-runner.yaml`: Kubernetes Job with a pinned dataset init container,
+  mounted configuration, projected credentials, and persistent results.
+- `harbor-runner-rbac.yaml`: runner ServiceAccount and trust-bundle permissions.
+- `harbor-results.yaml`: results PVC, retained when runner Jobs are deleted.
+- `results-reader.yaml`: read-only Pod for inspecting and exporting saved results.
+- `harbor-job.yaml`: editable Harbor configuration with task-to-template mappings.
 - `Dockerfile.pi`: reusable preparation recipe for one task instance image,
   adding pinned Pi, provider, and offline-verifier dependencies.
 - `substrate-install.yaml`: generic platform configuration for `ate-setup`, with
   the pinned release, bundled PostgreSQL, and RustFS storage defaults. Follow
   the installation guide to review its defaults and configure the storage plugins.
-- YAML manifests: runner, worker pool, task template, and the atespace access policy.
+- Other YAML manifests: worker pool, task template, and the atespace access policy.
 - `runner-kubeconfig.yaml`: in-cluster CLI identity using projected token files.
 - `*.patch`: compatibility changes applied to the pinned upstream sources.
 - [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.mdx):
@@ -43,6 +50,13 @@ and `results/` directories. Keep credentials out of configuration files.
 The example does not contain model deployment manifests or run data.
 
 The adapter requires Harbor 0.16.0 and the env client pinned in `requirements.txt`.
-The tutorial installs the upstream Pi adapter with the supplied patches. Changes
-to these pins need a fresh compatibility check. See the tutorial's validation
-section for the distinction between component checks and a complete deployment.
+The runner Dockerfile installs the upstream Pi adapter with the supplied
+patches. Changes to these pins need fresh compatibility and end-to-end checks.
+
+Build the runner image on a native x86-64 or ARM64 machine with
+`docker build -f Dockerfile.harbor -t your-registry/harbor-runner:prepared .`.
+Publish it and set its digest and architecture in `harbor-runner.yaml`.
+Each Job downloads the pinned task definitions into an `emptyDir` and writes
+results to the separate PVC. No live container installation or input copies
+are required. Run Jobs sequentially with the supplied shared ConfigMap and
+`ReadWriteOnce` PVC; delete the results reader before the next Job.
