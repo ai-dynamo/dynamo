@@ -14,12 +14,12 @@ use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
 };
 use super::worker_selection::WorkerSelectionPolicyFactory;
-use crate::WorkerType;
 use crate::config::KvRouterConfig;
+pub use crate::scheduling::config::DYN_ROUTER_DECODE_POLICY;
+pub use crate::scheduling::config::DYN_ROUTER_PREFILL_POLICY;
+pub use crate::scheduling::config::DYN_ROUTER_WORKER_SELECTION_POLICY;
 use crate::scheduling::config::WorkerSelectionPolicySelections;
-pub use crate::scheduling::config::{
-    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-};
+use dynamo_router_protocol::WorkerType;
 
 /// Parses one policy instance's YAML parameters and creates its partition factory.
 pub type WorkerSelectionPolicyProvider = Arc<
@@ -208,7 +208,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selections(
         &self,
-        policy_config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        policy_config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: WorkerSelectionPolicySelections,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let mut resolved = HashMap::new();
@@ -255,7 +255,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selected_cached(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: Option<&str>,
         resolved: &mut HashMap<String, WorkerSelectionPolicyFactory>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
@@ -276,7 +276,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selected(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: Option<&str>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
@@ -290,7 +290,7 @@ impl RouterPluginRegistry {
             .ok_or_else(|| WorkerSelectionPolicyRegistryError::UnknownInstance {
                 name: selected.to_owned(),
                 available: config
-                    .map(crate::scheduling::WorkerSelectionConfig::instance_names)
+                    .map(crate::plugins::worker_selection::WorkerSelectionConfig::instance_names)
                     .filter(|names| !names.is_empty())
                     .map(|names| names.join(", "))
                     .unwrap_or_else(|| "<none>".to_owned()),
@@ -325,10 +325,10 @@ impl RouterPluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WorkerSelectionPolicyError;
-    use crate::identity::RoutingPartitionRef;
     use crate::plugins::worker_selection::SelectionConfig;
-    use crate::scheduling::selector::{
+    use dynamo_router_protocol::identity::RoutingPartitionRef;
+    use dynamo_worker_selection::WorkerSelectionPolicyError;
+    use dynamo_worker_selection::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
     use std::sync::Mutex;
@@ -395,8 +395,8 @@ mod tests {
         })
     }
 
-    fn config() -> crate::scheduling::WorkerSelectionConfig {
-        crate::scheduling::RouterPolicyConfig::from_yaml(
+    fn config() -> crate::plugins::worker_selection::WorkerSelectionConfig {
+        crate::scheduling::policy_config::RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
   aggregated: first
@@ -641,7 +641,7 @@ worker_selection:
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "alpha"
         ));
 
-        let missing_type = crate::scheduling::RouterPolicyConfig::from_yaml(
+        let missing_type = crate::scheduling::policy_config::RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
   aggregated: missing-type
@@ -661,7 +661,7 @@ worker_selection:
                 if name == "missing" && available == "alpha"
         ));
 
-        let config = crate::scheduling::RouterPolicyConfig::from_yaml(
+        let config = crate::scheduling::policy_config::RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
   aggregated: invalid-parameters

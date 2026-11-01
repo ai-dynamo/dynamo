@@ -429,10 +429,9 @@ fn handle_replica_message<F, A>(
 mod tests {
     use super::*;
     #[cfg(feature = "http")]
-    use crate::identity::RoutingPartitionId;
-    use crate::protocols::ActiveSequenceEvent;
-
-    use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
+    use dynamo_router_protocol::identity::RoutingPartitionId;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     #[cfg(feature = "http")]
     use crate::services::slot_tracker::registry::SlotTrackerRegistry;

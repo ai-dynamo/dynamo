@@ -6,10 +6,11 @@
 
 use tokio::time::Instant;
 
-use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::policy_config::RouterPolicyConfig;
 use crate::scheduling::policy_config::RouterQueuePolicy;
-use crate::scheduling::policy_queue::*;
-use crate::scheduling::{PolicyClassConfig, PolicyProfile, RouterPolicyConfig, WorkerPlacement};
+use dynamo_admission::queue::*;
+use dynamo_admission::{PolicyClassConfig, PolicyProfile, WorkerPlacement};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 fn profile(yaml: &str) -> PolicyProfile {
     RouterPolicyConfig::from_yaml(yaml)

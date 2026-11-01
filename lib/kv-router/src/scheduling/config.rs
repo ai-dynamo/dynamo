@@ -8,12 +8,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::WorkerType;
-pub use crate::conditional_disagg::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
-use crate::conditional_disagg::{
-    default_conditional_disagg_eff_isl_ratio_threshold,
-    default_conditional_disagg_eff_isl_threshold,
-};
 pub use crate::plugins::worker_selection::selection_config::{
     OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
     overlap_score_credit_error_message,
@@ -23,12 +17,20 @@ use crate::plugins::worker_selection::selection_config::{
     default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
     validate_finite_non_negative, validate_overlap_score_credit, validate_range,
 };
-use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
-};
 use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
+};
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::block_hash::LocalBlockHash;
+pub use dynamo_worker_selection::conditional_disagg::{
+    ConditionalDisaggConfig, ConditionalDisaggPolicyKind,
+};
+use dynamo_worker_selection::conditional_disagg::{
+    default_conditional_disagg_eff_isl_ratio_threshold,
+    default_conditional_disagg_eff_isl_threshold,
 };
 
 pub use dynamo_scheduler::config::{RouterConfigOverride, RouterPrefillLoadModel};
@@ -1479,8 +1481,9 @@ mod tests {
     }
 
     use super::*;
-    use crate::identity::RoutingPartitionRef;
-    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_router_protocol::identity::RoutingPartitionRef;
+    use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
     use std::collections::HashMap;
 
     fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {

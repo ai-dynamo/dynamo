@@ -8,4 +8,4 @@
 pub use dynamo_kv_indexer::*;
 
 // Kernel hook; lives with the scheduler, reachable here for existing callers.
-pub use crate::scheduling::shared_cache::SharedKvCache;
+pub use dynamo_scheduler::shared_cache::SharedKvCache;

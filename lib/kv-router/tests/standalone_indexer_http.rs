@@ -15,15 +15,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_kv_router::RoutingPartitionId;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::indexer::server::{AppState, create_router};
-use dynamo_kv_router::zmq_wire::{BlockHashValue, RawKvEvent};
+use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::residency::StorageTier;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;

@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::scheduling::policy_config::{RouterPolicyConfigError, validate_identifier};
+use crate::scheduling::policy_config::RouterPolicyConfigError;
+use crate::scheduling::policy_config::validate_identifier;
 
 /// Process-wide configuration for worker selection in a custom Dynamo image.
 #[derive(Debug, Clone, PartialEq)]

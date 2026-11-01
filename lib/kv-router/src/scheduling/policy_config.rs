@@ -11,8 +11,9 @@ use thiserror::Error;
 
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
 use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use crate::sequences::WorkerLoadProjection;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::protocols::WorkerConfigLike;
+use dynamo_slot_tracker::WorkerLoadProjection;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::RawWorkerSelectionConfig;
@@ -596,7 +597,7 @@ pub(crate) fn validate_identifier(
 mod tests {
     use super::*;
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
-    use crate::sequences::WorkerLoadProjection;
+    use dynamo_slot_tracker::WorkerLoadProjection;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
         WorkerLoadInput::from_projection(WorkerLoadProjection {

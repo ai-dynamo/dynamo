@@ -70,7 +70,7 @@ pub enum RequestClassifierRegistryError {
     #[error("could not load request_classifier from router_policy_config: {source}")]
     Config {
         #[source]
-        source: crate::scheduling::RouterPolicyConfigError,
+        source: crate::scheduling::policy_config::RouterPolicyConfigError,
     },
     #[error("unknown request-classifier type {name:?}; linked classifier types: {available}")]
     UnknownType { name: String, available: String },

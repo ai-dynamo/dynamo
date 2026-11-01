@@ -9,7 +9,7 @@
 //! a ZMQ listener that ingests its KV events into a per-(model, routing group)
 //! `backend::Indexer`.
 //!
-//! [`RoutingPartitionId`](crate::identity::RoutingPartitionId) remains this service's sole registry
+//! [`RoutingPartitionId`](dynamo_router_protocol::identity::RoutingPartitionId) remains this service's sole registry
 //! authority for `(model_name, routing_group)`.
 //! Resolving it to `IndexerDomainId` is intentionally deferred until registration can carry
 //! authoritative explicit identity material; hashing local defaults here would create a second

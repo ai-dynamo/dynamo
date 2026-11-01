@@ -5,7 +5,8 @@
 
 use serde::Deserialize;
 
-use crate::scheduling::policy_config::{RouterPolicyConfigError, validate_identifier};
+use crate::scheduling::policy_config::RouterPolicyConfigError;
+use crate::scheduling::policy_config::validate_identifier;
 
 /// Startup selection and plugin-owned parameters for one request-classifier type.
 #[derive(Debug, Clone, PartialEq)]

@@ -9,15 +9,18 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use dynamo_kv_router::protocols::{
-    RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
-};
-use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-use dynamo_kv_router::{
-    DefaultWorkerSelector, SchedulingRequest, SelectionConfig, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector,
+use dynamo_router_protocol::columns::WorkerInputs;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::ScheduleMode;
+use dynamo_scheduler::SchedulingRequest;
+use dynamo_scheduler::overlap::OverlapSignals;
+use dynamo_scheduler::protocols::{RoutingConstraints, WorkerConfigLike};
+use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::{
+    SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 use rustc_hash::FxHashMap;
 
@@ -470,8 +473,8 @@ fn worker_projection(c: &mut Criterion) {
     group.sample_size(50);
     for count in [32, 2_048] {
         let (workers, request) = fixture(count);
-        let slots = dynamo_kv_router::ActiveSequencesMultiWorker::new(
-            dynamo_kv_router::NoopSequencePublisher,
+        let slots = dynamo_slot_tracker::ActiveSequencesMultiWorker::new(
+            dynamo_slot_tracker::NoopSequencePublisher,
             16,
             workers.keys().map(|&id| (id, (0, 1))).collect(),
             false,

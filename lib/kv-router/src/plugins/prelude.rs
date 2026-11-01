@@ -37,19 +37,21 @@ pub use crate::plugins::{
 };
 
 // Wire vocabulary the signal views carry.
-pub use crate::WorkerType;
-pub use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
-pub use crate::kv_hints::{
-    KvTransferCandidateSource, KvTransferCandidates, WorkerKvTransferKeys,
-    WorkerKvTransferKeysCache,
+pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+pub use dynamo_router_protocol::WorkerType;
+pub use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+pub use dynamo_router_protocol::identity::{RoutingPartitionId, RoutingPartitionRef};
+pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
+pub use dynamo_router_protocol::worker::{
+    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
-pub use crate::protocols::{
-    DpRank, ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,
-    RoutingConstraints, SelectionTraceSpec, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+pub use dynamo_scheduler::kv_hints::WorkerKvTransferKeysCache;
+pub use dynamo_scheduler::overlap::OverlapSignals;
+pub use dynamo_scheduler::protocols::{
+    KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints, WorkerConfigLike,
+    WorkerSelectionResult,
 };
-pub use crate::scheduling::{
-    KvSchedulerError, OverlapSignals, ScheduleMode, SchedulingRequest, SessionContext,
-    WorkerSelectionInputTrigger,
-};
-pub use crate::sequences::WorkerLoadProjection;
+pub use dynamo_scheduler::{KvSchedulerError, ScheduleMode, SchedulingRequest};
+pub use dynamo_slot_tracker::WorkerLoadProjection;
+pub use dynamo_worker_selection::kv_transfer::WorkerKvTransferKeys;
+pub use dynamo_worker_selection::{SelectionTraceSpec, SharedCacheHits};

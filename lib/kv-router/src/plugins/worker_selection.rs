@@ -28,10 +28,10 @@ pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
-pub use crate::scheduling::WorkerSelectionInputTrigger;
-pub use crate::scheduling::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
+pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
+pub use dynamo_scheduler::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 
 /// Factory that creates one worker-selection policy per routing partition.
 pub use dynamo_scheduler::types::WorkerSelectionPolicyFactory;

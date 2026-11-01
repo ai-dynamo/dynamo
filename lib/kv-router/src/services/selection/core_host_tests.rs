@@ -23,8 +23,8 @@ use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 use std::collections::HashSet;
 
-use crate::WorkerType;
 use crate::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::WorkerType;
 
 use crate::config::KvRouterConfig;
 use crate::services::selection::{

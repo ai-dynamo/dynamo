@@ -14,10 +14,10 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpListener;
 
-use crate::protocols::WorkerId;
-use crate::scheduling::KvSchedulerError;
 use crate::services::common::http::{json_error, json_ok, json_rejection};
 use crate::services::common::replica_sync_http;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::KvSchedulerError;
 
 use super::error::SelectionError;
 use super::service::SelectionService;

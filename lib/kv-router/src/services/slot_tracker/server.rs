@@ -14,13 +14,13 @@ use dynamo_tokens::SequenceHash;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::identity::RoutingPartitionId;
-use crate::protocols::WorkerWithDpRank;
-use crate::sequences::SequenceError;
 use crate::services::common::http::{json_error, json_ok, json_rejection};
 use crate::services::common::replica_sync::PeerManager;
 use crate::services::common::replica_sync_http;
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::identity::default_routing_group;
+use dynamo_slot_tracker::SequenceError;
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry};
 

@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocols::{WorkerId, WorkerWithDpRank};
-use crate::recovery::{CursorObservation, CursorState};
-use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+use dynamo_kv_events::cursor::{CursorObservation, CursorState};
+use dynamo_kv_events::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
@@ -538,8 +538,8 @@ async fn run_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::compute_block_hash_for_seq;
     use crate::services::indexer::backend::create_indexer;
+    use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
     use std::time::Duration;
 
     #[rstest::rstest]

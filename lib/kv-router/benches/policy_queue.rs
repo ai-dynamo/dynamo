@@ -11,11 +11,10 @@ use std::time::Duration;
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use dynamo_kv_router::RouterQueuePolicy;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::scheduling::{
-    PolicyProfile, PolicyQueue, QueueSnapshot, RouterPolicyConfig, WorkerPlacement,
-};
+use dynamo_admission::RouterQueuePolicy;
+use dynamo_admission::{PolicyProfile, PolicyQueue, QueueSnapshot, WorkerPlacement};
+use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy)]
 struct BenchRequest {

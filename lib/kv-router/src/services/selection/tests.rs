@@ -16,20 +16,23 @@ use tower::ServiceExt;
 use super::input::{MmRoutingInfoRequest, PromptRequest, TrackingHashInput};
 use super::server::create_router;
 use super::*;
-use crate::identity::RoutingPartitionRef;
-use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::plugins::worker_selection::SelectionConfig;
-use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
+use crate::tracking_hash::tracking_hash_context;
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use crate::scheduling::WorkerSelectionPolicyError;
-use crate::scheduling::overlap::build_overlap_scores_response;
-use crate::scheduling::selector::{
+use dynamo_kv_indexer::overlap::OverlapScores;
+use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use dynamo_router_protocol::identity::RoutingPartitionRef;
+use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::overlap::build_overlap_scores_response;
+use dynamo_scheduler::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
-use crate::{TrackingHashContext, TrackingHashScope, tracking_hash_context};
 use tempfile::NamedTempFile;
 
 fn test_config() -> crate::config::KvRouterConfig {
@@ -50,7 +53,7 @@ async fn binding_stream_rejects_invalid_config() {
     let builder = || {
         SelectionServiceBuilder::new(
             test_config(),
-            crate::WorkerType::Aggregated,
+            dynamo_router_protocol::WorkerType::Aggregated,
             RouterPluginRegistry::default(),
         )
         .session_binding_replication(11)
@@ -289,11 +292,11 @@ impl FactoryRendezvous {
     }
 }
 
-async fn native_policy_app<F>(worker_type: crate::WorkerType, factory: F) -> Router
+async fn native_policy_app<F>(worker_type: dynamo_router_protocol::WorkerType, factory: F) -> Router
 where
     F: for<'a> Fn(
             &SelectionConfig,
-            crate::WorkerType,
+            dynamo_router_protocol::WorkerType,
             RoutingPartitionRef<'a>,
         ) -> WorkerSelectionPolicy
         + Send
@@ -311,7 +314,7 @@ where
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
     };
-    let factory: crate::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let factory: dynamo_scheduler::types::WorkerSelectionPolicyFactory = Arc::new(factory);
     let mut registry = WorkerSelectionPolicyRegistry::default();
     registry
         .register(
@@ -363,7 +366,7 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     let worker_types = Arc::clone(&factory_worker_types);
     let rendezvous = Arc::clone(&factory_rendezvous);
     let app = native_policy_app(
-        crate::WorkerType::Prefill,
+        dynamo_router_protocol::WorkerType::Prefill,
         move |config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
             partitions.lock().unwrap().push(partition.into_owned());
@@ -434,14 +437,14 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
     assert_eq!(
         *factory_worker_types.lock().unwrap(),
-        vec![crate::WorkerType::Prefill; 2]
+        vec![dynamo_router_protocol::WorkerType::Prefill; 2]
     );
 }
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
     let app = native_policy_app(
-        crate::WorkerType::Aggregated,
+        dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
@@ -476,7 +479,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(
-        crate::WorkerType::Aggregated,
+        dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
@@ -511,7 +514,7 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
 #[tokio::test]
 async fn worker_selection_filter_returns_unavailable_without_booking() {
     let app = native_policy_app(
-        crate::WorkerType::Aggregated,
+        dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
             WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
@@ -656,7 +659,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -710,7 +713,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x47; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -757,7 +760,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x59; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -790,8 +793,8 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     assert_eq!(
         selection.block_hashes,
         vec![
-            crate::protocols::LocalBlockHash(11),
-            crate::protocols::LocalBlockHash(29)
+            dynamo_router_protocol::block_hash::LocalBlockHash(11),
+            dynamo_router_protocol::block_hash::LocalBlockHash(29)
         ]
     );
     assert_eq!(selection.sequence_hashes, vec![u64::MAX, 7]);
@@ -1861,10 +1864,10 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     let service_a = Arc::new(
         config_a
             .service_builder(
-                crate::WorkerType::Aggregated,
+                dynamo_router_protocol::WorkerType::Aggregated,
                 WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
                     |config, role, _| {
-                        crate::WorkerSelectionPolicy::reference(
+                        dynamo_worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
                             role.default_selector_label(),
                         )
@@ -1878,10 +1881,10 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     let service_b = Arc::new(
         SelectionServiceBuilder::new(
             test_config(),
-            crate::WorkerType::Aggregated,
+            dynamo_router_protocol::WorkerType::Aggregated,
             WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
                 |config, role, _| {
-                    crate::WorkerSelectionPolicy::reference(
+                    dynamo_worker_selection::WorkerSelectionPolicy::reference(
                         config.clone(),
                         role.default_selector_label(),
                     )
@@ -2117,7 +2120,7 @@ async fn register_rejects_oversized_dp_range() {
             "model_name": "model",
             "endpoint": "http://worker-1:8000",
             "block_size": 4,
-            "data_parallel_size": crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+            "data_parallel_size": dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
         })
         .to_string(),
     )

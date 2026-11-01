@@ -9,21 +9,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::identity::RoutingPartitionId;
-use dynamo_kv_router::indexer::KvIndexerInterface;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, RouterEvent, RoutingConstraints, StorageTier, WorkerWithDpRank,
-    compute_block_hash_for_seq, compute_seq_hash_for_block,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
-use dynamo_kv_router::scheduling::{BusyThresholds, RejectThresholdsProvider};
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
+use dynamo_kv_indexer::KvIndexerInterface;
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{
     HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
     SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory, local_selection_core,
     local_selection_core_with_host,
 };
+use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::load::BusyThresholds;
+use dynamo_router_protocol::residency::StorageTier;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_scheduler::protocols::RoutingConstraints;
+use dynamo_scheduler::types::RejectThresholdsProvider;
 use tokio_util::sync::CancellationToken;
 
 const BLOCK_SIZE: u32 = 16;
@@ -36,7 +42,7 @@ fn prompt_tokens() -> Vec<u32> {
 /// worker computes a fetch hint from it.
 fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _| {
-        dynamo_kv_router::WorkerSelectionPolicy::reference(
+        dynamo_worker_selection::WorkerSelectionPolicy::reference(
             config.clone(),
             role.default_selector_label(),
         )

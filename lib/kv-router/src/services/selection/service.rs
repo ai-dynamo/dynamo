@@ -8,20 +8,19 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
-use crate::protocols::WorkerId;
-use crate::scheduling::PotentialLoad;
-use crate::scheduling::RouterConfig;
 #[cfg(feature = "replica-sync-zmq")]
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_indexer::backend::IndexerPolicy;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::config::RouterConfig;
+use dynamo_scheduler::protocols::PotentialLoad;
 use dynamo_scheduler::replication::AffinityBindingEvent;
+use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
 
-use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
 #[cfg(feature = "ingest-zmq")]
 use super::core::HostCache;
 use super::core::{KvIndexSource, SelectionCore, SelectionHost};
@@ -34,8 +33,9 @@ use super::types::{
 };
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
-use crate::WorkerType;
 use crate::plugins::RouterPluginRegistry;
+use dynamo_router_protocol::WorkerType;
+use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -210,7 +210,7 @@ impl SelectionServiceBuilder {
             .apply_policy_config()
             .map_err(anyhow::Error::msg)?;
         if let Some(ttl) = self.session_affinity_ttl {
-            super::affinity::SessionAffinity::validate_ttl(ttl)?;
+            dynamo_session_affinity::SessionAffinity::validate_ttl(ttl)?;
         }
         self.kv_router_config
             .validate_config()
@@ -556,7 +556,7 @@ impl SelectionService {
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
                     std::sync::Arc::new(|config, role, _| {
-                        crate::WorkerSelectionPolicy::reference(
+                        dynamo_worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
                             role.default_selector_label(),
                         )
@@ -802,7 +802,10 @@ mod tests {
 
     fn test_registry() -> RouterPluginRegistry {
         RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+            dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
         }))
     }
 

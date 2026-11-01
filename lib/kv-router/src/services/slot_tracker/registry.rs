@@ -10,15 +10,16 @@ use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::identity::RoutingPartitionId;
-use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
-use crate::scheduling::PotentialLoad;
-use crate::sequences::topology::{
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::protocols::PotentialLoad;
+use dynamo_slot_tracker::single::PrefillCompletion;
+use dynamo_slot_tracker::topology::{
     MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
 };
-use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillCompletion, ReplicaWorkerPolicy, SequenceError,
-    SequenceRequest,
+use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::{
+    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
 
 use dynamo_scheduler::replication::{
@@ -495,7 +496,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     fn registry() -> SlotTrackerRegistry {
         SlotTrackerRegistry::new(CancellationToken::new())
