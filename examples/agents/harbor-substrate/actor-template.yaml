@@ -57,3 +57,4 @@ volumes:
 workerSelector:
   matchLabels:
     demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: amd64

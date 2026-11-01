@@ -65,16 +65,37 @@ Prepare these resources:
 - A Kubernetes cluster with [Substrate installed](../../kubernetes/agent-sandboxes/install-substrate.mdx)
   and the pinned `kubectl-ate` CLI on `PATH`. Administrative access is needed
   to create the tutorial's atespace and authorize its runner.
-- Linux `amd64` CPU nodes compatible with the pinned gVisor runtime and the
-  SWE-bench task images. Start with capacity for a worker requesting two CPUs
-  and 6 GiB of memory, plus the control plane and Harbor runner.
+- Linux x86-64 (`amd64`) or ARM64 (`arm64`) sandbox nodes with matching gVisor
+  assets and task images. Start with capacity for a worker requesting two CPUs
+  and 6 GiB of memory, plus separate capacity for the control plane and Harbor runner.
 - An image registry that the workers can pull from. The prepared task images
   can be large; reserve node image-cache space before adding tasks.
 - Git, `kubectl`, `curl`, `sha256sum`, OpenSSL, Python 3.12 or newer,
-  Docker with image build and push support, Go 1.27 or newer, and `ko` on the
-  preparation workstation.
+  Docker with BuildKit, image build and push support, Go 1.27 or newer, and `ko`
+  on the preparation workstation. Use a native builder for the target sandbox
+  architecture, or configure [Docker cross-platform builds](https://docs.docker.com/build/building/multi-platform/).
 - For Grafana panels, Prometheus Operator and Grafana. The example can use an
   existing `kube-prometheus-stack` installation.
+
+Choose architecture per component, not per cluster:
+
+| Component | Architecture must match |
+| --- | --- |
+| Installation tools | The workstation where you run them |
+| Substrate control plane and router | Their Kubernetes nodes |
+| Worker and actor | The sandbox node, gVisor assets, guest daemon, and task image |
+| Harbor runner | Its own node; it can differ from the workers |
+| Dynamo | Its inference nodes and the selected model recipe |
+
+The tabs below use `amd64` for x86-64 and `arm64` for AArch64. Choose the same
+sandbox architecture for the guest build, worker pool, and task image.
+The supplied sandbox configs default to `amd64`; edit them in place for ARM64.
+
+<Note>
+The ARM64 task base image is published, but this tutorial's ARM64 oracle and Pi
+runs have not been validated. SWE-bench describes ARM64 support as
+[experimental](https://github.com/SWE-bench/SWE-bench/blob/main/README.md).
+</Note>
 
 Complete the installation and its capability checks before continuing. Golden
 snapshots require working durable snapshot storage. The steps below configure
@@ -132,7 +153,9 @@ Choose one of the following paths:
 
 For self-hosted inference, use the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx).
 Follow the recipe from the root of your Dynamo clone and complete its smoke
-test. Record the served model ID, frontend Service name, and namespace. Then
+test. Select a recipe target and serving images for your inference hardware;
+the inference nodes can use a different CPU architecture from the sandboxes.
+Record the served model ID, frontend Service name, and namespace. Then
 return to this tutorial's directory from the repository root:
 
 ```bash title="Workstation"
@@ -313,6 +336,14 @@ repository:
 ```bash title="Workstation"
 git clone https://github.com/agent-substrate/env deps/env
 git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
+```
+
+Build for the sandbox node, regardless of your workstation's architecture:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+```bash title="Workstation"
 (
 	cd deps/env
 	umask 022
@@ -320,6 +351,21 @@ git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
 	  --platform=linux/amd64 ./cmd/ate-env-guest
 )
 ```
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+```bash title="Workstation"
+(
+	cd deps/env
+	umask 022
+	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
+	  --platform=linux/arm64 ./cmd/ate-env-guest
+)
+```
+
+</Tab>
+</Tabs>
 
 In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
 digest reference. The actor template mounts this image as a volume at `/ate`,
@@ -331,32 +377,83 @@ runner installs later; the adapter uses its generated gRPC stubs for the guest.
 
 <Step title="Create sandbox capacity" id="create-sandbox-capacity">
 
-In `workerpool.yaml`, replace `spec.template.nodeSelector.kubernetes.io/hostname`
-with an `amd64` node that runs `atelet`. Check the node's architecture first:
+In `workerpool.yaml`, select a node that runs `atelet`. Replace the hostname
+in the selected tab with that node's name, and check its architecture:
 
 ```bash title="Workstation"
-kubectl get node your-amd64-sandbox-node \
+kubectl get node your-sandbox-node \
   -o jsonpath='{.metadata.labels.kubernetes\.io/arch}{"\n"}'
 ```
 
-Replace the node name in the command too. It must report `amd64`; the model
-server can run on other nodes. The relevant part of the worker pool is:
+Edit the following fields in `workerpool.yaml`. Keep the other fields,
+including resources and the `gvisor-default` SandboxConfig reference:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+The node must report `amd64`. Set these worker-pool fields:
 
 ```yaml
+metadata:
+  labels:
+    demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: amd64
 spec:
-  replicas: 1
   template:
     nodeSelector:
       kubernetes.io/arch: amd64
       kubernetes.io/hostname: your-amd64-sandbox-node
-    resources:
-      limits:
-        cpu: '2'
-        memory: 6Gi
-      requests:
-        cpu: '2'
-        memory: 6Gi
 ```
+
+In `actor-template.yaml`, match the pool's architecture label:
+
+```yaml
+workerSelector:
+  matchLabels:
+    demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: amd64
+```
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+The node must report `arm64`. Set these worker-pool fields:
+
+```yaml
+metadata:
+  labels:
+    demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: arm64
+spec:
+  template:
+    nodeSelector:
+      kubernetes.io/arch: arm64
+      kubernetes.io/hostname: your-arm64-sandbox-node
+```
+
+In `actor-template.yaml`, match the pool's architecture label:
+
+```yaml
+workerSelector:
+  matchLabels:
+    demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: arm64
+```
+
+</Tab>
+</Tabs>
+
+The supplied `spec.workerImage` pins a multi-architecture index containing
+both Linux architectures. Keep the same reference for either tab:
+
+```yaml
+spec:
+  workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0-rc.1@sha256:02a31963cdfb1d250d205a55fb870385b1ba5bad1be1308d556a6296f76bf145
+```
+
+Kubernetes selects the worker image for its node. Substrate's `gvisor-default`
+configuration supplies the corresponding runtime assets. Each actor still
+needs a guest image and task image built for that same architecture.
 
 Keep the initial replica count and resources, then apply the edited file:
 
@@ -371,9 +468,10 @@ on the node you selected. Its resource requests reserve two CPUs and 6 GiB
 per worker. The actor template allocates one CPU and 4 GiB per task, leaving
 room for one such actor per worker with capacity headroom.
 
-The pool label `demo.harbor.dev/sandbox=gvisor` matches the actor template's
-`workerSelector`. Changing either side alone prevents actors from finding the
-intended workers. To add nodes, first ensure that `atelet` and runtime assets
+The pool's sandbox and architecture labels match the actor template's
+`workerSelector`. Keep both sides aligned. For simultaneous x86-64 and ARM64
+capacity, use separate pool and template names, with the corresponding labels
+and image digests. To add nodes, first ensure that `atelet` and runtime assets
 are present there, then adjust placement and replica count. To fit more actors
 per worker, increase worker capacity while preserving per-actor limits.
 
@@ -408,23 +506,52 @@ repository's `pyproject.toml`; the grader-cache step uses the versions pinned
 in `Dockerfile.pi`. Other tasks may need different dependencies or environment
 setup. Validate every prepared image with its own offline oracle trial.
 
-Build the first task image. Replace `registry.example.com/harbor-substrate`
-in both commands with a repository you can push to and the workers can pull from:
+The task base image already contains the Astropy checkout and its Conda test
+environment. Our build adds Pi and the cached dependencies. Prepare its build
+context once:
 
 ```bash title="Workstation"
 mkdir -p .build/image
 cp -a deps/agent-plugins/pi-plugin .build/image/pi-plugin
-docker build --platform linux/amd64 -f Dockerfile.pi \
-  -t registry.example.com/harbor-substrate/astropy-pi:prepared .build/image
-docker push registry.example.com/harbor-substrate/astropy-pi:prepared
 ```
+
+Select the sandbox architecture and replace `registry.example.com/harbor-substrate`
+with a repository you can push to and the workers can pull from. Each tab pins
+a task base image for that architecture. `Dockerfile.pi` selects the matching
+`uv` binary from BuildKit's `TARGETARCH`:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+```bash title="Workstation"
+docker build --platform linux/amd64 -f Dockerfile.pi \
+  --build-arg TASK_IMAGE=swebench/sweb.eval.x86_64.astropy_1776_astropy-12907@sha256:7485c1e3c8861efd0c6a4a78b952857592e541031039000d25e9481f045dc4a3 \
+  -t registry.example.com/harbor-substrate/astropy-pi:prepared-amd64 .build/image
+docker push registry.example.com/harbor-substrate/astropy-pi:prepared-amd64
+```
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+```bash title="Workstation"
+docker build --platform linux/arm64 -f Dockerfile.pi \
+  --build-arg TASK_IMAGE=swebench/sweb.eval.arm64.astropy_1776_astropy-12907@sha256:6373496b634a2e95077bfa3407ea8d334fd3520439832f003a0d631ab8a0d348 \
+  -t registry.example.com/harbor-substrate/astropy-pi:prepared-arm64 .build/image
+docker push registry.example.com/harbor-substrate/astropy-pi:prepared-arm64
+```
+
+</Tab>
+</Tabs>
 
 In `actor-template.yaml`, replace `containers[0].image` with the pushed
 repository and digest, such as `registry.example.com/harbor-substrate/astropy-pi@sha256:...`.
 Use the digest printed by `docker push`, not the mutable tag, for the run.
-`Dockerfile.pi` defaults to the pinned image for this Astropy task. For another
-task, build a separate prepared image with `--build-arg TASK_IMAGE=...`, using
-that task's `environment/Dockerfile` base image resolved to a digest.
+`Dockerfile.pi` defaults to the pinned x86-64 image for this Astropy task;
+the ARM64 command overrides that default. For another task, build a separate
+prepared image with `--build-arg TASK_IMAGE=...`. Inspect the task's
+`environment/Dockerfile` and resolve a base image for the intended architecture
+to a digest. Not every task has a published ARM64 image. Changing `--platform`
+does not convert an x86-64 base image into ARM64.
 
 Do not reuse one task's repository image for another task. Keep endpoint
 credentials, task instructions, candidate changes, and session state outside
@@ -454,7 +581,34 @@ your logging and artifact handling accordingly before using an authenticated
 endpoint. A Kubernetes Secret does not redact those logs. Use a scoped key for
 the run and treat captured logs as potentially credential-bearing.
 
-Start the runner and install its pinned dependencies:
+The Python image in `harbor-runner.yaml` pins a multi-architecture index with
+both x86-64 and ARM64 builds. Choose the runner's placement independently of
+the sandbox workers. To select its architecture, add one of these fragments
+to the **Pod** document's `spec` in `harbor-runner.yaml`:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+```yaml
+spec:
+  nodeSelector:
+    kubernetes.io/arch: amd64
+```
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+```yaml
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+```
+
+</Tab>
+</Tabs>
+
+Keep the supplied image reference for either architecture. Start the runner
+and install its pinned dependencies:
 
 ```bash title="Workstation"
 kubectl apply -f harbor-runner.yaml
@@ -564,6 +718,7 @@ Open `actor-template.yaml`. Check that `containers[0].image` contains the
 prepared task image digest and `volumes[0].image.reference` contains the guest
 image digest from the guest-image build step. Keep `metadata.name` as
 `swe-astropy-12907-pi` for this first task.
+Both image digests must match the architecture selected by `workerSelector`.
 
 The actor template is a Substrate API object. Register it with `kubectl-ate`.
 The Harbor job is a client configuration file, consumed by `harbor run`.
@@ -590,7 +745,7 @@ The template defines the sandbox that each trial starts:
 | `volumes[].image.reference` | Supplies the environment guest executable mounted at `/ate`. |
 | `containers[].wakeupProbe` | Requires the guest's `/readyz` endpoint before the actor is ready. |
 | `resources.limits` | Allocates one CPU and 4 GiB to the actor. Increase these limits for tasks that need more resources, and increase worker capacity accordingly. |
-| `workerSelector` | Matches the worker pool label. Use it to constrain placement for prewarming or capacity isolation. |
+| `workerSelector` | Matches the worker pool's sandbox and architecture labels. Keep the architecture aligned with the task and guest images; add placement constraints for prewarming or capacity isolation. |
 | `snapshotConfig` | Starts with golden snapshots disabled. Enable them in a separate template after checking the prepared image. |
 
 The job controls the trial lifecycle:

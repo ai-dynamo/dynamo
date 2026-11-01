@@ -32,7 +32,17 @@ Before applying, edit `metrics-bridge.yaml` if your monitoring installation
 uses different names. Match the ServiceMonitor's `metadata.labels.release`
 (`kube-prometheus-stack`) to your Prometheus selector, and the NetworkPolicy's
 monitoring namespace selector to your Prometheus namespace (`monitoring`).
-Keep the Collector endpoint, port mappings, and resource limits for this run:
+The pinned Collector image includes both `linux/amd64` and `linux/arm64`.
+Its node architecture is independent of the workers and Dynamo. Choose its
+placement by editing `spec.template.spec.nodeSelector.kubernetes.io/arch`:
+
+| Collector nodes | Value |
+| --- | --- |
+| x86-64 | `amd64`, the supplied default |
+| ARM64 | `arm64` |
+
+Keep the same image reference for either architecture, along with the Collector
+endpoint, port mappings, and resource limits for this run:
 
 ```bash
 kubectl apply -f metrics-bridge.yaml

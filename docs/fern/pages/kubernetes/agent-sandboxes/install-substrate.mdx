@@ -22,7 +22,8 @@ around limitations in that release's installer.
   certificate APIs and volume projections are stable and enabled by default.
   On 1.35 and 1.36, complete the explicit configuration in
   [Check cluster capabilities](#check-cluster-capabilities).
-- Linux nodes compatible with your selected sandbox runtime and its assets.
+- Linux x86-64 (`amd64`) or ARM64 (`arm64`) nodes, with images and sandbox
+  runtime assets built for the nodes where each component runs.
 - PostgreSQL, object storage, and network access configured according to the
   pinned [Substrate operator installation guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
 - Git, Go 1.27 or newer, and `kubectl` on the installation workstation, with the
@@ -189,21 +190,89 @@ store; custom clients must configure their TLS library to use it. Follow the
 pinned [authentication setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authentication.md)
 for signer and trust configuration.
 
-The node architecture, sandbox runtime build, and workload image architecture
-must match. Every node eligible for sandbox placement needs `atelet` and the
-assets required by its sandbox runtime.
+### Choose architecture per component
+
+The Substrate control plane, sandbox workers, workload clients, and Dynamo can
+run on separate nodes with different CPU architectures. Match each component's
+binaries and images to its own nodes:
+
+| Component | Architecture choice |
+| --- | --- |
+| `ate-setup` and workstation `kubectl-ate` | Build for the workstation where you execute them. |
+| Substrate control plane and router | Use images for their scheduled nodes. The pinned release publishes multi-architecture images. |
+| `atelet`, workers, and actors | Match each sandbox node's architecture. Actor images and guest executables must match that worker. |
+| Workload clients | Use images and CLI binaries for the client's own node. |
+| Dynamo | Select serving images for the inference hardware through the model recipe, independently of Substrate. |
+
+For gVisor, the pinned
+[`gvisor-default` SandboxConfig](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/manifests/ate-install/sandboxconfig-gvisor.yaml)
+provides both architecture variants of the same runtime release. `atelet`
+selects the matching assets. Inspect eligible nodes with the relevant tab:
+
+<Tabs>
+<Tab title="x86-64 (amd64)">
+
+```bash
+kubectl get nodes -l kubernetes.io/os=linux,kubernetes.io/arch=amd64
+```
+
+Use `linux/amd64` worker and actor images. The SandboxConfig's `assets.amd64`
+entry supplies the `x86_64` gVisor release archive.
+
+</Tab>
+<Tab title="ARM64 (arm64)">
+
+```bash
+kubectl get nodes -l kubernetes.io/os=linux,kubernetes.io/arch=arm64
+```
+
+Use `linux/arm64` worker and actor images. The SandboxConfig's `assets.arm64`
+entry supplies the `aarch64` gVisor release archive.
+
+</Tab>
+</Tabs>
+
+Every node eligible for sandbox placement needs `atelet` and the assets
+required by its runtime. For a different sandbox runtime, check that its
+binaries, kernel requirements, and configured assets support the selected
+architecture. Workload guides configure worker placement and actor images
+separately after this platform installation.
 
 </Step>
 
 <Step title="Build the installation tools" id="build-the-installation-tools">
 
-Build the tools from the same release as the control-plane images:
+Fetch the same release as the control-plane images:
 
 ```bash
 mkdir -p deps/bin
 git clone --branch v1.0.0-rc.1 https://github.com/agent-substrate/substrate deps/substrate
-go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
-go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
+go env GOHOSTOS GOHOSTARCH
+```
+
+Choose the architecture reported by Go for your **workstation**, independently
+of the cluster nodes. These commands keep the workstation's operating system:
+
+<Tabs>
+<Tab title="x86-64 workstation (amd64)">
+
+```bash
+GOARCH=amd64 go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
+GOARCH=amd64 go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
+```
+
+</Tab>
+<Tab title="ARM64 workstation (arm64)">
+
+```bash
+GOARCH=arm64 go -C deps/substrate build -o ../bin/ate-setup ./cmd/ate-setup
+GOARCH=arm64 go -C deps/substrate build -o ../bin/kubectl-ate ./cmd/kubectl-ate
+```
+
+</Tab>
+</Tabs>
+
+```bash
 export PATH="$PWD/deps/bin:$PATH"
 ```
 
@@ -239,6 +308,12 @@ images:
   repo: ghcr.io/agent-substrate/substrate
   tag: v1.0.0-rc.1
 ```
+
+Use the same release settings for x86-64 and ARM64 nodes. Kubernetes selects
+the matching platform from each multi-architecture image. If you replace a
+release image with your own build, publish both architectures or constrain
+that component's placement to nodes matching your image. A digest for one
+architecture is different from a digest for the multi-architecture index.
 
 This fragment selects the release; it is not a complete installation document.
 Supply database credentials through the upstream installer's supported secret

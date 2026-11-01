@@ -156,6 +156,11 @@ terminates TLS on port 20391 and forwards events to the receiver on loopback
 port 20390. It installs stunnel from Alpine repositories at startup. Use a
 prebuilt approved image if Pod egress does not permit that.
 
+`alpine:3.22` includes x86-64 and ARM64 images. Kubernetes selects the variant
+for the frontend's node; keep this reference for either architecture. A custom
+sidecar image must match the frontend node, independently of the actor's
+architecture.
+
 If the frontend already has trace settings or these volume names, merge the
 configuration without duplicate entries. For Kustomize, regenerate the manifest
 first. Inspect the rendered diff, then apply it:

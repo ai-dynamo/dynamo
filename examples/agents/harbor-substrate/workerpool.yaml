@@ -14,7 +14,8 @@
 # limitations under the License.
 
 
-# Replace the hostname with an amd64 node running atelet.
+# Defaults to amd64. For arm64, change both architecture labels and the hostname.
+# Keep the actor template workerSelector aligned with the pool labels.
 apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
@@ -22,6 +23,7 @@ metadata:
   namespace: ate-env
   labels:
     demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: amd64
 spec:
   replicas: 1
   sandboxClasses:
@@ -39,4 +41,4 @@ spec:
       requests:
         cpu: '2'
         memory: 6Gi
-  workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0-rc.1@sha256:b1911bc8a14097289575c06d9410b8077ae6a1bbef2ec8af89eaa837eee7e4ee
+  workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0-rc.1@sha256:02a31963cdfb1d250d205a55fb870385b1ba5bad1be1308d556a6296f76bf145

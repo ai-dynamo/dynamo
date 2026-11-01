@@ -15,6 +15,7 @@
 
 ARG TASK_IMAGE=swebench/sweb.eval.x86_64.astropy_1776_astropy-12907@sha256:7485c1e3c8861efd0c6a4a78b952857592e541031039000d25e9481f045dc4a3
 FROM ${TASK_IMAGE}
+ARG TARGETARCH
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG NODE_VERSION=22.23.4
 ARG PI_VERSION=0.72.1
@@ -31,8 +32,13 @@ RUN source "$NVM_DIR/nvm.sh" && cd /root/pi-dynamo-provider && npm ci && npm run
     && pi install /root/pi-dynamo-provider && npm cache clean --force \
     && node --input-type=module -e 'import fs from "node:fs"; import {createRequire} from "node:module"; const require=createRequire(import.meta.url); const pi=require(process.env.NVM_BIN+"/../lib/node_modules/@mariozechner/pi-coding-agent/package.json"); fs.writeFileSync("/opt/pi-runtime.json",JSON.stringify({node:process.version,pi:pi.version,provider:"/root/pi-dynamo-provider",extension:"/root/pi-dynamo-provider/dist/index.js"})+"\n");' \
     && sha256sum dist/*.js > /opt/pi-provider.sha256
-RUN curl -fsSL https://github.com/astral-sh/uv/releases/download/0.7.13/uv-x86_64-unknown-linux-gnu.tar.gz \
-    | tar -xz --strip-components=1 -C /usr/local/bin uv-x86_64-unknown-linux-gnu/uv \
+RUN case "$TARGETARCH" in \
+      amd64) UV_ARCH=x86_64 ;; \
+      arm64) UV_ARCH=aarch64 ;; \
+      *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/0.7.13/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin "uv-${UV_ARCH}-unknown-linux-gnu/uv" \
     && mkdir -p /logs/agent /logs/verifier /logs/artifacts /installed-agent
 # Verifier dependencies, so the unchanged test script needs no registry access:
 # the repository's build requirements as wheels, and the SWE-bench grader's

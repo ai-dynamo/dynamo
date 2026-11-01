@@ -27,6 +27,10 @@ This directory contains the runnable files:
 
 Generate the file list with `git ls-files examples/agents/harbor-substrate`.
 Edit the supplied configuration files in place as the tutorial describes.
+The tutorial includes x86-64 (`amd64`) and ARM64 (`arm64`) image and placement
+choices. Configurations default to `amd64`; ARM64 execution remains unvalidated.
+The control plane, Harbor runner, sandbox workers, and Dynamo can use different
+node architectures. Match the guest and task images to their sandbox worker.
 Generated builds, certificates, and results use the ignored `.build/`, `.trace/`,
 and `results/` directories. Keep credentials out of configuration files.
 The example does not contain model deployment manifests or run data.
