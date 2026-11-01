@@ -36,4 +36,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 dynamo-kv-hashing = { workspace = true }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
+rmp-serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

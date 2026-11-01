@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use dynamo_router_protocol::load::BusyThresholds;
+use dynamo_slot_tracker::busy::BusyThresholds;
 
 /// The one class of a profile built from the flat router config alone.
 pub const SYNTHETIC_POLICY_CLASS: &str = "default";

@@ -25,11 +25,11 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::identity::RoutingPartitionId;
-use dynamo_router_protocol::load::BusyThresholds;
 use dynamo_router_protocol::residency::StorageTier;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::protocols::RoutingConstraints;
 use dynamo_scheduler::types::RejectThresholdsProvider;
+use dynamo_slot_tracker::busy::BusyThresholds;
 use tokio_util::sync::CancellationToken;
 
 const BLOCK_SIZE: u32 = 16;

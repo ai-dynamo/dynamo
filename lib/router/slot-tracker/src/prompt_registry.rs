@@ -21,7 +21,7 @@ use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::busy::FullRankCounts;
 use crate::prelude::WorkerWithDpRank;
-use dynamo_router_protocol::load::WorkerCapacity;
+use dynamo_router_protocol::worker::WorkerCapacity;
 
 /// Ephemeral, request-specific view of worker load.
 ///

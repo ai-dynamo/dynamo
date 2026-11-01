@@ -10,12 +10,11 @@
 mod direct_zmq;
 
 use dynamo_kv_router::services::selection::SelectionService;
-use dynamo_router_protocol::load::{SchedulerGroup, SchedulerLoad};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::host::ModelLoadResponse;
 use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS,
+    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad,
 };
 pub use dynamo_slot_tracker::host::{
     ActiveSequences, ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, RequestId,

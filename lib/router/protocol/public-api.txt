@@ -25,9 +25,9 @@ pub fn dynamo_router_protocol::block_hash::LocalBlockHash::deserialize<D>(D) -> 
 pub mod dynamo_router_protocol::columns
 pub struct dynamo_router_protocol::columns::WorkerInfo
 impl dynamo_router_protocol::columns::WorkerInfo
-pub fn dynamo_router_protocol::columns::WorkerInfo::capacity(&self) -> dynamo_router_protocol::load::WorkerCapacity
+pub fn dynamo_router_protocol::columns::WorkerInfo::capacity(&self) -> dynamo_router_protocol::worker::WorkerCapacity
 pub fn dynamo_router_protocol::columns::WorkerInfo::max_num_batched_tokens(&self) -> core::option::Option<u64>
-pub fn dynamo_router_protocol::columns::WorkerInfo::new(dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_router_protocol::load::WorkerCapacity) -> Self
+pub fn dynamo_router_protocol::columns::WorkerInfo::new(dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_router_protocol::worker::WorkerCapacity) -> Self
 pub fn dynamo_router_protocol::columns::WorkerInfo::total_kv_blocks(&self) -> core::option::Option<u64>
 pub fn dynamo_router_protocol::columns::WorkerInfo::worker(&self) -> dynamo_router_protocol::worker::WorkerWithDpRank
 pub struct dynamo_router_protocol::columns::WorkerInputs(_)
@@ -180,42 +180,6 @@ pub dynamo_router_protocol::kv_hints::KvSourceLocationsPayload::source_control_e
 pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
 pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
 pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
-pub mod dynamo_router_protocol::load
-pub enum dynamo_router_protocol::load::SchedulerGroup
-pub dynamo_router_protocol::load::SchedulerGroup::ReplicaGroup
-pub dynamo_router_protocol::load::SchedulerGroup::ReplicaGroup::group_id: alloc::string::String
-pub dynamo_router_protocol::load::SchedulerGroup::Standalone
-pub dynamo_router_protocol::load::SchedulerGroup::Standalone::scheduler_id: u64
-pub dynamo_router_protocol::load::SchedulerGroup::Unknown
-pub struct dynamo_router_protocol::load::ActiveLoad
-pub dynamo_router_protocol::load::ActiveLoad::active_decode_blocks: core::option::Option<u64>
-pub dynamo_router_protocol::load::ActiveLoad::active_prefill_tokens: core::option::Option<u64>
-pub dynamo_router_protocol::load::ActiveLoad::dp_rank: dynamo_router_protocol::worker::DpRank
-pub dynamo_router_protocol::load::ActiveLoad::kv_used_blocks: core::option::Option<u64>
-pub dynamo_router_protocol::load::ActiveLoad::worker_id: dynamo_router_protocol::worker::WorkerId
-pub struct dynamo_router_protocol::load::BusyThresholds
-pub dynamo_router_protocol::load::BusyThresholds::decode_busy_threshold_frac: core::option::Option<f64>
-pub dynamo_router_protocol::load::BusyThresholds::prefill_busy_threshold: core::option::Option<usize>
-pub dynamo_router_protocol::load::BusyThresholds::prefill_busy_threshold_frac: core::option::Option<f64>
-impl dynamo_router_protocol::load::BusyThresholds
-pub fn dynamo_router_protocol::load::BusyThresholds::has_room<L: dynamo_router_protocol::load::RankLoad>(&self, &L, dynamo_router_protocol::load::WorkerCapacity) -> bool
-pub fn dynamo_router_protocol::load::BusyThresholds::is_configured(&self) -> bool
-pub struct dynamo_router_protocol::load::SchedulerLoad
-pub dynamo_router_protocol::load::SchedulerLoad::active_decode_blocks: u64
-pub dynamo_router_protocol::load::SchedulerLoad::active_prefill_tokens: u64
-pub dynamo_router_protocol::load::SchedulerLoad::dp_rank: dynamo_router_protocol::worker::DpRank
-pub dynamo_router_protocol::load::SchedulerLoad::group: dynamo_router_protocol::load::SchedulerGroup
-pub dynamo_router_protocol::load::SchedulerLoad::worker_id: dynamo_router_protocol::worker::WorkerId
-pub struct dynamo_router_protocol::load::WorkerCapacity
-impl dynamo_router_protocol::load::WorkerCapacity
-pub fn dynamo_router_protocol::load::WorkerCapacity::max_num_batched_tokens(self) -> core::option::Option<u64>
-pub fn dynamo_router_protocol::load::WorkerCapacity::new(core::option::Option<u64>, core::option::Option<u64>) -> Self
-pub fn dynamo_router_protocol::load::WorkerCapacity::prefill_budget(self) -> u64
-pub fn dynamo_router_protocol::load::WorkerCapacity::total_kv_blocks(self) -> core::option::Option<u64>
-pub const dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS: u64
-pub trait dynamo_router_protocol::load::RankLoad
-pub fn dynamo_router_protocol::load::RankLoad::active_decode_blocks(&self) -> usize
-pub fn dynamo_router_protocol::load::RankLoad::active_prefill_tokens(&self) -> usize
 pub mod dynamo_router_protocol::metadata
 pub struct dynamo_router_protocol::metadata::RouterHintSourceMetadata
 pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::source_control_endpoint: alloc::string::String
@@ -291,6 +255,12 @@ pub fn dynamo_router_protocol::session::SessionContext::session_final(&self) -> 
 pub fn dynamo_router_protocol::session::SessionContext::session_id(&self) -> &str
 pub fn dynamo_router_protocol::session::SessionContext::with_agent_headers(self, alloc::sync::Arc<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>>) -> Self
 pub mod dynamo_router_protocol::worker
+pub struct dynamo_router_protocol::worker::ActiveLoad
+pub dynamo_router_protocol::worker::ActiveLoad::active_decode_blocks: core::option::Option<u64>
+pub dynamo_router_protocol::worker::ActiveLoad::active_prefill_tokens: core::option::Option<u64>
+pub dynamo_router_protocol::worker::ActiveLoad::dp_rank: dynamo_router_protocol::worker::DpRank
+pub dynamo_router_protocol::worker::ActiveLoad::kv_used_blocks: core::option::Option<u64>
+pub dynamo_router_protocol::worker::ActiveLoad::worker_id: dynamo_router_protocol::worker::WorkerId
 pub struct dynamo_router_protocol::worker::WorkerAffinityTarget
 pub dynamo_router_protocol::worker::WorkerAffinityTarget::dp_rank: core::option::Option<dynamo_router_protocol::worker::DpRank>
 pub dynamo_router_protocol::worker::WorkerAffinityTarget::worker_id: dynamo_router_protocol::worker::WorkerId
@@ -298,6 +268,12 @@ impl dynamo_router_protocol::worker::WorkerAffinityTarget
 pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::new(dynamo_router_protocol::worker::WorkerId, core::option::Option<dynamo_router_protocol::worker::DpRank>) -> Self
 impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::worker::WorkerAffinityTarget
 pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub struct dynamo_router_protocol::worker::WorkerCapacity
+impl dynamo_router_protocol::worker::WorkerCapacity
+pub fn dynamo_router_protocol::worker::WorkerCapacity::max_num_batched_tokens(self) -> core::option::Option<u64>
+pub fn dynamo_router_protocol::worker::WorkerCapacity::new(core::option::Option<u64>, core::option::Option<u64>) -> Self
+pub fn dynamo_router_protocol::worker::WorkerCapacity::prefill_budget(self) -> u64
+pub fn dynamo_router_protocol::worker::WorkerCapacity::total_kv_blocks(self) -> core::option::Option<u64>
 pub struct dynamo_router_protocol::worker::WorkerWithDpRank
 pub dynamo_router_protocol::worker::WorkerWithDpRank::dp_rank: dynamo_router_protocol::worker::DpRank
 pub dynamo_router_protocol::worker::WorkerWithDpRank::worker_id: dynamo_router_protocol::worker::WorkerId
@@ -308,6 +284,7 @@ impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for d
 pub fn dynamo_router_protocol::kv_hints::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
 impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::worker::WorkerAffinityTarget
 pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub const dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS: u64
 pub type dynamo_router_protocol::worker::DpRank = u32
 pub type dynamo_router_protocol::worker::WorkerId = u64
 pub mod dynamo_router_protocol::worker_type

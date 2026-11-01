@@ -873,8 +873,8 @@ pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) 
 pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
 pub trait dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt
 pub fn dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
-impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_router_protocol::load::BusyThresholds
-pub fn dynamo_router_protocol::load::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_slot_tracker::busy::BusyThresholds
+pub fn dynamo_slot_tracker::busy::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
 pub mod dynamo_kv_router::scheduling::policy_queue
 pub use dynamo_kv_router::scheduling::policy_queue::<<dynamo_admission::queue::*>>
 pub mod dynamo_kv_router::scheduling::prefill_load
@@ -955,8 +955,8 @@ pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::parameters(&self) 
 pub fn dynamo_kv_router::scheduling::WorkerSelectionInstance::policy_type(&self) -> &str
 pub trait dynamo_kv_router::scheduling::BusyThresholdsExt
 pub fn dynamo_kv_router::scheduling::BusyThresholdsExt::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
-impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_router_protocol::load::BusyThresholds
-pub fn dynamo_router_protocol::load::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
+impl dynamo_kv_router::scheduling::policy_config::BusyThresholdsExt for dynamo_slot_tracker::busy::BusyThresholds
+pub fn dynamo_slot_tracker::busy::BusyThresholds::worker_is_full<C: dynamo_scheduler::protocols::WorkerConfigLike>(&self, dynamo_router_protocol::worker::WorkerId, &C, &rustc_hash::FxHashMap<dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_slot_tracker::prompt_registry::WorkerLoadProjection>) -> bool
 pub type dynamo_kv_router::scheduling::RequestClassifierFactory = alloc::sync::Arc<(dyn core::ops::function::Fn(dynamo_admission::classifier::inputs::RequestClassifierContext) -> alloc::boxed::Box<dyn dynamo_admission::classifier::RequestClassifier> + core::marker::Send + core::marker::Sync)>
 pub type dynamo_kv_router::scheduling::RequestClassifierProvider = alloc::sync::Arc<(dyn core::ops::function::Fn(&dynamo_kv_router::scheduling::RequestClassifierParameters) -> core::result::Result<dynamo_kv_router::scheduling::RequestClassifierFactory, dynamo_kv_router::scheduling::RequestClassifierProviderError> + core::marker::Send + core::marker::Sync)>
 pub mod dynamo_kv_router::services

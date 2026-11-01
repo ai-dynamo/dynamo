@@ -2319,7 +2319,7 @@ mod worker_metrics_tests {
     use std::time::Duration;
 
     use anyhow::Result;
-    use dynamo_router_protocol::load::ActiveLoad;
+    use dynamo_router_protocol::worker::ActiveLoad;
 
     use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
 
@@ -2375,7 +2375,7 @@ mod worker_metrics_tests {
 mod test_integration_publisher {
     use super::*;
     use crate::kv_router::KV_METRICS_SUBJECT;
-    use dynamo_router_protocol::load::ActiveLoad;
+    use dynamo_router_protocol::worker::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 

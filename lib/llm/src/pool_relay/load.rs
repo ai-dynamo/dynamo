@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use dynamo_kv_indexer::cuckoo::ProducerIdentity;
-use dynamo_router_protocol::load::{ActiveLoad, SchedulerGroup, SchedulerLoad};
+use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::transports::event_plane::EventEnvelope;
+use dynamo_slot_tracker::host::{SchedulerGroup, SchedulerLoad};
 
 use super::serving_load::{SOURCE_RETENTION, freshness};
 use crate::kv_router::sequence::SCHEDULER_LOAD_PUBLISH_INTERVAL;

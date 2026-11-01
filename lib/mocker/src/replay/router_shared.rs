@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::common::protocols::MockerConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike};
 use dynamo_slot_tracker::host::{

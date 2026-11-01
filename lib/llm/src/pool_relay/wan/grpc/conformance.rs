@@ -14,7 +14,7 @@ use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHa
 use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
-use dynamo_router_protocol::load::ActiveLoad;
+use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::{
     DistributedRuntime, Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider,

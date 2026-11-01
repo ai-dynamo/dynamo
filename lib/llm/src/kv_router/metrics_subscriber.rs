@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_router_protocol::load::ActiveLoad;
+use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint},

@@ -51,7 +51,7 @@ use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePo
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
 
 // The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
-pub use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
+pub use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 

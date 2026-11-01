@@ -19,7 +19,7 @@ use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::services::selection::{SelectionService, SelectionServiceBuilder};
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionId};
-use dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_router_protocol::worker_type::WorkerType;
 use dynamo_scheduler::host::{

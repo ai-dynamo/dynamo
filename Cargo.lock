@@ -2262,6 +2262,7 @@ version = "1.7.0"
 dependencies = [
  "async-trait",
  "dynamo-router-protocol",
+ "dynamo-slot-tracker",
  "dynamo-tokens",
  "futures-util",
  "ordered-float 4.6.0",
@@ -3104,7 +3105,6 @@ dependencies = [
 name = "dynamo-router-protocol"
 version = "1.7.0"
 dependencies = [
- "rmp-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3400,9 +3400,11 @@ dependencies = [
  "fastrand",
  "indexmap 2.14.0",
  "parking_lot",
+ "rmp-serde",
  "rustc-hash 2.1.2",
  "seqlock",
  "serde",
+ "serde_json",
  "slotmap",
  "thiserror 2.0.18",
  "tokio",
@@ -3602,6 +3604,7 @@ dependencies = [
  "async-trait",
  "crossbeam-queue",
  "dynamo-router-protocol",
+ "dynamo-slot-tracker",
  "fastrand",
  "parking_lot",
  "rustc-hash 2.1.2",

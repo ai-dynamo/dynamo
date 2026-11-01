@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_router_protocol::load::{ActiveLoad, BusyThresholds};
-use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
+use dynamo_router_protocol::worker::ActiveLoad;
+use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::http::service::metrics::{
@@ -1267,7 +1267,7 @@ mod tests {
         WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
         overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
-    use dynamo_router_protocol::load::ActiveLoad;
+    use dynamo_router_protocol::worker::ActiveLoad;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
     use std::collections::HashSet;

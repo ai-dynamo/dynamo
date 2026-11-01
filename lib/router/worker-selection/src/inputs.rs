@@ -353,7 +353,7 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 const _: () = assert!(size_of::<CandidateData>() == 128);
 
 pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
-pub use dynamo_router_protocol::load::WorkerCapacity;
+pub use dynamo_router_protocol::worker::WorkerCapacity;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerTransferInput {
@@ -483,7 +483,7 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
-impl dynamo_router_protocol::load::RankLoad for WorkerLoadInput {
+impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
     #[inline]
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens

@@ -32,7 +32,6 @@ pub use dynamo_kv_indexer::residency::{
     ResolvedRouterHintSource,
 };
 pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-pub use dynamo_router_protocol::load::{ActiveLoad, SchedulerGroup, SchedulerLoad};
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 pub use dynamo_router_protocol::mm::{
     BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,
@@ -42,12 +41,12 @@ pub use dynamo_router_protocol::residency::{
     UnsupportedResidencyDomain, WireResidencyDomain,
 };
 pub use dynamo_router_protocol::worker::{
-    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+    ActiveLoad, DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
 pub use dynamo_slot_tracker::wire::{
     ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
     ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
-    PrefillEventData, PrefillLoadHint,
+    PrefillEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
 };
 pub use dynamo_worker_selection::{
     SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SharedCacheHits,

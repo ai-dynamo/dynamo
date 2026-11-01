@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
 use dynamo_router_protocol::identity::PoolId;
-use dynamo_router_protocol::load::{ActiveLoad, SchedulerLoad};
+use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::transports::event_plane::EventEnvelope;
+use dynamo_slot_tracker::host::SchedulerLoad;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, TryAcquireError};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -3381,7 +3382,7 @@ mod tests {
             dp_rank,
             active_decode_blocks: 3,
             active_prefill_tokens: 4,
-            group: dynamo_router_protocol::load::SchedulerGroup::Standalone { scheduler_id: 7 },
+            group: dynamo_slot_tracker::host::SchedulerGroup::Standalone { scheduler_id: 7 },
         }
     }
 
