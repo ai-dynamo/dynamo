@@ -9,11 +9,17 @@
 #
 # Usage: scripts/router_layering_check.sh [--host]
 #
-#   (no flag)  per-crate checks from TABLE below plus the workspace feature
-#              check; pre-commit runs this.
-#   --host     additionally resolve the host packages in HOSTS and fail if any
-#              table crate reaches a heavy external crate in the host's own
-#              graph (feature unification included); CI runs this.
+#   (no flag)  per-crate checks from TABLE below (exact router-dependency set,
+#              forbidden transport crates, exact direct dependencies, the
+#              protocol behavior grep), the composition crate's no-features
+#              tree and direct dependencies, the workspace feature check, and
+#              the source rules (no #[doc(hidden)], no cross-crate glob
+#              re-export, README/AGENTS/CLAUDE per crate); pre-commit runs this
+#              in about ten seconds.
+#   --host     additionally resolve the host packages in HOSTS and
+#              HOSTS_EXTERNAL and fail if any table crate reaches a heavy
+#              external crate in the host's own graph (feature unification
+#              included); CI runs this.
 #
 # Exit status: 0 all checks passed, 1 at least one layering check failed,
 # 2 the gate could not run (missing crate, empty cargo output, bad usage).
@@ -43,12 +49,12 @@ TABLE=(
   "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
   "dynamo-kv-events | dynamo-router-protocol dynamo-kv-hashing | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq | dynamo-kv-hashing dynamo-router-protocol rmp-serde rustc-hash serde serde_json thiserror tracing | -"
   "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing prometheus axum hyper reqwest | anyhow tokio tracing zmq | -"
-  "dynamo-kv-indexer | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq | - | -"
-  "dynamo-slot-tracker | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
-  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
-  "dynamo-worker-selection | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
-  "dynamo-admission | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
-  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | - | -"
+  "dynamo-kv-indexer | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq | anyhow arc-swap async-trait blake3 dashmap dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens fastrand flume parking_lot prometheus rustc-hash seqlock serde serde_json slotmap thiserror tokio tokio-util tracing xxhash-rust | -"
+  "dynamo-slot-tracker | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | anyhow crossbeam-utils dashmap dynamo-router-protocol dynamo-tokens fastrand indexmap parking_lot rustc-hash seqlock serde slotmap thiserror tokio tokio-util tracing | -"
+  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | blake3 dashmap dynamo-router-protocol serde thiserror tokio tokio-util tracing | -"
+  "dynamo-worker-selection | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait crossbeam-queue dynamo-router-protocol fastrand parking_lot rustc-hash serde serde_json thiserror tracing | -"
+  "dynamo-admission | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait dynamo-router-protocol dynamo-tokens futures-util ordered-float parking_lot rustc-hash serde serde_json thiserror tokio tokio-util tracing | -"
+  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | anyhow arc-swap async-trait blake3 crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection fastrand futures-util http once_cell ordered-float parking_lot rmp-serde rustc-hash serde serde_json thiserror tokio tokio-util tracing uuid zeroize | -"
   "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
 
@@ -64,6 +70,9 @@ ROUTER_TEST_FEATURES="testing bench profile"
 # --host: packages whose resolved graph must not route a table crate to one of
 # HOST_FORBIDDEN. Hosts missing from the workspace are skipped with a notice.
 HOSTS="dynamo-llm dynamo-ext-proc dynamo-mocker"
+# Hosts outside the workspace: "package|manifest|features" (features may be empty). The Python
+# bindings run the standalone services, so they resolve with the service features on.
+HOSTS_EXTERNAL="dynamo-py3|lib/bindings/python/Cargo.toml|kv-indexer,slot-tracker,select-service"
 # prometheus joins this list in step 9c, when exposition moves to dynamo-metrics; today the
 # kv-indexer `export` feature (kv-router `metrics`) reaches it by design.
 HOST_FORBIDDEN="axum hyper reqwest zmq"
@@ -246,6 +255,14 @@ if [ ! -s "$tmp/comp_hits.txt" ]; then
 else
   bad "$COMPOSITION: transport crates in its no-features tree: $(show <"$tmp/comp_hits.txt")"
 fi
+COMPOSITION_DIRECT_DEPS="anyhow arc-swap async-trait axum blake3 chrono crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-truthy dynamo-worker-selection dynamo-zmq fastrand flume futures-util http parking_lot prometheus reqwest rmp-serde rustc-hash serde serde_json serde_yaml thiserror tokio tokio-util tracing tracing-appender uuid xxhash-rust zeroize zmq"
+direct_deps "$COMPOSITION" | lines >"$tmp/comp_direct.txt"
+words "$COMPOSITION_DIRECT_DEPS" >"$tmp/comp_direct_want.txt"
+if cmp -s "$tmp/comp_direct.txt" "$tmp/comp_direct_want.txt"; then
+  ok "$COMPOSITION: direct deps == the $(wc -l <"$tmp/comp_direct_want.txt") listed (normal and optional)"
+else
+  bad "$COMPOSITION: direct deps $(show <"$tmp/comp_direct.txt") != required $(show <"$tmp/comp_direct_want.txt")"
+fi
 
 words "$table_crates" >"$tmp/table_crates.txt"
 
@@ -271,43 +288,108 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# --host: no table crate reaches a heavy external crate in a host's own graph
+# Source rules over every router crate (SPLIT_V2 G10): no #[doc(hidden)] (an
+# item is documented or absent), no cross-crate glob re-export, and the
+# README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate's
+# deprecated shims are glob re-exports by design until their removal release.
 # ---------------------------------------------------------------------------
+ROUTER_CRATE_DIRS="lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/zmq"
+GLOB_EXEMPT_DIRS="lib/kv-router"
+for d in $ROUTER_CRATE_DIRS; do [ -d "$d/src" ] || die "$d/src does not exist"; done
+mapfile -t src_files < <(for d in $ROUTER_CRATE_DIRS; do find "$d/src" -type f -name '*.rs'; done | sort)
+[ "${#src_files[@]}" -gt 0 ] || die "no .rs files under the router crates"
+rc=0
+grep -nF -- '#[doc(hidden)]' "${src_files[@]}" >"$tmp/hidden.txt" || rc=$?
+case $rc in 0|1) ;; *) die "grep failed ($rc) scanning for doc(hidden)" ;; esac
+grep -vF -- "$ALLOW_MARK" "$tmp/hidden.txt" >"$tmp/hidden_bad.txt" || true
+if [ ! -s "$tmp/hidden_bad.txt" ]; then
+  ok "router crates: no #[doc(hidden)] (${#src_files[@]} files)"
+else
+  bad "router crates: #[doc(hidden)] items ($(wc -l <"$tmp/hidden_bad.txt") lines):"
+  sed 's/^/        /' "$tmp/hidden_bad.txt"
+fi
+exempt_re="^($(words "$GLOB_EXEMPT_DIRS" | paste -sd'|'))/"
+mapfile -t glob_files < <(printf '%s\n' "${src_files[@]}" | grep -vE -- "$exempt_re" || true)
+[ "${#glob_files[@]}" -gt 0 ] || die "no .rs files left after exempting $GLOB_EXEMPT_DIRS"
+rc=0
+grep -nE -- '^[[:space:]]*pub(\([a-z]+\))? use dynamo_[a-z_]+::[A-Za-z0-9_:]*\*;' "${glob_files[@]}" >"$tmp/globs.txt" || rc=$?
+case $rc in 0|1) ;; *) die "grep failed ($rc) scanning for glob re-exports" ;; esac
+if [ ! -s "$tmp/globs.txt" ]; then
+  ok "router crates: no cross-crate glob re-export (${#glob_files[@]} files outside $(words "$GLOB_EXEMPT_DIRS" | show))"
+else
+  bad "router crates: cross-crate glob re-exports ($(wc -l <"$tmp/globs.txt") lines):"
+  sed 's/^/        /' "$tmp/globs.txt"
+fi
+: >"$tmp/guides_bad.txt"
+for d in $ROUTER_CRATE_DIRS; do
+  [ -f "$d/README.md" ] || echo "$d/README.md missing" >>"$tmp/guides_bad.txt"
+  [ -f "$d/AGENTS.md" ] || echo "$d/AGENTS.md missing" >>"$tmp/guides_bad.txt"
+  if [ ! -f "$d/CLAUDE.md" ]; then
+    echo "$d/CLAUDE.md missing" >>"$tmp/guides_bad.txt"
+  elif [ "$(tr -d '[:space:]' <"$d/CLAUDE.md")" != "@AGENTS.md" ]; then
+    echo "$d/CLAUDE.md must contain exactly @AGENTS.md" >>"$tmp/guides_bad.txt"
+  fi
+done
+if [ ! -s "$tmp/guides_bad.txt" ]; then
+  ok "router crates: README.md, AGENTS.md, CLAUDE.md (@AGENTS.md) present in all $(words "$ROUTER_CRATE_DIRS" | wc -l) crates"
+else
+  bad "router crates: agent guides:"
+  sed 's/^/        /' "$tmp/guides_bad.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# --host: no table crate reaches a heavy external crate in a host's own graph
+# (feature unification included). HOSTS are workspace packages; HOSTS_EXTERNAL
+# have their own manifest and lockfile and resolve with the features listed.
+# ---------------------------------------------------------------------------
+check_host() {
+  local host="$1"; shift
+  tree "$host" "$host" "$@" >"$tmp/host_tree.txt"
+  for x in $HOST_FORBIDDEN; do
+    mapfile -t versions < <(awk -v n="$x" '$1 == n { print $2 }' "$tmp/host_tree.txt")
+    if [ "${#versions[@]}" -eq 0 ]; then
+      ok "$host: $x absent from its normal tree"
+      continue
+    fi
+    # One inverted tree per resolved version: a bare name is ambiguous to
+    # cargo when two versions coexist (reqwest 0.12 and 0.13 in dynamo-llm).
+    for v in "${versions[@]}"; do
+      spec="$x@${v#v}"
+      tree "$host" "$x" "$@" -i "$spec" >"$tmp/inv_tree.txt"
+      awk '{ print $1 }' "$tmp/inv_tree.txt" | lines >"$tmp/inv.txt"
+      comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits_all.txt"
+      # drop the adapter crate that exists to reach this dependency, if one is declared for it
+      exempt=""
+      for e in $HOST_ADAPTER_EXEMPT; do [ "${e#*:}" = "$x" ] && exempt="${e%%:*}"; done
+      if [ -n "$exempt" ]; then
+        grep -vxF -- "$exempt" "$tmp/inv_hits_all.txt" >"$tmp/inv_hits.txt" || true
+      else
+        cp "$tmp/inv_hits_all.txt" "$tmp/inv_hits.txt"
+      fi
+      if [ ! -s "$tmp/inv_hits.txt" ]; then
+        ok "$host: no router crate reaches $spec"
+      else
+        bad "$host: router crates reach $spec: $(show <"$tmp/inv_hits.txt")"
+      fi
+    done
+  done
+}
 if [ "$host_mode" -eq 1 ]; then
   for host in $HOSTS; do
     if ! in_workspace "$host"; then
       echo "skip  $host: not a workspace package"
       continue
     fi
-    tree "$host" "$host" >"$tmp/host_tree.txt"
-    for x in $HOST_FORBIDDEN; do
-      mapfile -t versions < <(awk -v n="$x" '$1 == n { print $2 }' "$tmp/host_tree.txt")
-      if [ "${#versions[@]}" -eq 0 ]; then
-        ok "$host: $x absent from its normal tree"
-        continue
-      fi
-      # One inverted tree per resolved version: a bare name is ambiguous to
-      # cargo when two versions coexist (reqwest 0.12 and 0.13 in dynamo-llm).
-      for v in "${versions[@]}"; do
-        spec="$x@${v#v}"
-        tree "$host" "$x" -i "$spec" >"$tmp/inv_tree.txt"
-        awk '{ print $1 }' "$tmp/inv_tree.txt" | lines >"$tmp/inv.txt"
-        comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits_all.txt"
-        # drop the adapter crate that exists to reach this dependency, if one is declared for it
-        exempt=""
-        for e in $HOST_ADAPTER_EXEMPT; do [ "${e#*:}" = "$x" ] && exempt="${e%%:*}"; done
-        if [ -n "$exempt" ]; then
-          grep -vxF -- "$exempt" "$tmp/inv_hits_all.txt" >"$tmp/inv_hits.txt" || true
-        else
-          cp "$tmp/inv_hits_all.txt" "$tmp/inv_hits.txt"
-        fi
-        if [ ! -s "$tmp/inv_hits.txt" ]; then
-          ok "$host: no router crate reaches $spec"
-        else
-          bad "$host: router crates reach $spec: $(show <"$tmp/inv_hits.txt")"
-        fi
-      done
-    done
+    check_host "$host"
+  done
+  for spec in $HOSTS_EXTERNAL; do
+    IFS='|' read -r host manifest features <<<"$spec"
+    [ -f "$manifest" ] || die "$host: manifest $manifest does not exist"
+    if [ -n "$features" ]; then
+      check_host "$host" --manifest-path "$manifest" --features "$features"
+    else
+      check_host "$host" --manifest-path "$manifest"
+    fi
   done
 fi
 

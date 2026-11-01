@@ -119,7 +119,7 @@ pub struct BusyThresholds {
     pub prefill_busy_threshold: Option<usize>,
     /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
     /// rank does not report it, the fraction is taken of
-    /// [`DEFAULT_MAX_BATCHED_TOKENS`](dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS).
+    /// [`DEFAULT_MAX_BATCHED_TOKENS`].
     pub prefill_busy_threshold_frac: Option<f64>,
     /// Fraction of the rank's `total_kv_blocks` above which the KV blocks its active
     /// requests hold make it full. A rank that does not report `total_kv_blocks` skips it.

@@ -122,6 +122,8 @@ pub dynamo_kv_router::config::KvRouterConfig::enable_session_prefix_index: bool
 pub dynamo_kv_router::config::KvRouterConfig::host_cache_hit_weight: f64
 pub dynamo_kv_router::config::KvRouterConfig::overlap_score_credit: f64
 pub dynamo_kv_router::config::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::config::KvRouterConfig::policy_config_cache: std::sync::once_lock::OnceLock<dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig>
+pub dynamo_kv_router::config::KvRouterConfig::policy_model_name: core::option::Option<alloc::string::String>
 pub dynamo_kv_router::config::KvRouterConfig::prefill_load_scale: f64
 pub dynamo_kv_router::config::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
 pub dynamo_kv_router::config::KvRouterConfig::router_assume_kv_reuse: bool
@@ -320,6 +322,8 @@ pub dynamo_kv_router::plugins::prelude::KvRouterConfig::enable_session_prefix_in
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::host_cache_hit_weight: f64
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::overlap_score_credit: f64
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::policy_config_cache: std::sync::once_lock::OnceLock<dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig>
+pub dynamo_kv_router::plugins::prelude::KvRouterConfig::policy_model_name: core::option::Option<alloc::string::String>
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::prefill_load_scale: f64
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
 pub dynamo_kv_router::plugins::prelude::KvRouterConfig::router_assume_kv_reuse: bool
@@ -752,6 +756,8 @@ pub dynamo_kv_router::scheduling::config::KvRouterConfig::enable_session_prefix_
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::host_cache_hit_weight: f64
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::overlap_score_credit: f64
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::policy_config_cache: std::sync::once_lock::OnceLock<dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig>
+pub dynamo_kv_router::scheduling::config::KvRouterConfig::policy_model_name: core::option::Option<alloc::string::String>
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::prefill_load_scale: f64
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
 pub dynamo_kv_router::scheduling::config::KvRouterConfig::router_assume_kv_reuse: bool
@@ -1329,6 +1335,8 @@ pub dynamo_kv_router::KvRouterConfig::enable_session_prefix_index: bool
 pub dynamo_kv_router::KvRouterConfig::host_cache_hit_weight: f64
 pub dynamo_kv_router::KvRouterConfig::overlap_score_credit: f64
 pub dynamo_kv_router::KvRouterConfig::overlap_score_credit_decay: f64
+pub dynamo_kv_router::KvRouterConfig::policy_config_cache: std::sync::once_lock::OnceLock<dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig>
+pub dynamo_kv_router::KvRouterConfig::policy_model_name: core::option::Option<alloc::string::String>
 pub dynamo_kv_router::KvRouterConfig::prefill_load_scale: f64
 pub dynamo_kv_router::KvRouterConfig::router_approximate_cache_policy: dynamo_kv_indexer::config::ApproximateCachePolicyKind
 pub dynamo_kv_router::KvRouterConfig::router_assume_kv_reuse: bool

@@ -580,12 +580,10 @@ pub struct KvRouterConfig {
 
     /// Run-level model selector used by offline and online replay.
     #[serde(skip)]
-    #[doc(hidden)]
     pub policy_model_name: Option<String>,
 
     /// Parsed startup policy document. This prevents per-model file reloads.
     #[serde(skip)]
-    #[doc(hidden)]
     pub policy_config_cache: OnceLock<super::policy_config::RouterPolicyConfig>,
 
     /// Number of KV indexer worker threads.

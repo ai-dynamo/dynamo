@@ -1,0 +1,344 @@
+pub mod dynamo_router_protocol
+pub mod dynamo_router_protocol::attempt
+pub struct dynamo_router_protocol::attempt::AttemptId(_)
+impl core::fmt::Display for dynamo_router_protocol::attempt::AttemptId
+pub fn dynamo_router_protocol::attempt::AttemptId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct dynamo_router_protocol::attempt::AttemptIdMinter
+impl dynamo_router_protocol::attempt::AttemptIdMinter
+pub fn dynamo_router_protocol::attempt::AttemptIdMinter::mint(&self) -> dynamo_router_protocol::attempt::AttemptId
+pub const fn dynamo_router_protocol::attempt::AttemptIdMinter::new() -> Self
+pub mod dynamo_router_protocol::block_hash
+pub struct dynamo_router_protocol::block_hash::ExternalSequenceBlockHash(pub u64)
+impl core::convert::From<i64> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
+pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::from(i64) -> Self
+impl core::convert::From<u64> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
+pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::from(u64) -> Self
+impl serde_core::ser::Serialize for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
+pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
+pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+pub struct dynamo_router_protocol::block_hash::LocalBlockHash(pub u64)
+impl serde_core::ser::Serialize for dynamo_router_protocol::block_hash::LocalBlockHash
+pub fn dynamo_router_protocol::block_hash::LocalBlockHash::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::block_hash::LocalBlockHash
+pub fn dynamo_router_protocol::block_hash::LocalBlockHash::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+pub mod dynamo_router_protocol::columns
+pub struct dynamo_router_protocol::columns::WorkerInfo
+impl dynamo_router_protocol::columns::WorkerInfo
+pub fn dynamo_router_protocol::columns::WorkerInfo::capacity(&self) -> dynamo_router_protocol::load::WorkerCapacity
+pub fn dynamo_router_protocol::columns::WorkerInfo::max_num_batched_tokens(&self) -> core::option::Option<u64>
+pub fn dynamo_router_protocol::columns::WorkerInfo::new(dynamo_router_protocol::worker::WorkerWithDpRank, dynamo_router_protocol::load::WorkerCapacity) -> Self
+pub fn dynamo_router_protocol::columns::WorkerInfo::total_kv_blocks(&self) -> core::option::Option<u64>
+pub fn dynamo_router_protocol::columns::WorkerInfo::worker(&self) -> dynamo_router_protocol::worker::WorkerWithDpRank
+pub struct dynamo_router_protocol::columns::WorkerInputs(_)
+impl dynamo_router_protocol::columns::WorkerInputs
+pub const dynamo_router_protocol::columns::WorkerInputs::ALL: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::CACHE: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::KV_TRANSFER: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::LOAD: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::NONE: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::OCCUPANCY: Self
+pub const dynamo_router_protocol::columns::WorkerInputs::PREFERRED_TAINT: Self
+pub const fn dynamo_router_protocol::columns::WorkerInputs::contains(self, Self) -> bool
+pub fn dynamo_router_protocol::columns::WorkerInputs::without(self, Self) -> Self
+impl core::ops::bit::BitOr for dynamo_router_protocol::columns::WorkerInputs
+pub type dynamo_router_protocol::columns::WorkerInputs::Output = dynamo_router_protocol::columns::WorkerInputs
+pub fn dynamo_router_protocol::columns::WorkerInputs::bitor(self, Self) -> Self::Output
+pub mod dynamo_router_protocol::identity
+pub enum dynamo_router_protocol::identity::IdentityParseError
+pub dynamo_router_protocol::identity::IdentityParseError::InvalidCacheOwner
+pub dynamo_router_protocol::identity::IdentityParseError::InvalidHex
+pub dynamo_router_protocol::identity::IdentityParseError::InvalidIndexerDomain
+pub dynamo_router_protocol::identity::IdentityParseError::InvalidPool
+pub enum dynamo_router_protocol::identity::IdentitySource
+pub dynamo_router_protocol::identity::IdentitySource::DefaultDerived
+pub dynamo_router_protocol::identity::IdentitySource::Explicit
+pub struct dynamo_router_protocol::identity::CacheOwnerId
+impl dynamo_router_protocol::identity::CacheOwnerId
+pub const fn dynamo_router_protocol::identity::CacheOwnerId::new(dynamo_router_protocol::identity::PoolId, dynamo_router_protocol::identity::StableDpSlotId) -> Self
+pub const fn dynamo_router_protocol::identity::CacheOwnerId::pool(self) -> dynamo_router_protocol::identity::PoolId
+pub const fn dynamo_router_protocol::identity::CacheOwnerId::slot(self) -> dynamo_router_protocol::identity::StableDpSlotId
+impl core::fmt::Display for dynamo_router_protocol::identity::CacheOwnerId
+pub fn dynamo_router_protocol::identity::CacheOwnerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::CacheOwnerId
+pub type dynamo_router_protocol::identity::CacheOwnerId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::CacheOwnerId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::CacheSemanticsId
+impl dynamo_router_protocol::identity::CacheSemanticsId
+pub const fn dynamo_router_protocol::identity::CacheSemanticsId::digest(self) -> [u8; 16]
+pub const fn dynamo_router_protocol::identity::CacheSemanticsId::new([u8; 16], dynamo_router_protocol::identity::IdentitySource) -> Self
+pub const fn dynamo_router_protocol::identity::CacheSemanticsId::source(self) -> dynamo_router_protocol::identity::IdentitySource
+impl core::fmt::Debug for dynamo_router_protocol::identity::CacheSemanticsId
+pub fn dynamo_router_protocol::identity::CacheSemanticsId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for dynamo_router_protocol::identity::CacheSemanticsId
+pub fn dynamo_router_protocol::identity::CacheSemanticsId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::CacheSemanticsId
+pub type dynamo_router_protocol::identity::CacheSemanticsId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::CacheSemanticsId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::ClusterId(_)
+impl dynamo_router_protocol::identity::ClusterId
+pub const fn dynamo_router_protocol::identity::ClusterId::get(self) -> u64
+pub const fn dynamo_router_protocol::identity::ClusterId::new(u64) -> Self
+impl core::fmt::Display for dynamo_router_protocol::identity::ClusterId
+pub fn dynamo_router_protocol::identity::ClusterId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::ClusterId
+pub type dynamo_router_protocol::identity::ClusterId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::ClusterId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::IndexerDomainId
+impl dynamo_router_protocol::identity::IndexerDomainId
+pub const fn dynamo_router_protocol::identity::IndexerDomainId::cache_semantics(self) -> dynamo_router_protocol::identity::CacheSemanticsId
+pub const fn dynamo_router_protocol::identity::IndexerDomainId::new(dynamo_router_protocol::identity::CacheSemanticsId, dynamo_router_protocol::identity::RoutingScopeId) -> Self
+pub const fn dynamo_router_protocol::identity::IndexerDomainId::relies_on_defaults(self) -> bool
+pub const fn dynamo_router_protocol::identity::IndexerDomainId::routing_scope(self) -> dynamo_router_protocol::identity::RoutingScopeId
+impl core::fmt::Display for dynamo_router_protocol::identity::IndexerDomainId
+pub fn dynamo_router_protocol::identity::IndexerDomainId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::IndexerDomainId
+pub type dynamo_router_protocol::identity::IndexerDomainId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::IndexerDomainId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::PoolId
+impl dynamo_router_protocol::identity::PoolId
+pub const fn dynamo_router_protocol::identity::PoolId::cluster_id(self) -> dynamo_router_protocol::identity::ClusterId
+pub const fn dynamo_router_protocol::identity::PoolId::indexer_domain(self) -> dynamo_router_protocol::identity::IndexerDomainId
+pub const fn dynamo_router_protocol::identity::PoolId::new(dynamo_router_protocol::identity::IndexerDomainId, dynamo_router_protocol::identity::ClusterId) -> Self
+impl core::fmt::Display for dynamo_router_protocol::identity::PoolId
+pub fn dynamo_router_protocol::identity::PoolId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::PoolId
+pub type dynamo_router_protocol::identity::PoolId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::PoolId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::RoutingPartitionId
+pub dynamo_router_protocol::identity::RoutingPartitionId::model_name: alloc::string::String
+pub dynamo_router_protocol::identity::RoutingPartitionId::routing_group: alloc::string::String
+impl dynamo_router_protocol::identity::RoutingPartitionId
+pub fn dynamo_router_protocol::identity::RoutingPartitionId::as_ref(&self) -> dynamo_router_protocol::identity::RoutingPartitionRef<'_>
+pub fn dynamo_router_protocol::identity::RoutingPartitionId::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<dynamo_router_protocol::identity::RoutingPartitionRef<'_>> for dynamo_router_protocol::identity::RoutingPartitionId
+pub fn dynamo_router_protocol::identity::RoutingPartitionId::from(dynamo_router_protocol::identity::RoutingPartitionRef<'_>) -> Self
+impl core::fmt::Display for dynamo_router_protocol::identity::RoutingPartitionId
+pub fn dynamo_router_protocol::identity::RoutingPartitionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::convert::From<&'a dynamo_router_protocol::identity::RoutingPartitionId> for dynamo_router_protocol::identity::RoutingPartitionRef<'a>
+pub fn dynamo_router_protocol::identity::RoutingPartitionRef<'a>::from(&'a dynamo_router_protocol::identity::RoutingPartitionId) -> Self
+pub struct dynamo_router_protocol::identity::RoutingPartitionRef<'a>
+pub dynamo_router_protocol::identity::RoutingPartitionRef::model_name: &'a str
+pub dynamo_router_protocol::identity::RoutingPartitionRef::routing_group: &'a str
+impl<'a> dynamo_router_protocol::identity::RoutingPartitionRef<'a>
+pub fn dynamo_router_protocol::identity::RoutingPartitionRef<'a>::into_owned(self) -> dynamo_router_protocol::identity::RoutingPartitionId
+pub const fn dynamo_router_protocol::identity::RoutingPartitionRef<'a>::new(&'a str, &'a str) -> Self
+impl core::convert::From<dynamo_router_protocol::identity::RoutingPartitionRef<'_>> for dynamo_router_protocol::identity::RoutingPartitionId
+pub fn dynamo_router_protocol::identity::RoutingPartitionId::from(dynamo_router_protocol::identity::RoutingPartitionRef<'_>) -> Self
+impl core::fmt::Display for dynamo_router_protocol::identity::RoutingPartitionRef<'_>
+pub fn dynamo_router_protocol::identity::RoutingPartitionRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::convert::From<&'a dynamo_router_protocol::identity::RoutingPartitionId> for dynamo_router_protocol::identity::RoutingPartitionRef<'a>
+pub fn dynamo_router_protocol::identity::RoutingPartitionRef<'a>::from(&'a dynamo_router_protocol::identity::RoutingPartitionId) -> Self
+pub struct dynamo_router_protocol::identity::RoutingScopeId
+impl dynamo_router_protocol::identity::RoutingScopeId
+pub const fn dynamo_router_protocol::identity::RoutingScopeId::digest(self) -> [u8; 16]
+pub const fn dynamo_router_protocol::identity::RoutingScopeId::new([u8; 16], dynamo_router_protocol::identity::IdentitySource) -> Self
+pub const fn dynamo_router_protocol::identity::RoutingScopeId::source(self) -> dynamo_router_protocol::identity::IdentitySource
+impl core::fmt::Debug for dynamo_router_protocol::identity::RoutingScopeId
+pub fn dynamo_router_protocol::identity::RoutingScopeId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for dynamo_router_protocol::identity::RoutingScopeId
+pub fn dynamo_router_protocol::identity::RoutingScopeId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::RoutingScopeId
+pub type dynamo_router_protocol::identity::RoutingScopeId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::RoutingScopeId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::identity::StableDpSlotId
+impl dynamo_router_protocol::identity::StableDpSlotId
+pub const fn dynamo_router_protocol::identity::StableDpSlotId::digest(self) -> [u8; 16]
+pub const fn dynamo_router_protocol::identity::StableDpSlotId::new([u8; 16], dynamo_router_protocol::identity::IdentitySource) -> Self
+pub const fn dynamo_router_protocol::identity::StableDpSlotId::source(self) -> dynamo_router_protocol::identity::IdentitySource
+impl core::fmt::Debug for dynamo_router_protocol::identity::StableDpSlotId
+pub fn dynamo_router_protocol::identity::StableDpSlotId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for dynamo_router_protocol::identity::StableDpSlotId
+pub fn dynamo_router_protocol::identity::StableDpSlotId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::identity::StableDpSlotId
+pub type dynamo_router_protocol::identity::StableDpSlotId::Err = dynamo_router_protocol::identity::IdentityParseError
+pub fn dynamo_router_protocol::identity::StableDpSlotId::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub const dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP: &str
+pub mod dynamo_router_protocol::kv_hints
+pub enum dynamo_router_protocol::kv_hints::KvTransferCandidateSource
+pub dynamo_router_protocol::kv_hints::KvTransferCandidateSource::CacheOwner(dynamo_router_protocol::residency::ResidencyOwnerKey)
+pub dynamo_router_protocol::kv_hints::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
+impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::kv_hints::KvTransferCandidateSource
+pub fn dynamo_router_protocol::kv_hints::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub struct dynamo_router_protocol::kv_hints::KvHint
+pub dynamo_router_protocol::kv_hints::KvHint::actions: alloc::vec::Vec<dynamo_router_protocol::kv_hints::KvHintAction>
+pub dynamo_router_protocol::kv_hints::KvHint::message_id: alloc::string::String
+pub dynamo_router_protocol::kv_hints::KvHint::protocol_version: alloc::string::String
+impl dynamo_router_protocol::kv_hints::KvHint
+pub fn dynamo_router_protocol::kv_hints::KvHint::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<dynamo_router_protocol::kv_hints::KvHintAction>) -> Self
+pub struct dynamo_router_protocol::kv_hints::KvHintAction
+pub dynamo_router_protocol::kv_hints::KvHintAction::action_id: alloc::string::String
+pub dynamo_router_protocol::kv_hints::KvHintAction::action_type: alloc::string::String
+pub dynamo_router_protocol::kv_hints::KvHintAction::action_version: alloc::string::String
+pub dynamo_router_protocol::kv_hints::KvHintAction::payload: alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>
+impl dynamo_router_protocol::kv_hints::KvHintAction
+pub fn dynamo_router_protocol::kv_hints::KvHintAction::fetch(impl core::convert::Into<alloc::string::String>, dynamo_router_protocol::kv_hints::KvSourceLocationsPayload) -> Self
+pub fn dynamo_router_protocol::kv_hints::KvHintAction::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>) -> Self
+pub struct dynamo_router_protocol::kv_hints::KvSourceLocationsPayload
+pub dynamo_router_protocol::kv_hints::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>
+pub dynamo_router_protocol::kv_hints::KvSourceLocationsPayload::source_control_endpoint: alloc::string::String
+pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
+pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
+pub const dynamo_router_protocol::kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
+pub mod dynamo_router_protocol::load
+pub enum dynamo_router_protocol::load::SchedulerGroup
+pub dynamo_router_protocol::load::SchedulerGroup::ReplicaGroup
+pub dynamo_router_protocol::load::SchedulerGroup::ReplicaGroup::group_id: alloc::string::String
+pub dynamo_router_protocol::load::SchedulerGroup::Standalone
+pub dynamo_router_protocol::load::SchedulerGroup::Standalone::scheduler_id: u64
+pub dynamo_router_protocol::load::SchedulerGroup::Unknown
+pub struct dynamo_router_protocol::load::ActiveLoad
+pub dynamo_router_protocol::load::ActiveLoad::active_decode_blocks: core::option::Option<u64>
+pub dynamo_router_protocol::load::ActiveLoad::active_prefill_tokens: core::option::Option<u64>
+pub dynamo_router_protocol::load::ActiveLoad::dp_rank: dynamo_router_protocol::worker::DpRank
+pub dynamo_router_protocol::load::ActiveLoad::kv_used_blocks: core::option::Option<u64>
+pub dynamo_router_protocol::load::ActiveLoad::worker_id: dynamo_router_protocol::worker::WorkerId
+pub struct dynamo_router_protocol::load::BusyThresholds
+pub dynamo_router_protocol::load::BusyThresholds::decode_busy_threshold_frac: core::option::Option<f64>
+pub dynamo_router_protocol::load::BusyThresholds::prefill_busy_threshold: core::option::Option<usize>
+pub dynamo_router_protocol::load::BusyThresholds::prefill_busy_threshold_frac: core::option::Option<f64>
+impl dynamo_router_protocol::load::BusyThresholds
+pub fn dynamo_router_protocol::load::BusyThresholds::has_room<L: dynamo_router_protocol::load::RankLoad>(&self, &L, dynamo_router_protocol::load::WorkerCapacity) -> bool
+pub fn dynamo_router_protocol::load::BusyThresholds::is_configured(&self) -> bool
+pub struct dynamo_router_protocol::load::SchedulerLoad
+pub dynamo_router_protocol::load::SchedulerLoad::active_decode_blocks: u64
+pub dynamo_router_protocol::load::SchedulerLoad::active_prefill_tokens: u64
+pub dynamo_router_protocol::load::SchedulerLoad::dp_rank: dynamo_router_protocol::worker::DpRank
+pub dynamo_router_protocol::load::SchedulerLoad::group: dynamo_router_protocol::load::SchedulerGroup
+pub dynamo_router_protocol::load::SchedulerLoad::worker_id: dynamo_router_protocol::worker::WorkerId
+pub struct dynamo_router_protocol::load::WorkerCapacity
+impl dynamo_router_protocol::load::WorkerCapacity
+pub fn dynamo_router_protocol::load::WorkerCapacity::max_num_batched_tokens(self) -> core::option::Option<u64>
+pub fn dynamo_router_protocol::load::WorkerCapacity::new(core::option::Option<u64>, core::option::Option<u64>) -> Self
+pub fn dynamo_router_protocol::load::WorkerCapacity::prefill_budget(self) -> u64
+pub fn dynamo_router_protocol::load::WorkerCapacity::total_kv_blocks(self) -> core::option::Option<u64>
+pub const dynamo_router_protocol::load::DEFAULT_MAX_BATCHED_TOKENS: u64
+pub trait dynamo_router_protocol::load::RankLoad
+pub fn dynamo_router_protocol::load::RankLoad::active_decode_blocks(&self) -> usize
+pub fn dynamo_router_protocol::load::RankLoad::active_prefill_tokens(&self) -> usize
+pub mod dynamo_router_protocol::metadata
+pub struct dynamo_router_protocol::metadata::RouterHintSourceMetadata
+pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::source_control_endpoint: alloc::string::String
+pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::topology_domains: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::worker_type: alloc::string::String
+pub mod dynamo_router_protocol::mm
+pub struct dynamo_router_protocol::mm::BlockExtraInfo
+pub dynamo_router_protocol::mm::BlockExtraInfo::mm_objects: alloc::vec::Vec<dynamo_router_protocol::mm::BlockMmObjectInfo>
+pub struct dynamo_router_protocol::mm::BlockMmObjectInfo
+pub dynamo_router_protocol::mm::BlockMmObjectInfo::mm_hash: u64
+pub dynamo_router_protocol::mm::BlockMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
+pub struct dynamo_router_protocol::mm::RequestExtraInfo
+pub dynamo_router_protocol::mm::RequestExtraInfo::mm_objects: alloc::vec::Vec<dynamo_router_protocol::mm::RequestMmObjectInfo>
+impl dynamo_router_protocol::mm::RequestExtraInfo
+pub fn dynamo_router_protocol::mm::RequestExtraInfo::to_block_level(&self, usize, usize) -> alloc::vec::Vec<core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>>
+pub struct dynamo_router_protocol::mm::RequestMmObjectInfo
+pub dynamo_router_protocol::mm::RequestMmObjectInfo::mm_hash: u64
+pub dynamo_router_protocol::mm::RequestMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
+pub mod dynamo_router_protocol::residency
+pub enum dynamo_router_protocol::residency::ResetScope
+pub dynamo_router_protocol::residency::ResetScope::All
+pub dynamo_router_protocol::residency::ResetScope::Domain(dynamo_router_protocol::residency::ResidencyDomain)
+pub enum dynamo_router_protocol::residency::ResidencyDomain
+pub dynamo_router_protocol::residency::ResidencyDomain::CacheOwner
+pub dynamo_router_protocol::residency::ResidencyDomain::Worker
+pub enum dynamo_router_protocol::residency::ResidencyOwner
+pub dynamo_router_protocol::residency::ResidencyOwner::CacheOwner(dynamo_router_protocol::identity::CacheOwnerId)
+pub dynamo_router_protocol::residency::ResidencyOwner::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
+impl dynamo_router_protocol::residency::ResidencyOwner
+pub const fn dynamo_router_protocol::residency::ResidencyOwner::as_worker(self) -> core::option::Option<dynamo_router_protocol::worker::WorkerWithDpRank>
+pub const fn dynamo_router_protocol::residency::ResidencyOwner::cache_owner(dynamo_router_protocol::identity::CacheOwnerId) -> Self
+pub const fn dynamo_router_protocol::residency::ResidencyOwner::domain(self) -> dynamo_router_protocol::residency::ResidencyDomain
+pub const fn dynamo_router_protocol::residency::ResidencyOwner::worker(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub enum dynamo_router_protocol::residency::StorageTier
+pub dynamo_router_protocol::residency::StorageTier::Device
+pub dynamo_router_protocol::residency::StorageTier::Disk
+pub dynamo_router_protocol::residency::StorageTier::External
+pub dynamo_router_protocol::residency::StorageTier::HostPinned
+impl dynamo_router_protocol::residency::StorageTier
+pub fn dynamo_router_protocol::residency::StorageTier::from_kv_medium(&str) -> core::option::Option<Self>
+pub fn dynamo_router_protocol::residency::StorageTier::is_gpu(self) -> bool
+pub fn dynamo_router_protocol::residency::StorageTier::to_kv_medium(self) -> core::option::Option<&'static str>
+pub enum dynamo_router_protocol::residency::WireResidencyDomain
+pub dynamo_router_protocol::residency::WireResidencyDomain::Invalid
+pub dynamo_router_protocol::residency::WireResidencyDomain::Known(dynamo_router_protocol::residency::ResidencyDomain)
+pub dynamo_router_protocol::residency::WireResidencyDomain::Missing
+pub dynamo_router_protocol::residency::WireResidencyDomain::Unknown(alloc::boxed::Box<str>)
+impl dynamo_router_protocol::residency::WireResidencyDomain
+pub fn dynamo_router_protocol::residency::WireResidencyDomain::explicit(dynamo_router_protocol::residency::ResidencyDomain) -> Self
+pub fn dynamo_router_protocol::residency::WireResidencyDomain::is_missing(&self) -> bool
+pub fn dynamo_router_protocol::residency::WireResidencyDomain::parse(&self) -> core::result::Result<core::option::Option<dynamo_router_protocol::residency::ResidencyDomain>, dynamo_router_protocol::residency::UnsupportedResidencyDomain>
+impl serde_core::ser::Serialize for dynamo_router_protocol::residency::WireResidencyDomain
+pub fn dynamo_router_protocol::residency::WireResidencyDomain::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::residency::WireResidencyDomain
+pub fn dynamo_router_protocol::residency::WireResidencyDomain::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+pub struct dynamo_router_protocol::residency::ResidencyOwnerKey(_)
+impl dynamo_router_protocol::residency::ResidencyOwnerKey
+pub const fn dynamo_router_protocol::residency::ResidencyOwnerKey::digest(self) -> [u8; 16]
+pub const fn dynamo_router_protocol::residency::ResidencyOwnerKey::from_digest([u8; 16]) -> Self
+pub struct dynamo_router_protocol::residency::UnsupportedResidencyDomain
+pub mod dynamo_router_protocol::session
+pub enum dynamo_router_protocol::session::WorkerSelectionInputTrigger
+pub dynamo_router_protocol::session::WorkerSelectionInputTrigger::Other
+pub dynamo_router_protocol::session::WorkerSelectionInputTrigger::ToolResult
+pub dynamo_router_protocol::session::WorkerSelectionInputTrigger::UserMessage
+pub struct dynamo_router_protocol::session::SessionContext
+impl dynamo_router_protocol::session::SessionContext
+pub fn dynamo_router_protocol::session::SessionContext::agent_headers(&self) -> &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>
+pub fn dynamo_router_protocol::session::SessionContext::input_trigger(&self) -> core::option::Option<dynamo_router_protocol::session::WorkerSelectionInputTrigger>
+pub fn dynamo_router_protocol::session::SessionContext::new(alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<bool>, core::option::Option<dynamo_router_protocol::session::WorkerSelectionInputTrigger>) -> Self
+pub fn dynamo_router_protocol::session::SessionContext::parent_session_id(&self) -> core::option::Option<&str>
+pub fn dynamo_router_protocol::session::SessionContext::session_final(&self) -> core::option::Option<bool>
+pub fn dynamo_router_protocol::session::SessionContext::session_id(&self) -> &str
+pub fn dynamo_router_protocol::session::SessionContext::with_agent_headers(self, alloc::sync::Arc<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>>) -> Self
+pub mod dynamo_router_protocol::worker
+pub struct dynamo_router_protocol::worker::WorkerAffinityTarget
+pub dynamo_router_protocol::worker::WorkerAffinityTarget::dp_rank: core::option::Option<dynamo_router_protocol::worker::DpRank>
+pub dynamo_router_protocol::worker::WorkerAffinityTarget::worker_id: dynamo_router_protocol::worker::WorkerId
+impl dynamo_router_protocol::worker::WorkerAffinityTarget
+pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::new(dynamo_router_protocol::worker::WorkerId, core::option::Option<dynamo_router_protocol::worker::DpRank>) -> Self
+impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::worker::WorkerAffinityTarget
+pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub struct dynamo_router_protocol::worker::WorkerWithDpRank
+pub dynamo_router_protocol::worker::WorkerWithDpRank::dp_rank: dynamo_router_protocol::worker::DpRank
+pub dynamo_router_protocol::worker::WorkerWithDpRank::worker_id: dynamo_router_protocol::worker::WorkerId
+impl dynamo_router_protocol::worker::WorkerWithDpRank
+pub fn dynamo_router_protocol::worker::WorkerWithDpRank::from_worker_id(dynamo_router_protocol::worker::WorkerId) -> Self
+pub fn dynamo_router_protocol::worker::WorkerWithDpRank::new(dynamo_router_protocol::worker::WorkerId, dynamo_router_protocol::worker::DpRank) -> Self
+impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::kv_hints::KvTransferCandidateSource
+pub fn dynamo_router_protocol::kv_hints::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_router_protocol::worker::WorkerAffinityTarget
+pub fn dynamo_router_protocol::worker::WorkerAffinityTarget::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub type dynamo_router_protocol::worker::DpRank = u32
+pub type dynamo_router_protocol::worker::WorkerId = u64
+pub mod dynamo_router_protocol::worker_type
+pub enum dynamo_router_protocol::worker_type::WorkerType
+pub dynamo_router_protocol::worker_type::WorkerType::Aggregated
+pub dynamo_router_protocol::worker_type::WorkerType::Decode
+pub dynamo_router_protocol::worker_type::WorkerType::Encode
+pub dynamo_router_protocol::worker_type::WorkerType::Prefill
+impl dynamo_router_protocol::worker_type::WorkerType
+pub const fn dynamo_router_protocol::worker_type::WorkerType::as_str(&self) -> &'static str
+pub const fn dynamo_router_protocol::worker_type::WorkerType::default_selector_label(&self) -> &'static str
+impl core::fmt::Display for dynamo_router_protocol::worker_type::WorkerType
+pub fn dynamo_router_protocol::worker_type::WorkerType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::worker_type::WorkerType
+pub type dynamo_router_protocol::worker_type::WorkerType::Err = dynamo_router_protocol::worker_type::ParseWorkerTypeError
+pub fn dynamo_router_protocol::worker_type::WorkerType::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct dynamo_router_protocol::worker_type::ParseWorkerTypeError
+pub dynamo_router_protocol::worker_type::ParseWorkerTypeError::token: alloc::string::String
+impl core::error::Error for dynamo_router_protocol::worker_type::ParseWorkerTypeError
+impl core::fmt::Display for dynamo_router_protocol::worker_type::ParseWorkerTypeError
+pub fn dynamo_router_protocol::worker_type::ParseWorkerTypeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum dynamo_router_protocol::WorkerType
+pub dynamo_router_protocol::WorkerType::Aggregated
+pub dynamo_router_protocol::WorkerType::Decode
+pub dynamo_router_protocol::WorkerType::Encode
+pub dynamo_router_protocol::WorkerType::Prefill
+impl dynamo_router_protocol::worker_type::WorkerType
+pub const fn dynamo_router_protocol::worker_type::WorkerType::as_str(&self) -> &'static str
+pub const fn dynamo_router_protocol::worker_type::WorkerType::default_selector_label(&self) -> &'static str
+impl core::fmt::Display for dynamo_router_protocol::worker_type::WorkerType
+pub fn dynamo_router_protocol::worker_type::WorkerType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for dynamo_router_protocol::worker_type::WorkerType
+pub type dynamo_router_protocol::worker_type::WorkerType::Err = dynamo_router_protocol::worker_type::ParseWorkerTypeError
+pub fn dynamo_router_protocol::worker_type::WorkerType::from_str(&str) -> core::result::Result<Self, Self::Err>
