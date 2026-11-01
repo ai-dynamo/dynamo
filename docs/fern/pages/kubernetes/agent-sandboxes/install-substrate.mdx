@@ -5,11 +5,9 @@ title: Install Substrate
 subtitle: Prepare a Kubernetes cluster to run agent sandboxes with Agent Substrate.
 ---
 
-Install Agent Substrate's control plane, node runtime, and an in-cluster RustFS
-object store for snapshots. Object storage is required by this Substrate release,
-even when a workload does not use golden snapshots or suspend/resume.
-Workloads configure their own client identities, worker pools, and actor images
-after installation. This procedure does not require Harbor, Pi, or a model server.
+Install Agent Substrate's control plane and node runtime on Kubernetes, with an
+in-cluster RustFS object store for snapshots by default. When you finish, your
+cluster is ready for you to configure and run agent workloads.
 
 <Warning>
 This integration is experimental and uses Substrate `v1.0.0-rc.1`, commit
@@ -620,10 +618,8 @@ and repeat these checks.
 
 </Steps>
 
-For a coding-agent workload, continue with
+To configure and run a coding-agent workload, continue with
 [Run SWE-bench Verified with Harbor, Pi, and Substrate](../../use-cases/agents/harbor-substrate.mdx).
-That tutorial configures its runner identity, guest image, worker capacity, and
-request timeouts, then validates them with a task.
 
 ## Resolve low-port permission failures when needed
 
