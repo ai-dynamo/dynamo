@@ -549,9 +549,9 @@ mod tests {
     use crate::kv_router::indexer::{LowerTierIndexers, SideIndexer};
     use std::time::Duration;
 
+    use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
     use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, PruneConfig};
-    use dynamo_router_protocol::residency::StorageTier;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 

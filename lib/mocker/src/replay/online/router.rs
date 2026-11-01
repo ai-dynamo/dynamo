@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
@@ -18,7 +19,6 @@ use dynamo_kv_indexer::host::{
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
-use dynamo_router_protocol::residency::StorageTier;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::{
@@ -582,9 +582,9 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
     use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_router_protocol::residency::StorageTier;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::*;

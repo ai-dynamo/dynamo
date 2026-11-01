@@ -244,8 +244,8 @@ mod tests {
         KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
     use dynamo_kv_events::placement::Placement;
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
     use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier};
 
     use super::*;
 

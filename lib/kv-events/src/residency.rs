@@ -6,8 +6,8 @@
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::identity::CacheOwnerId;
-use crate::worker::WorkerWithDpRank;
+use dynamo_router_protocol::identity::CacheOwnerId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

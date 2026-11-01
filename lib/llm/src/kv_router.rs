@@ -2663,8 +2663,8 @@ mod tests {
     #[case::concurrent(2)]
     #[tokio::test]
     async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
+        use dynamo_kv_events::residency::StorageTier;
         use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
-        use dynamo_router_protocol::residency::StorageTier;
 
         let component = make_test_component("session-prefix-core").await;
         let endpoint = component.endpoint("backend");

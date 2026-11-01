@@ -14,6 +14,9 @@ use dynamo_kv_events::event::{
     KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
 use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_events::residency::StorageTier;
+#[cfg(test)]
+use dynamo_kv_events::residency::{ResetScope, ResidencyDomain};
 pub use dynamo_kv_events::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_events::zmq_wire::{
@@ -23,9 +26,6 @@ use dynamo_kv_events::zmq_wire::{
 use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
 #[cfg(test)]
 use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_router_protocol::residency::StorageTier;
-#[cfg(test)]
-use dynamo_router_protocol::residency::{ResetScope, ResidencyDomain};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};

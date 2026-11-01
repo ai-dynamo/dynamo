@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use dynamo_kv_events::residency::ResidencyOwnerKey;
 use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
-use dynamo_router_protocol::residency::ResidencyOwnerKey;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.

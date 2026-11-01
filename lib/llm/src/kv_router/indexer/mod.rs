@@ -269,9 +269,9 @@ pub(super) mod test_util {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
+    use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
     use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_router_protocol::residency::StorageTier;
 
     pub(crate) fn store_event(
         worker_id: u64,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_events::event::KvCacheEvent;
-use dynamo_router_protocol::residency::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;

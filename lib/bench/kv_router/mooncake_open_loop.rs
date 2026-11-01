@@ -10,12 +10,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::host::{
     KvIndexerInterface, LowerTierIndexers, LowerTierMatchDetails, ObservationError, SyncIndexer,
     ThreadPoolIndexer, ThreadPoolObservationPlan, query_lower_tiers_with_options,
 };
 use dynamo_router_protocol::block_hash::LocalBlockHash;
-use dynamo_router_protocol::residency::StorageTier;
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 

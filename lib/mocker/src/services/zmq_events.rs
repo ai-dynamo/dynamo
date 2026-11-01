@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
-use dynamo_router_protocol::residency::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 use futures::{Sink, SinkExt, StreamExt};
 use serde::Serialize;
 use tmq::{

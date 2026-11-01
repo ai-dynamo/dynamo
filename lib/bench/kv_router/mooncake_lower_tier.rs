@@ -19,6 +19,7 @@ use std::sync::Arc;
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
 };
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers,
     LowerTierQueryOptions, MatchDetails, ResidencyProjection, ResidencyRoutingSnapshot,
@@ -29,7 +30,6 @@ use dynamo_router_protocol::identity::{
     RoutingScopeId, StableDpSlotId,
 };
 use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-use dynamo_router_protocol::residency::StorageTier;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::Serialize;
 

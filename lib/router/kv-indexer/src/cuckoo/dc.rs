@@ -1465,9 +1465,9 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier, WireResidencyDomain};
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_router_protocol::block_hash::LocalBlockHash;
-    use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier, WireResidencyDomain};
 
     use super::*;
 

@@ -7,8 +7,8 @@ use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventT
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_router_protocol::residency::StorageTier;
 
 use crate::common::protocols::ForwardPassSnapshot;
 

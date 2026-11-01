@@ -1570,10 +1570,10 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
+    use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_router_protocol::residency::StorageTier;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
         PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,

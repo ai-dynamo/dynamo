@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_events::cursor::CursorState;
 use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_events::residency::ResetScope;
 use dynamo_kv_indexer::host::WorkerKvQueryResponse;
-use dynamo_router_protocol::residency::ResetScope;
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
 use tokio::sync::{Mutex, Semaphore, watch};
@@ -1141,6 +1141,7 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer,
     };
@@ -1149,7 +1150,6 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier};
     use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -2028,9 +2028,7 @@ mod tests {
         assert_eq!(retained.len(), 1);
         assert_eq!(
             retained[0].residency_domain,
-            dynamo_router_protocol::residency::WireResidencyDomain::explicit(
-                ResidencyDomain::CacheOwner
-            )
+            dynamo_kv_events::residency::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
         );
         assert_eq!(retained[0].state_source, Some(cache_owner_id()));
     }

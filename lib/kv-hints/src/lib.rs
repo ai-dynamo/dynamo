@@ -27,8 +27,8 @@
 //! and the attach point that puts the hint on the selected request stay in
 //! `dynamo-scheduler`.
 //!
-//! Among router crates this one depends on `dynamo-router-protocol` only; no tokio, no
-//! transport, no stage logic.
+//! Among router crates this one depends on `dynamo-router-protocol` and, for the residency
+//! owner key, `dynamo-kv-events`; no tokio, no transport, no stage logic.
 
 pub mod keys;
 pub mod transfer;

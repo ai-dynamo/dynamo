@@ -4,7 +4,7 @@
 use aisimulate_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_events::event::RouterEvent;
-use dynamo_router_protocol::residency::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 
 use crate::common::protocols::{MockerConfig, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;

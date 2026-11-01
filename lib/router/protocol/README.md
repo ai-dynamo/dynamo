@@ -23,7 +23,7 @@ Everything else belongs to the crate that produces it. When a second crate needs
 
 | Concept | Lives in |
 |---|---|
-| KV cache events, `RouterEvent` and its builders, the engine codec, the replay cursor, placement helpers | `dynamo-kv-events` |
+| KV cache events, `RouterEvent` and its builders, the engine codec, the replay cursor, placement helpers, the residency vocabulary (`StorageTier`, `ResidencyDomain`, `ResidencyOwner`, `ResidencyOwnerKey`, `ResetScope`, `WireResidencyDomain`) | `dynamo-kv-events` |
 | Block and sequence hashing, the tracking-hash context | `dynamo-kv-hashing` |
 | KV transfer hints (`KvHint`, the `KV_HINT_TRANSFER_*` keys, `KvTransferCandidateSource`), the transfer source choice, the worker transfer keys | `dynamo-kv-hints` |
 | The router request and response, routing constraints, config overrides, eligibility, the hook traits the kernel calls | `dynamo-scheduler` |

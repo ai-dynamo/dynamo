@@ -16,13 +16,13 @@ use std::{
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::{ResetScope, ResidencyDomain, StorageTier};
 use dynamo_kv_indexer::host::{
     KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, ResidencyProjection,
     ResidencyRoutingSnapshot, WorkerKvQueryResponse,
 };
 use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-use dynamo_router_protocol::residency::{ResetScope, ResidencyDomain, StorageTier};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::Component,
@@ -2403,6 +2403,7 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 #[cfg(test)]
 mod tests {
     use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hints::KvTransferCandidateSource;
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
@@ -2415,7 +2416,6 @@ mod tests {
         StableDpSlotId,
     };
     use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-    use dynamo_router_protocol::residency::ResidencyOwner;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::{collections::HashMap, sync::Arc};
 

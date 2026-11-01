@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use dynamo_router_protocol::residency::{ResidencyDomain, StorageTier};
+use crate::residency::{ResidencyDomain, StorageTier};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 
 use crate::event::{KvCacheEvent, RouterEvent};

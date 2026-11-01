@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::*;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
-use dynamo_router_protocol::residency::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 
 struct NoopKvSink;
 

@@ -20,6 +20,10 @@ pub use dynamo_kv_events::event::{
     KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
 pub use dynamo_kv_events::placement::{Placement, PlacementEvent, PlacementOwner};
+pub use dynamo_kv_events::residency::{
+    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
+    UnsupportedResidencyDomain, WireResidencyDomain,
+};
 pub use dynamo_kv_hashing::routing::{
     BlockHashOptions, MM_PAD_HASH_MASK, MM_PAD_SHIFT_VALUE, TokensWithHashes, XXH3_SEED,
     complete_block_count, compute_block_hash, compute_block_hash_for_seq,
@@ -36,10 +40,6 @@ pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlo
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 pub use dynamo_router_protocol::mm::{
     BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,
-};
-pub use dynamo_router_protocol::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
-    UnsupportedResidencyDomain, WireResidencyDomain,
 };
 pub use dynamo_router_protocol::worker::{
     ActiveLoad, DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,

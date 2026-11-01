@@ -33,6 +33,7 @@ use std::{
 use anyhow::{Context, Result};
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
 use dynamo_kv_events::zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer};
 use dynamo_kv_indexer::host::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
@@ -40,7 +41,6 @@ use dynamo_kv_indexer::host::{
 };
 use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
 use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-use dynamo_router_protocol::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},

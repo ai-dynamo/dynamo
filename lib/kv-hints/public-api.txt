@@ -47,7 +47,7 @@ impl dynamo_kv_hints::transfer::WorkerKvTransferKeys
 pub fn dynamo_kv_hints::transfer::WorkerKvTransferKeys::from_worker<'a>(u32, u32, impl core::ops::function::Fn(u32) -> core::option::Option<dynamo_kv_hints::keys::KvHintTransferWorkerMetadata<'a>>, core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<&str>, core::option::Option<dynamo_kv_hints::keys::KvTransferEnforcement>) -> Self
 pub mod dynamo_kv_hints::wire
 pub enum dynamo_kv_hints::wire::KvTransferCandidateSource
-pub dynamo_kv_hints::wire::KvTransferCandidateSource::CacheOwner(dynamo_router_protocol::residency::ResidencyOwnerKey)
+pub dynamo_kv_hints::wire::KvTransferCandidateSource::CacheOwner(dynamo_kv_events::residency::ResidencyOwnerKey)
 pub dynamo_kv_hints::wire::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
 impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_kv_hints::wire::KvTransferCandidateSource
 pub fn dynamo_kv_hints::wire::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
@@ -72,7 +72,7 @@ pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
 pub enum dynamo_kv_hints::KvTransferCandidateSource
-pub dynamo_kv_hints::KvTransferCandidateSource::CacheOwner(dynamo_router_protocol::residency::ResidencyOwnerKey)
+pub dynamo_kv_hints::KvTransferCandidateSource::CacheOwner(dynamo_kv_events::residency::ResidencyOwnerKey)
 pub dynamo_kv_hints::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
 impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_kv_hints::wire::KvTransferCandidateSource
 pub fn dynamo_kv_hints::wire::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self

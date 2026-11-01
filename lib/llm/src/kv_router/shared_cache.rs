@@ -31,11 +31,11 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     utils::zmq::{connect_sub_socket, multipart_message},
 };
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::host::{
     KvRouterError, SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
 };
 use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
-use dynamo_router_protocol::residency::StorageTier;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::SharedKvCache;
 use dynamo_worker_selection::host::SharedCacheHits;

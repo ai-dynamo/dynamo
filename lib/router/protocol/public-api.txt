@@ -172,48 +172,6 @@ pub fn dynamo_router_protocol::mm::RequestExtraInfo::to_block_level(&self, usize
 pub struct dynamo_router_protocol::mm::RequestMmObjectInfo
 pub dynamo_router_protocol::mm::RequestMmObjectInfo::mm_hash: u64
 pub dynamo_router_protocol::mm::RequestMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
-pub mod dynamo_router_protocol::residency
-pub enum dynamo_router_protocol::residency::ResetScope
-pub dynamo_router_protocol::residency::ResetScope::All
-pub dynamo_router_protocol::residency::ResetScope::Domain(dynamo_router_protocol::residency::ResidencyDomain)
-pub enum dynamo_router_protocol::residency::ResidencyDomain
-pub dynamo_router_protocol::residency::ResidencyDomain::CacheOwner
-pub dynamo_router_protocol::residency::ResidencyDomain::Worker
-pub enum dynamo_router_protocol::residency::ResidencyOwner
-pub dynamo_router_protocol::residency::ResidencyOwner::CacheOwner(dynamo_router_protocol::identity::CacheOwnerId)
-pub dynamo_router_protocol::residency::ResidencyOwner::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
-impl dynamo_router_protocol::residency::ResidencyOwner
-pub const fn dynamo_router_protocol::residency::ResidencyOwner::as_worker(self) -> core::option::Option<dynamo_router_protocol::worker::WorkerWithDpRank>
-pub const fn dynamo_router_protocol::residency::ResidencyOwner::cache_owner(dynamo_router_protocol::identity::CacheOwnerId) -> Self
-pub const fn dynamo_router_protocol::residency::ResidencyOwner::domain(self) -> dynamo_router_protocol::residency::ResidencyDomain
-pub const fn dynamo_router_protocol::residency::ResidencyOwner::worker(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
-pub enum dynamo_router_protocol::residency::StorageTier
-pub dynamo_router_protocol::residency::StorageTier::Device
-pub dynamo_router_protocol::residency::StorageTier::Disk
-pub dynamo_router_protocol::residency::StorageTier::External
-pub dynamo_router_protocol::residency::StorageTier::HostPinned
-impl dynamo_router_protocol::residency::StorageTier
-pub fn dynamo_router_protocol::residency::StorageTier::from_kv_medium(&str) -> core::option::Option<Self>
-pub fn dynamo_router_protocol::residency::StorageTier::is_gpu(self) -> bool
-pub fn dynamo_router_protocol::residency::StorageTier::to_kv_medium(self) -> core::option::Option<&'static str>
-pub enum dynamo_router_protocol::residency::WireResidencyDomain
-pub dynamo_router_protocol::residency::WireResidencyDomain::Invalid
-pub dynamo_router_protocol::residency::WireResidencyDomain::Known(dynamo_router_protocol::residency::ResidencyDomain)
-pub dynamo_router_protocol::residency::WireResidencyDomain::Missing
-pub dynamo_router_protocol::residency::WireResidencyDomain::Unknown(alloc::boxed::Box<str>)
-impl dynamo_router_protocol::residency::WireResidencyDomain
-pub fn dynamo_router_protocol::residency::WireResidencyDomain::explicit(dynamo_router_protocol::residency::ResidencyDomain) -> Self
-pub fn dynamo_router_protocol::residency::WireResidencyDomain::is_missing(&self) -> bool
-pub fn dynamo_router_protocol::residency::WireResidencyDomain::parse(&self) -> core::result::Result<core::option::Option<dynamo_router_protocol::residency::ResidencyDomain>, dynamo_router_protocol::residency::UnsupportedResidencyDomain>
-impl serde_core::ser::Serialize for dynamo_router_protocol::residency::WireResidencyDomain
-pub fn dynamo_router_protocol::residency::WireResidencyDomain::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::residency::WireResidencyDomain
-pub fn dynamo_router_protocol::residency::WireResidencyDomain::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
-pub struct dynamo_router_protocol::residency::ResidencyOwnerKey(_)
-impl dynamo_router_protocol::residency::ResidencyOwnerKey
-pub const fn dynamo_router_protocol::residency::ResidencyOwnerKey::digest(self) -> [u8; 16]
-pub const fn dynamo_router_protocol::residency::ResidencyOwnerKey::from_digest([u8; 16]) -> Self
-pub struct dynamo_router_protocol::residency::UnsupportedResidencyDomain
 pub mod dynamo_router_protocol::session
 pub enum dynamo_router_protocol::session::WorkerSelectionInputTrigger
 pub dynamo_router_protocol::session::WorkerSelectionInputTrigger::Other

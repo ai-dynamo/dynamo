@@ -7,7 +7,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use dynamo_kv_events::event::KvCacheEvent;
-use dynamo_router_protocol::residency::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_tokens::Token;
 
 pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};

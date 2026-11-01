@@ -14,7 +14,7 @@ use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
 use crate::placement::PlacementEvent;
-use dynamo_router_protocol::residency::StorageTier;
+use crate::residency::StorageTier;
 use dynamo_router_protocol::worker::{DpRank, WorkerWithDpRank};
 
 mod convert;

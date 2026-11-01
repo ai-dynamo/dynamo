@@ -7,7 +7,7 @@ use dynamo_kv_events::cursor::{CursorObservation, CursorState};
 #[cfg(test)]
 use dynamo_kv_events::event::KvCacheEventData;
 use dynamo_kv_events::event::RouterEvent;
-use dynamo_router_protocol::residency::ResetScope;
+use dynamo_kv_events::residency::ResetScope;
 use dynamo_router_protocol::worker::{DpRank, WorkerId};
 
 pub(super) type RecoveryKey = (WorkerId, DpRank);

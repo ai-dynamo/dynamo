@@ -109,8 +109,8 @@ impl MaybeError for IndexerRecordRoutingDecisionReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_events::residency::ResetScope;
     use dynamo_kv_indexer::host::WireTieredMatchDetails;
-    use dynamo_router_protocol::residency::ResetScope;
 
     #[test]
     fn worker_kv_query_reply_is_wire_transparent() {
