@@ -55,6 +55,7 @@ TABLE=(
   "dynamo-worker-selection | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait crossbeam-queue dynamo-router-protocol fastrand parking_lot rustc-hash serde serde_json thiserror tracing | -"
   "dynamo-admission | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-zmq axum hyper reqwest zmq prometheus | async-trait dynamo-router-protocol dynamo-tokens futures-util ordered-float parking_lot rustc-hash serde serde_json thiserror tokio tokio-util tracing | -"
   "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | anyhow arc-swap async-trait blake3 crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection fastrand futures-util http once_cell ordered-float parking_lot rmp-serde rustc-hash serde serde_json thiserror tokio tokio-util tracing uuid zeroize | -"
+  "dynamo-error | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-tokens tokio anyhow thiserror tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json | -"
   "dynamo-kv-hashing | dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-router-protocol dynamo-tokens serde serde_json thiserror xxhash-rust | -"
 )
 
@@ -293,7 +294,7 @@ fi
 # README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate's
 # deprecated shims are glob re-exports by design until their removal release.
 # ---------------------------------------------------------------------------
-ROUTER_CRATE_DIRS="lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/zmq"
+ROUTER_CRATE_DIRS="lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/zmq"
 GLOB_EXEMPT_DIRS="lib/kv-router"
 for d in $ROUTER_CRATE_DIRS; do [ -d "$d/src" ] || die "$d/src does not exist"; done
 mapfile -t src_files < <(for d in $ROUTER_CRATE_DIRS; do find "$d/src" -type f -name '*.rs'; done | sort)
