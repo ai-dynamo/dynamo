@@ -75,8 +75,9 @@ chain and hostname.
 
 ## Add capture to the recipe frontend
 
-Set `DEPLOYMENT_YAML` to the manifest selected from the model recipe. Save its
-current contents for cleanup, then edit the original file in place:
+Set `DEPLOYMENT_YAML` to the manifest you apply for the model recipe. Use an
+absolute path because commands here run from `examples/agents/harbor-substrate`.
+Save the current rendered manifest before adding capture:
 
 ```bash
 export DEPLOYMENT_YAML=/path/to/your/model-deployment.yaml
@@ -84,8 +85,17 @@ mkdir -p .build
 cp "$DEPLOYMENT_YAML" .build/frontend-before.yaml
 ```
 
-Edit the file named by `DEPLOYMENT_YAML`. In the `Frontend` entry under `spec.components`,
-merge the following fields into `podTemplate.spec`. Append to the existing
+Choose where to edit according to the recipe:
+
+- **Plain manifest:** edit the file named by `DEPLOYMENT_YAML` in place.
+- **Kustomize:** edit the source DGD or your cluster overlay, then rerun the
+  recipe's render command from the repository root to regenerate
+  `DEPLOYMENT_YAML`. Return with `cd examples/agents/harbor-substrate` before
+  continuing here. Editing only a generated `/tmp` manifest loses capture on
+  the next render. Keep a copy of any source files you change for cleanup.
+
+In the `Frontend` entry under `spec.components`, merge the following fields
+into `podTemplate.spec`. Append to the existing
 `main` container's `env` and `volumeMounts` lists, add the sidecar to
 `containers`, and add the volumes. Preserve the recipe's images, arguments,
 other environment variables, worker components, and accompanying resources.
@@ -147,7 +157,8 @@ port 20390. It installs stunnel from Alpine repositories at startup. Use a
 prebuilt approved image if Pod egress does not permit that.
 
 If the frontend already has trace settings or these volume names, merge the
-configuration without duplicate entries. Inspect the diff, then apply it:
+configuration without duplicate entries. For Kustomize, regenerate the manifest
+first. Inspect the rendered diff, then apply it:
 
 ```bash
 diff -u .build/frontend-before.yaml "$DEPLOYMENT_YAML"
@@ -195,8 +206,7 @@ adapter starts stunnel, and the provider publishes tool events to its loopback
 listener. These settings require the Dynamo frontend capture configured above.
 Omit them when using an external endpoint.
 
-Copy the policy and public client files to the runner, then return to the
-tutorial to upload the edited job:
+Copy the policy and public client files to the runner:
 
 ```bash
 kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
@@ -205,12 +215,18 @@ kubectl -n ate-env cp .trace/public/tls.crt harbor-runner:/work/tool-trace/tls.c
 kubectl -n ate-env cp stunnel-client.conf harbor-runner:/work/tool-trace/stunnel-client.conf
 ```
 
-Run one trial and confirm that Pi's `toolCallId` values appear in native tool
+## Setup complete
+
+Return to [the tutorial's capture step](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx#optionally-capture-traces-and-sandbox-metrics)
+to set a new job name, upload the edited job, and run one trial. Continue with
+the export procedure below only after that trial finishes.
+
+## Export the completed capture
+
+For the completed trial, confirm that Pi's `toolCallId` values appear in native tool
 records alongside model requests with the same session ID. Missing tool events
 mean the transport is incomplete even if inference succeeds. Check the client,
 sidecar, and frontend logs before starting a batch.
-
-## Export the completed capture
 
 After the job finishes, wait for the frontend's trace writer to flush. Find the
 frontend Pod using your deployment's labels, then copy its trace directory:

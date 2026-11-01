@@ -9,10 +9,11 @@ Install Agent Substrate's control plane, node runtime, and snapshot storage.
 Workloads configure their own client identities, worker pools, and actor images
 after installation. This procedure does not require Harbor, Pi, or a model server.
 
-> [!WARNING]
-> This integration is experimental and uses Substrate `v1.0.0-rc.1`, commit
-> `f86fde9dfb5424c8d16f613de80469bdbef06541`. The S3 instructions below work
-> around limitations in that release's installer.
+<Warning>
+This integration is experimental and uses Substrate `v1.0.0-rc.1`, commit
+`f86fde9dfb5424c8d16f613de80469bdbef06541`. The S3 instructions below work
+around limitations in that release's installer.
+</Warning>
 
 ## Prerequisites
 
@@ -27,7 +28,9 @@ after installation. This procedure does not require Harbor, Pi, or a model serve
 Run commands from a working directory of your choice. Paths are relative to
 that directory. Keep the installer configuration for future updates.
 
-## Check cluster capabilities
+<Steps toc={true}>
+
+<Step title="Check cluster capabilities" id="check-cluster-capabilities">
 
 Check that Kubernetes serves both native certificate APIs:
 
@@ -45,7 +48,9 @@ The node architecture, sandbox runtime build, and workload image architecture
 must match. Every node eligible for sandbox placement needs `atelet` and the
 assets required by its sandbox runtime.
 
-## Build the installation tools
+</Step>
+
+<Step title="Build the installation tools" id="build-the-installation-tools">
 
 Build the tools from the same release as the control-plane images:
 
@@ -61,12 +66,25 @@ Keep this `bin` directory on `PATH` in shells where you manage Substrate or run
 its tutorials. `ate-setup` installs the platform; `kubectl-ate` manages its API
 objects.
 
-## Configure the installation
+</Step>
 
-Create `substrate-install.yaml` using the pinned upstream
-[operator installation guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md).
-That guide owns the database, storage, runtime asset, certificate issuance, and
-platform-specific settings. Set these fields in your installation document:
+<Step title="Configure the installation" id="configure-the-installation">
+
+Create `substrate-install.yaml` in your chosen working directory. The pinned
+[operator installation reference](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md)
+describes configuration keys; use the following checklist to prepare the
+services and node assets before deployment:
+
+| Requirement | Preparation and verification |
+| --- | --- |
+| PostgreSQL | Follow [PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md) for the database, schema, roles, and connection settings. Ensure the cluster can reach it. |
+| Snapshot storage | Create a bucket and configure access using [snapshot storage settings](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/operator-install.md#snapshot-storage); use the S3 workaround below when applicable. |
+| Runtime assets | Check [sandbox asset caching](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/concepts/sandbox-asset-cache.md) for the selected runtime's binaries, versions, and node cache. Ensure eligible nodes can obtain matching assets. |
+| Certificates | Complete the API/projection checks above and the [authentication setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authentication.md). Verify projected files after deployment. |
+| Administrative access | Configure a global owner using the [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md). This identity creates workload atespaces later. |
+| Egress credential injection | Explicitly disable injection or configure a provider as described below. The installer rejects an omitted choice. |
+
+Set these release fields in your installation document:
 
 ```yaml
 apiVersion: install.ate.dev/v1alpha1
@@ -81,6 +99,20 @@ This fragment selects the release; it is not a complete installation document.
 Supply database credentials through the upstream installer's supported secret
 settings. Configure your administrative identity using Substrate's
 [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md).
+
+If workloads supply their own endpoint credentials, disable gateway credential
+injection explicitly:
+
+```yaml
+atenet:
+  egress:
+    credentialProvider: '{"enabled":false}'
+```
+
+For gateway-managed credentials, configure a provider using
+[egress credential injection](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-credential-injection.md)
+instead. The Harbor tutorial passes an API key through the agent environment
+and does not require gateway injection.
 
 The router's `ingressAllowedSPIFFEIDs` setting controls which clients can
 reach actors. It has no default: without an allowlist, the platform accepts no
@@ -116,14 +148,21 @@ works, including the small in-cluster RustFS from
 upstream's `manifests/ate-install/kind/rustfs.yaml`. Create the bucket before
 the first actor.
 
-## Deploy the control plane
+</Step>
+
+<Step title="Deploy the control plane" id="deploy-the-control-plane">
 
 Pass the current Kubernetes context explicitly so the installer uses your
-existing cluster credentials:
+existing cluster credentials. Run the installer inside its source checkout:
+it locates deployment assets relative to that repository. The subshell returns
+you to your chosen working directory afterward:
 
 ```bash
-ate-setup deploy ate-system --context "$(kubectl config current-context)" \
-  --config substrate-install.yaml
+(
+  cd deps/substrate
+  ate-setup deploy ate-system --context "$(kubectl config current-context)" \
+    --config ../../substrate-install.yaml
+)
 ```
 
 Omit or adapt optional Google `PodMonitoring` resources on clusters without
@@ -163,7 +202,42 @@ Replace the endpoint and region with your store's values. Running
 `ate-setup deploy` again rewrites both workloads, so reapply the patch after
 each deploy.
 
+</Step>
+
+<Step title="Verify the installation" id="verify-the-installation">
+
+Wait for the control plane and node runtime:
+
+```bash
+kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
+kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
+kubectl -n ate-system rollout status deployment/ate-controller --timeout=600s
+kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
+kubectl -n ate-system get pods -o wide
+kubectl get clustertrustbundles
+```
+
+Check that `atelet` is ready on every node intended for sandbox placement and
+that the admitted Pods retain their certificate projections and receive their
+credential files. Readiness alone does not verify a workload's client
+permissions, guest image, or durable snapshot restoration; check those when
+configuring the workload.
+
+If a Pod reports a port-443 permission error, use the conditional fix below
+and repeat these checks.
+
+</Step>
+
+</Steps>
+
+For a coding-agent workload, continue with
+[Run SWE-bench Verified with Harbor, Pi, and Substrate](../../use-cases/agents/harbor-substrate.mdx).
+That tutorial configures its runner identity, guest image, worker capacity, and
+request timeouts, then validates them with a task.
+
 ## Resolve low-port permission failures when needed
+
+<Accordion title="Fix a port-443 permission error">
 
 If a Substrate API or worker Pod cannot bind port 443, the installation may
 need a Pod-local sysctl:
@@ -184,26 +258,4 @@ patch to its generated Deployment is necessary, record it and reapply after
 recreation. The generated deployment has the same name as its WorkerPool.
 This is a Pod setting, not a host sysctl change.
 
-## Verify the installation
-
-Wait for the control plane and node runtime:
-
-```bash
-kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
-kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
-kubectl -n ate-system rollout status deployment/ate-controller --timeout=600s
-kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
-kubectl -n ate-system get pods -o wide
-kubectl get clustertrustbundles
-```
-
-Check that `atelet` is ready on every node intended for sandbox placement and
-that the admitted Pods retain their certificate projections and receive their
-credential files. Readiness alone does not verify a workload's client
-permissions, guest image, or durable snapshot restoration; check those when
-configuring the workload.
-
-For a coding-agent workload, continue with
-[Run SWE-bench Verified with Harbor, Pi, and Substrate](../../use-cases/agents/harbor-substrate.mdx).
-That tutorial configures its runner identity, guest image, worker capacity, and
-request timeouts, then validates them with a task.
+</Accordion>

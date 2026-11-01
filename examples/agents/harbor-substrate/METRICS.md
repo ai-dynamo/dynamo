@@ -10,7 +10,7 @@ labels, changes no worker capacity, and enables no suspension policy.
 
 ## Prerequisites
 
-- Complete [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.md).
+- Complete [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.mdx).
 - Install Prometheus Operator and Grafana. This example uses the
   `kube-prometheus-stack` release in namespace `monitoring`.
 - Run commands from this directory with the intended Kubernetes context selected.
@@ -102,6 +102,11 @@ kubectl -n monitoring create configmap \
   --from-file=substrate-native-metrics.json=substrate-dashboard.json \
   --dry-run=client -o yaml | kubectl label --local -f - \
   grafana_dashboard=1 -o yaml | kubectl apply -f -
+```
+
+In a separate terminal, keep the Grafana port-forward running:
+
+```bash
 kubectl -n monitoring port-forward \
   service/kube-prometheus-stack-grafana 3007:80
 ```
@@ -110,10 +115,15 @@ Open `http://localhost:3007/d/substrate-native-metrics`. The dashboard contains
 22 panels for collection health, worker state, lifecycle operations, scheduling,
 routing, resource usage, image-cache lookups, checkpoints, restores, and parking.
 
+## Setup complete
+
+Once scrape targets are healthy, services emit metrics, and the dashboard is
+available, return to [the tutorial's capture step](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx#optionally-capture-traces-and-sandbox-metrics).
+Run one trial there with a new job name, then use the checks below.
+
 ## Validate with one task
 
-Run one prepared-image Harbor trial using the existing model endpoint and
-concurrency one. Select its time range in Grafana. Expect:
+For the completed one-trial run, select its time range in Grafana. Expect:
 
 1. A worker changes from idle to partial or at capacity during execution.
 2. Lifecycle metrics record create/resume, followed by cleanup operations.

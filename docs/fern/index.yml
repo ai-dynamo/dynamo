@@ -142,7 +142,7 @@ navigation:
         collapsed: true
         contents:
           - page: Install Substrate
-            path: pages/kubernetes/agent-sandboxes/install-substrate.md
+            path: pages/kubernetes/agent-sandboxes/install-substrate.mdx
 
       # ==================== Usage ====================
       - section: Model Deployment

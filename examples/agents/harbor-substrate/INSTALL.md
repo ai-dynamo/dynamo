@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 
 Platform installation is documented in
-[Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.md)
+[Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.mdx)
 under **Kubernetes Guide → Agent Sandboxes**.
 
 After installation, follow

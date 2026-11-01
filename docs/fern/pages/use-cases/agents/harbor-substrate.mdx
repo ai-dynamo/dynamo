@@ -54,7 +54,7 @@ finishes.
 Prepare these resources:
 
 - A local clone of the Dynamo repository.
-- A Kubernetes cluster with [Substrate installed](../../kubernetes/agent-sandboxes/install-substrate.md)
+- A Kubernetes cluster with [Substrate installed](../../kubernetes/agent-sandboxes/install-substrate.mdx)
   and the pinned `kubectl-ate` CLI on `PATH`. Administrative access is needed
   to create the tutorial's atespace and authorize its runner.
 - Linux `amd64` CPU nodes compatible with the pinned gVisor runtime and the
@@ -76,18 +76,64 @@ From the root of your Dynamo clone, enter the example directory. Run workstation
 commands here unless a step identifies the runner shell. Edit the supplied
 configuration files in place as you follow the tutorial.
 
-```bash
+```bash title="Workstation"
 cd examples/agents/harbor-substrate
 ```
 
 The commands use your current Kubernetes context. The configuration lives
 in the YAML files below. Keep API keys out of those files.
 
-## Choose an inference endpoint
+| File | Consumer | What you configure |
+| --- | --- | --- |
+| `workerpool.yaml` | Kubernetes: `kubectl apply` | CPU worker placement and capacity |
+| `harbor-runner.yaml` | Kubernetes: `kubectl apply` | Harbor runner Pod, ServiceAccount, and credentials |
+| `runner-access-policy.yaml` | Substrate: `kubectl-ate` | Runner permissions within the atespace |
+| `actor-template.yaml` | Substrate: `kubectl-ate` | Task image, guest executable, actor resources, and placement |
+| `egress.yaml` | Environment adapter | Hosts and ports each actor may reach |
+| `harbor-job.yaml` | Harbor: `harbor run` | Model, tasks, template mapping, and concurrency |
+
+Complete the numbered steps to save your first trial's results. Tracing,
+sandbox metrics, golden snapshots, and batch runs follow as optional extensions.
+
+<Steps toc={true}>
+
+<Step title="Verify Substrate" id="verify-substrate">
+
+Confirm that the installed platform is ready:
+
+```bash title="Workstation"
+kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
+kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
+kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
+kubectl -n ate-system get pods -o wide
+```
+
+`atelet` must be ready on each node eligible for sandbox placement. If these
+checks fail, return to [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx).
+
+</Step>
+
+<Step title="Choose an inference endpoint" id="choose-an-inference-endpoint">
+
+Edit `harbor-job.yaml` and `egress.yaml` together. The URL selects where Pi
+sends requests; the egress policy decides whether the actor may reach it.
+Choose one of the following paths:
+
+<Tabs>
+<Tab title="Serve with Dynamo">
 
 For self-hosted inference, use the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx).
-Select the recipe for your hardware and complete its smoke test. In
-`harbor-job.yaml`, edit `agents[0].model_name` to match the exact served model ID,
+Follow the recipe from the root of your Dynamo clone and complete its smoke
+test. Record the served model ID, frontend Service name, and namespace. Then
+return to this tutorial's directory from the repository root:
+
+```bash title="Workstation"
+cd examples/agents/harbor-substrate
+```
+
+The recipe's `localhost` port-forward address tests access from your workstation.
+For Pi, use the frontend's Service DNS name or another address reachable from
+the actor. In `harbor-job.yaml`, edit `agents[0].model_name` to match the exact served model ID,
 keeping the `dynamo/` provider prefix. Set `agents[0].env.DYNAMO_BASE_URL` to the
 frontend URL reachable from the sandbox, including `/v1`. The supplied values
 are:
@@ -101,8 +147,24 @@ env:
   DYN_AGENT_SESSION_FINAL: "1"
 ```
 
-Keep `DYN_AGENT_SESSION_FINAL: "1"` for Dynamo. This tutorial adds tracing to
-the frontend later; it does not change the recipe's engine or GPU configuration.
+Keep `DYN_AGENT_SESSION_FINAL: "1"` for Dynamo. Optional tracing later adds
+capture to this frontend without changing its engine or GPU configuration.
+
+In `egress.yaml`, match the hostname and port of that URL. The supplied rule is:
+
+```yaml
+rules:
+  - http:
+      hostnames: ["model-frontend.inference.svc.cluster.local"]
+      ports:
+        numbers: [8000]
+```
+
+Use only the hostname, without a scheme or path. For a Dynamo frontend served
+over HTTPS, use `tlsPassthrough` and its HTTPS port instead.
+
+</Tab>
+<Tab title="Use an external endpoint">
 
 For an external service, change `DYN_AGENT_SESSION_FINAL` to `"0"`, use its
 HTTPS base URL including the API prefix, and set `model_name` to
@@ -114,6 +176,29 @@ cluster. The pinned provider requires:
   `max_tokens`, and streaming usage support.
 - A model context window and output limit that you can configure explicitly.
 
+In `egress.yaml`, replace the example HTTP rule with a TLS rule for your API's
+hostname and port:
+
+```yaml
+rules:
+  - tlsPassthrough:
+      hostnames: ["api.example.com"]
+      ports:
+        numbers: [443]
+```
+
+Replace `api.example.com` with the hostname from your base URL, without a scheme
+or path. Supply the API key when preparing the runner below. An
+OpenAI-compatible label alone is not a compatibility check; the first Pi trial
+must exercise tool calls and continuation against your selected endpoint.
+
+External jobs disable Dynamo's session-final control requests. Harbor results
+and Substrate metrics remain available. Dynamo's server-side inference traces
+require a Dynamo endpoint you control.
+
+</Tab>
+</Tabs>
+
 `DYNAMO_MAX_TOKENS: "8192"` caps each response at 8,192 tokens. Leave
 `DYNAMO_CONTEXT_WINDOW` empty for an endpoint that advertises its limit.
 Dynamo lists the engine's serving limit as `context_window` in `GET /v1/models`,
@@ -121,33 +206,19 @@ and the provider patch reads it. To override that value, set
 `DYNAMO_CONTEXT_WINDOW` to a quoted token count. The provider uses the explicit
 value first, then the advertised value, then a default of 128,000 tokens.
 A provider with a different protocol needs its own Pi provider configuration.
-An OpenAI-compatible label alone is not a compatibility check.
+Before continuing, check that the job's model ID and base URL describe the
+selected endpoint and that the policy allows its hostname and port. Use port
+80 for HTTP or 443 for HTTPS when the URL does not specify a port.
 
-External jobs disable Dynamo's session-final control requests. Harbor
-results and Substrate metrics remain available. Dynamo's server-side
-inference traces require a Dynamo endpoint you control.
+</Step>
 
-## Verify Substrate
-
-Confirm that the installed platform is ready:
-
-```bash
-kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
-kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
-kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
-kubectl -n ate-system get pods -o wide
-```
-
-`atelet` must be ready on each node eligible for sandbox placement. If these
-checks fail, return to [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.md).
-
-## Create the namespace, atespace, and access policy
+<Step title="Create the namespace, atespace, and access policy" id="create-the-namespace-atespace-and-access-policy">
 
 A Kubernetes namespace and a Substrate atespace are separate objects. This
 tutorial uses `ate-env` for both. Run the Substrate commands as an administrator
 with global ownership; an atespace-scoped owner cannot create an atespace:
 
-```bash
+```bash title="Workstation"
 kubectl create namespace ate-env
 kubectl-ate create atespace ate-env
 kubectl-ate create access-policy \
@@ -161,11 +232,12 @@ Pod in the tutorial. If these objects already exist, inspect and reuse them.
 For an existing access policy, preserve its current bindings and update with
 its `uid` and `version`.
 
-Two identities, one ServiceAccount: `kubectl-ate` sends the projected token,
-whose principal is `user:system:serviceaccount:ate-env:harbor-runner`. The
-adapter's guest calls present the projected pod certificate, whose SPIFFE ID is
-the one in `ingressAllowedSPIFFEIDs`. The access policy covers the first. The
-router allowlist covers the second.
+The same ServiceAccount supplies two credentials for different operations:
+
+| Operation | Credential | Authorization control |
+| --- | --- | --- |
+| Create/delete actors and list templates | Projected token; principal `user:system:serviceaccount:ate-env:harbor-runner` | Atespace access policy (`runner-access-policy.yaml`) |
+| Execute guest commands and transfer files | Projected pod certificate with the runner's SPIFFE ID | Router `ingressAllowedSPIFFEIDs` allowlist |
 
 ### Authorize the runner at the router
 
@@ -175,7 +247,7 @@ In the `atenet-router` Deployment's container arguments, append
 differs from `cluster.local`, and preserve existing identities. If the argument
 is absent, add it with this identity as its value:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-system edit deployment atenet-router
 kubectl -n ate-system rollout status deployment/atenet-router --timeout=300s
 ```
@@ -197,7 +269,7 @@ The rc1 router defaults to a five-minute route timeout, which also bounds guest
 process-output streams. In the `atenet-router` container's deployment arguments,
 set `--route-timeout=60m` for the unmodified 3,000-second task deadlines:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-system edit deployment atenet-router
 kubectl -n ate-system rollout status \
   deployment/atenet-router --timeout=300s
@@ -210,7 +282,7 @@ actors to free capacity.
 
 Check the router arguments before creating actors:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-system get deployment atenet-router \
   -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ' ' '\n' \
   | grep -E 'ingress-allowed-spiffe-ids|route-timeout'
@@ -220,7 +292,9 @@ The allowlist must include `spiffe://cluster.local/ns/ate-env/sa/harbor-runner`,
 and the route timeout must be `60m`. Keep that timeout in the installation's
 managed router configuration when updating Substrate.
 
-## Build the guest image
+</Step>
+
+<Step title="Build the guest image" id="build-the-guest-image">
 
 `ate-env-guest` is the daemon that runs commands and moves files inside an
 actor. It comes from the env repository and does not depend on the Substrate Go
@@ -228,7 +302,7 @@ module, so it builds from the pinned commit without changes. Replace
 `registry.example.com/harbor-substrate` in the build command with your image
 repository:
 
-```bash
+```bash title="Workstation"
 git clone https://github.com/agent-substrate/env deps/env
 git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
 (
@@ -245,12 +319,14 @@ so the task image stays untouched. Configure image-pull credentials separately
 if the registry is private. The same checkout supplies the Python client the
 runner installs later; the adapter uses its generated gRPC stubs for the guest.
 
-## Create sandbox capacity
+</Step>
+
+<Step title="Create sandbox capacity" id="create-sandbox-capacity">
 
 In `workerpool.yaml`, replace `spec.template.nodeSelector.kubernetes.io/hostname`
 with an `amd64` node that runs `atelet`. Check the node's architecture first:
 
-```bash
+```bash title="Workstation"
 kubectl get node your-amd64-sandbox-node \
   -o jsonpath='{.metadata.labels.kubernetes\.io/arch}{"\n"}'
 ```
@@ -276,7 +352,7 @@ spec:
 
 Keep the initial replica count and resources, then apply the edited file:
 
-```bash
+```bash title="Workstation"
 kubectl apply -f workerpool.yaml
 kubectl -n ate-env rollout status \
   deployment/harbor-workers --timeout=600s
@@ -293,14 +369,16 @@ intended workers. To add nodes, first ensure that `atelet` and runtime assets
 are present there, then adjust placement and replica count. To fit more actors
 per worker, increase worker capacity while preserving per-actor limits.
 
-The [installation guide](../../kubernetes/agent-sandboxes/install-substrate.md#resolve-low-port-permission-failures-when-needed)
+The [installation guide](../../kubernetes/agent-sandboxes/install-substrate.mdx#resolve-low-port-permission-failures-when-needed)
 includes the conditional low-port permission fix for platforms that need it.
 
-## Prepare Pi and the task image
+</Step>
+
+<Step title="Prepare Pi and the task image" id="prepare-pi-and-the-task-image">
 
 Fetch the pinned Pi integration and task dataset:
 
-```bash
+```bash title="Workstation"
 git clone https://github.com/ai-dynamo/agent-plugins deps/agent-plugins
 git -C deps/agent-plugins checkout 223a0b8823610d042e7479bfff9b93eeac4a23ec
 for patch in pi-provider-limits pi-harbor-adapter; do
@@ -317,14 +395,15 @@ detects the prepared runtime, starts the optional TLS tool-event transport, and
 otherwise falls back to the upstream installation, which needs registry egress.
 The image contains Pi 0.72.1 and its compiled provider. It also holds the
 repository's build requirements as wheels and the grader's packages in the uv
-cache, so neither the agent nor the verifier needs registry access. Those two
-steps read the repository's `pyproject.toml`, so they work for other tasks
-without changes.
+cache for this task. The wheel step reads `build-system.requires` from the
+repository's `pyproject.toml`; the grader-cache step uses the versions pinned
+in `Dockerfile.pi`. Other tasks may need different dependencies or environment
+setup. Validate every prepared image with its own offline oracle trial.
 
 Build the first task image. Replace `registry.example.com/harbor-substrate`
 in both commands with a repository you can push to and the workers can pull from:
 
-```bash
+```bash title="Workstation"
 mkdir -p .build/image
 cp -a deps/agent-plugins/pi-plugin .build/image/pi-plugin
 docker build --platform linux/amd64 -f Dockerfile.pi \
@@ -343,14 +422,16 @@ Do not reuse one task's repository image for another task. Keep endpoint
 credentials, task instructions, candidate changes, and session state outside
 the prepared image. Build time and the first image pull are preparation costs.
 
-## Prepare the Harbor runner
+</Step>
+
+<Step title="Prepare the Harbor runner" id="prepare-the-harbor-runner">
 
 For an authenticated endpoint, provide the key as `DYNAMO_API_KEY`, the name
 used by the current Dynamo Pi adapter. The optional Secret reference in
 `harbor-runner.yaml` supplies that environment variable. Create the Secret
 before starting the runner:
 
-```bash
+```bash title="Workstation"
 read -rsp 'Model API key: ' MODEL_API_KEY
 printf '\n'
 printf '%s' "$MODEL_API_KEY" | kubectl -n ate-env \
@@ -367,7 +448,7 @@ the run and treat captured logs as potentially credential-bearing.
 
 Start the runner and install its pinned dependencies:
 
-```bash
+```bash title="Workstation"
 kubectl apply -f harbor-runner.yaml
 kubectl -n ate-env wait --for=condition=Ready \
   pod/harbor-runner --timeout=300s
@@ -392,7 +473,7 @@ The runner does not need a Docker daemon.
 
 Download the Substrate CLI for the runner's architecture and verify its checksum:
 
-```bash
+```bash title="Workstation"
 RUNNER_MACHINE="$(kubectl -n ate-env exec harbor-runner -- uname -m)"
 case "$RUNNER_MACHINE" in
 	x86_64) RUNNER_ARCH=amd64 ;;
@@ -411,7 +492,7 @@ kubectl -n ate-env cp deps/runner-bin/kubectl-ate harbor-runner:/work/kubectl-at
 
 Check the runner's control-plane access:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-env exec harbor-runner -- \
   /work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 \
   --token-file /var/run/secrets/ateapi/token get actor-templates -a ate-env
@@ -421,34 +502,20 @@ The command must succeed, even if the template list is empty. It checks the
 CLI connection, trust configuration, and the access policy for the runner's
 token. A `PermissionDenied` error names the principal that is missing a role.
 
-Edit `egress.yaml` to match `DYNAMO_BASE_URL` in `harbor-job.yaml`.
-The supplied rule permits the example frontend's hostname and port:
+Upload the egress policy you edited with the inference endpoint:
 
-```yaml
-rules:
-  - http:
-      hostnames: ["model-frontend.inference.svc.cluster.local"]
-      ports:
-        numbers: [8000]
-```
-
-Set `hostnames` to the URL's hostname without a scheme or path, and `numbers`
-to its port. For an HTTPS endpoint, replace the `http` key with `tlsPassthrough`;
-the default HTTPS port is 443. For HTTP without an explicit port, use 80.
-Upload the edited policy:
-
-```bash
+```bash title="Workstation"
 kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
 ```
 
 This is a Substrate egress policy, not a Kubernetes NetworkPolicy. The adapter
 applies it separately to each actor. The policy allows only the model endpoint.
-Inside the actor, any other name resolves to NXDOMAIN, so a command that reaches
-for the internet fails within a second with a clear error. The prepared image
+Names outside the allowlist are denied by actor DNS. Commands that try to
+download dependencies therefore fail under this policy. The prepared image
 carries what the verifier needs, and the Harbor job tells pip and uv to work
 offline.
 
-### Allow more egress
+<Accordion title="Allow additional egress">
 
 Add a rule only when a task needs one. Each rule names hosts and ports, and the
 gateway decides by protocol:
@@ -475,11 +542,15 @@ Substrate guide on
 shows the `systemInfo` volume that mounts it. Raw TCP is not supported, which is
 why the optional tool-event transport wraps its stream in TLS.
 
-Opening source hosting changes what a pass means. In an earlier batch with
-GitHub reachable, most passing trials had copied the upstream fix. Keep the
-default policy for results you intend to compare.
+</Accordion>
 
-## Configure the task template and Harbor job
+Opening source hosting lets an agent retrieve an upstream fix, which changes
+what a passing benchmark result means. Keep the default policy for results you
+intend to compare.
+
+</Step>
+
+<Step title="Configure the task template and Harbor job" id="configure-the-task-template-and-harbor-job">
 
 Open `actor-template.yaml`. Check that `containers[0].image` contains the
 prepared task image digest and `volumes[0].image.reference` contains the guest
@@ -489,6 +560,18 @@ image digest from the guest-image build step. Keep `metadata.name` as
 The actor template is a Substrate API object. Register it with `kubectl-ate`.
 The Harbor job is a client configuration file, consumed by `harbor run`.
 Neither file is a Kubernetes Job or a manifest for `kubectl apply`.
+
+Each trial follows this lifecycle:
+
+```mermaid
+flowchart TD
+    T[Harbor selects a task] --> M[template_map selects its actor template]
+    M --> A[Substrate creates and starts an actor]
+    A --> P[Pi calls the model and runs tools]
+    P --> V[Harbor runs the task verifier]
+    V --> R[Harbor collects results and logs]
+    R --> D[Adapter deletes the actor]
+```
 
 The template defines the sandbox that each trial starts:
 
@@ -501,6 +584,17 @@ The template defines the sandbox that each trial starts:
 | `resources.limits` | Allocates one CPU and 4 GiB to the actor. Increase these limits for tasks that need more resources, and increase worker capacity accordingly. |
 | `workerSelector` | Matches the worker pool label. Use it to constrain placement for prewarming or capacity isolation. |
 | `snapshotConfig` | Starts with golden snapshots disabled. Enable them in a separate template after checking the prepared image. |
+
+The job controls the trial lifecycle:
+
+| Field | Purpose and adjustment |
+| --- | --- |
+| `tasks[].path` | Selects a dataset task copied into the runner. |
+| `environment.kwargs.template_map` | Maps each task directory name to its prepared actor template. |
+| `agents[].kwargs.version` | Must match the Pi version baked into the task image. |
+| `verifier.env` | Directs pip and uv to offline dependencies in that image. |
+| `n_concurrent_trials` | Limits whole trials, including setup, verification, and cleanup. Start at one. |
+| `environment.delete` | Deletes the actor after artifact collection when `true`. |
 
 In `harbor-job.yaml`, keep the initial one-trial settings and the Astropy
 task-to-template mapping. The model settings are the ones you edited earlier:
@@ -545,7 +639,7 @@ for an external API. All values under `agents[].env` are strings.
 Copy the original task without changing its instructions or verifier. The
 selected task retains its 3,000-second agent and verifier deadlines:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-env cp "deps/harbor-datasets/datasets/swebench-verified/$TASK" "harbor-runner:/work/tasks/$TASK"
 kubectl-ate create actor-template -f actor-template.yaml
 kubectl-ate get actor-template swe-astropy-12907-pi -a ate-env -o yaml
@@ -558,41 +652,33 @@ image, resource limit, or snapshot setting, edit a copy, give it a new
 use it. To change a Harbor job, edit its YAML and upload the file again before
 starting a new run. Use a new `job_name` for each run you want to compare.
 
-## Enable capture before running tasks
+Upload the configured job:
 
-For Dynamo inference, follow
-[Capture inference and tool traces](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md).
-It shows the frontend manifest additions and the corresponding job and egress
-settings. Keep the frontend's model-serving configuration from the recipe.
-
-For sandbox metrics, follow
-[Collect Substrate metrics](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md).
-Confirm that Prometheus scrapes the collector and Grafana shows its health.
-Set up collection while workers are idle because telemetry changes can restart
-them. Harbor collects Pi's raw event log and verifier output without a separate
-trajectory conversion step.
-
-Upload the job after making any tracing changes:
-
-```bash
+```bash title="Workstation"
 kubectl -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
 ```
 
-## Prewarm and check the environment
+The template must be listed by the preceding `get` command, and the job's
+mapping must name it before you continue.
+
+</Step>
+
+<Step title="Prewarm and check the environment" id="prewarm-and-check-the-environment">
 
 Open a runner shell:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-env exec -it harbor-runner -- \
   bash
 ```
 
-Inside the runner, create a disposable actor from the template and watch it
-start:
+Inside the runner, create a disposable actor, resume it, and watch it start.
+Creation leaves the actor suspended; `resume` starts the guest:
 
-```bash
+```bash title="Harbor runner"
 ATE="/work/kubectl-ate --context in-cluster --endpoint api.ate-system.svc:443 --token-file /var/run/secrets/ateapi/token"
 $ATE create actor harbor-check-one -a ate-env --template swe-astropy-12907-pi
+$ATE resume actor harbor-check-one -a ate-env
 $ATE get actor harbor-check-one -a ate-env
 ```
 
@@ -601,16 +687,16 @@ state is `ACTOR_STATE_RUNNING` and a worker Pod is listed. Investigate a start
 that takes longer than the job's 1,200-second readiness budget. Then delete
 the actor:
 
-```bash
+```bash title="Harbor runner"
 $ATE delete actor harbor-check-one -a ate-env
 exit
 ```
 
 This pulls the image onto the worker that placed the actor and proves that the
-template, the access policy, and the worker pool fit together. The guest, the
-baked runtime, and the verifier are checked by the oracle job below, which
-runs them through the same adapter path a trial uses. Every trial starts a
-fresh actor from the template, so nothing carries over between trials.
+template, the access policy, and the worker pool fit together. The oracle below
+checks guest execution and the offline verifier. The first Pi trial checks the
+prepared Pi runtime and model interaction. Every trial starts a fresh actor;
+changes made in one trial's workspace do not carry into the next.
 
 A prepared image avoids repeated package installation. Prewarming caches its
 layers on the selected node. When adding nodes, repeat these checks with
@@ -624,7 +710,7 @@ model, then the verifier runs as usual. Under the default egress policy, a
 reward of 1 proves that the image and the job carry everything the verifier
 needs. Copy the job on the workstation:
 
-```bash
+```bash title="Workstation"
 cp harbor-job.yaml oracle-job.yaml
 ```
 
@@ -638,7 +724,7 @@ agents:
 
 Upload and run it, then read the reward:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-env cp oracle-job.yaml harbor-runner:/work/oracle-job.yaml
 kubectl -n ate-env exec harbor-runner -- \
   harbor run --config /work/oracle-job.yaml -y
@@ -646,15 +732,157 @@ kubectl -n ate-env exec harbor-runner -- \
   sh -c 'cat /work/jobs/swe-oracle/*/verifier/reward.txt'
 ```
 
-A reward of 0 here means the image or the policy is incomplete, not that the
-model failed. Read `verifier/test-stdout.txt` in the trial directory for the
-command that could not run. Repeat this check for every new task image.
+Require a reward of 1 before running Pi. If the oracle fails, inspect the trial's
+`result.json`, `exception_info`, and `verifier/test-stdout.txt`. Missing packages,
+egress restrictions, timeouts, or task failures can cause an unsuccessful run;
+no model was called. Repeat this check for every new task image.
 
-### Optionally restore from a golden snapshot
+</Step>
+
+<Step title="Run one trial" id="run-one-trial">
+
+Open a runner shell:
+
+```bash title="Workstation"
+kubectl -n ate-env exec -it harbor-runner -- sh
+```
+
+Inside the runner, run the uploaded job:
+
+```bash title="Harbor runner"
+cd /work
+harbor run --config /work/harbor-job.yaml -y
+```
+
+Inspect `/work/jobs/swe-one`.
+A complete integration run has a trial result,
+Pi tool events, a verifier report, and collected artifacts. Check
+`exception_info` in the trial result and assistant errors in `agent/pi.txt`.
+A zero reward can mean the agent failed to fix the bug even when the system
+worked. A reward alone does not establish successful model transport.
+
+Before a batch, confirm that Pi can call a tool, receive its result, and make
+another model request from inside the actor. This validates endpoint semantics
+and actor egress together.
+
+Exit the runner shell before saving results on your workstation:
+
+```bash title="Harbor runner"
+exit
+```
+
+</Step>
+
+<Step title="Save and inspect the results" id="save-and-inspect-the-results">
+
+On the workstation, copy the job before removing resources:
+
+```bash title="Workstation"
+mkdir -p results
+# For later runs, replace swe-one with swe-observed, swe-golden, or swe-batch.
+export JOB_NAME=swe-one
+kubectl -n ate-env cp \
+  "harbor-runner:/work/jobs/$JOB_NAME" "results/$JOB_NAME"
+```
+
+Retain the edited job YAML, templates, policies, dataset revision, and result
+files together. Each trial directory contains:
+
+| Artifact | What to check |
+| --- | --- |
+| `result.json` | Trial outcome and `exception_info`; investigate setup or execution exceptions. |
+| `substrate.json` | Actor identity for matching this trial to Substrate activity. |
+| `substrate-timing.jsonl` | Time spent in environment preparation phases. |
+| `agent/pi.txt` | Raw Pi events: a tool call, its result, and a subsequent model request; inspect assistant errors. |
+| `verifier/` | Verifier logs and reward; distinguish a failed solution from an execution failure. |
+
+A successful integration run includes model/tool continuation and collected
+verifier output. Reward measures the solution's correctness; it does not by
+itself establish that all integration steps worked.
+
+### Inspect the job in Harbor
+
+In a separate workstation terminal, use a viewer environment so its version
+does not change the pinned execution environment. Keep the viewer running:
+
+```bash title="Workstation"
+python3 -m venv .venv/viewer
+.venv/viewer/bin/pip install harbor==0.25.0
+.venv/viewer/bin/harbor view results --host 127.0.0.1 --port 8080
+```
+
+Open `http://localhost:8080` to inspect the job and trial results. Read the
+collected `agent/pi.txt` and verifier files alongside those results. This
+example does not convert Pi events to ATIF, so it does not populate Harbor's
+structured trajectory view. Differences between raw event timestamps are not
+isolated inference durations.
+
+</Step>
+
+</Steps>
+
+## Optionally capture traces and sandbox metrics
+
+After saving the first trial, add either or both views below. Stop active jobs
+before changing telemetry because those changes can restart workers. Harbor's
+raw Pi log and verifier output are available without either setup.
+
+<CardGroup cols={2}>
+<Card title="Inference and tool traces" href="https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md#prepare-the-transport">
+Configure capture on a Dynamo frontend you control. Correlate model requests
+and measured tool spans by session ID in Perfetto.
+</Card>
+<Card title="Sandbox metrics" href="https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#deploy-the-metrics-bridge">
+Connect Substrate to Prometheus and Grafana. Inspect worker occupancy,
+lifecycle operations, and resource usage for either inference option.
+</Card>
+</CardGroup>
+
+Follow each guide through its **Setup complete** checkpoint, then return here.
+For tracing, preserve the model recipe's serving configuration and edit its
+source manifest or Kustomize overlay as directed by the guide. For metrics,
+require healthy scrape targets and emitting services before continuing.
+
+Set `job_name: swe-observed` in `harbor-job.yaml` to keep this run separate from
+`swe-one`. Upload the edited job and run one trial from the workstation:
+
+```bash title="Workstation"
+kubectl -n ate-env cp harbor-job.yaml harbor-runner:/work/harbor-job.yaml
+kubectl -n ate-env exec harbor-runner -- \
+  harbor run --config /work/harbor-job.yaml -y
+```
+
+Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+`JOB_NAME=swe-observed`. Then inspect the views you configured:
+
+### Inspect measured spans in Perfetto
+
+Export the native capture using the commands in
+[Capture inference and tool traces](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md#export-the-completed-capture).
+Use the session ID to find the same trial in Perfetto. Inspect model requests,
+time to first token, and measured tool spans. Check tool IDs against Pi's log.
+Do not present inferred waits as measured tool execution.
+
+### Inspect sandbox activity in Grafana
+
+Use the [metrics validation checklist](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#validate-with-one-task)
+for the completed trial.
+
+Select the job's time window in the Substrate dashboard. Inspect worker
+occupancy, lifecycle operations, image-cache requests, resource usage, and
+checkpoint or restore activity. Empty restore panels are expected for a run
+that only boots fresh actors.
+
+The native parking metrics are aggregate. They do not identify which Harbor
+session waited, and their duration can include restoration. Use `substrate.json`
+for actor correlation, without assuming a shared distributed trace across all
+three viewers.
+
+## Optionally restore from a golden snapshot
 
 Create separate files for the optional golden configuration on the workstation:
 
-```bash
+```bash title="Workstation"
 cp actor-template.yaml golden-template.yaml
 cp harbor-job.yaml golden-job.yaml
 ```
@@ -673,25 +901,27 @@ In `golden-job.yaml`, set `job_name: swe-golden` and map
 `astropy__astropy-12907` to `swe-astropy-12907-pi-golden`. Create and inspect the
 template:
 
-```bash
+```bash title="Workstation"
 kubectl-ate create actor-template -f golden-template.yaml
 kubectl-ate get actor-template swe-astropy-12907-pi-golden -a ate-env -o json
 ```
 
 Read `status.goldenSnapshotStatus.goldenTag`, then fetch that tag:
 
-```bash
+```bash title="Workstation"
 export GOLDEN_TAG=the-tag-from-template-status
 kubectl-ate get tag "$GOLDEN_TAG" -a ate-env -o json
 ```
 
 Wait for `status.snapshot.durableSnapshot.state` to become
 `SNAPSHOT_STORAGE_STATE_COMPLETED`, and require `SNAPSHOT_FIDELITY_MEMORY`.
-Repeat the prewarm actor creation and deletion with
-`--template swe-astropy-12907-pi-golden`. Then upload the golden job:
+Repeat the prewarm actor creation, resume, status check, and deletion with
+`--template swe-astropy-12907-pi-golden`. Then upload and run the golden job:
 
-```bash
+```bash title="Workstation"
 kubectl -n ate-env cp golden-job.yaml harbor-runner:/work/golden-job.yaml
+kubectl -n ate-env exec harbor-runner -- \
+  harbor run --config /work/golden-job.yaml -y
 ```
 
 Golden snapshots reuse initial sandbox state. The prepared guest snapshot does
@@ -699,34 +929,12 @@ not contain an initialized Pi conversation. Verify restore events and storage
 fidelity before attributing startup behavior to snapshots. Keep prepared-image
 and golden-snapshot runs in separate output directories.
 
-## Run one trial, then increase concurrency
+Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+`JOB_NAME=swe-golden` before comparing the runs.
 
-Open a runner shell:
+## Increase concurrency
 
-```bash
-kubectl -n ate-env exec -it harbor-runner -- sh
-```
-
-Inside the runner, run the uploaded job:
-
-```bash
-cd /work
-harbor run --config /work/harbor-job.yaml -y
-# For the optional golden path, use /work/golden-job.yaml instead.
-```
-
-Inspect `/work/jobs/swe-one` (or `/work/jobs/swe-golden` for the optional path).
-A complete integration run has a trial result,
-Pi tool events, a verifier report, and collected artifacts. Check
-`exception_info` in the trial result and assistant errors in `agent/pi.txt`.
-A zero reward can mean the agent failed to fix the bug even when the system
-worked. A reward alone does not establish successful model transport.
-
-Before a batch, confirm that Pi can call a tool, receive its result, and make
-another model request from inside the actor. This validates endpoint semantics
-and actor egress together.
-
-To add tasks, return to the workstation and repeat the image build and template
+On the workstation, repeat the image build and template
 creation for each task. Give every template its own name, copy the corresponding
 dataset directories to `/work/tasks`, and add each task to both `tasks` and
 `environment.kwargs.template_map` in a copy of the job YAML. Keep each image
@@ -734,7 +942,7 @@ digest in its template.
 
 Copy the job before configuring a batch:
 
-```bash
+```bash title="Workstation"
 cp harbor-job.yaml batch-job.yaml
 ```
 
@@ -743,7 +951,7 @@ For a two-task batch, set `job_name: swe-batch` and
 `spec.replicas: 2` to provide two workers. Apply the pool, upload the edited
 job, and run it:
 
-```bash
+```bash title="Workstation"
 kubectl apply -f workerpool.yaml
 kubectl -n ate-env rollout status deployment/harbor-workers --timeout=600s
 kubectl -n ate-env cp batch-job.yaml harbor-runner:/work/batch-job.yaml
@@ -761,66 +969,15 @@ Worker capacity limits resident actors, while the inference service has its own
 request limit. This example keeps actors resident through each trial. It does
 not automatically suspend Pi between model calls.
 
-## Save and inspect the results
-
-Exit the runner shell and copy the job before removing resources:
-
-```bash
-mkdir -p results
-# Use swe-golden or swe-batch here to collect the corresponding job.
-export JOB_NAME=swe-one
-kubectl -n ate-env cp \
-  "harbor-runner:/work/jobs/$JOB_NAME" "results/$JOB_NAME"
-```
-
-Retain the edited job YAML, templates and policies, dataset revision, and
-all result files together. Each trial includes `substrate.json`, which maps the
-Harbor trial to its actor, and `substrate-timing.jsonl`, which records preparation
-phases. Pi's raw events are in `agent/pi.txt`; verifier output is in `verifier/`.
-
-### Inspect the job in Harbor
-
-Use a separate viewer environment so the viewer version does not change the
-pinned execution environment:
-
-```bash
-python3 -m venv .venv/viewer
-.venv/viewer/bin/pip install harbor==0.25.0
-.venv/viewer/bin/harbor view results --host 127.0.0.1 --port 8080
-```
-
-Open `http://localhost:8080` to inspect the job and trial results. Read the
-collected `agent/pi.txt` and verifier files alongside those results. This
-example does not convert Pi events to ATIF, so it does not populate Harbor's
-structured trajectory view. Differences between raw event timestamps are not
-isolated inference durations.
-
-### Inspect measured spans in Perfetto
-
-Export the native capture using the commands in
-[Capture inference and tool traces](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md).
-Use the session ID to find the same trial in Perfetto. Inspect model requests,
-time to first token, and measured tool spans. Check tool IDs against Pi's log.
-Do not present inferred waits as measured tool execution.
-
-### Inspect sandbox activity in Grafana
-
-Select the job's time window in the Substrate dashboard. Inspect worker
-occupancy, lifecycle operations, image-cache requests, resource usage, and
-checkpoint or restore activity. Empty restore panels are expected for a run
-that only boots fresh actors.
-
-The native parking metrics are aggregate. They do not identify which Harbor
-session waited, and their duration can include restoration. Use `substrate.json`
-for actor correlation, without assuming a shared distributed trace across all
-three viewers.
+Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+`JOB_NAME=swe-batch`. Inspect each trial before adding more tasks or workers.
 
 ## Clean up
 
 First save the results and native trace files. Confirm that Harbor deleted its
 actors. Use the CLI to list actors before removing any retained resources:
 
-```bash
+```bash title="Workstation"
 kubectl-ate get actors -a ate-env
 kubectl -n ate-env delete pod harbor-runner
 kubectl -n ate-env delete workerpool harbor-workers
@@ -830,15 +987,20 @@ Delete only templates, golden tags, Secrets, and collector resources created
 for this walkthrough. Keep shared Substrate services, storage, and inference
 endpoints. Follow the metrics guide's restore procedure before removing the
 Collector. If you added tracing to an existing frontend, remove the tutorial's
-trace additions by comparing with `.build/frontend-before.yaml`. Apply the
-updated frontend manifest and stop the local viewer.
+trace additions by comparing with `.build/frontend-before.yaml`. For Kustomize,
+remove those additions from the source or overlay and regenerate the manifest.
+Apply the updated frontend manifest and stop the local viewer.
 
 ## Validation scope
 
-The CLI checks above verify guest startup, the prepared runtime, and actor
-isolation. The oracle job checks the verifier and the egress policy without a
-model. The first Harbor trial checks model access, tool execution, result
-collection, and verification together.
+| Check | What it establishes |
+| --- | --- |
+| Disposable actor | Template, placement, and actor startup |
+| Oracle trial | Guest execution, reference patch, and offline verification under the selected policy |
+| Pi trial | Prepared Pi runtime, model/tool interaction, verification, and artifact collection |
+
+These checks do not constitute an isolation test or validate access to every
+possible network destination.
 
 After changing a dependency pin, endpoint, image, or cluster configuration,
 repeat the one-trial check before running a batch. Golden restore and external
