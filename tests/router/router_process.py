@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import sys
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 _EPP_BINARY_ENV = "DYN_EPP_BINARY"
 _DEFAULT_EPP_BINARY = "/epp"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_INIT_OBSERVE_POLL_S = 0.05
 
 
 class SlotTrackerProcess(ManagedProcess):
@@ -71,6 +74,7 @@ class FrontendRouterProcess(ManagedProcess):
         event_plane: str | None = None,
         session_affinity_ttl_secs: int | None = None,
         extra_env: Mapping[str, str | None] | None = None,
+        require_readiness: bool = True,
     ):
         command = [
             sys.executable,
@@ -144,16 +148,19 @@ class FrontendRouterProcess(ManagedProcess):
             env=env,
             timeout=60,
             display_output=True,
-            health_check_ports=[frontend_port],
-            health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", check_http_ok)
-            ],
+            health_check_ports=[frontend_port] if require_readiness else [],
+            health_check_urls=(
+                [(f"http://localhost:{frontend_port}/v1/models", check_http_ok)]
+                if require_readiness
+                else []
+            ),
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
             display_name=f"dynamo-frontend-{router_mode}-{frontend_port}",
         )
         self.port = frontend_port
         self.router_mode = router_mode
+        self.require_readiness = require_readiness
 
 
 # Backward-compatible alias so existing callers that import KVRouterProcess
@@ -234,6 +241,7 @@ class RuntimeEppProcess(ManagedProcess):
         extra_env: Mapping[str, str | None] | None = None,
         timeout: float = 240,
         kubeconfig: str | os.PathLike[str] | None = None,
+        require_readiness: bool = True,
     ):
         resolved_binary = (binary or os.environ.get(_EPP_BINARY_ENV, "")).strip() or (
             _DEFAULT_EPP_BINARY
@@ -262,12 +270,83 @@ class RuntimeEppProcess(ManagedProcess):
             env=env,
             timeout=timeout,
             display_output=True,
-            health_check_ports=[health_port],
+            health_check_ports=[health_port] if require_readiness else [],
             health_check_urls=[],
-            health_check_funcs=[
-                lambda remaining=None: epp_loopback_tls_ready(grpc_port, remaining)
-            ],
+            health_check_funcs=(
+                [lambda remaining=None: epp_loopback_tls_ready(grpc_port, remaining)]
+                if require_readiness
+                else []
+            ),
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-runtime-epp",
         )
+        self.require_readiness = require_readiness
+
+
+def observe_owned_initialization_diagnostic(
+    process: ManagedProcess,
+    *,
+    diagnostic: str,
+    deadline_s: float,
+    node_name: str,
+    label: str,
+) -> tuple[int, Path]:
+    """Watch one already-started ManagedProcess log for an init diagnostic.
+
+    The process must already be entered through the shared ManagedProcess
+    lifecycle. This helper does not start, retry, or replace that lifecycle.
+    A process may stay alive after a failed router/model construction. The
+    only success is the exact diagnostic in a completed newline-terminated
+    line before the single deadline. An exited parent may still flush the
+    completed log inside that same deadline; a partial last line is not a
+    match. Readiness timeout, a missing model, an arbitrary HTTP error, a
+    killed process, or any other startup error is a hard failure.
+    """
+    if not diagnostic:
+        raise AssertionError(f"{label} diagnostic must be nonempty")
+    if deadline_s <= 0:
+        raise AssertionError(f"{label} deadline_s={deadline_s!r} must be positive")
+    if process is None:
+        raise AssertionError(f"{label} was not saved")
+    proc = process.proc
+    if proc is None:
+        raise AssertionError(f"{label} process was not started")
+    log_path = process.log_path
+    if not log_path:
+        raise AssertionError(f"{label} process has no log_path")
+    log = Path(log_path)
+    if node_name not in log.as_posix():
+        raise AssertionError(f"{label} log_path {log} is not this node {node_name}")
+    boundary = re.compile(re.escape(diagnostic) + r"(?![0-9A-Za-z.])")
+    deadline = time.monotonic() + deadline_s
+    while True:
+        pid = proc.pid
+        proc.poll()
+        raw = log.read_bytes() if log.is_file() else b""
+        last_nl = raw.rfind(b"\n")
+        completed = raw[: last_nl + 1] if last_nl >= 0 else b""
+        try:
+            text = completed.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError(
+                f"{label} pid={pid} log={log} completed log prefix is not "
+                "valid UTF-8"
+            ) from exc
+        if boundary.search(_ANSI_RE.sub("", text)):
+            logger.info(
+                "%s pid=%s log=%s initialization diagnostic observed",
+                label,
+                pid,
+                log,
+            )
+            return pid, log
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{label} pid={pid} log={log} reached the initialization "
+                "deadline without the consumed-key diagnostic "
+                f"{diagnostic!r}; this is not an expected readiness timeout, "
+                "missing model, HTTP error, or other startup failure"
+            )
+        remaining = deadline - time.monotonic()
+        time.sleep(min(_INIT_OBSERVE_POLL_S, max(remaining, 0.0)))

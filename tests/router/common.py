@@ -4399,6 +4399,306 @@ def run_frontend_epp_token_parity(
     )
 
 
+def run_keyed_tracking_runtime_config(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    profile_name: str,
+) -> None:
+    """Consume keyed-xxh3-v1 and require query tokens plus real FE/EPP routes."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        KEYED_TRACKING_PROFILE,
+        TRACKING_HASH_ALGORITHM,
+        TRACKING_KEY_ID,
+        TRACKING_KEY_PUBLIC_BYTES,
+        TRACKING_KEY_SIZE,
+        TRACKING_RUNTIME_FIELDS,
+        _keyed_tracking_consumer_env,
+        _plain_chat_token_case,
+        _write_tracking_key_file,
+        assert_frontend_expected_fields,
+        clear_known_manifest_router_envs,
+        compare_effective_fields,
+        frontend_native_projection,
+        native_default_projection,
+        observe_epp_init_event,
+    )
+    from tests.router.epp_parity import collect_frontend_generation_route
+
+    if profile_name != KEYED_TRACKING_PROFILE:
+        raise AssertionError(
+            f"keyed tracking profile {profile_name!r} != {KEYED_TRACKING_PROFILE!r}"
+        )
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    key_path = tmp_path / "parity-public-tracking-key.bin"
+    provenance = _write_tracking_key_file(key_path, TRACKING_KEY_PUBLIC_BYTES)
+    if provenance["length"] != TRACKING_KEY_SIZE:
+        raise AssertionError(
+            f"public tracking key length {provenance['length']} != {TRACKING_KEY_SIZE}"
+        )
+    consumer_env = _keyed_tracking_consumer_env(key_path)
+    for name, value in consumer_env.items():
+        monkeypatch.setenv(name, value)
+    expected = {
+        "router_tracking_hash": TRACKING_HASH_ALGORITHM,
+        "router_tracking_key_id": TRACKING_KEY_ID,
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        frontend = frontend_native_projection(TRACKING_RUNTIME_FIELDS)
+    defaults = native_default_projection(TRACKING_RUNTIME_FIELDS)
+    assert_frontend_expected_fields(
+        profile=profile_name,
+        frontend=frontend,
+        expected=expected,
+        defaults=defaults,
+    )
+    cases = _plain_chat_token_case(model_name)
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        log_label=profile_name,
+    ) as stack:
+        epp = observe_epp_init_event(
+            stack.epp_process,
+            node_name=request.node.name,
+            expected=expected,
+        )
+        compare_effective_fields(
+            profile=profile_name,
+            frontend=frontend,
+            epp=epp,
+            expected=expected,
+            defaults=defaults,
+        )
+        run_frontend_epp_token_parity(
+            stack, cases, include_negative_control=False
+        )
+        case = cases[0]
+        generation = collect_frontend_generation_route(
+            stack.frontend_url,
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("fe-gen-keyed-plain_chat"),
+        )
+        if stack.driver is None:
+            raise AssertionError("owned ext_proc driver was not saved")
+        epp_route = stack.driver.collect_route_observation(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("epp-route-keyed-plain_chat"),
+        )
+        if not epp_route.token_ids:
+            raise AssertionError("EPP route token_ids are empty")
+        if (generation.worker_id, generation.dp_rank) != (
+            epp_route.worker_id,
+            epp_route.dp_rank,
+        ):
+            raise AssertionError(
+                "frontend generation and EPP route worker/rank differ: "
+                f"fe={generation.worker_id}/{generation.dp_rank} "
+                f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+            )
+        if generation.dp_rank != 0:
+            raise AssertionError(
+                f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+            )
+        frontend_proc = getattr(stack, "frontend_process", None)
+        epp_proc = getattr(stack, "epp_process", None)
+        if frontend_proc is None or frontend_proc.proc is None:
+            raise AssertionError("owned frontend_process was not saved")
+        if epp_proc is None or epp_proc.proc is None:
+            raise AssertionError("owned epp_process was not saved")
+        kube_api = stack.kube_api
+        if kube_api is not None and kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(kube_api.failures)
+            )
+        logger.info(
+            "keyed tracking runtime algorithm=%s key_id=%s key_path=%s "
+            "key_length=%s key_sha256=%s frontend pid=%s epp pid=%s "
+            "fe_worker=%s/%s epp_worker=%s/%s",
+            TRACKING_HASH_ALGORITHM,
+            TRACKING_KEY_ID,
+            provenance["path"],
+            provenance["length"],
+            provenance["sha256"],
+            frontend_proc.proc.pid,
+            epp_proc.proc.pid,
+            generation.worker_id,
+            generation.dp_rank,
+            epp_route.worker_id,
+            epp_route.dp_rank,
+        )
+
+
+def run_keyed_tracking_key_file_size(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    arm: str,
+) -> None:
+    """Reject a 31-byte public tracking key on one owned consumer arm."""
+    from tests.router.epp_config_contract import (
+        KEYED_TRACKING_SIZE_ARMS,
+        TRACKING_KEY_INVALID_BYTES,
+        TRACKING_KEY_SIZE_DEADLINE_S,
+        TRACKING_KEY_SIZE_DIAGNOSTIC,
+        _keyed_tracking_consumer_env,
+        _write_tracking_key_file,
+        clear_known_manifest_router_envs,
+    )
+    from tests.router.router_process import observe_owned_initialization_diagnostic
+
+    if arm not in KEYED_TRACKING_SIZE_ARMS:
+        raise AssertionError(f"keyed tracking size arm {arm!r} is unknown")
+    if TRACKING_KEY_SIZE_DIAGNOSTIC != (
+        "router tracking key file must contain exactly 32 raw bytes; found 31"
+    ):
+        raise AssertionError(
+            "keyed tracking size diagnostic is not the source-derived 31-byte message"
+        )
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    key_path = tmp_path / f"parity-public-tracking-key-31-{arm}.bin"
+    provenance = _write_tracking_key_file(key_path, TRACKING_KEY_INVALID_BYTES)
+    if provenance["length"] != 31:
+        raise AssertionError(f"invalid tracking key length {provenance['length']} != 31")
+    consumer_env = _keyed_tracking_consumer_env(key_path)
+    include_frontend = arm == "frontend"
+    include_epp = arm == "epp"
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        include_frontend=include_frontend,
+        include_epp=include_epp,
+        require_readiness=False,
+        log_label=f"key-size-{arm}",
+    ) as stack:
+        process = (
+            getattr(stack, "frontend_process", None)
+            if include_frontend
+            else getattr(stack, "epp_process", None)
+        )
+        pid, log = observe_owned_initialization_diagnostic(
+            process,
+            diagnostic=TRACKING_KEY_SIZE_DIAGNOSTIC,
+            deadline_s=TRACKING_KEY_SIZE_DEADLINE_S,
+            node_name=request.node.name,
+            label=f"{arm}_process",
+        )
+    logger.info(
+        "keyed tracking size diagnostic=%s arm=%s key_path=%s key_length=%s "
+        "key_sha256=%s pid=%s log=%s",
+        TRACKING_KEY_SIZE_DIAGNOSTIC,
+        arm,
+        provenance["path"],
+        provenance["length"],
+        provenance["sha256"],
+        pid,
+        log,
+    )
+
+
+def run_approximate_cache_policy_metrics(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    policy_name: str,
+) -> None:
+    """Read owned FE/EPP configured/effective gauges for LRU or default TTL."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        APPROXIMATE_POLICY_NAMES,
+        APPROXIMATE_POLICY_ROW,
+        _approximate_consumer_env,
+        _assert_core_policy_gauges,
+        _frontend_full_kv_json,
+        _plain_chat_token_case,
+        clear_known_manifest_router_envs,
+    )
+
+    if policy_name not in APPROXIMATE_POLICY_NAMES:
+        raise AssertionError(f"unknown approximate policy profile {policy_name!r}")
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    consumer_env = _approximate_consumer_env(policy_name)
+    for name, value in consumer_env.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        payload = _frontend_full_kv_json()
+    if APPROXIMATE_POLICY_ROW in payload:
+        raise AssertionError(
+            "native to_json now serializes router_approximate_cache_policy; "
+            "omission is not a default or support oracle"
+        )
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        core_system_metrics=True,
+        log_label=f"approx-{policy_name}",
+    ) as stack:
+        run_frontend_epp_token_parity(
+            stack, _plain_chat_token_case(model_name), include_negative_control=False
+        )
+        if stack.mockers is None:
+            raise AssertionError("owned mocker endpoint was not saved")
+        namespace = stack.mockers.namespace
+        component = stack.mockers.component_name
+        if not namespace or not component:
+            raise AssertionError(
+                "owned mocker endpoint identity is missing "
+                f"namespace={namespace!r} component={component!r}"
+            )
+        for role in ("frontend", "epp"):
+            pid, port, content = stack.core_system_metrics_text(role=role)
+            _assert_core_policy_gauges(
+                content,
+                role=role,
+                pid=pid,
+                port=port,
+                namespace=namespace,
+                component=component,
+                selected=policy_name,
+            )
+            logger.info(
+                "approximate policy %s %s pid=%s port=%s namespace=%s component=%s",
+                policy_name,
+                role,
+                pid,
+                port,
+                namespace,
+                component,
+            )
+
+
 def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
     """Reusable actual-token scenarios for tool schema and tool-history rendering.
 

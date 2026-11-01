@@ -19,15 +19,21 @@ ignored-compatibility cases, the five conditional scalar probes, and the
 positional-search probe are ordinary tests, not xfail. Remote-indexer and
 session TTL rows bind existing collected Items rather than new tests.
 Overlap refresh is an ordinary owned-process queue-INFO plus plain-chat
-token-parity test, not xfail.
+token-parity test, not xfail. Keyed tracking and approximate-policy
+core-metrics rows are ordinary unverified-candidate tests, not xfail.
+The 31-byte size control is parameterized over independent frontend/epp
+arms. Candidate collection is 41 nodes, not an executed claim.
 """
 
 import pytest
 
 from tests.router.epp_config_contract import (
     ADMISSION_CONTROL_CASE_IDS,
+    APPROXIMATE_POLICY_NAMES,
     CONDITIONAL_SCALAR_PROBES,
     ENFORCE_DISAGG_CASE_IDS,
+    KEYED_TRACKING_PROFILE,
+    KEYED_TRACKING_SIZE_ARMS,
     PROFILE_NAMES,
     ConditionalJsonConfigMismatch,
     LoadAwarePresetConfigMismatch,
@@ -166,4 +172,61 @@ def test_overlap_refresh_effective_config(
         monkeypatch,
         ROUTER_MODEL_NAME,
         EppFrontendParityStack,
+    )
+
+
+@pytest.mark.parametrize("profile_name", [KEYED_TRACKING_PROFILE])
+def test_keyed_tracking_runtime_config(
+    request, predownload_tokenizers, tmp_path, monkeypatch, profile_name
+):
+    """Consume keyed-xxh3-v1 on both real routers and compare hash/ID."""
+    from tests.router.common import run_keyed_tracking_runtime_config
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_keyed_tracking_runtime_config(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+        profile_name,
+    )
+
+
+@pytest.mark.parametrize("arm", list(KEYED_TRACKING_SIZE_ARMS))
+def test_keyed_tracking_key_file_size(
+    request, predownload_tokenizers, tmp_path, monkeypatch, arm
+):
+    """One owned consumer arm must reject a 31-byte public tracking key file."""
+    from tests.router.common import run_keyed_tracking_key_file_size
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_keyed_tracking_key_file_size(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+        arm,
+    )
+
+
+@pytest.mark.parametrize("policy_name", list(APPROXIMATE_POLICY_NAMES))
+def test_approximate_cache_policy_metrics(
+    request, predownload_tokenizers, tmp_path, monkeypatch, policy_name
+):
+    """Read configured/effective core gauges for LRU and omitted-env TTL."""
+    from tests.router.common import run_approximate_cache_policy_metrics
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_approximate_cache_policy_metrics(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+        policy_name,
     )

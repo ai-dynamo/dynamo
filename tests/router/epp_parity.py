@@ -2457,16 +2457,35 @@ def wait_for_frontend_models(
 class EppFrontendParityStack:
     """Own the loopback API, one mocker, native frontend HTTP, and real /epp."""
 
-    def __init__(self, request, tmp_path: Path, model_name: str) -> None:
+    def __init__(
+        self,
+        request,
+        tmp_path: Path,
+        model_name: str,
+        *,
+        consumer_env: Mapping[str, str | None] | None = None,
+        include_frontend: bool = True,
+        include_epp: bool = True,
+        require_readiness: bool = True,
+        core_system_metrics: bool = False,
+        log_label: str | None = None,
+    ) -> None:
         self.request = request
         self.tmp_path = tmp_path
         self.model_name = model_name
+        self.consumer_env = dict(consumer_env) if consumer_env is not None else None
+        self.include_frontend = include_frontend
+        self.include_epp = include_epp
+        self.require_readiness = require_readiness
+        self.core_system_metrics = core_system_metrics
+        self.log_label = log_label
         self.identity = resolve_pod_identity()
         self._stack = ExitStack()
         self._lock: FileLock | None = None
         self.kube_api: LoopbackKubeAPI | None = None
         self.mockers = None
         self.frontend_port: int | None = None
+        self.epp_system_port: int | None = None
         self.driver: ExtProcParityDriver | None = None
         self.frontend_process: FrontendRouterProcess | None = None
         self.epp_process: RuntimeEppProcess | None = None
@@ -2502,16 +2521,107 @@ class EppFrontendParityStack:
             self._stack.close()
             raise
 
+    def _require_i16_system_port(self, port: int, *, label: str) -> int:
+        if not isinstance(port, int) or port < 1 or port > 32767:
+            raise AssertionError(
+                f"{label} system port {port!r} is not a positive i16 bind port"
+            )
+        return port
+
+    def _apply_consumer_env(self, env: dict[str, str | None]) -> dict[str, str | None]:
+        if self.consumer_env:
+            reserved = [
+                name
+                for name in ("DYN_SYSTEM_PORT", "DYN_SYSTEM_HOST", "DYN_EPP_METRICS_PORT")
+                if name in self.consumer_env
+            ]
+            if reserved:
+                raise AssertionError(
+                    "consumer_env must not set stack-owned bind names: "
+                    + ", ".join(reserved)
+                )
+            env.update(self.consumer_env)
+        return env
+
+    def _mocker_env(
+        self, kubeconfig: Path, identity: PodIdentity
+    ) -> dict[str, str | None]:
+        env = loopback_process_env(kubeconfig, identity, WORKER_CONTAINER_NAME)
+        for name in self.consumer_env or {}:
+            env[name] = None
+        return env
+
+    def _label_process(self, process, *, suffix: str) -> None:
+        if not self.log_label:
+            return
+        process.display_name = f"{process.display_name}-{self.log_label}"
+        process.log_dir = f"{self.request.node.name}/{self.log_label}-{suffix}"
+
+    def core_system_metrics_text(self, *, role: str) -> tuple[int, int, str]:
+        """Scrape one owned process's runtime core /metrics endpoint."""
+        if role == "frontend":
+            # Frontend pops DYN_SYSTEM_PORT; KV DRT gauges are on HTTP /metrics.
+            process = self.frontend_process
+            port = self.frontend_port
+            label = "frontend_process"
+        elif role == "epp":
+            process = self.epp_process
+            port = self.epp_system_port
+            label = "epp_process"
+        else:
+            raise AssertionError(f"unknown core metrics role {role!r}")
+        if process is None or process.proc is None:
+            raise AssertionError(f"owned {label} was not saved")
+        if process.proc.poll() is not None:
+            raise AssertionError(f"owned {label} process is not live")
+        if port is None:
+            raise AssertionError(f"owned {label} has no core metrics port")
+        pid = process.proc.pid
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
+        if response.status_code != 200:
+            raise AssertionError(
+                f"{label} pid={pid} core /metrics on port {port} "
+                f"returned HTTP {response.status_code}"
+            )
+        return pid, port, response.text
+
     def _start(self, mocker_cls) -> EppFrontendParityStack:
         """Launch children against the loopback API; fail if the fixture recorded errors."""
+        if not self.include_frontend and not self.include_epp:
+            raise AssertionError("parity stack requires frontend or EPP")
         self._lock = acquire_epp_session_lock()
         self._stack.callback(self._lock.release)
-        assert_epp_ports_free()
-        allocated = allocate_ports(3, DynamoPortRange.ROUTER.value)
+        if self.include_epp:
+            assert_epp_ports_free()
+        needed = 2
+        if self.include_frontend:
+            needed += 1
+        if self.core_system_metrics and self.include_epp:
+            needed += 1
+        allocated = allocate_ports(needed, DynamoPortRange.ROUTER.value)
         self._allocated_ports = allocated
         self.request.addfinalizer(lambda: deallocate_ports(list(allocated)))
-        api_port, frontend_port, worker_http_port = allocated
-        self.frontend_port = frontend_port
+        index = 0
+        api_port = allocated[index]
+        index += 1
+        frontend_port = None
+        if self.include_frontend:
+            frontend_port = allocated[index]
+            index += 1
+            self.frontend_port = frontend_port
+        worker_http_port = allocated[index]
+        index += 1
+        if self.core_system_metrics and self.include_epp:
+            self.epp_system_port = self._require_i16_system_port(
+                allocated[index], label="epp"
+            )
+            index += 1
+        if index != len(allocated):
+            raise AssertionError(
+                f"parity stack port unpack used {index} of {len(allocated)}"
+            )
 
         kubeconfig = write_loopback_kubeconfig(
             self.tmp_path / "kubeconfig",
@@ -2527,9 +2637,7 @@ class EppFrontendParityStack:
         self._stack.callback(proto_modules.close)
         self.driver = ExtProcParityDriver(proto_modules)
 
-        mocker_env = loopback_process_env(
-            kubeconfig, self.identity, WORKER_CONTAINER_NAME
-        )
+        mocker_env = self._mocker_env(kubeconfig, self.identity)
         self.mockers = mocker_cls(
             self.request,
             mocker_args={"speedup_ratio": 10.0, "block_size": 16},
@@ -2546,11 +2654,14 @@ class EppFrontendParityStack:
         )
         self._stack.enter_context(self.mockers)
 
-        frontend_env = loopback_process_env(
-            kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
-        )
-        self.frontend_process = self._stack.enter_context(
-            FrontendRouterProcess(
+        if self.include_frontend:
+            if frontend_port is None:
+                raise AssertionError("frontend port was not allocated")
+            frontend_env = loopback_process_env(
+                kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
+            )
+            self._apply_consumer_env(frontend_env)
+            frontend = FrontendRouterProcess(
                 self.request,
                 16,
                 frontend_port,
@@ -2561,18 +2672,25 @@ class EppFrontendParityStack:
                 router_mode="kv",
                 min_initial_workers=1,
                 extra_env=frontend_env,
+                require_readiness=self.require_readiness,
             )
-        )
+            self._label_process(frontend, suffix="frontend")
+            self.frontend_process = self._stack.enter_context(frontend)
 
-        epp_env = loopback_process_env(kubeconfig, self.identity, EPP_CONTAINER_NAME)
-        epp_env.update(
-            {
-                "DYN_NAMESPACE": self.mockers.namespace,
-                "DYN_COMPONENT_NAME": "mocker",
-            }
-        )
-        self.epp_process = self._stack.enter_context(
-            RuntimeEppProcess(
+        if self.include_epp:
+            epp_env = loopback_process_env(kubeconfig, self.identity, EPP_CONTAINER_NAME)
+            epp_env.update(
+                {
+                    "DYN_NAMESPACE": self.mockers.namespace,
+                    "DYN_COMPONENT_NAME": "mocker",
+                }
+            )
+            self._apply_consumer_env(epp_env)
+            if self.epp_system_port is not None:
+                epp_env["DYN_SYSTEM_HOST"] = "127.0.0.1"
+                epp_env["DYN_SYSTEM_PORT"] = str(self.epp_system_port)
+                epp_env["DYN_SYSTEM_ENABLED"] = None
+            epp = RuntimeEppProcess(
                 self.request,
                 binary=epp_binary_path(),
                 grpc_port=EPP_GRPC_PORT,
@@ -2580,9 +2698,12 @@ class EppFrontendParityStack:
                 extra_env=epp_env,
                 timeout=PROCESS_TIMEOUT_S,
                 kubeconfig=kubeconfig,
+                require_readiness=self.require_readiness,
             )
-        )
-        wait_for_frontend_models(self.frontend_url)
+            self._label_process(epp, suffix="epp")
+            self.epp_process = self._stack.enter_context(epp)
+        if self.require_readiness and self.include_frontend:
+            wait_for_frontend_models(self.frontend_url)
         if self.kube_api.failures:
             raise RuntimeError(
                 "Loopback Kubernetes API recorded unexpected requests: "

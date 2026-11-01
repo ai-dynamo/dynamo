@@ -20,9 +20,15 @@ parser contracts. The five conditional scalar envs and
 observer. ``session_affinity_ttl_secs`` binds TTL enable-presence only on
 the existing session_id gap. ``overlap_refresh_after_secs`` is a
 supported_candidate dual-process queue-construction INFO plus plain-chat
-token-parity observer. ``shared_cache_multiplier`` is a
-supported_candidate profile pending runtime evidence. Remaining rows stay
-pending.
+token-parity observer. ``router_tracking_hash`` and
+``router_tracking_key_id`` bind the keyed-tracking runtime Item.
+``router_tracking_key_file`` binds that runtime Item and the owned
+frontend/epp size-control Items. ``router_approximate_cache_policy``
+binds the owned core-metrics LRU and default-TTL Items. These four rows
+are unverified candidates until fixed-SHA Linux execution. Candidate
+collection is 41 nodes, not an executed claim. ``shared_cache_multiplier``
+is a supported_candidate profile pending runtime evidence. Remaining rows
+stay pending.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -36,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import logging
 import re
@@ -43,6 +50,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 # Compiled KvRouterConfig and FrontendArgGroup stay function-local so this
@@ -147,6 +155,98 @@ OVERLAP_REFRESH_ENABLED = "Router queue overlap-score refresh enabled after"
 OVERLAP_REFRESH_TARGET = "dynamo_kv_router::scheduling::queue"
 OVERLAP_REFRESH_LOG_FLUSH_S = 2.0
 OVERLAP_REFRESH_RS = REPO_ROOT / "lib/kv-router/src/scheduling/overlap_refresh.rs"
+TRACKING_HASH_ROW = "router_tracking_hash"
+TRACKING_KEY_FILE_ROW = "router_tracking_key_file"
+TRACKING_KEY_ID_ROW = "router_tracking_key_id"
+APPROXIMATE_POLICY_ROW = "router_approximate_cache_policy"
+TRACKING_RUNTIME_OBSERVER = (
+    "fe_native_to_json+epp_init_event+owned_key_file_read+"
+    "plain_chat_token_parity+fe_generation+epp_route"
+)
+TRACKING_KEY_FILE_OBSERVER = (
+    "owned_fe_epp_key_file_read+size_diagnostic+keyed_tracking_runtime"
+)
+APPROXIMATE_POLICY_OBSERVER = (
+    "owned_fe_epp_core_system_metrics+plain_chat_token_parity+default_ttl_control"
+)
+KEYED_TRACKING_PROFILE = "keyed_tracking"
+KEYED_TRACKING_RUNTIME_TEST = "test_keyed_tracking_runtime_config"
+KEYED_TRACKING_RUNTIME_ITEM = (
+    "tests/router/test_epp_frontend_config_parity.py::"
+    f"{KEYED_TRACKING_RUNTIME_TEST}[{KEYED_TRACKING_PROFILE}]"
+)
+KEYED_TRACKING_SIZE_TEST = "test_keyed_tracking_key_file_size"
+KEYED_TRACKING_SIZE_ARMS = ("frontend", "epp")
+KEYED_TRACKING_SIZE_ITEMS = tuple(
+    "tests/router/test_epp_frontend_config_parity.py::"
+    f"{KEYED_TRACKING_SIZE_TEST}[{arm}]"
+    for arm in KEYED_TRACKING_SIZE_ARMS
+)
+APPROXIMATE_POLICY_TEST = "test_approximate_cache_policy_metrics"
+APPROXIMATE_POLICY_NAMES = ("lru", "ttl")
+APPROXIMATE_POLICY_ITEMS = tuple(
+    "tests/router/test_epp_frontend_config_parity.py::"
+    f"{APPROXIMATE_POLICY_TEST}[{name}]"
+    for name in APPROXIMATE_POLICY_NAMES
+)
+_TRACKING_APPROXIMATE_BINDINGS = MappingProxyType(
+    {
+        TRACKING_HASH_ROW: MappingProxyType(
+            {
+                "observer": TRACKING_RUNTIME_OBSERVER,
+                "flags": ("--router-tracking-hash",),
+                "env": ("DYN_ROUTER_TRACKING_HASH",),
+                "schema_fields": ("router_tracking_hash",),
+                "affected_fields": ("router_tracking_hash",),
+                "items": (KEYED_TRACKING_RUNTIME_ITEM,),
+            }
+        ),
+        TRACKING_KEY_ID_ROW: MappingProxyType(
+            {
+                "observer": TRACKING_RUNTIME_OBSERVER,
+                "flags": ("--router-tracking-key-id",),
+                "env": ("DYN_ROUTER_TRACKING_KEY_ID",),
+                "schema_fields": ("router_tracking_key_id",),
+                "affected_fields": ("router_tracking_key_id",),
+                "items": (KEYED_TRACKING_RUNTIME_ITEM,),
+            }
+        ),
+        TRACKING_KEY_FILE_ROW: MappingProxyType(
+            {
+                "observer": TRACKING_KEY_FILE_OBSERVER,
+                "flags": ("--router-tracking-key-file",),
+                "env": ("DYN_ROUTER_TRACKING_KEY_FILE",),
+                "schema_fields": ("router_tracking_key_file",),
+                "affected_fields": ("router_tracking_key_file",),
+                "items": (KEYED_TRACKING_RUNTIME_ITEM, *KEYED_TRACKING_SIZE_ITEMS),
+            }
+        ),
+        APPROXIMATE_POLICY_ROW: MappingProxyType(
+            {
+                "observer": APPROXIMATE_POLICY_OBSERVER,
+                "flags": ("--router-approximate-cache-policy",),
+                "env": ("DYN_ROUTER_APPROXIMATE_CACHE_POLICY",),
+                "schema_fields": ("router_approximate_cache_policy",),
+                "affected_fields": ("router_approximate_cache_policy",),
+                "items": APPROXIMATE_POLICY_ITEMS,
+            }
+        ),
+    }
+)
+TRACKING_HASH_ALGORITHM = "keyed-xxh3-v1"
+TRACKING_KEY_ID = "parity-public-test-key-v1"
+TRACKING_KEY_PUBLIC_BYTES = bytes(range(32))
+TRACKING_KEY_INVALID_BYTES = bytes(range(31))
+TRACKING_KEY_SIZE = 32
+TRACKING_KEY_SIZE_DIAGNOSTIC = (
+    f"router tracking key file must contain exactly {TRACKING_KEY_SIZE} "
+    "raw bytes; found 31"
+)
+TRACKING_KEY_SIZE_DEADLINE_S = 60.0
+TRACKING_RUNTIME_FIELDS = ("router_tracking_hash", "router_tracking_key_id")
+APPROXIMATE_CONFIGURED_METRIC = "router_approximate_cache_configured_policy"
+APPROXIMATE_EFFECTIVE_METRIC = "router_approximate_cache_effective_policy"
+APPROXIMATE_POLICY_LABELS = ("ttl", "lru", "disabled")
 QUEUE_RS = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
 INDEXER_BACKEND_RS = REPO_ROOT / "lib/kv-router/src/services/indexer/backend.rs"
 WORKERS_RS = REPO_ROOT / "lib/kv-router/src/services/selection/core/workers.rs"
@@ -221,6 +321,8 @@ _ENUM_EVENT_VALUES = {
     "PrefillLoad": "prefill_load",
     "isl_or_load": "isl_or_load",
     "IslOrLoad": "isl_or_load",
+    "public-xxh3-v1": "public-xxh3-v1",
+    "keyed-xxh3-v1": "keyed-xxh3-v1",
 }
 _SOME_RE = re.compile(r"^Some\((.+)\)$")
 OMITTABLE_DEFAULT_NATIVE_FIELDS = frozenset(
@@ -231,6 +333,8 @@ OMITTABLE_DEFAULT_NATIVE_FIELDS = frozenset(
         "conditional_disagg_eff_isl_ratio_threshold",
         "conditional_disagg_prefill_busy_threshold",
         "conditional_disagg_decode_busy_threshold",
+        "router_tracking_hash",
+        "router_tracking_key_id",
     }
 )
 OPTION_EVENT_FIELDS = frozenset(
@@ -240,6 +344,7 @@ OPTION_EVENT_FIELDS = frozenset(
         "conditional_disagg_prefill_busy_threshold",
         "conditional_disagg_decode_busy_threshold",
         "shared_cache_multiplier",
+        "router_tracking_key_id",
     }
 )
 _CONDITIONAL_JSON = (
@@ -956,11 +1061,13 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--router-approximate-cache-policy",),
         ("DYN_ROUTER_APPROXIMATE_CACHE_POLICY",),
         ("router_approximate_cache_policy",),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        APPROXIMATE_POLICY_OBSERVER,
         (),
-        (),
-        "Process-local; skipped from to_json. No live observer in this increment.",
+        ("router_approximate_cache_policy",),
+        "Unverified candidate until fixed-SHA Linux execution. Process-local; "
+        "omitted from native to_json. Owned FE and EPP core gauges observe "
+        "nondefault LRU and the omitted-env default TTL control.",
     ),
     SettingDecision(
         "router_prefill_policy",
@@ -1026,36 +1133,43 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--router-tracking-hash",),
         ("DYN_ROUTER_TRACKING_HASH",),
         ("router_tracking_hash",),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        TRACKING_RUNTIME_OBSERVER,
         (),
-        (),
-        "FE/EPP field exists. No profile exercises it. No live observer in "
-        "this increment.",
+        ("router_tracking_hash",),
+        "Unverified candidate until fixed-SHA Linux execution. Keyed public "
+        "test profile. FE native to_json and the owned EPP init event must "
+        "expose keyed-xxh3-v1 after real model construction, query token "
+        "parity, one FE generation, and one real EPP ext_proc route.",
     ),
     SettingDecision(
         "router_tracking_key_file",
         ("--router-tracking-key-file",),
         ("DYN_ROUTER_TRACKING_KEY_FILE",),
         ("router_tracking_key_file",),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        TRACKING_KEY_FILE_OBSERVER,
         (),
-        (),
-        "FE/EPP Option field exists. No profile exercises it. No live "
-        "observer in this increment.",
+        ("router_tracking_key_file",),
+        "Unverified candidate until fixed-SHA Linux execution. Valid 32-byte "
+        "public file is consumed during router construction. Independent "
+        "frontend and epp 31-byte arms must emit the owned size diagnostic. "
+        "The EPP init event does not expose the path.",
     ),
     SettingDecision(
         "router_tracking_key_id",
         ("--router-tracking-key-id",),
         ("DYN_ROUTER_TRACKING_KEY_ID",),
         ("router_tracking_key_id",),
-        STATUS_PENDING,
-        None,
+        STATUS_SUPPORTED,
+        TRACKING_RUNTIME_OBSERVER,
         (),
-        (),
-        "FE/EPP Option field exists. No profile exercises it. No live "
-        "observer in this increment.",
+        ("router_tracking_key_id",),
+        "Unverified candidate until fixed-SHA Linux execution. Keyed public "
+        "test profile. FE native to_json and the owned EPP init event must "
+        "expose parity-public-test-key-v1 after real model construction, "
+        "query token parity, one FE generation, and one real EPP ext_proc "
+        "route.",
     ),
     SettingDecision(
         "shared_cache_multiplier",
@@ -1454,6 +1568,30 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {OVERLAP_REFRESH_OBSERVER}; only "
                 f"{OVERLAP_REFRESH_ROW} may"
             )
+        if row.observer == TRACKING_RUNTIME_OBSERVER and row.name not in {
+            TRACKING_HASH_ROW,
+            TRACKING_KEY_ID_ROW,
+        }:
+            raise AssertionError(
+                f"{row.name} may not use {TRACKING_RUNTIME_OBSERVER}; only "
+                f"{TRACKING_HASH_ROW} and {TRACKING_KEY_ID_ROW} may"
+            )
+        if (
+            row.observer == TRACKING_KEY_FILE_OBSERVER
+            and row.name != TRACKING_KEY_FILE_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {TRACKING_KEY_FILE_OBSERVER}; only "
+                f"{TRACKING_KEY_FILE_ROW} may"
+            )
+        if (
+            row.observer == APPROXIMATE_POLICY_OBSERVER
+            and row.name != APPROXIMATE_POLICY_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {APPROXIMATE_POLICY_OBSERVER}; only "
+                f"{APPROXIMATE_POLICY_ROW} may"
+            )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
         names.add(row.name)
@@ -1835,6 +1973,30 @@ def _assert_overlap_refresh_binding(row: SettingDecision, items: Iterable[Any]) 
     _assert_ordinary_collected_item(OVERLAP_REFRESH_ITEM, item)
 
 
+def _assert_tracking_approximate_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    spec = _TRACKING_APPROXIMATE_BINDINGS.get(row.name)
+    if spec is None:
+        raise AssertionError(
+            f"{row.name} is not a closed tracking/approximate contract"
+        )
+    if row.status != STATUS_SUPPORTED:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+        )
+    for field in ("observer", "flags", "env", "schema_fields", "affected_fields"):
+        got = getattr(row, field)
+        wanted = spec[field]
+        if got != wanted:
+            raise AssertionError(f"{row.name} {field} {got!r} != {wanted!r}")
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    for item_id in spec["items"]:
+        item = _require_unique_nodeid_item(items, item_id)
+        _assert_ordinary_collected_item(item_id, item)
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -1852,6 +2014,11 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     stay free of xfail/skip. use_remote_indexer and session_affinity_ttl_secs
     bind only their exact existing collected Items. overlap_refresh_after_secs
     binds only its ordinary owned-process queue-INFO plus token-parity Item.
+    router_tracking_hash and router_tracking_key_id bind only the ordinary
+    keyed-tracking runtime Item. router_tracking_key_file binds that runtime
+    Item and both ordinary frontend/epp size-control Items.
+    router_approximate_cache_policy binds the ordinary LRU and omitted-env
+    default-TTL core-metrics Items.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -1930,6 +2097,9 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == OVERLAP_REFRESH_ROW:
             _assert_overlap_refresh_binding(row, item_list)
+            continue
+        if row.name in _TRACKING_APPROXIMATE_BINDINGS:
+            _assert_tracking_approximate_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -2060,11 +2230,17 @@ def _decode_event_value(name: str, raw: str, expected: Any) -> Any:
         return None
     if isinstance(expected, str):
         mapped = _ENUM_EVENT_VALUES.get(payload)
-        if mapped is None:
-            raise AssertionError(
-                f"{name}={raw!r} is not a known enum display/serde tracing form"
-            )
-        return mapped
+        if mapped is not None:
+            return mapped
+        if name == "router_tracking_key_id":
+            text = payload
+            if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                text = text[1:-1]
+            if text == expected:
+                return text
+        raise AssertionError(
+            f"{name}={raw!r} is not a known enum display/serde tracing form"
+        )
     if payload in {"true", "false"}:
         value: Any = payload == "true"
         if isinstance(expected, bool):
@@ -3556,3 +3732,126 @@ def run_effective_config_profile(
             expected=profile.expected,
             defaults=defaults,
         )
+
+
+def _plain_chat_token_case(model_name: str):
+    from tests.router.common import frontend_epp_token_parity_cases
+
+    cases = frontend_epp_token_parity_cases(model_name)
+    plain = [case for case in cases if case.name == "plain_chat"]
+    if len(plain) != 1:
+        raise AssertionError(
+            f"expected exactly one plain_chat token case, found {len(plain)}"
+        )
+    return plain
+
+
+def _write_tracking_key_file(path: Path, payload: bytes) -> dict[str, Any]:
+    path.write_bytes(payload)
+    if path.read_bytes() != payload:
+        raise AssertionError(f"tracking key file {path} was not written as public bytes")
+    return {
+        "path": str(path),
+        "length": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _keyed_tracking_consumer_env(key_path: Path) -> dict[str, str]:
+    return {
+        "DYN_ROUTER_TRACKING_HASH": TRACKING_HASH_ALGORITHM,
+        "DYN_ROUTER_TRACKING_KEY_FILE": str(key_path),
+        "DYN_ROUTER_TRACKING_KEY_ID": TRACKING_KEY_ID,
+    }
+
+
+def _approximate_consumer_env(policy_name: str) -> dict[str, str | None]:
+    if policy_name not in APPROXIMATE_POLICY_NAMES:
+        raise AssertionError(f"unknown approximate policy profile {policy_name!r}")
+    env: dict[str, str | None] = {
+        "DYN_ROUTER_USE_KV_EVENTS": "false",
+        "DYN_USE_REMOTE_INDEXER": "false",
+        "DYN_ROUTER_APPROXIMATE_CACHE_POLICY": None,
+    }
+    if policy_name == "lru":
+        env["DYN_ROUTER_APPROXIMATE_CACHE_POLICY"] = "lru"
+    return env
+
+
+def _core_metric_name(suffix: str) -> str:
+    from dynamo.prometheus_names import name_prefix
+
+    return f"{name_prefix.COMPONENT}_{suffix}"
+
+
+def _assert_core_policy_gauges(
+    content: str,
+    *,
+    role: str,
+    pid: int,
+    port: int,
+    namespace: str,
+    component: str,
+    selected: str,
+) -> None:
+    from dynamo.prometheus_names import labels
+    from tests.utils.prometheus import find_metric_samples
+
+    if selected not in APPROXIMATE_POLICY_LABELS:
+        raise AssertionError(f"{role} selected policy {selected!r} is unknown")
+    if not namespace or not component:
+        raise AssertionError(
+            f"{role} owned mocker identity is missing "
+            f"namespace={namespace!r} component={component!r}"
+        )
+    configured_name = _core_metric_name(APPROXIMATE_CONFIGURED_METRIC)
+    effective_name = _core_metric_name(APPROXIMATE_EFFECTIVE_METRIC)
+    namespace_label = namespace.replace("-", "_")
+    identity = {
+        labels.NAMESPACE: namespace_label,
+        labels.COMPONENT: component,
+    }
+    for metric_name in (configured_name, effective_name):
+        family = find_metric_samples(content, metric_name)
+        if not family:
+            raise AssertionError(
+                f"{role} pid={pid} port={port} {metric_name} family is missing"
+            )
+        matched: dict[str, float] = {}
+        for policy in APPROXIMATE_POLICY_LABELS:
+            samples = find_metric_samples(
+                content,
+                metric_name,
+                {**identity, "policy": policy},
+            )
+            if not samples:
+                raise AssertionError(
+                    f"{role} pid={pid} port={port} {metric_name} "
+                    f"namespace={namespace_label!r} component={component!r} "
+                    f"policy={policy!r} series is missing"
+                )
+            if len(samples) != 1:
+                raise AssertionError(
+                    f"{role} pid={pid} port={port} {metric_name} "
+                    f"namespace={namespace_label!r} component={component!r} "
+                    f"policy={policy!r} has {len(samples)} series"
+                )
+            matched[policy] = samples[0]
+        if len(family) != len(matched):
+            raise AssertionError(
+                f"{role} pid={pid} port={port} {metric_name} has "
+                f"{len(family)} family samples; {len(matched)} match "
+                f"namespace={namespace_label!r} component={component!r}"
+            )
+        for policy, value in matched.items():
+            wanted = 1.0 if policy == selected else 0.0
+            if value != wanted:
+                raise AssertionError(
+                    f"{role} pid={pid} port={port} {metric_name} "
+                    f"{policy}={value} != {wanted}; selected={selected}"
+                )
+        if matched[selected] != 1.0:
+            raise AssertionError(
+                f"{role} pid={pid} port={port} {metric_name} did not "
+                f"observe selected {selected}"
+            )
