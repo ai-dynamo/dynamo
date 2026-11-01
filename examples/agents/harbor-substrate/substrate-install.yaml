@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Consumed by ate-setup --config, not kubectl apply.
+apiVersion: install.ate.dev/v1alpha1
+kind: SubstrateInstall
+namespace: ate-system
+images:
+  repo: ghcr.io/agent-substrate/substrate
+  tag: v1.0.0-rc.1
+
+ateapi:
+  authz:
+    # Upstream development default, used by kubectl-ate without --token-file.
+    # For a shared installation, replace with your administrators' principals.
+    bootstrapOwners: system:serviceaccount:ate-system:ate-client
+  postgres:
+    # Use the default StorageClass for the bundled PostgreSQL PVC (500 GiB).
+    # Set a StorageClass name here if your cluster has no suitable default.
+    storageClass: ""
+
+storage:
+  snapshotLocation: s3://ate-snapshots/
+  # Required by the rc1 installer on non-kind clusters; unused by the S3 backend.
+  transferGSAName: unused
+gcp:
+  projectID: not-a-gcp-project
+
+atenet:
+  egress:
+    # Workloads supply their own model/API credentials.
+    credentialProvider: '{"enabled":false}'
+
+# No actor ingress until a workload adds its clients' SPIFFE IDs.
+# Use one comma-separated string, not a YAML list.
+ingressAllowedSPIFFEIDs: ""

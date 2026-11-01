@@ -97,12 +97,6 @@ runs have not been validated. SWE-bench describes ARM64 support as
 [experimental](https://github.com/SWE-bench/SWE-bench/blob/main/README.md).
 </Note>
 
-Complete the installation and its capability checks before continuing.
-Object storage is required by the pinned Substrate release, including for this
-initial run with golden snapshots disabled. The installation guide deploys
-in-cluster RustFS and creates the `ate-snapshots` bucket by default. The steps
-below configure Harbor on that installation.
-
 From the root of your Dynamo clone, enter the example directory. Run workstation
 commands here unless a step identifies the runner shell. Edit the supplied
 configuration files in place as you follow the tutorial.
@@ -111,11 +105,25 @@ configuration files in place as you follow the tutorial.
 cd examples/agents/harbor-substrate
 ```
 
+If you need to install Substrate, follow
+[Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.mdx)
+from this directory and select **Use the Dynamo example** in its configuration
+step. Edit the supplied `substrate-install.yaml` in place, complete the
+installation's capability and readiness checks, then return here. If Substrate
+is already installed, retain its operator-managed configuration and continue
+with the verification step below.
+
+Object storage is required by the pinned Substrate release, including for this
+initial run with golden snapshots disabled. The installation guide deploys
+in-cluster RustFS and creates the `ate-snapshots` bucket by default. The steps
+below configure Harbor on that installation.
+
 The commands use your current Kubernetes context. The configuration lives
 in the YAML files below. Keep API keys out of those files.
 
 | File | Consumer | What you configure |
 | --- | --- | --- |
+| `substrate-install.yaml` | Installer: `ate-setup --config` | Generic platform release, database, administrator, and storage settings |
 | `workerpool.yaml` | Kubernetes: `kubectl apply` | CPU worker placement and capacity |
 | `harbor-runner.yaml` | Kubernetes: `kubectl apply` | Harbor runner Pod, ServiceAccount, and credentials |
 | `runner-access-policy.yaml` | Substrate: `kubectl-ate` | Runner permissions within the atespace |
@@ -285,16 +293,17 @@ kubectl -n ate-system edit deployment atenet-router
 kubectl -n ate-system rollout status deployment/atenet-router --timeout=300s
 ```
 
-Also add the identity to `ingressAllowedSPIFFEIDs` in the installation's managed
-configuration so a later deploy preserves it:
+Also add the identity to `ingressAllowedSPIFFEIDs` in `substrate-install.yaml`
+(or your installation's managed configuration) so a later deploy preserves it.
+For the example's initially empty allowlist, set:
 
 ```yaml
-ingressAllowedSPIFFEIDs:
-  - spiffe://cluster.local/ns/ate-env/sa/harbor-runner
+ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/ate-env/sa/harbor-runner
 ```
 
-The list above shows the identity to add, not a replacement for other clients.
-On a shared installation, have its operator make these changes.
+The installer accepts a comma-separated string, not a YAML list. Append to
+existing identities rather than replacing them. On a shared installation,
+have its operator make these changes.
 
 ### Align request timeouts
 
