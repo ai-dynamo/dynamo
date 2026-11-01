@@ -438,7 +438,7 @@ ingressAllowedSPIFFEIDs: ""
 To use an external database, follow
 [Substrate's PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md).
 Supply connection credentials through the installer's supported environment
-settings. Keep them out of the checked-in YAML.
+settings.
 
 For a shared installation, select administrator principals using the
 [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md#bootstrap-owners).
@@ -502,10 +502,6 @@ standard regional endpoint. For GCS, follow the upstream
 with a `gs://` location and real transfer-service-account settings; keep
 `ATE_STORAGE_BACKEND=gcs` and omit the AWS entries.
 </Note>
-
-Keep these manifest edits with your installation configuration. `ate-setup`
-renders this checkout, so subsequent deploys reuse the settings. Reapply your
-edits if you replace or upgrade the checkout.
 
 </Step>
 
