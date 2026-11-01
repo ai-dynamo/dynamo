@@ -26,13 +26,14 @@ token-parity observer. ``router_tracking_hash`` and
 frontend/epp size-control Items. ``router_approximate_cache_policy``
 binds the owned core-metrics LRU and default-TTL Items. These four rows
 are unverified candidates until fixed-SHA Linux execution.
-``active_decode_blocks_threshold`` binds one ordinary owned worker-monitor
-remote-load Item as an unverified candidate. ``shared_cache_type`` binds
-one ordinary owned HiCache client-construction Item as an unverified
-candidate. ``shared_cache_multiplier`` is a supported_candidate profile
-pending runtime evidence. ``kv_cache_block_size`` stays pending until the
-ordinary Dynamic cross-input Items execute; collected Items are not a
-binding. Remaining rows stay pending.
+``active_decode_blocks_threshold`` is a measured known gap: FE configured
+0.25 vs EPP monitor None after the default-None control, on one owned
+worker-monitor remote-load Item. ``shared_cache_type`` binds one ordinary
+owned HiCache client-construction Item. ``shared_cache_multiplier`` is a
+supported_candidate profile pending runtime evidence. ``kv_cache_block_size``
+is not-FE-honored Dynamic worker-card geometry: independent CLI 8/64 did
+not override card 32, and the card 16 control yielded 16. Remaining rows
+stay pending.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -315,6 +316,24 @@ _SHARED_CACHE_TYPE_BINDING = MappingProxyType(
         "items": (SHARED_CACHE_TYPE_ITEM,),
     }
 )
+KV_CACHE_BLOCK_SIZE_ROW = "kv_cache_block_size"
+KV_CACHE_BLOCK_SIZE_OBSERVER = (
+    "dynamic_worker_card_cross_input+model_metric+provider_block_size"
+)
+KV_CACHE_BLOCK_SIZE_TEST = "test_dynamic_block_size_consumer"
+KV_CACHE_BLOCK_SIZE_PROFILES = (
+    "worker_card32_frontend_cli8",
+    "worker_card32_frontend_cli64",
+    "worker_card16_frontend_cli64",
+)
+KV_CACHE_BLOCK_SIZE_ITEMS = (
+    "tests/router/test_epp_frontend_config_parity.py::"
+    "test_dynamic_block_size_consumer[worker_card32_frontend_cli8]",
+    "tests/router/test_epp_frontend_config_parity.py::"
+    "test_dynamic_block_size_consumer[worker_card32_frontend_cli64]",
+    "tests/router/test_epp_frontend_config_parity.py::"
+    "test_dynamic_block_size_consumer[worker_card16_frontend_cli64]",
+)
 QUEUE_RS = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
 INDEXER_BACKEND_RS = REPO_ROOT / "lib/kv-router/src/services/indexer/backend.rs"
 WORKERS_RS = REPO_ROOT / "lib/kv-router/src/services/selection/core/workers.rs"
@@ -330,7 +349,9 @@ _QUEUE_REFRESH_IF_RE = re.compile(
 _SUPPORTS_OVERLAP_REFRESH_RE = re.compile(
     r"pub fn supports_overlap_refresh\s*\(\s*&self\s*\)\s*->\s*bool\s*\{"
 )
-NOT_FE_HONORED_ROWS = frozenset({NOT_FE_HONORED_ROW, POSITIONAL_ROW})
+NOT_FE_HONORED_ROWS = frozenset(
+    {NOT_FE_HONORED_ROW, POSITIONAL_ROW, KV_CACHE_BLOCK_SIZE_ROW}
+)
 KV_INDEXER_MOD = REPO_ROOT / "lib/kv-router/src/indexer/mod.rs"
 POSITIONAL_RS = REPO_ROOT / "lib/kv-router/src/indexer/positional.rs"
 KV_INDEXER_RS = REPO_ROOT / "lib/kv-router/src/indexer/kv_indexer.rs"
@@ -521,6 +542,10 @@ class LoadAwarePresetConfigMismatch(FrontendEppConfigMismatch):
 
 class ConditionalJsonConfigMismatch(FrontendEppConfigMismatch):
     """Measured FE conditional JSON vs EPP default scalar config."""
+
+
+class ActiveDecodeThresholdConfigMismatch(FrontendEppConfigMismatch):
+    """Measured FE configured 0.25 decode threshold vs EPP monitor None."""
 
 
 @dataclass(frozen=True)
@@ -1004,16 +1029,19 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "event does not. No live observer in this increment.",
     ),
     SettingDecision(
-        "kv_cache_block_size",
+        KV_CACHE_BLOCK_SIZE_ROW,
         ("--kv-cache-block-size",),
         ("DYN_KV_CACHE_BLOCK_SIZE",),
         ("kv_cache_block_size",),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Frontend wrapper CLI sets this for KV mode. It is not a KvRouterConfig "
-        "to_json/init-event field. Do not treat an env translation as EPP honor.",
+        STATUS_NOT_FE_HONORED,
+        KV_CACHE_BLOCK_SIZE_OBSERVER,
+        KV_CACHE_BLOCK_SIZE_PROFILES,
+        (KV_CACHE_BLOCK_SIZE_ROW,),
+        "The tested Dynamic engine consumes worker-card geometry; independent "
+        "CLI 8/64 did not override card 32, and the card 16 control yielded 16. "
+        "This is not CLI support or an all-engine statement. The live inputs "
+        "were CLI cross-values; CLI/env identifier ownership shares the "
+        "Frontend setting, and no independent env run is being claimed.",
     ),
     SettingDecision(
         "conditional_disagg_epp_scalar_envs",
@@ -1032,13 +1060,13 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("--active-decode-blocks-threshold",),
         (DECODE_THRESHOLD_ENV,),
         ("active_decode_blocks_threshold",),
-        STATUS_SUPPORTED,
+        STATUS_KNOWN_GAP,
         DECODE_THRESHOLD_OBSERVER,
         (),
         (DECODE_THRESHOLD_ROW,),
-        "Unverified candidate until fixed-SHA Linux execution. Owned FE and "
-        "EPP worker-monitor remote-load events observe the snapshotted decode "
-        "threshold after a real generation. Prefill thresholds stay pending.",
+        "Measured consumer gap: FE configured 0.25 vs EPP monitor None with "
+        "default None control. Effective remote-load consumer scope, not a "
+        "proven admission-pressure boundary. Prefill thresholds stay pending.",
     ),
     SettingDecision(
         "active_prefill_tokens_threshold",
@@ -1261,11 +1289,10 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         SHARED_CACHE_TYPE_OBSERVER,
         (),
         (SHARED_CACHE_TYPE_ROW,),
-        "Unverified candidate until fixed-SHA Linux execution. Omitted-env "
-        "none and explicit hicache are observed on FE native JSON, the owned "
-        "EPP init event, and HiCache client construction. This is not a "
-        "remote cache-hit claim. Existing aliases stay owned, not independently "
-        "executed.",
+        "Omitted-env none and explicit hicache are observed on FE native JSON, "
+        "the owned EPP init event, and HiCache client construction. This is "
+        "not a remote cache-hit claim. Existing aliases stay owned, not "
+        "independently executed.",
     ),
     SettingDecision(
         "use_remote_indexer",
@@ -1680,6 +1707,14 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {SHARED_CACHE_TYPE_OBSERVER}; only "
                 f"{SHARED_CACHE_TYPE_ROW} may"
             )
+        if (
+            row.observer == KV_CACHE_BLOCK_SIZE_OBSERVER
+            and row.name != KV_CACHE_BLOCK_SIZE_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {KV_CACHE_BLOCK_SIZE_OBSERVER}; only "
+                f"{KV_CACHE_BLOCK_SIZE_ROW} may"
+            )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
         names.add(row.name)
@@ -1916,12 +1951,58 @@ def _assert_positional_not_fe_binding(
     _assert_ordinary_collected_item(POSITIONAL_ITEM, item)
 
 
+def _assert_kv_cache_block_size_not_fe_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    if row.name != KV_CACHE_BLOCK_SIZE_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {KV_CACHE_BLOCK_SIZE_ROW} contract"
+        )
+    if row.status != STATUS_NOT_FE_HONORED:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_NOT_FE_HONORED!r}"
+        )
+    if row.observer != KV_CACHE_BLOCK_SIZE_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != "
+            f"{KV_CACHE_BLOCK_SIZE_OBSERVER!r}"
+        )
+    if row.flags != ("--kv-cache-block-size",):
+        raise AssertionError(
+            f"{row.name} flags {row.flags} != ('--kv-cache-block-size',)"
+        )
+    if row.env != ("DYN_KV_CACHE_BLOCK_SIZE",):
+        raise AssertionError(
+            f"{row.name} env {row.env} != ('DYN_KV_CACHE_BLOCK_SIZE',)"
+        )
+    if row.schema_fields != (KV_CACHE_BLOCK_SIZE_ROW,):
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != "
+            f"{(KV_CACHE_BLOCK_SIZE_ROW,)!r}"
+        )
+    if row.affected_fields != (KV_CACHE_BLOCK_SIZE_ROW,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            f"{(KV_CACHE_BLOCK_SIZE_ROW,)!r}"
+        )
+    if row.profiles != KV_CACHE_BLOCK_SIZE_PROFILES:
+        raise AssertionError(
+            f"{row.name} profiles {row.profiles} != {KV_CACHE_BLOCK_SIZE_PROFILES}"
+        )
+    for item_id in KV_CACHE_BLOCK_SIZE_ITEMS:
+        item = _require_unique_nodeid_item(items, item_id)
+        _assert_ordinary_collected_item(item_id, item)
+
+
 def _assert_not_fe_honored_binding(row: SettingDecision, items: Iterable[Any]) -> None:
     if row.name == NOT_FE_HONORED_ROW:
         _assert_conditional_scalar_not_fe_binding(row, items)
         return
     if row.name == POSITIONAL_ROW:
         _assert_positional_not_fe_binding(row, items)
+        return
+    if row.name == KV_CACHE_BLOCK_SIZE_ROW:
+        _assert_kv_cache_block_size_not_fe_binding(row, items)
         return
     raise AssertionError(
         f"{row.name} is not an explicit not-FE-honored contract; "
@@ -2085,6 +2166,32 @@ def _assert_tracking_approximate_binding(
         _assert_ordinary_collected_item(item_id, item)
 
 
+def _assert_decode_threshold_xfail_marker(mark: Any) -> None:
+    if mark.args:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ROW} xfail has positional condition {mark.args!r}"
+        )
+    if "condition" in mark.kwargs:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ROW} xfail has condition="
+            f"{mark.kwargs['condition']!r}"
+        )
+    if mark.kwargs.get("strict") is not True:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ROW} xfail strict={mark.kwargs.get('strict')!r} "
+            "is not True"
+        )
+    if mark.kwargs.get("raises") is not ActiveDecodeThresholdConfigMismatch:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ROW} xfail raises={mark.kwargs.get('raises')!r} "
+            f"!= {ActiveDecodeThresholdConfigMismatch!r}"
+        )
+    if mark.kwargs.get("run", True) is not True:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ROW} xfail run={mark.kwargs.get('run')!r} is disabled"
+        )
+
+
 def _assert_decode_threshold_binding(
     row: SettingDecision, items: Iterable[Any]
 ) -> None:
@@ -2092,9 +2199,9 @@ def _assert_decode_threshold_binding(
         raise AssertionError(
             f"{row.name} is not the fixed {DECODE_THRESHOLD_ROW} contract"
         )
-    if row.status != STATUS_SUPPORTED:
+    if row.status != STATUS_KNOWN_GAP:
         raise AssertionError(
-            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+            f"{row.name} status {row.status!r} != {STATUS_KNOWN_GAP!r}"
         )
     if row.observer != DECODE_THRESHOLD_OBSERVER:
         raise AssertionError(
@@ -2117,7 +2224,16 @@ def _assert_decode_threshold_binding(
     if row.profiles != ():
         raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
     item = _require_unique_nodeid_item(items, DECODE_THRESHOLD_ITEM)
-    _assert_ordinary_collected_item(DECODE_THRESHOLD_ITEM, item)
+    skips = list(item.iter_markers(name="skip")) + list(
+        item.iter_markers(name="skipif")
+    )
+    marks = list(item.iter_markers(name="xfail"))
+    if skips or len(marks) != 1:
+        raise AssertionError(
+            f"{DECODE_THRESHOLD_ITEM} must collect exactly one xfail and no skip, "
+            f"found xfail={len(marks)} skip={len(skips)}"
+        )
+    _assert_decode_threshold_xfail_marker(marks[0])
 
 
 def _assert_shared_cache_type_binding(
@@ -2164,9 +2280,11 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     Item and both ordinary frontend/epp size-control Items.
     router_approximate_cache_policy binds the ordinary LRU and omitted-env
     default-TTL core-metrics Items. active_decode_blocks_threshold binds
-    only its ordinary owned worker-monitor remote-load Item.
-    shared_cache_type binds only its ordinary owned HiCache
-    client-construction Item.
+    only its owned worker-monitor remote-load Item with one unconditional
+    strict xfail of ActiveDecodeThresholdConfigMismatch. shared_cache_type
+    binds only its ordinary owned HiCache client-construction Item.
+    kv_cache_block_size binds the three ordinary Dynamic worker-card
+    cross-input Items.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -3742,9 +3860,7 @@ def mark_owned_log_cursor(
 ) -> tuple[int, Path, int]:
     if not log_label:
         raise AssertionError(f"{label} log_label must be nonempty")
-    pid, log, text = _owned_process_log_text(
-        process, label=label, node_name=node_name
-    )
+    pid, log, text = _owned_process_log_text(process, label=label, node_name=node_name)
     if log_label not in log.as_posix():
         raise AssertionError(
             f"{label} log_path {log} is not this profile label {log_label}"
@@ -3752,9 +3868,7 @@ def mark_owned_log_cursor(
     return pid, log, len(text.encode("utf-8"))
 
 
-def _parse_owned_decode_load_threshold(
-    line: str, *, worker_id: int, dp_rank: int
-):
+def _parse_owned_decode_load_threshold(line: str, *, worker_id: int, dp_rank: int):
     cleaned = ANSI_RE.sub("", line)
     if DECODE_LOAD_TARGET not in cleaned or DECODE_LOAD_EVENT not in cleaned:
         return _DECODE_SKIP
@@ -3846,9 +3960,7 @@ def owned_process_log_identity(
 ) -> tuple[int, Path]:
     if not log_label:
         raise AssertionError(f"{label} log_label must be nonempty")
-    pid, log, _text = _owned_process_log_text(
-        process, label=label, node_name=node_name
-    )
+    pid, log, _text = _owned_process_log_text(process, label=label, node_name=node_name)
     if log_label not in log.as_posix():
         raise AssertionError(
             f"{label} log_path {log} is not this profile label {log_label}"

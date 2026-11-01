@@ -11,8 +11,8 @@ selector together with runtime_epp, not generic runtime-image coverage.
 This is a staged partial configuration suite. Explicit pending rows and
 their reasons are the unmeasured list. Inventory, identifier-ownership,
 and collected-Item binding checks remain ordinary hard failures, not
-skip/xfail. The two measured gaps are strict xfails of their dedicated
-mismatch subclasses.
+skip/xfail. The two measured profile gaps and the decode-threshold consumer gap
+are strict xfails of their dedicated mismatch subclasses.
 Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
 hard failures. Other profiles stay ordinary tests. Admission/enforce
 ignored-compatibility cases, the five conditional scalar probes, and the
@@ -22,11 +22,12 @@ Overlap refresh is an ordinary owned-process queue-INFO plus plain-chat
 token-parity test, not xfail. Keyed tracking and approximate-policy
 core-metrics rows are ordinary unverified-candidate tests, not xfail.
 The 31-byte size control is parameterized over independent frontend/epp
-arms. active_decode_blocks_threshold is an ordinary unverified-candidate
-worker-monitor remote-load test, not xfail. shared_cache_type is an
-ordinary unverified-candidate HiCache client-construction test, not xfail.
-Dynamic block-size cross-input cases are ordinary first-selection
-experiments and stay unbound while kv_cache_block_size is pending.
+arms. active_decode_blocks_threshold is a measured strict xfail of
+ActiveDecodeThresholdConfigMismatch after default-None and configured
+0.25 remote-load observation. shared_cache_type is an ordinary owned
+HiCache client-construction test, not xfail. Dynamic block-size
+cross-input cases bind kv_cache_block_size as not-FE-honored Dynamic
+worker-card geometry, not CLI support.
 """
 
 import pytest
@@ -39,6 +40,7 @@ from tests.router.epp_config_contract import (
     KEYED_TRACKING_PROFILE,
     KEYED_TRACKING_SIZE_ARMS,
     PROFILE_NAMES,
+    ActiveDecodeThresholdConfigMismatch,
     ConditionalJsonConfigMismatch,
     LoadAwarePresetConfigMismatch,
     assert_inventory_matches_manifest,
@@ -236,6 +238,15 @@ def test_approximate_cache_policy_metrics(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=ActiveDecodeThresholdConfigMismatch,
+    reason=(
+        "issue #16592: FE configured 0.25 vs EPP monitor None with default "
+        "None control; effective remote-load consumer scope, not a proven "
+        "admission-pressure boundary"
+    ),
+)
 def test_active_decode_threshold_consumer(
     request, predownload_tokenizers, tmp_path, monkeypatch
 ):

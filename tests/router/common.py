@@ -4714,6 +4714,7 @@ def run_active_decode_threshold_consumer(
         DECODE_THRESHOLD_ENV,
         DECODE_THRESHOLD_PROFILES,
         DECODE_THRESHOLD_ROW,
+        ActiveDecodeThresholdConfigMismatch,
         _plain_chat_token_case,
         clear_known_manifest_router_envs,
         decode_threshold_consumer_env,
@@ -4759,9 +4760,7 @@ def run_active_decode_threshold_consumer(
                 node_name=node_name,
                 log_label=log_label,
             )
-            run_frontend_epp_token_parity(
-                stack, cases, include_negative_control=False
-            )
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
             case = cases[0]
             generation = collect_frontend_generation_route(
                 stack.frontend_url,
@@ -4795,7 +4794,10 @@ def run_active_decode_threshold_consumer(
                 raise AssertionError("owned frontend_process was not saved")
             if epp_proc is None or epp_proc.proc is None:
                 raise AssertionError("owned epp_process was not saved")
-            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
                 raise AssertionError("owned frontend or EPP process is not live")
             kube_api = stack.kube_api
             if kube_api is not None and kube_api.failures:
@@ -4866,6 +4868,14 @@ def run_active_decode_threshold_consumer(
             f"{list(DECODE_THRESHOLD_PROFILES)}"
         )
     frontend_value, epp_value = observed["configured"]
+    if observed == {
+        "default": (None, None),
+        "configured": (0.25, None),
+    }:
+        raise ActiveDecodeThresholdConfigMismatch(
+            "configured decode-threshold mismatch after default and route "
+            f"controls: frontend={frontend_value!r} epp={epp_value!r}"
+        )
     if frontend_value != epp_value:
         raise AssertionError(
             "configured decode-threshold mismatch after default and route "
@@ -5018,9 +5028,7 @@ def run_shared_cache_type_consumer(
                     component=component,
                     deadline=deadline,
                 )
-            run_frontend_epp_token_parity(
-                stack, cases, include_negative_control=False
-            )
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
             case = cases[0]
             generation = collect_frontend_generation_route(
                 stack.frontend_url,
@@ -5054,7 +5062,10 @@ def run_shared_cache_type_consumer(
                 raise AssertionError("owned frontend_process was not saved")
             if epp_proc is None or epp_proc.proc is None:
                 raise AssertionError("owned epp_process was not saved")
-            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
                 raise AssertionError("owned frontend or EPP process is not live")
             kube_api = stack.kube_api
             if kube_api is not None and kube_api.failures:
@@ -5582,9 +5593,7 @@ def observe_owned_frontend_model_block_size(
                 f"returned HTTP {response.status_code}"
             )
         family = find_metric_samples(response.text, metric_name)
-        samples = find_metric_samples(
-            response.text, metric_name, {labels.MODEL: model}
-        )
+        samples = find_metric_samples(response.text, metric_name, {labels.MODEL: model})
         if family and samples:
             if len(family) != 1 or len(samples) != 1:
                 raise AssertionError(
@@ -5687,9 +5696,7 @@ def _prepare_first_selection_snapshot(
                         f"budget after {attempt} probes key={key}"
                     )
                 attempt += 1
-                probe = [
-                    random.randint(1, 10000) for _ in range(2 * worker_block_size)
-                ]
+                probe = [random.randint(1, 10000) for _ in range(2 * worker_block_size)]
                 try:
                     await asyncio.wait_for(
                         send_request_via_python_kv_router(
@@ -5830,9 +5837,7 @@ def _prepare_first_selection_snapshot(
                         f"{case.name}: get_overlap_scores outlived the remaining "
                         "45s readiness budget"
                     ) from exc
-                _require_overlap_block_size(
-                    scores, worker_block_size, label=case.name
-                )
+                _require_overlap_block_size(scores, worker_block_size, label=case.name)
                 blocks = {
                     (row["worker_id"], row["dp_rank"]): row["device_blocks"]
                     for row in scores["workers"]
@@ -7008,9 +7013,7 @@ def _require_fe_generation_internal_ids(
             f"post-book {booked_blocker_id!r}"
         )
     if len(set(ids.values())) != 3:
-        raise AssertionError(
-            f"{case_name}: FE internal ids are not distinct: {ids}"
-        )
+        raise AssertionError(f"{case_name}: FE internal ids are not distinct: {ids}")
     return ids
 
 
@@ -7099,14 +7102,11 @@ def _assert_held_generation_open(
     when: str,
 ) -> None:
     if "error" in outcome:
-        raise AssertionError(
-            f"{label} finished with error {when}: {outcome['error']}"
-        )
+        raise AssertionError(f"{label} finished with error {when}: {outcome['error']}")
     status = outcome.get("status")
     if status is not None and status != 200:
         raise AssertionError(
-            f"{label} HTTP {status} {when}: "
-            f"{str(outcome.get('text', ''))[:300]}"
+            f"{label} HTTP {status} {when}: " f"{str(outcome.get('text', ''))[:300]}"
         )
     if "text" in outcome:
         raise AssertionError(f"{label} completed {when}: {outcome!r}")
@@ -7121,9 +7121,7 @@ def _require_priority_threads_finished(
 ) -> None:
     alive = [label for label, thread in threads if thread.is_alive()]
     if alive:
-        raise AssertionError(
-            f"{case_name}: FE threads still alive after join: {alive}"
-        )
+        raise AssertionError(f"{case_name}: FE threads still alive after join: {alive}")
 
 
 def _wait_prefill_booking(
