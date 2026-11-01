@@ -353,6 +353,9 @@ class RouterSearchSpace(BaseModel):
             ),
         }
         load_model = public.pop("prefill_load_model", None)
+        if load_model is not None:
+            # Reject unknown fields such as a misspelled "type".
+            PrefillLoadRecommendationModel.model_validate(load_model)
         raw_type = load_model.get("type") if isinstance(load_model, Mapping) else None
         normalized["prefill_load_model_type"] = domain_choices(
             raw_type, ["none", "ais"]

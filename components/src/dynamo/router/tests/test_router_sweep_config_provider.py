@@ -235,14 +235,22 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
 
 def test_public_router_search_without_policy_searches_both_policies() -> None:
     plan = create_provider().generate_search_space(
-        {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}},
+        {"prefill_load_model": {"type": "none"}},
         _sweep_context(),
     )
 
     assert plan.state["public_schema"] is True
     choices = plan.fragment.choices_by_branch["agg"]
     assert choices["mode"] == ["kv_router", "round_robin"]
-    assert choices["prefill_load_model_type"] == ["none", "ais"]
+    assert choices["prefill_load_model_type"] == ["none"]
+
+
+def test_public_router_search_rejects_unknown_load_model_fields() -> None:
+    with pytest.raises(ValueError, match="types"):
+        create_provider().generate_search_space(
+            {"prefill_load_model": {"types": "ais"}},
+            _sweep_context(),
+        )
 
 
 def test_public_router_prediction_materializes_runtime_hook() -> None:
