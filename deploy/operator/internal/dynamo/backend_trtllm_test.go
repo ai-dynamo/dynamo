@@ -226,10 +226,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectReadinessRemoved: false,
 			expectStartupRemoved:   true,
 			expectedReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{
-						Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-					},
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
 				},
 				InitialDelaySeconds: 20,
 				PeriodSeconds:       20,

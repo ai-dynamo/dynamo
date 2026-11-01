@@ -22,9 +22,9 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	t.Log("Project the complete build contract")
 	build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
 	require.NoError(t, err)
-	require.EqualValues(t, 4, build.IOFPGACount)
-	require.EqualValues(t, 2, build.IOFanoutFactor)
-	require.Len(t, build.Partitions, 1)
+	require.EqualValues(t, 4, build.ioFPGACount)
+	require.EqualValues(t, 2, build.ioFanoutFactor)
+	require.Len(t, build.partitions, 1)
 
 	t.Log("Reject an unsupported contract revision before lowering the manifest")
 	manifest.SetContractRevision(manifest.ContractRevision() + 1)
@@ -33,7 +33,7 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 }
 
 func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
-	for _, field := range []string{"batch size", "node count", "protocol", "FPGA mode", "runtime assets", "partition selection"} {
+	for _, field := range []string{"batch size", "node count", "compilation mode", "protocol", "FPGA mode", "runtime assets", "partition selection"} {
 		t.Run(field, func(t *testing.T) {
 			t.Log("Normalize equivalent legacy and split deployment contracts")
 			legacy := newManifestV2ContractFixture(t)
@@ -59,6 +59,9 @@ func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
 			case "node count":
 				legacyConfig.SetNumLpuNodes(99)
 				splitConfig.SetNumLpuNodes(99)
+			case "compilation mode":
+				legacyConfig.SetCompilationMode(manifestcapnpv2.CompilationMode(99))
+				splitConfig.SetCompilationMode(deploymentcapnpv1.CompilationMode(99))
 			case "protocol":
 				legacyIO, err := legacyConfig.RuntimeIo()
 				require.NoError(t, err)
@@ -98,7 +101,7 @@ func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
 	}
 }
 
-func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
+func TestAcquireBuildRejectsInvalidHXArtifacts(t *testing.T) {
 	t.Log("Define malformed HX artifact inventories")
 	tests := []struct {
 		name    string
@@ -123,11 +126,13 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 			case "singleton selected prop-sync chain":
 				fixture.selectedPropSyncChains = [][]uint32{{1}}
 			}
-			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+			buildDir := writeCompilerFixture(t, fixture)
 
-			t.Log("Reject malformed HX artifacts during manifest normalization")
-			_, err := normalizeBuildSnapshot(snapshot)
+			t.Log("Reject malformed HX artifacts before publishing the acquired snapshot")
+			snapshot, err := (&defaultModelRegistry{}).AcquireBuild(t.Context(), buildDir)
+			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, test.wantErr)
+			require.Nil(t, snapshot)
 		})
 	}
 }
@@ -162,7 +167,7 @@ func TestBuildFromGbuildManifestV2ValidatesPartitionGeometry(t *testing.T) {
 	}
 }
 
-func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) {
+func TestBuildFromGbuildManifestV2DetectsCUDAPartitions(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Build an lpuOnly manifest with one LPU and one CUDA artifact")
@@ -180,7 +185,9 @@ func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) 
 	cudaRef.SetPartitionId(1)
 	cudaRef.SetDeviceType(manifestcapnpv2.DeviceType_cuda)
 
-	t.Log("Reject the mixed-device lpuOnly artifact set")
-	_, err = buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
-	require.ErrorContains(t, err, "deployment.compilationMode lpuOnly requires every artifact partition to use deviceType lpu")
+	t.Log("Retain CUDA requirements independently of the compilation mode label")
+	build, err := buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
+	require.NoError(t, err)
+	require.True(t, build.hasCUDAPartitions)
+	require.Len(t, build.partitions, 1)
 }

@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: muse-spark-open-816b-a42b
+title: Muse-Spark-Open-816B-A42B
+page: pages/recipes/model-recipes/Muse-Spark-Open.mdx
+provider: meta
+model:
+  name: Muse-Spark-Open-816B-A42B
+  hf_id: meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+  precision: NVFP4 with FP8 KV cache
+status: experimental
+targets:
+- id: sglang-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 12
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 514.30 output tok/s, 128.58 output tok/s/GPU, 57.43 user output tok/s P50, TTFT P50 221.70 ms at concurrency 12
+- id: sglang-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  - nixl
+  - prefill-decode-disaggregation
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 16
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/disagg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 768.50 output tok/s, 96.07 output tok/s/GPU, 58.77 user output tok/s P50, TTFT P50 1,335.20 ms at concurrency 16
+- id: sglang-kv-router-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 22
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/agg-gb200-agentic-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 934.20 output tok/s, 116.78 output tok/s/GPU, 54.51 user output tok/s P50, TTFT P50 239.20 ms at concurrency 22
+- id: sglang-agg-gb300
+  recommended: true
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 16
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 635.80 output tok/s, 158.95 output tok/s/GPU, 50.97 user output tok/s P50, TTFT P50 177.90 ms at concurrency 16
+- id: sglang-disagg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  - nixl
+  - prefill-decode-disaggregation
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 16
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/disagg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 835.80 output tok/s, 104.48 output tok/s/GPU, 62.12 user output tok/s P50, TTFT P50 289.40 ms at concurrency 16
+- id: sglang-kv-router-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake trace, approximately 64K ISL / 400 OSL / 90% KV reuse, concurrency 20
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/sglang/agg-gb300-agentic-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,054.70 output tok/s, 131.84 output tok/s/GPU, 66.70 user output tok/s P50, TTFT P50 158.40 ms at concurrency 20
+- id: vllm-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24 [functional validation]
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/vllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 475.20 output tok/s, 118.81 output tok/s/GPU, 27.23 user output tok/s P50, TTFT P50 2,339.90 ms at concurrency 24 over 500 requests [functional validation]
+- id: vllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24 [functional validation]
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/vllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 564.80 output tok/s, 141.20 output tok/s/GPU, 28.84 user output tok/s P50, TTFT P50 292.90 ms at concurrency 24 over 500 requests [functional validation]
+- id: trtllm-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/trtllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 384.58 output tok/s, 96.15 output tok/s/GPU, 30.82 user output tok/s P50, TTFT P50 11,533.66 ms at concurrency 24 over 500 requests [functional validation]
+- id: trtllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - tp4
+  - ep4
+  - fp8-kv-cache
+  workload:
+    type: agentic-trace-replay
+    traffic: First 500 requests from the Mooncake trace at concurrency 24 [functional validation]
+  deploy:
+    asset: recipes/muse-spark-open-816b-a42b/trtllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/muse-spark-open-816b-a42b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 583.23 output tok/s, 145.81 output tok/s/GPU, 31.37 user output tok/s P50, TTFT P50 600.34 ms at concurrency 24 over 500 requests [functional validation]
+related_benchmarks: []
+maintainer: null
+gaps:
+- Video input is supported on the SGLang aggregated and KV-router recipes only; the SGLang disaggregated worker path has no video decoder.

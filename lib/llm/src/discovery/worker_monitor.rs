@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::ActiveLoad;
+use dynamo_kv_router::scheduling::BusyThresholds;
 use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
 use serde::{Deserialize, Serialize};
 
@@ -141,34 +143,53 @@ impl LoadThresholdConfig {
 }
 
 /// Shared threshold configuration for independently owned routing load contexts.
+///
+/// Every request classification and every queue selection reads it from a worker thread;
+/// only `/busy_threshold` writes it. Reads are wait-free: `get` copies the current value out
+/// of an [`ArcSwap`] without taking a lock, so a pending write never stalls the request path.
 #[derive(Clone)]
-pub struct LoadThresholdHandle(Arc<std::sync::RwLock<LoadThresholdConfig>>);
+pub struct LoadThresholdHandle(Arc<ArcSwap<LoadThresholdConfig>>);
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
-        Self(Arc::new(std::sync::RwLock::new(config)))
+        Self(Arc::new(ArcSwap::from_pointee(config)))
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
-        self.0.read().unwrap().clone()
+        LoadThresholdConfig::clone(&self.0.load())
     }
 
+    /// Merge the set fields of `config` into the current thresholds. Concurrent writers
+    /// retry through `rcu`; they are rare and never block readers.
     pub fn update(&self, config: &LoadThresholdConfig) {
-        let mut current = self.0.write().unwrap();
-        if let Some(value) = config.active_decode_blocks_threshold {
-            current.active_decode_blocks_threshold = Some(value);
-        }
-        if let Some(value) = config.active_prefill_tokens_threshold {
-            current.active_prefill_tokens_threshold = Some(value);
-        }
-        if let Some(value) = config.active_prefill_tokens_threshold_frac {
-            current.active_prefill_tokens_threshold_frac = Some(value);
-        }
+        self.0.rcu(|current| {
+            let mut next = LoadThresholdConfig::clone(current);
+            if let Some(value) = config.active_decode_blocks_threshold {
+                next.active_decode_blocks_threshold = Some(value);
+            }
+            if let Some(value) = config.active_prefill_tokens_threshold {
+                next.active_prefill_tokens_threshold = Some(value);
+            }
+            if let Some(value) = config.active_prefill_tokens_threshold_frac {
+                next.active_prefill_tokens_threshold_frac = Some(value);
+            }
+            next
+        });
     }
 
     pub fn is_configured(&self) -> bool {
-        self.0.read().unwrap().is_configured()
+        self.0.load().is_configured()
     }
+}
+
+/// Which load observations the monitor judges against the decode threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeSignals {
+    /// Scheduler snapshots of booked load and worker-published load alike.
+    All,
+    /// Worker-published load only. A KV router's queue judges the load it booked itself,
+    /// so its scheduler snapshots neither feed the decode state nor move the latch.
+    EngineOnly,
 }
 
 /// Worker load monitoring state per dp_rank
@@ -405,7 +426,15 @@ impl WorkerLoadState {
         &mut self,
         observation: LoadObservation,
         active_decode_blocks_threshold: Option<f64>,
+        signals: DecodeSignals,
     ) -> bool {
+        // Once routed, a scheduler snapshot is the queue's to judge: it neither feeds the
+        // decode state nor moves the latch. Worker-published `active_decode_blocks` is an
+        // engine signal like `kv_used_blocks` and stays in. Scheduler snapshots cannot
+        // precede routing (the queue that publishes them is built after `route()`), so no
+        // booked value is left behind in the decode state when the switch flips.
+        let booked_only = signals == DecodeSignals::EngineOnly
+            && matches!(observation, LoadObservation::Scheduler(_));
         let (worker, active_decode_blocks, active_prefill_tokens, kv_used_blocks) =
             observation.parts();
         let dp_rank = worker.dp_rank;
@@ -413,14 +442,17 @@ impl WorkerLoadState {
             return false;
         }
 
+        if let Some(active_tokens) = active_prefill_tokens {
+            self.active_prefill_tokens.insert(dp_rank, active_tokens);
+        }
+        if booked_only {
+            return true;
+        }
         if let Some(active_blocks) = active_decode_blocks {
             self.active_decode_blocks.insert(dp_rank, active_blocks);
         }
         if let Some(kv_used_blocks) = kv_used_blocks {
             self.kv_used_blocks.insert(dp_rank, kv_used_blocks);
-        }
-        if let Some(active_tokens) = active_prefill_tokens {
-            self.active_prefill_tokens.insert(dp_rank, active_tokens);
         }
         if let Some(threshold) = active_decode_blocks_threshold {
             self.update_decode_overload_latch(
@@ -442,6 +474,7 @@ impl WorkerLoadState {
         self.apply_load_observation(
             LoadObservation::Remote(load.clone().into()),
             active_decode_blocks_threshold,
+            DecodeSignals::All,
         );
     }
 
@@ -600,6 +633,81 @@ fn collect_overloaded_workers(
         .collect()
 }
 
+/// The live busy thresholds and the switch that moves their enforcement from the worker
+/// monitor to a KV router's queue. The monitor owns one; the scheduler-load sender holds a
+/// clone so the router can flip the switch.
+#[derive(Clone)]
+pub(crate) struct RoutableThresholds {
+    handle: LoadThresholdHandle,
+    routed: Arc<AtomicBool>,
+}
+
+impl RoutableThresholds {
+    pub(crate) fn new(handle: LoadThresholdHandle) -> Self {
+        Self {
+            handle,
+            routed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The live handle `/busy_threshold` updates.
+    pub(crate) fn handle(&self) -> &LoadThresholdHandle {
+        &self.handle
+    }
+
+    /// Thresholds the monitor applies. Once a KV router's queue enforces them on its booked
+    /// load, only the decode threshold remains, for the worker-published signals the queue
+    /// cannot see: generated tokens, other frontends, and prefill workers that track no
+    /// active blocks.
+    fn monitor_config(&self) -> LoadThresholdConfig {
+        let config = self.handle.get();
+        if self.is_routed() {
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: config.active_decode_blocks_threshold,
+                ..Default::default()
+            }
+        } else {
+            config
+        }
+    }
+
+    /// Which observations the monitor judges: all of them, or only worker-published ones
+    /// once the queue owns its booked load.
+    fn decode_signals(&self) -> DecodeSignals {
+        if self.is_routed() {
+            DecodeSignals::EngineOnly
+        } else {
+            DecodeSignals::All
+        }
+    }
+
+    /// Hand enforcement of the booked-load checks to the caller's queue. The monitor keeps
+    /// judging worker-published load against the decode threshold; the queue applies the
+    /// returned live handle to its own booked load.
+    pub(crate) fn route(&self) -> LoadThresholdHandle {
+        self.routed.store(true, Ordering::Release);
+        self.handle.clone()
+    }
+
+    pub(crate) fn is_routed(&self) -> bool {
+        self.routed.load(Ordering::Acquire)
+    }
+}
+
+impl From<LoadThresholdConfig> for BusyThresholds {
+    /// The queue's vocabulary for the `/busy_threshold` config: token counts narrow to
+    /// `usize` saturating, fractions pass through.
+    fn from(config: LoadThresholdConfig) -> Self {
+        BusyThresholds {
+            prefill_busy_threshold: config
+                .active_prefill_tokens_threshold
+                .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
+            prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
+            decode_busy_threshold_frac: config.active_decode_blocks_threshold,
+        }
+    }
+}
+
 /// Worker monitor for tracking KV cache usage and overload states.
 ///
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
@@ -618,7 +726,7 @@ pub struct KvWorkerMonitor {
     /// Load thresholds for overload detection. Each field is `Option<T>` — unset
     /// means the corresponding check in `is_overloaded` is skipped. If all three are
     /// `None`, rejection is fully disabled.
-    thresholds: LoadThresholdHandle,
+    thresholds: RoutableThresholds,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
     start_lock: Arc<tokio::sync::Mutex<()>>,
@@ -641,7 +749,7 @@ impl KvWorkerMonitor {
         client: Client,
         source: RouterLoadSource,
         scheduler_load_rx: SchedulerLoadReceiver,
-        thresholds: LoadThresholdHandle,
+        thresholds: RoutableThresholds,
         cancellation_token: CancellationToken,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Self {
@@ -660,23 +768,33 @@ impl KvWorkerMonitor {
         }
     }
 
+    /// The live thresholds and the switch a KV router flips when its queue takes over
+    /// their enforcement.
+    #[cfg(test)]
+    pub(crate) fn thresholds(&self) -> &RoutableThresholds {
+        &self.thresholds
+    }
+
     /// Returns true iff the user explicitly configured at least one threshold.
     ///
     /// When false, all three per-field checks are skipped in `is_overloaded` and
     /// rejection is fully disabled. Callers that gate 529 responses on overload
     /// detection should check this before enabling the gate.
     pub fn is_configured(&self) -> bool {
-        self.thresholds.is_configured()
+        self.thresholds.handle().is_configured()
     }
 
     /// Get the current active decode blocks threshold, if configured.
     pub fn active_decode_blocks_threshold(&self) -> Option<f64> {
-        self.thresholds.get().active_decode_blocks_threshold
+        self.thresholds
+            .handle()
+            .get()
+            .active_decode_blocks_threshold
     }
 
     /// Set the active decode blocks threshold.
     pub fn set_active_decode_blocks_threshold(&self, threshold: f64) {
-        self.thresholds.update(&LoadThresholdConfig {
+        self.thresholds.handle().update(&LoadThresholdConfig {
             active_decode_blocks_threshold: Some(threshold),
             ..Default::default()
         });
@@ -684,12 +802,15 @@ impl KvWorkerMonitor {
 
     /// Get the current active prefill tokens threshold, if configured.
     pub fn active_prefill_tokens_threshold(&self) -> Option<u64> {
-        self.thresholds.get().active_prefill_tokens_threshold
+        self.thresholds
+            .handle()
+            .get()
+            .active_prefill_tokens_threshold
     }
 
     /// Set the active prefill tokens threshold.
     pub fn set_active_prefill_tokens_threshold(&self, threshold: u64) {
-        self.thresholds.update(&LoadThresholdConfig {
+        self.thresholds.handle().update(&LoadThresholdConfig {
             active_prefill_tokens_threshold: Some(threshold),
             ..Default::default()
         });
@@ -697,12 +818,15 @@ impl KvWorkerMonitor {
 
     /// Get the current active prefill tokens threshold frac, if configured.
     pub fn active_prefill_tokens_threshold_frac(&self) -> Option<f64> {
-        self.thresholds.get().active_prefill_tokens_threshold_frac
+        self.thresholds
+            .handle()
+            .get()
+            .active_prefill_tokens_threshold_frac
     }
 
     /// Set the active prefill tokens threshold frac.
     pub fn set_active_prefill_tokens_threshold_frac(&self, frac: f64) {
-        self.thresholds.update(&LoadThresholdConfig {
+        self.thresholds.handle().update(&LoadThresholdConfig {
             active_prefill_tokens_threshold_frac: Some(frac),
             ..Default::default()
         });
@@ -711,14 +835,14 @@ impl KvWorkerMonitor {
     /// Get the current load threshold configuration. Unset fields are returned
     /// as `None` (no spurious fallback values).
     pub fn load_threshold_config(&self) -> LoadThresholdConfig {
-        self.thresholds.get()
+        self.thresholds.handle().get()
     }
 
     /// Update thresholds from a `LoadThresholdConfig`. Only fields that are
     /// `Some` in the input overwrite their counterparts; `None` fields leave
     /// the existing value untouched.
     pub fn set_load_threshold_config(&self, config: &LoadThresholdConfig) {
-        self.thresholds.update(config);
+        self.thresholds.handle().update(config);
     }
 }
 
@@ -799,7 +923,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
                 HashMap::new();
             let mut overloaded_tracker = OverloadedWorkerTracker::default();
-            let mut last_thresholds = thresholds.get();
+            let mut last_thresholds = thresholds.monitor_config();
 
             loop {
                 let kv_event_future = async {
@@ -863,7 +987,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
 
-                        let cfg = thresholds.get();
+                        let cfg = thresholds.monitor_config();
 
                         // Reconcile worker state to the authoritative rank range from discovery.
                         // This also makes expected-but-unobserved ranks participate in the
@@ -964,9 +1088,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .or_default()
                             .insert(worker.dp_rank);
 
-                        // Snapshot thresholds once per event — rare writes (HTTP endpoint)
-                        // mean RwLock contention is effectively zero.
-                        let cfg = thresholds.get();
+                        // Snapshot thresholds once per event; the handle read is wait-free.
+                        let cfg = thresholds.monitor_config();
+                        let signals = thresholds.decode_signals();
                         let thresholds_changed = cfg != last_thresholds;
 
                         // Update worker load state per dp_rank (for overload detection only).
@@ -976,6 +1100,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             state.apply_load_observation(
                                 observation,
                                 cfg.active_decode_blocks_threshold,
+                                signals,
                             );
                             let total_blocks = state.kv_total_blocks.get(&worker.dp_rank).copied();
                             let worker_overloaded = state.is_overloaded_for_config(&cfg);
@@ -1024,7 +1149,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             break;
                         };
 
-                        let cfg = thresholds.get();
+                        let cfg = thresholds.monitor_config();
+                        let signals = thresholds.decode_signals();
                         let thresholds_changed = cfg != last_thresholds;
                         let mut overloaded_changed = false;
                         for snapshot in scheduler_loads {
@@ -1062,6 +1188,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 state.apply_load_observation(
                                     LoadObservation::Scheduler(snapshot),
                                     cfg.active_decode_blocks_threshold,
+                                    signals,
                                 );
                                 state.is_overloaded_for_config(&cfg)
                             };
@@ -1136,13 +1263,15 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadObservation, LoadThresholdConfig, OverloadedWorkerTracker, RemoteActiveLoadSnapshot,
-        WORKER_LOAD_METRICS, WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
+        BusyThresholds, DecodeSignals, LoadObservation, LoadThresholdConfig, LoadThresholdHandle,
+        OverloadedWorkerTracker, RemoteActiveLoadSnapshot, RoutableThresholds, WORKER_LOAD_METRICS,
+        WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
         overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
@@ -1173,13 +1302,13 @@ mod tests {
         });
 
         let mut local_then_remote = WorkerLoadState::default();
-        local_then_remote.apply_load_observation(local, None);
-        local_then_remote.apply_load_observation(remote, None);
+        local_then_remote.apply_load_observation(local, None, DecodeSignals::All);
+        local_then_remote.apply_load_observation(remote, None, DecodeSignals::All);
         assert_eq!(local_then_remote.active_prefill_tokens.get(&0), Some(&100));
 
         let mut remote_then_local = WorkerLoadState::default();
-        remote_then_local.apply_load_observation(remote, None);
-        remote_then_local.apply_load_observation(local, None);
+        remote_then_local.apply_load_observation(remote, None, DecodeSignals::All);
+        remote_then_local.apply_load_observation(local, None, DecodeSignals::All);
         assert_eq!(remote_then_local.active_prefill_tokens.get(&0), Some(&200));
     }
 
@@ -1197,6 +1326,7 @@ mod tests {
                 kv_used_blocks: Some(8),
             }),
             None,
+            DecodeSignals::All,
         );
         assert_eq!(state.active_prefill_tokens.get(&0), Some(&123));
 
@@ -1208,6 +1338,7 @@ mod tests {
                 kv_used_blocks: None,
             }),
             None,
+            DecodeSignals::All,
         );
         assert_eq!(state.active_prefill_tokens.get(&0), Some(&0));
     }
@@ -1417,6 +1548,7 @@ mod tests {
                 kv_used_blocks: Some(100),
             }),
             Some(0.6),
+            DecodeSignals::All,
         ));
 
         let declared = state.reconcile_runtime_config(4..5, Some(100), Some(1_000), Some(0.6));
@@ -1578,6 +1710,188 @@ mod tests {
     }
 
     #[test]
+    fn routed_monitor_keeps_only_the_engine_decode_check() {
+        let handle = LoadThresholdHandle::new(LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.8),
+            active_prefill_tokens_threshold: Some(100),
+            active_prefill_tokens_threshold_frac: Some(0.5),
+        });
+        let thresholds = RoutableThresholds::new(handle.clone());
+        assert!(!thresholds.is_routed());
+        assert_eq!(thresholds.monitor_config(), handle.get());
+        assert_eq!(thresholds.decode_signals(), DecodeSignals::All);
+
+        let routed = thresholds.route();
+        assert!(thresholds.is_routed());
+        assert_eq!(
+            thresholds.monitor_config(),
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.8),
+                ..Default::default()
+            },
+            "prefill thresholds move to the queue; the decode one stays for worker-published load"
+        );
+        assert_eq!(thresholds.decode_signals(), DecodeSignals::EngineOnly);
+        assert_eq!(
+            routed.get(),
+            handle.get(),
+            "the routed handle is the live one"
+        );
+        assert!(handle.is_configured(), "the live handle keeps its values");
+
+        // A live `/busy_threshold` update still reaches the routed monitor.
+        handle.update(&LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.6),
+            ..Default::default()
+        });
+        assert_eq!(
+            thresholds.monitor_config().active_decode_blocks_threshold,
+            Some(0.6)
+        );
+    }
+
+    #[test]
+    fn engine_only_ignores_scheduler_snapshots_and_keeps_worker_published_load() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let booked = |active_decode_blocks| {
+            LoadObservation::Scheduler(SchedulerLoadSnapshot {
+                worker,
+                active_decode_blocks,
+                active_prefill_tokens: 0,
+            })
+        };
+        let published = |active_decode_blocks, kv_used_blocks| {
+            LoadObservation::Remote(
+                ActiveLoad {
+                    worker_id: 1,
+                    dp_rank: 0,
+                    active_decode_blocks,
+                    active_prefill_tokens: None,
+                    kv_used_blocks,
+                }
+                .into(),
+            )
+        };
+        let fresh = || {
+            let mut state = WorkerLoadState::default();
+            state.kv_total_blocks.insert(0, 100);
+            state
+        };
+
+        // Before routing, a scheduler snapshot of booked blocks marks the worker.
+        let mut unrouted = fresh();
+        unrouted.apply_load_observation(booked(90), Some(0.6), DecodeSignals::All);
+        assert!(unrouted.is_overloaded(Some(0.6), None, None));
+
+        // Once routed, the same snapshot is the queue's to judge: it is not even recorded.
+        let mut routed = fresh();
+        routed.apply_load_observation(booked(90), Some(0.6), DecodeSignals::EngineOnly);
+        assert!(!routed.is_overloaded(Some(0.6), None, None));
+        assert!(routed.active_decode_blocks.is_empty());
+
+        // Worker-published load still marks the worker when routed, whichever field it uses.
+        let mut routed = fresh();
+        routed.apply_load_observation(
+            published(None, Some(90)),
+            Some(0.6),
+            DecodeSignals::EngineOnly,
+        );
+        assert!(routed.is_overloaded(Some(0.6), None, None));
+        let mut routed = fresh();
+        routed.apply_load_observation(
+            published(Some(90), None),
+            Some(0.6),
+            DecodeSignals::EngineOnly,
+        );
+        assert!(routed.is_overloaded(Some(0.6), None, None));
+    }
+
+    #[test]
+    fn engine_only_latch_is_held_and_released_by_worker_published_load_alone() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        let used = |kv_used_blocks| {
+            LoadObservation::Remote(
+                ActiveLoad {
+                    worker_id: 1,
+                    dp_rank: 0,
+                    active_decode_blocks: None,
+                    active_prefill_tokens: None,
+                    kv_used_blocks: Some(kv_used_blocks),
+                }
+                .into(),
+            )
+        };
+        let booked = LoadObservation::Scheduler(SchedulerLoadSnapshot {
+            worker,
+            active_decode_blocks: 90,
+            active_prefill_tokens: 0,
+        });
+
+        state.apply_load_observation(used(90), Some(0.6), DecodeSignals::EngineOnly);
+        assert!(state.is_overloaded(Some(0.6), None, None));
+        // A stale-high scheduler snapshot neither sets nor holds the latch...
+        state.apply_load_observation(booked, Some(0.6), DecodeSignals::EngineOnly);
+        assert!(state.is_overloaded(Some(0.6), None, None));
+        // ...so the engine reporting the KV drained releases it.
+        state.apply_load_observation(used(10), Some(0.6), DecodeSignals::EngineOnly);
+        assert!(!state.is_overloaded(Some(0.6), None, None));
+    }
+
+    #[test]
+    fn load_threshold_handle_merges_updates_and_shares_state() {
+        let handle = LoadThresholdHandle::new(LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(10),
+            ..Default::default()
+        });
+        let reader = handle.clone();
+        assert!(reader.is_configured());
+
+        // A partial update keeps the fields it does not set.
+        handle.update(&LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            ..Default::default()
+        });
+        assert_eq!(
+            reader.get(),
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.9),
+                active_prefill_tokens_threshold: Some(10),
+                active_prefill_tokens_threshold_frac: None,
+            }
+        );
+
+        // Updates compose in order.
+        handle.update(&LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(20),
+            active_prefill_tokens_threshold_frac: Some(0.5),
+            ..Default::default()
+        });
+        let current = reader.get();
+        assert_eq!(current.active_prefill_tokens_threshold, Some(20));
+        assert_eq!(current.active_prefill_tokens_threshold_frac, Some(0.5));
+        assert_eq!(current.active_decode_blocks_threshold, Some(0.9));
+    }
+
+    #[test]
+    fn busy_thresholds_from_load_threshold_config() {
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            active_prefill_tokens_threshold: Some(u64::MAX),
+            active_prefill_tokens_threshold_frac: Some(0.5),
+        };
+        let thresholds = BusyThresholds::from(config);
+        assert_eq!(thresholds.decode_busy_threshold_frac, Some(0.9));
+        assert_eq!(thresholds.prefill_busy_threshold, Some(usize::MAX));
+        assert_eq!(thresholds.prefill_busy_threshold_frac, Some(0.5));
+        assert_eq!(
+            BusyThresholds::from(LoadThresholdConfig::default()),
+            BusyThresholds::default()
+        );
+    }
+
+    #[test]
     fn is_overloaded_returns_false_when_all_thresholds_are_none() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
@@ -1698,7 +2012,10 @@ mod tests {
 
         assert!(!tracker.update_worker(7, false));
         client.mark_overloaded_immediate(7);
-        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(Arc::new(HashSet::from([7])))
+        );
 
         let overloaded_changed = tracker.update_worker(7, false);
         assert!(

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import NvCreateImageRequest
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.llm import ModelType
 
@@ -86,13 +87,22 @@ def parse_request_type(
     if modality is OutputModality.IMAGE:
         if "messages" in raw_request:
             return raw_request, RequestType.CHAT_COMPLETION
-        return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
+        return (
+            parse_media_request(NvCreateImageRequest, raw_request),
+            RequestType.IMAGE_GENERATION,
+        )
 
     if modality is OutputModality.VIDEO:
-        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
+        return (
+            parse_media_request(NvCreateVideoRequest, raw_request),
+            RequestType.VIDEO_GENERATION,
+        )
 
     if modality is OutputModality.AUDIO:
-        return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
+        return (
+            parse_media_request(NvCreateAudioSpeechRequest, raw_request),
+            RequestType.AUDIO_GENERATION,
+        )
 
     # Text Modality
     return raw_request, RequestType.CHAT_COMPLETION

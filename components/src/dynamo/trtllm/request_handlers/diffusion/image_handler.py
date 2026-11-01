@@ -22,6 +22,7 @@ from dynamo.common.protocols.image_protocol import (
     NvCreateImageRequest,
     NvImagesResponse,
 )
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import get_fs, upload_to_fs
 from dynamo.common.utils.image_utils import encode_to_png_bytes
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
@@ -150,19 +151,16 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         logger.debug(f"Received generation request: {request_id}")
 
         # Parse request
-        req = NvCreateImageRequest(**request)
+        req = parse_media_request(NvCreateImageRequest, request)
         nvext = req.nvext or ImageNvExt()
 
         # Parse parameters
         width, height = self._parse_size(req.size)
+        # The shared model bounds a request's `n` to 1..10 as the frontend
+        # does; DiffusionConfig bounds the default the same way.
         num_images_per_prompt = (
             req.n if req.n is not None else self.config.default_num_images_per_prompt
         )
-        if not 1 <= num_images_per_prompt <= 10:
-            raise ValueError(
-                f"num_images_per_prompt must be in [1, 10], got "
-                f"{num_images_per_prompt}."
-            )
         num_inference_steps = (
             nvext.num_inference_steps
             if nvext.num_inference_steps is not None

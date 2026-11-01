@@ -29,6 +29,23 @@ pub fn run<E: LLMEngine + 'static>(
     })
 }
 
+/// Start runtime probes before a sidecar chooses whether to serve inference or
+/// run a node-local telemetry task.
+pub fn run_with_drt<T, B, F, Fut>(
+    runtime_config: RuntimeConfig,
+    bootstrap: B,
+    task: F,
+) -> anyhow::Result<()>
+where
+    B: Future<Output = anyhow::Result<T>>,
+    F: FnOnce(DistributedRuntime, T, CancellationToken) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    run_task(|runtime, shutdown| async move {
+        run_drt_task_until_shutdown(runtime_config, bootstrap, task, &runtime, shutdown).await
+    })
+}
+
 /// Run a sidecar task with the shared runtime and process-signal lifecycle.
 /// The task owns discovery and may serve inference or relay telemetry only.
 pub fn run_task<F, Fut>(task: F) -> anyhow::Result<()>
@@ -70,6 +87,44 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
     runtime: &Runtime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    let expected_runtime = runtime_config.clone();
+    let bootstrap = async move {
+        // Keep engine discovery failures distinct from runtime/Worker failures
+        // for embedded launchers' existing error contracts.
+        let (engine, config) = bootstrap.await.map_err(SidecarStartupError::Dynamo)?;
+        anyhow::ensure!(
+            config.runtime == expected_runtime,
+            "sidecar runtime settings changed during engine discovery"
+        );
+        Ok::<_, anyhow::Error>((engine, config))
+    };
+    run_drt_task_until_shutdown(
+        runtime_config,
+        bootstrap,
+        |drt, (engine, config), shutdown| async move {
+            Worker::new(Arc::new(engine), config)
+                .run_with_drt(drt, shutdown)
+                .await
+                .map_err(Into::into)
+        },
+        runtime,
+        shutdown,
+    )
+    .await
+}
+
+async fn run_drt_task_until_shutdown<T, B, F, Fut>(
+    runtime_config: RuntimeConfig,
+    bootstrap: B,
+    task: F,
+    runtime: &Runtime,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()>
+where
+    B: Future<Output = anyhow::Result<T>>,
+    F: FnOnce(DistributedRuntime, T, CancellationToken) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     let startup = async {
         let distributed = runtime_config.to_distributed_config()?;
         let drt = DistributedRuntime::new_with_probe_policy(
@@ -79,15 +134,8 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         )
         .await?;
         tracing::info!("Sidecar runtime connected; discovering engine metadata");
-        // Keep engine discovery failures distinct from runtime/Worker failures
-        // for embedded launchers' existing error contracts.
-        let (engine, config) = bootstrap.await.map_err(SidecarStartupError::Dynamo)?;
-        // Engine discovery must not change settings after connections are live.
-        anyhow::ensure!(
-            config.runtime == runtime_config,
-            "sidecar runtime settings changed during engine discovery"
-        );
-        Ok::<_, anyhow::Error>((drt, engine, config))
+        let initialized = bootstrap.await?;
+        Ok::<_, anyhow::Error>((drt, initialized))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
     let result = tokio::select! {
@@ -107,11 +155,8 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         }
         anyhow::bail!("runtime shut down during sidecar initialization");
     }
-    let (drt, engine, config) = result?;
-    Worker::new(Arc::new(engine), config)
-        .run_with_drt(drt, shutdown)
-        .await
-        .map_err(Into::into)
+    let (drt, initialized) = result?;
+    task(drt, initialized, shutdown).await
 }
 
 #[cfg(test)]

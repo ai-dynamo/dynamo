@@ -39,6 +39,7 @@ WORKDIR /workspace
 # targets that build no wheels. runtime_wheel_builder populates it post-build.
 RUN mkdir -p /opt/dynamo/rust-licenses
 {% if device == "xpu" or device == "cpu" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim \
@@ -47,7 +48,11 @@ RUN apt clean && apt-get update -y && \
     libxext6 \
     libgl1 \
     libaio-dev \
-    linux-libc-dev
+    linux-libc-dev && \
+    . /etc/os-release && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "20260816ubuntu0.${VERSION_ID}.1"
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -134,6 +139,11 @@ RUN apt-get update -y \
 {% endif %}
 
 {% if device == "cuda" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
+# dnf fails when no package at or above the floor is available.
+RUN dnf -y --setopt=tsflags=nocontexts install 'ca-certificates >= 2026.2.92_v9.0.319-81.3.el8_10' && \
+    dnf clean all
+
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
@@ -326,12 +336,14 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set. The allowlist
-# covers exactly two paths: (1) the encode CLI ingesting rawvideo frames from
+# covers three paths: (1) the encode CLI ingesting rawvideo frames from
 # imageio over a pipe and encoding with libvpx_vp9, and (2) the Rust media-ffmpeg
 # VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
+# (3) vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
+# rawvideo) output: uncompressed, no royalty-bearing codec. Do not add --disable-ffprobe.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x and 9.x (not `pipe:`), so omitting it breaks
 # the imageio encode path with "Protocol not found. Did you mean file:fd:?".
@@ -398,11 +410,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-shared \
         --enable-libvpx \
         --disable-encoders \
-        --enable-encoder=libvpx_vp9 \
+        --enable-encoder=libvpx_vp9,ppm,rawvideo \
         --disable-decoders \
         --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
-        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-muxer=mov,mp4,matroska,webm,image2pipe,rawvideo \
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
@@ -432,6 +444,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
       || { echo "ERROR: the in-tree ffmpeg does not list its VP9 encoder; it is" >&2; \
            echo "       either broken or unable to start, and the codec guard" >&2; \
            echo "       below would then pass without checking anything." >&2; \
+           exit 1; }; } && \
+    # The vllm-rs video decode path needs ffprobe, the image2pipe muxer and the
+    # ppm encoder; without them every sidecar video request fails with HTTP 500.
+    { /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
+      && /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^ *V[^ ]* +ppm ' \
+      && /usr/local/bin/ffprobe -hide_banner -version >/dev/null 2>&1 \
+      || { echo "ERROR: the in-tree ffmpeg lacks the image2pipe muxer, the ppm" >&2; \
+           echo "       encoder or the ffprobe CLI that vLLM's video decode needs." >&2; \
            exit 1; }; } && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
@@ -621,8 +641,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" and device == "xpu" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist && \
-{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
     # they stay external and resolve to the image's /usr/local/lib copies. This
@@ -657,7 +676,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist; \
     fi && \
-{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
 # wheel metadata and optional source archival both validate every member.
@@ -782,13 +801,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##### wheel_builder ##############
 ##################################
 {% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
-# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
-# consolidates all wheels.
+# Builds NIXL (native + Python wheel), then consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
-# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
-# not install KVBM, so nothing in that image consumes a from-source NIXL build.
+# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF, so
+# nothing in that image consumes a from-source NIXL build.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -876,85 +894,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 {% endif %}
 
-{% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
-COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
-
-# Build kvbm wheel (with nixl linkage via auditwheel repair)
-ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/bindings/kvbm && \
-        KVBM_FEATURES=""; \
-        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
-        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
-        if [ "$DEVICE" = "cuda" ]; then \
-            auditwheel repair \
-                --exclude libnixl.so \
-                --exclude libnixl_build.so \
-                --exclude libnixl_common.so \
-                --exclude 'lib*.so*' \
-                --plat manylinux_2_28_${ARCH_ALT} \
-                --wheel-dir /opt/dynamo/dist \
-                target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-            cp target/wheels/*.whl /opt/dynamo/dist/; \
-        fi; \
-    fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
-{% endif %}
-
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
-
-# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
-# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
-# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
-# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
-# Venv python required: compliance.overrides needs pyyaml, absent from the
-# system python3 (see the runtime_wheel_builder bundling step).
-COPY container/compliance /opt/compliance
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -u; \
-    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
-        [ -d "$src" ] || continue; \
-        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
-            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
-            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
-                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
-            done; \
-        done; \
-    done; \
-    for whl in /opt/dynamo/dist/kvbm*.whl; do \
-        [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
-            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
-            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
-    done; \
-    echo "kvbm wheel NOTICES step done"
+# Crate license texts for the compliance licenses stage
+COPY --from=runtime_wheel_builder /opt/dynamo/rust-licenses/ /opt/dynamo/rust-licenses/
 
 {% else %}
-# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and the
-# frontend installs it from PyPI; neither builds Dynamo KVBM. Keep this alias so
-# downstream stages can still COPY Dynamo wheels and build tools from a common
-# wheel_builder stage name.
-# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
-# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+# The frontend installs NIXL from PyPI and Triton ships no NIXL. Keep this alias
+# so downstream stages can still COPY Dynamo wheels and build tools from a
+# common wheel_builder stage name.
 FROM runtime_wheel_builder AS wheel_builder
 {% endif %}

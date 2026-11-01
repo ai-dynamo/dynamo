@@ -23,7 +23,6 @@ import (
 	"strconv"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -107,10 +106,8 @@ func FindModelsForBaseModel(
 	requests := make([]reconcile.Request, 0, len(models.Items))
 	for _, model := range models.Items {
 		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      model.Name,
-				Namespace: model.Namespace,
-			},
+			Name:      model.Name,
+			Namespace: model.Namespace,
 		})
 	}
 

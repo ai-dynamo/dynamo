@@ -41,6 +41,23 @@ class TestIsModelCard:
     def test_missing_type_rejected(self):
         assert not is_model_card({})
 
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            {"type": "Model", "model_suffix": "adapter"},
+            {"type": "Model", "model_suffix": ""},
+            {"type": "Model", "card_json": {"lora": {"name": "adapter"}}},
+            {"type": "Model", "card_json": {"lora": {}}},
+        ],
+    )
+    def test_runtime_adapter_registration_rejected(self, wrapper):
+        assert not is_model_card(wrapper)
+
+    def test_null_adapter_fields_are_base_model(self):
+        assert is_model_card(
+            {"type": "Model", "model_suffix": None, "card_json": {"lora": None}}
+        )
+
 
 # ── is_prefill_card ────────────────────────────────────────────────
 

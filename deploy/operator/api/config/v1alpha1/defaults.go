@@ -21,7 +21,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 const defaultBindAddress = "0.0.0.0"
@@ -38,7 +37,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Server.Metrics.BindAddress = defaultBindAddress
 	}
 	if obj.Server.Metrics.Secure == nil {
-		obj.Server.Metrics.Secure = ptr.To(true)
+		obj.Server.Metrics.Secure = new(true)
 	}
 	if obj.Server.HealthProbe.Port == 0 {
 		obj.Server.HealthProbe.Port = 8081
@@ -82,7 +81,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 
 	// GPU discovery defaults
 	if obj.GPU.DiscoveryEnabled == nil {
-		obj.GPU.DiscoveryEnabled = ptr.To(true)
+		obj.GPU.DiscoveryEnabled = new(true)
 	}
 
 	// ServiceMesh defaults
@@ -94,7 +93,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 			obj.ServiceMesh.Istio.TLSMode = "SIMPLE"
 		}
 		if obj.ServiceMesh.Istio.InsecureSkipVerify == nil {
-			obj.ServiceMesh.Istio.InsecureSkipVerify = ptr.To(true)
+			obj.ServiceMesh.Istio.InsecureSkipVerify = new(true)
 		}
 	}
 

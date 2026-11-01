@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import zmq
 
+import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
+from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_ids,
@@ -612,7 +616,7 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -662,7 +666,7 @@ def test_init_fpm_relay_follows_local_dp_rank_bounds(
         setattr(server_args, key, value)
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=SimpleNamespace(
             server_args=server_args,
@@ -749,7 +753,7 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -761,6 +765,61 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
     assert calls[0]["worker_id"] == 0
     publisher.cleanup()
+
+
+def _scheduler_entry(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank):
+    """Stands in for SGLang's ``run_scheduler_process`` signature."""
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_every_pure_dp_scheduler_reaches_the_metrics_socket(
+    monkeypatch, tmp_path
+):
+    """SGLang gives each pure-DP scheduler a fresh ``metrics_ipc_name`` and keeps
+    only ``instance_id``; the scheduler wrapper must make every rank's metrics
+    reach the PULL socket the publisher binds from the parent ``port_args``."""
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", None)
+    instance_id = uuid.uuid4().hex[:12]
+    server_args = SimpleNamespace(
+        dp_size=2, enable_dp_attention=False, nnodes=1, node_rank=0, page_size=16
+    )
+    parent = SimpleNamespace(
+        metrics_ipc_name=f"ipc://{tmp_path}/parent", instance_id=instance_id
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(port_args=parent),
+        config=SimpleNamespace(server_args=server_args, dynamo_args=SimpleNamespace()),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+    ctx = zmq.Context()
+    pushes = []
+    try:
+        for dp_rank in (0, 1):
+            port_args = SimpleNamespace(
+                metrics_ipc_name=f"ipc://{tmp_path}/rank-{dp_rank}",
+                instance_id=instance_id,
+            )
+            _share_scheduler_metrics_ipc_name(
+                _scheduler_entry, (server_args, port_args, 0, 0, 0, dp_rank), {}
+            )
+            push = ctx.socket(zmq.PUSH)
+            push.setsockopt(zmq.LINGER, 0)
+            push.connect(port_args.metrics_ipc_name)
+            push.send_pyobj(SimpleNamespace(data_parallel_rank=dp_rank))
+            pushes.append(push)
+
+        received = [
+            await asyncio.wait_for(publisher._sock.recv_pyobj(), timeout=2)
+            for _ in range(2)
+        ]
+        assert sorted(m.data_parallel_rank for m in received) == [0, 1]
+    finally:
+        for push in pushes:
+            push.close()
+        ctx.term()
+        publisher.cleanup()
 
 
 # ---- per-worker metric gating (embedding vs chat) ----

@@ -95,7 +95,7 @@ KV-cache entries:
 |---------|---------|----------|
 | vLLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
-| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.20 and 0.5.21. |
+| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.21 and 0.5.22. |
 
 SGLang cache salt routing is available in Dynamo development builds that include
 [PR #14803](https://github.com/ai-dynamo/dynamo/pull/14803). Updating SGLang alone does not
@@ -330,6 +330,63 @@ Dynamo supports this field for requests with one choice.
     }
 }
 ```
+
+### Image Accounting
+
+`/v1/images/generations` and `/v1/images/edits` report per-request accounting in two fields with
+different contracts:
+
+| Field | Source contract | Value |
+|-------|-----------------|-------|
+| `usage` | OpenAI Images API token usage | The backend's token counts, or `null`. Diffusion models served through vLLM-Omni report no token counts, so the field is `null`. |
+| `nvext.usage` | Dynamo extension | Image-based accounting. Present whenever the backend reports it; no `extra_fields` opt-in. The image counts are always present; an unknown step count is omitted, never written as `0`. |
+
+`nvext.usage` carries these fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `output_images` | integer | Images generated and returned in `data`. Counts the output, not the requested `n`. |
+| `input_images` | integer | Reference images the request consumed: `0` for text-to-image, `1` for a request with `input_reference` or an `/v1/images/edits` request. |
+| `num_inference_steps` | integer, optional | The step count the backend ran. Omitted when the backend does not know it. |
+
+The response also fills the OpenAI `size` (`WIDTHxHEIGHT` of the generated images) and
+`output_format` fields from the images themselves.
+
+Example response for a request with `"n": 2`:
+
+```json
+{
+  "created": 1760000000,
+  "data": [{"b64_json": "..."}, {"b64_json": "..."}],
+  "size": "1024x1024",
+  "output_format": "png",
+  "usage": null,
+  "nvext": {
+    "usage": {
+      "output_images": 2,
+      "input_images": 0,
+      "num_inference_steps": 4
+    }
+  }
+}
+```
+
+When a worker returns the images of one request in several chunks, the frontend merges them:
+`data` is concatenated; `output_images` adds up over the chunks that report it; `created`,
+`input_images`, and token `usage` keep the first reported value; `size`, `output_format`, and
+`num_inference_steps` are dropped (`null` or omitted) when chunks disagree or one does not report
+them, so the response never claims a value that does not hold for every image.
+
+Backend support:
+
+| Backend | `nvext.usage` | `size`, `output_format` |
+|---------|---------------|-------------------------|
+| vLLM-Omni | Yes | Yes |
+| SGLang | Not yet | Not yet |
+| TensorRT-LLM | Not yet | Not yet |
+
+vLLM-Omni reports the step count the request asked for in `nvext.num_inference_steps` and omits it
+when the model default applied: its engine output does not carry the count it ran.
 
 ## See Also
 

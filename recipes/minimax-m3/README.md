@@ -68,14 +68,31 @@ export CLUSTER_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-cluster
 export DGD="minimax-m3-$PROFILE"
 ```
 
-Prepare and render the cluster configuration as described in
-[Edit and render](#edit-and-render), then apply the rendered manifest:
+Prepare and validate the cluster configuration as described in
+[Edit and render](#edit-and-render). Then include the selected profile's
+`worker-liveness` Component to configure worker startup, liveness, and readiness
+probes. The startup probe allows up to two hours for initialization, matching
+the operator default. The liveness and readiness probes extend allowances for
+cold kernel compilation. The cluster validator accepts only cluster bindings,
+so compose this Component in a separate deployment directory:
 
 ```bash
+export DEPLOY_KUSTOMIZATION=/absolute/path/to/private/minimax-m3-deploy
+mkdir -p "$DEPLOY_KUSTOMIZATION"
+cat > "$DEPLOY_KUSTOMIZATION/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(realpath --relative-to="$DEPLOY_KUSTOMIZATION" "$CLUSTER_KUSTOMIZATION")
+components:
+  - $(realpath --relative-to="$DEPLOY_KUSTOMIZATION" "$RECIPE_DIR/kustomize/components/worker-liveness")
+EOF
+kustomize build --load-restrictor LoadRestrictionsNone \
+  "$DEPLOY_KUSTOMIZATION" > "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply --dry-run=server \
-  -f "$CLUSTER_KUSTOMIZATION/rendered.yaml"
+  -f "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
-  -f "$CLUSTER_KUSTOMIZATION/rendered.yaml"
+  -f "$DEPLOY_KUSTOMIZATION/rendered.yaml"
 ```
 
 ## Edit and render

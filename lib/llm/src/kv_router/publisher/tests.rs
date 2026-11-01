@@ -20,9 +20,42 @@ mod test_event_processing {
     use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
+    #[tokio::test]
+    async fn publisher_readiness_and_fatal_termination_are_observable_when_idle() {
+        for startup_succeeds in [false, true] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (startup_tx, startup) = oneshot::channel();
+            let (finish_tx, finish_rx) = oneshot::channel::<()>();
+            let processor_task = tokio::spawn(async move {
+                if startup_succeeds {
+                    let _ = startup_tx.send(());
+                    let _ = finish_rx.await;
+                }
+            });
+            let mut publisher = KvEventPublisher {
+                kv_block_size: 1,
+                source: None,
+                cancellation_token: CancellationToken::new(),
+                worker_id: 7,
+                tx,
+                next_event_id: Arc::new(AtomicU64::new(0)),
+                startup: Some(startup),
+                processor_handle: parking_lot::Mutex::new(Some(processor_task)),
+            };
+            let result = tokio::time::timeout(Duration::from_secs(1), publisher.ready())
+                .await
+                .expect("readiness must complete without data events");
+            assert_eq!(result.is_ok(), startup_succeeds);
+            drop(finish_tx);
+            tokio::time::timeout(Duration::from_secs(1), publisher.terminated())
+                .await
+                .expect("fatal termination must be observable");
+        }
+    }
+
     #[test]
-    fn test_publish_batch_ignores_empty_and_preserves_order() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+    fn test_publish_batch_preserves_optional_session_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -30,6 +63,55 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_handle: parking_lot::Mutex::new(None),
+        };
+        publisher
+            .publish_batch_with_session_ids(
+                [Some("a"), Some("b"), None]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, session)| {
+                        (
+                            KvCacheEvent {
+                                event_id: i as u64,
+                                dp_rank: 2,
+                                data: KvCacheEventData::Stored(KvCacheStoreData {
+                                    parent_hash: None,
+                                    start_position: Some(0),
+                                    blocks: Vec::new(),
+                                }),
+                            },
+                            StorageTier::Device,
+                            session.map(str::to_owned),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
+        assert_eq!(batch.len(), 3);
+        for (event, session) in batch.into_iter().zip([Some("a"), Some("b"), None]) {
+            let event = event.into_router_event().unwrap();
+            assert_eq!(event.session_id.as_deref(), session);
+            assert_eq!(event.worker_id, 7);
+            assert_eq!(event.event.dp_rank, 2);
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_publish_batch_ignores_empty_and_preserves_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_handle: parking_lot::Mutex::new(None),
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -52,7 +134,7 @@ mod test_event_processing {
                 },
             ])
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].event.event_id, 8);
         assert_eq!(batch[0].event.dp_rank, 1);
@@ -62,7 +144,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -70,6 +152,8 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_handle: parking_lot::Mutex::new(None),
         };
         drop(rx);
 
@@ -97,7 +181,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_wraps_events_in_batches() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -105,6 +189,8 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_handle: parking_lot::Mutex::new(None),
         };
 
         publisher
@@ -114,7 +200,7 @@ mod test_event_processing {
                 dp_rank: 2,
             })
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].event.event_id, 10);
         assert_eq!(batch[0].event.dp_rank, 2);
@@ -140,7 +226,7 @@ mod test_event_processing {
             ])
             .unwrap();
 
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(
             batch
                 .iter()
@@ -857,7 +943,7 @@ mod tests_startup_helpers {
 
         let cancellation_token = CancellationToken::new();
         let processor_token = cancellation_token.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
@@ -923,8 +1009,8 @@ mod tests_startup_helpers {
         };
 
         let token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        tx.send(local_gpu_event(1, event)).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        tx.send(local_gpu_event(1, event).into()).unwrap();
         drop(tx);
 
         let handle = tokio::spawn(start_event_processor(
@@ -981,8 +1067,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        tx.send(local_gpu_event(1, event)).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        tx.send(local_gpu_event(1, event).into()).unwrap();
         drop(tx);
 
         // Start event processor with local indexer
@@ -1067,8 +1153,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        tx.send(local_gpu_event(1, store_event)).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        tx.send(local_gpu_event(1, store_event).into()).unwrap();
 
         // Start event processor with local indexer
         let handle = tokio::spawn(start_event_processor(
@@ -1088,7 +1174,7 @@ mod tests_startup_helpers {
             }),
             dp_rank: 0,
         };
-        tx.send(local_gpu_event(1, remove_event)).unwrap();
+        tx.send(local_gpu_event(1, remove_event).into()).unwrap();
         drop(tx);
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1150,8 +1236,8 @@ mod tests_startup_helpers {
             dp_rank: 0,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        tx.send(local_gpu_event(1, store_event)).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        tx.send(local_gpu_event(1, store_event).into()).unwrap();
 
         // Clear all blocks
         let clear_event = KvCacheEvent {
@@ -1159,7 +1245,7 @@ mod tests_startup_helpers {
             data: KvCacheEventData::Cleared,
             dp_rank: 0,
         };
-        tx.send(local_gpu_event(1, clear_event)).unwrap();
+        tx.send(local_gpu_event(1, clear_event).into()).unwrap();
         drop(tx);
 
         // Create event processor and wait
@@ -1228,8 +1314,8 @@ mod tests_startup_helpers {
         };
 
         let new_token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        tx.send(local_gpu_event(1, event)).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        tx.send(local_gpu_event(1, event).into()).unwrap();
         drop(tx);
 
         // Despite local indexer being cancelled, event processor should continue
@@ -1255,8 +1341,11 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
+    #[rstest::rstest]
+    #[case::legacy(false)]
+    #[case::heartbeat_source(true)]
     #[tokio::test]
-    async fn test_start_zmq_listener_pushes_to_channel() {
+    async fn test_start_zmq_listener_pushes_to_channel(#[case] heartbeat_source: bool) {
         #[derive(serde::Serialize)]
         #[serde(tag = "type")]
         enum MapKvEvent {
@@ -1274,7 +1363,7 @@ mod tests_startup_helpers {
         }
 
         // Prepare channel that listener should fill
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
 
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
@@ -1300,6 +1389,9 @@ mod tests_startup_helpers {
                 4,
                 next_event_id,
                 None,
+                None,
+                Some(0),
+                heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
                 None,
             )
         });
@@ -1329,7 +1421,7 @@ mod tests_startup_helpers {
             },
         ];
 
-        let batch = (0.0, events, Some(1_i32));
+        let batch = (0.0, events, Some(0_i32));
 
         let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
@@ -1349,7 +1441,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1389,6 +1481,71 @@ mod tests_startup_helpers {
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
 
+        // The first accepted batch confirms the subscription is established.
+        // Neither another rank nor an unlabeled batch may reach this rank-zero
+        // source (unlabeled batches otherwise default to rank zero).
+        for rank in [Some(1_i32), None] {
+            send_multipart(
+                &pub_socket,
+                vec![
+                    Vec::new(),
+                    (seq + 1).to_be_bytes().to_vec(),
+                    rmps::to_vec_named(&(
+                        0.0,
+                        vec![MapKvEvent::BlockRemoved {
+                            block_hashes: vec![999],
+                        }],
+                        rank,
+                    ))
+                    .unwrap(),
+                ],
+            )
+            .await
+            .expect("failed to send foreign-rank ZMQ test event");
+        }
+
+        // Heartbeat-aware sources invalidate residency on a transport gap;
+        // legacy advisory streams continue with the received events.
+        let gap_frames = vec![
+            Bytes::from("").to_vec(),
+            Bytes::from((seq + 2).to_be_bytes().to_vec()).to_vec(),
+            payload.to_vec(),
+        ];
+        send_multipart(&pub_socket, gap_frames)
+            .await
+            .expect("failed to send gapped ZMQ test event");
+        let recovery = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for gap recovery")
+            .expect("listener channel closed")
+            .into_events();
+        let offset = usize::from(heartbeat_source);
+        assert_eq!(recovery.len(), 2 + offset);
+        if heartbeat_source {
+            assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
+        }
+        assert!(matches!(
+            recovery[offset].event.data,
+            KvCacheEventData::Stored(_)
+        ));
+        assert!(matches!(
+            recovery[offset + 1].event.data,
+            KvCacheEventData::Removed(_)
+        ));
+        for (index, event) in recovery.iter().enumerate() {
+            assert_eq!(event.event.event_id, 2 + index as u64);
+            assert_eq!(event.event.dp_rank, 0);
+        }
+
+        if heartbeat_source {
+            let expired = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("heartbeat expiry must clear residency")
+                .expect("listener channel closed")
+                .into_events();
+            assert!(matches!(expired[0].event.data, KvCacheEventData::Cleared));
+        }
+
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
@@ -1416,7 +1573,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1430,6 +1587,9 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
+                None,
+                None,
                 None,
                 None,
             )
@@ -1460,7 +1620,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1515,7 +1675,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1529,6 +1689,9 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
+                None,
+                None,
                 None,
                 None,
             )
@@ -1552,7 +1715,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, sentinel_frames.clone())
@@ -1603,7 +1766,7 @@ mod tests_startup_helpers {
 
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = String::new();
@@ -1613,7 +1776,20 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
+            start_zmq_listener(
+                endpoint,
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1647,7 +1823,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(
@@ -1697,7 +1873,7 @@ mod tests_startup_helpers {
             100, // buffer size
         ));
 
-        let (worker_tx, worker_rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel::<PublisherInput>();
 
         // Start worker's event processor
         tokio::spawn(start_event_processor(
@@ -1739,7 +1915,7 @@ mod tests_startup_helpers {
         };
 
         worker_tx
-            .send(local_gpu_event(worker_1_id, event_1.clone()))
+            .send(local_gpu_event(worker_1_id, event_1.clone()).into())
             .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -1812,7 +1988,7 @@ mod tests_startup_helpers {
         };
 
         worker_tx
-            .send(local_gpu_event(worker_1_id, event_2.clone()))
+            .send(local_gpu_event(worker_1_id, event_2.clone()).into())
             .unwrap(); // send to worker but not to router
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -2372,8 +2548,63 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
+    async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
+        use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
+        for (is_rejected, is_offline) in [(false, false), (true, false), (false, true)] {
+            let indexer_cancel = CancellationToken::new();
+            if is_offline {
+                indexer_cancel.cancel();
+            }
+            let indexer = Arc::new(LocalKvIndexer::new(
+                indexer_cancel,
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                16,
+            ));
+            let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+            let cancel = CancellationToken::new();
+            let publisher = MockPublisher::new();
+            let task = tokio::spawn(run_event_processor_loop(
+                publisher.clone(),
+                1,
+                cancel.clone(),
+                rx,
+                Some(indexer.clone()),
+                Some(60_000),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            ));
+            let (done, ack) = tokio::sync::oneshot::channel();
+            // A missing parent reaches the index and is rejected there, as on the live path.
+            let parent = is_rejected.then_some(999);
+            tx.send(local_gpu_batch(vec![stored_event(0, parent, 10, 0)]).into())
+                .unwrap();
+            tx.send(PublisherInput::Barrier(done)).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), ack)
+                .await
+                .unwrap()
+                .unwrap();
+            if is_offline {
+                assert!(result.is_err());
+                // The listener must still be able to publish its terminal status.
+                assert!(!cancel.is_cancelled());
+            } else {
+                result.unwrap();
+                // No flush/sleep: the barrier means the index finished the batch,
+                // even with an otherwise long publisher batching timeout.
+                let matches = indexer
+                    .find_matches(vec![LocalBlockHash(10)])
+                    .await
+                    .unwrap();
+                assert_eq!(matches.scores.is_empty(), is_rejected);
+            }
+            drop(tx);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn test_native_list_coalesces_singleton_stores_without_timeout() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2385,11 +2616,14 @@ mod event_processor_tests {
             DEFAULT_MAX_BATCH_BLOCKS,
         ));
 
-        tx.send(local_gpu_batch(vec![
-            stored_event(0, None, 10, 0),
-            stored_event(1, Some(10), 11, 0),
-            stored_event(2, Some(11), 12, 0),
-        ]))
+        tx.send(
+            local_gpu_batch(vec![
+                stored_event(0, None, 10, 0),
+                stored_event(1, Some(10), 11, 0),
+                stored_event(2, Some(11), 12, 0),
+            ])
+            .into(),
+        )
         .unwrap();
         drop(tx);
         handle.await.unwrap();
@@ -2404,7 +2638,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_native_list_merges_removals_and_preserves_type_order() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2416,11 +2650,14 @@ mod event_processor_tests {
             DEFAULT_MAX_BATCH_BLOCKS,
         ));
 
-        tx.send(local_gpu_batch(vec![
-            removed_event(0, 20, 0),
-            removed_event(1, 21, 0),
-            stored_event(2, None, 22, 0),
-        ]))
+        tx.send(
+            local_gpu_batch(vec![
+                removed_event(0, 20, 0),
+                removed_event(1, 21, 0),
+                stored_event(2, None, 22, 0),
+            ])
+            .into(),
+        )
         .unwrap();
         drop(tx);
         handle.await.unwrap();
@@ -2438,7 +2675,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_native_list_flushes_all_structural_boundaries_in_order() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2456,28 +2693,31 @@ mod event_processor_tests {
             data: KvCacheEventData::Cleared,
             dp_rank: 1,
         };
-        tx.send(vec![
-            PlacementEvent::local_gpu(1, stored_event(0, None, 10, 0)),
-            PlacementEvent::local_gpu(1, stored_event(1, Some(10), 11, 0)),
-            // Broken chain.
-            PlacementEvent::local_gpu(1, stored_event(2, Some(99), 12, 0)),
-            // Type boundary.
-            PlacementEvent::local_gpu(1, removed_event(3, 12, 0)),
-            // DP-rank boundary.
-            PlacementEvent::local_gpu(1, removed_event(4, 50, 1)),
-            // Storage-tier boundary.
-            PlacementEvent::new(
-                Placement::local_worker(1, 1, StorageTier::HostPinned),
-                host_removed,
-            ),
-            // A second physical lower tier remains in the Worker domain.
-            PlacementEvent::new(
-                Placement::local_worker(1, 1, StorageTier::Disk),
-                removed_event(6, 52, 1),
-            ),
-            // Clear boundary.
-            PlacementEvent::new(Placement::local_worker(1, 1, StorageTier::Device), clear),
-        ])
+        tx.send(
+            vec![
+                PlacementEvent::local_gpu(1, stored_event(0, None, 10, 0)),
+                PlacementEvent::local_gpu(1, stored_event(1, Some(10), 11, 0)),
+                // Broken chain.
+                PlacementEvent::local_gpu(1, stored_event(2, Some(99), 12, 0)),
+                // Type boundary.
+                PlacementEvent::local_gpu(1, removed_event(3, 12, 0)),
+                // DP-rank boundary.
+                PlacementEvent::local_gpu(1, removed_event(4, 50, 1)),
+                // Storage-tier boundary.
+                PlacementEvent::new(
+                    Placement::local_worker(1, 1, StorageTier::HostPinned),
+                    host_removed,
+                ),
+                // A second physical lower tier remains in the Worker domain.
+                PlacementEvent::new(
+                    Placement::local_worker(1, 1, StorageTier::Disk),
+                    removed_event(6, 52, 1),
+                ),
+                // Clear boundary.
+                PlacementEvent::new(Placement::local_worker(1, 1, StorageTier::Device), clear),
+            ]
+            .into(),
+        )
         .unwrap();
         drop(tx);
         handle.await.unwrap();
@@ -2518,7 +2758,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_no_timeout_flushes_each_native_list_independently() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2530,8 +2770,10 @@ mod event_processor_tests {
             DEFAULT_MAX_BATCH_BLOCKS,
         ));
 
-        tx.send(local_gpu_event(removed_event(0, 30, 0))).unwrap();
-        tx.send(local_gpu_event(removed_event(1, 31, 0))).unwrap();
+        tx.send(local_gpu_event(removed_event(0, 30, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(removed_event(1, 31, 0)).into())
+            .unwrap();
         drop(tx);
         handle.await.unwrap();
 
@@ -2545,7 +2787,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_timeout_merges_compatible_tails_across_native_lists() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2557,8 +2799,10 @@ mod event_processor_tests {
             DEFAULT_MAX_BATCH_BLOCKS,
         ));
 
-        tx.send(local_gpu_event(removed_event(0, 40, 0))).unwrap();
-        tx.send(local_gpu_event(removed_event(1, 41, 0))).unwrap();
+        tx.send(local_gpu_event(removed_event(0, 40, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(removed_event(1, 41, 0)).into())
+            .unwrap();
         drop(tx);
         handle.await.unwrap();
 
@@ -2572,7 +2816,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_size_cap_flushes_between_events_in_native_list() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2590,7 +2834,7 @@ mod event_processor_tests {
                 stored_event(i as u64, parent_hash, i as u64, 0)
             })
             .collect();
-        tx.send(local_gpu_batch(events)).unwrap();
+        tx.send(local_gpu_batch(events).into()).unwrap();
         drop(tx);
         handle.await.unwrap();
 
@@ -2644,7 +2888,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_size_cap_does_not_split_one_source_event() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let handle = tokio::spawn(run_event_processor_loop(
             publisher.clone(),
@@ -2672,7 +2916,7 @@ mod event_processor_tests {
             }),
             dp_rank: 0,
         };
-        tx.send(local_gpu_event(event)).unwrap();
+        tx.send(local_gpu_event(event).into()).unwrap();
         drop(tx);
         handle.await.unwrap();
 
@@ -2708,7 +2952,7 @@ mod event_processor_tests {
 
     /// Helper function to test removed events batching with configurable count and timeout
     async fn test_removed_events_batching(event_count: usize, timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2734,7 +2978,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(local_gpu_event(event)).unwrap();
+            tx.send(local_gpu_event(event).into()).unwrap();
             // Yield to allow event processor to process the event
             tokio::task::yield_now().await;
         }
@@ -2805,7 +3049,7 @@ mod event_processor_tests {
 
     /// Helper function to test stored events batching with configurable count and timeout
     async fn test_stored_events_batching(event_count: usize, timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2844,7 +3088,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(local_gpu_event(event)).unwrap();
+            tx.send(local_gpu_event(event).into()).unwrap();
             // Small sleep to allow event processor to batch events
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
@@ -2904,7 +3148,7 @@ mod event_processor_tests {
     async fn test_run_event_processor_loop_non_sequential_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2937,7 +3181,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(local_gpu_event(event)).unwrap();
+            tx.send(local_gpu_event(event).into()).unwrap();
         }
 
         drop(tx);
@@ -2973,7 +3217,7 @@ mod event_processor_tests {
     async fn test_run_event_processor_loop_reused_parent_hash_breaks_chain() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -2991,51 +3235,60 @@ mod event_processor_tests {
             .await
         });
 
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                start_position: Some(10),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(1),
-                    tokens_hash: LocalBlockHash(100),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: Some(10),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(1),
+                        tokens_hash: LocalBlockHash(100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(1)),
-                start_position: Some(11_111),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(2),
-                    tokens_hash: LocalBlockHash(200),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(1)),
+                    start_position: Some(11_111),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(2),
+                        tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 2,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(1)),
-                start_position: Some(20),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(3),
-                    tokens_hash: LocalBlockHash(300),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(1)),
+                    start_position: Some(20),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(3),
+                        tokens_hash: LocalBlockHash(300),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -3111,7 +3364,7 @@ mod event_processor_tests {
 
     /// Helper function to test no batching with slow input
     async fn test_no_batching_with_slow_input(timeout_ms: Option<u64>) {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3139,7 +3392,7 @@ mod event_processor_tests {
                 }),
                 dp_rank: 0,
             };
-            tx.send(local_gpu_event(event)).unwrap();
+            tx.send(local_gpu_event(event).into()).unwrap();
             // Wait 2ms between events (much longer than the timeout)
             // This ensures each event times out before the next one arrives
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -3184,7 +3437,7 @@ mod event_processor_tests {
     async fn test_event_type_switching_causes_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3203,32 +3456,38 @@ mod event_processor_tests {
         });
 
         // Send a Removed event
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(0)],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(0)],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         // Small sleep
         tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
 
         // Send a Stored event (should cause flush of the Removed event)
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(0)),
-                start_position: None,
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(1),
-                    tokens_hash: LocalBlockHash(100),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(0)),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(1),
+                        tokens_hash: LocalBlockHash(100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         // Give time for processing
@@ -3249,7 +3508,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_host_tier_events_are_published_and_preserved() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3267,13 +3526,16 @@ mod event_processor_tests {
             .await
         });
 
-        tx.send(local_host_event(KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(42)],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_host_event(KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(42)],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         drop(tx);
@@ -3297,7 +3559,7 @@ mod event_processor_tests {
     async fn test_storage_tier_change_causes_flush() {
         let timeout_ms = Some(100);
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3315,23 +3577,29 @@ mod event_processor_tests {
             .await
         });
 
-        tx.send(local_host_event(KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(1)],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_host_event(KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(1)],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(2)],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(2)],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         drop(tx);
@@ -3352,7 +3620,7 @@ mod event_processor_tests {
     async fn test_dp_rank_change_causes_flush() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3372,26 +3640,32 @@ mod event_processor_tests {
 
         // Send events with dp_rank=0
         for i in 0..3 {
-            tx.send(local_gpu_event(KvCacheEvent {
-                event_id: i as u64,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
-                }),
-                dp_rank: 0,
-            }))
+            tx.send(
+                local_gpu_event(KvCacheEvent {
+                    event_id: i as u64,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                    }),
+                    dp_rank: 0,
+                })
+                .into(),
+            )
             .unwrap();
             tokio::task::yield_now().await;
         }
 
         // Send events with dp_rank=1 (should cause flush of previous batch)
         for i in 3..6 {
-            tx.send(local_gpu_event(KvCacheEvent {
-                event_id: i as u64,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
-                }),
-                dp_rank: 1,
-            }))
+            tx.send(
+                local_gpu_event(KvCacheEvent {
+                    event_id: i as u64,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                    }),
+                    dp_rank: 1,
+                })
+                .into(),
+            )
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3444,7 +3718,7 @@ mod event_processor_tests {
     async fn test_flushed_events_have_correct_metadata() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3464,13 +3738,16 @@ mod event_processor_tests {
 
         // Send first batch: 3 events with dp_rank=0, event_ids 10-12
         for i in 0..3 {
-            tx.send(local_gpu_event(KvCacheEvent {
-                event_id: 10 + i as u64,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
-                }),
-                dp_rank: 0,
-            }))
+            tx.send(
+                local_gpu_event(KvCacheEvent {
+                    event_id: 10 + i as u64,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                    }),
+                    dp_rank: 0,
+                })
+                .into(),
+            )
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3478,13 +3755,16 @@ mod event_processor_tests {
         // Send second batch: 2 events with dp_rank=1, event_ids 20-21
         // This should flush the first batch with dp_rank=0
         for i in 0..2 {
-            tx.send(local_gpu_event(KvCacheEvent {
-                event_id: 20 + i as u64,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash((i + 3) as u64)],
-                }),
-                dp_rank: 1,
-            }))
+            tx.send(
+                local_gpu_event(KvCacheEvent {
+                    event_id: 20 + i as u64,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash((i + 3) as u64)],
+                    }),
+                    dp_rank: 1,
+                })
+                .into(),
+            )
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3530,7 +3810,7 @@ mod event_processor_tests {
     async fn test_first_event_after_idle_flushes_immediately_then_batches() {
         let timeout_ms = Some(50); // 50ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3554,13 +3834,16 @@ mod event_processor_tests {
         // Send 3 events rapidly - first should flush immediately (stale timer),
         // remaining 2 should batch together
         for i in 0..3 {
-            tx.send(local_gpu_event(KvCacheEvent {
-                event_id: i as u64,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
-                }),
-                dp_rank: 0,
-            }))
+            tx.send(
+                local_gpu_event(KvCacheEvent {
+                    event_id: i as u64,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                    }),
+                    dp_rank: 0,
+                })
+                .into(),
+            )
             .unwrap();
             tokio::task::yield_now().await;
         }
@@ -3600,7 +3883,7 @@ mod event_processor_tests {
     async fn test_stored_events_with_dp_rank_change_correct_metadata() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3619,53 +3902,62 @@ mod event_processor_tests {
         });
 
         // Send first batch: 2 sequential stored events with dp_rank=0, event_ids 100-101
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 100,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(0)),
-                start_position: None,
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(1),
-                    tokens_hash: LocalBlockHash(100),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 100,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(0)),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(1),
+                        tokens_hash: LocalBlockHash(100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 101,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(1)),
-                start_position: None,
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(2),
-                    tokens_hash: LocalBlockHash(200),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 101,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(1)),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(2),
+                        tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
         // Send second batch: 1 event with dp_rank=1, event_id=200
         // This should flush the first batch with dp_rank=0, event_id=101
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 200,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(0)),
-                start_position: None,
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(100),
-                    tokens_hash: LocalBlockHash(1000),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 1,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 200,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(0)),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(1000),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 1,
+            })
+            .into(),
+        )
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -3720,7 +4012,7 @@ mod event_processor_tests {
     async fn test_batch_parent_hash_preserved_when_extending() {
         let timeout_ms = Some(100); // 100ms timeout
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
@@ -3739,53 +4031,62 @@ mod event_processor_tests {
         });
 
         // First event: parent_hash=None, block_hash=1
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None, // Root block with no parent
-                start_position: Some(10),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(1),
-                    tokens_hash: LocalBlockHash(100),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None, // Root block with no parent
+                    start_position: Some(10),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(1),
+                        tokens_hash: LocalBlockHash(100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
         // Second event: parent_hash=Some(1), block_hash=2 (sequential)
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
-                start_position: Some(999),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(2),
-                    tokens_hash: LocalBlockHash(200),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
+                    start_position: Some(999),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(2),
+                        tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
         tokio::task::yield_now().await;
 
         // Third event: parent_hash=Some(2), block_hash=3 (sequential)
-        tx.send(local_gpu_event(KvCacheEvent {
-            event_id: 2,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: Some(ExternalSequenceBlockHash(2)),
-                start_position: Some(1_234),
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(3),
-                    tokens_hash: LocalBlockHash(300),
-                    mm_extra_info: None,
-                }],
-            }),
-            dp_rank: 0,
-        }))
+        tx.send(
+            local_gpu_event(KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(2)),
+                    start_position: Some(1_234),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(3),
+                        tokens_hash: LocalBlockHash(300),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            })
+            .into(),
+        )
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
