@@ -13,15 +13,18 @@ use crate::config::KvRouterConfig;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::RouterConfig;
+#[cfg(feature = "replica-sync-zmq")]
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
-use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::tracking_hash_context;
+use dynamo_kv_indexer::backend::IndexerPolicy;
 use dynamo_scheduler::replication::AffinityBindingEvent;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
-use super::core::{HostCache, KvIndexSource, SelectionCore, SelectionHost};
+#[cfg(feature = "ingest-zmq")]
+use super::core::HostCache;
+use super::core::{KvIndexSource, SelectionCore, SelectionHost};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -29,6 +32,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+#[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
 use crate::WorkerType;
 use crate::plugins::RouterPluginRegistry;
@@ -36,8 +40,11 @@ use crate::plugins::RouterPluginRegistry;
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
     indexer_threads: usize,
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
     indexer_peers: Vec<String>,
+    #[cfg(feature = "replica-sync-zmq")]
     replica_sync_port: Option<u16>,
+    #[cfg(feature = "replica-sync-zmq")]
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
@@ -79,14 +86,19 @@ impl SelectionServiceBuilder {
         Self {
             kv_router_config,
             indexer_threads: 4,
+            #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
             indexer_peers: Vec::new(),
+            #[cfg(feature = "replica-sync-zmq")]
             replica_sync_port: None,
+            #[cfg(feature = "replica-sync-zmq")]
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             plugin_registry,
             // The standalone service's partitions index worker KV events
-            // published over ZMQ; `kv_index` overrides this.
+            // published over ZMQ; `kv_index` and `host` override this. Without
+            // the ZMQ ingress the host feeds the index itself.
+            #[cfg(feature = "ingest-zmq")]
             host: SelectionHost {
                 cache: HostCache {
                     index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
@@ -94,6 +106,8 @@ impl SelectionServiceBuilder {
                 },
                 ..SelectionHost::default()
             },
+            #[cfg(not(feature = "ingest-zmq"))]
+            host: SelectionHost::default(),
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
             session_affinity_mode: SessionAffinityMode::default(),
@@ -130,6 +144,8 @@ impl SelectionServiceBuilder {
         self
     }
 
+    /// Peer indexers whose state seeds this service's index at startup.
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
     pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
         self.indexer_peers = indexer_peers;
         self
@@ -156,6 +172,8 @@ impl SelectionServiceBuilder {
         self
     }
 
+    /// Join the ZMQ replica mesh on `port`, seeded with `peers`.
+    #[cfg(feature = "replica-sync-zmq")]
     pub fn replica_sync(mut self, port: u16, peers: Vec<String>) -> Self {
         self.replica_sync_port = Some(port);
         self.replica_sync_peers = peers;
@@ -182,6 +200,7 @@ impl SelectionServiceBuilder {
                 self.session_affinity_ttl.is_some(),
                 "session binding replication requires session affinity"
             );
+            #[cfg(feature = "replica-sync-zmq")]
             anyhow::ensure!(
                 self.replica_sync_port.is_none(),
                 "host session binding replication cannot be combined with replica_sync"
@@ -212,14 +231,15 @@ impl SelectionServiceBuilder {
         let indexer_policy = IndexerPolicy::from_config(
             &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
         )?;
-        let recover_from_peers = !self.indexer_peers.is_empty();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
+        #[cfg(feature = "replica-sync-zmq")]
         let replica_runtime = setup_replica_sync(
             self.replica_sync_port,
             &self.replica_sync_peers,
             cancel_token.child_token(),
         )?;
+        #[cfg(feature = "replica-sync-zmq")]
         if replica_runtime.is_some() {
             tracing::info!(
                 router_tracking_hash = %tracking_hash.algorithm(),
@@ -227,7 +247,10 @@ impl SelectionServiceBuilder {
                 "Selection replica synchronization initialized"
             );
         }
+        #[cfg(feature = "replica-sync-zmq")]
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
+        #[cfg(not(feature = "replica-sync-zmq"))]
+        let replica_config = None;
         let config = RouterConfig::from(&self.kv_router_config)
             .validate()
             .map_err(anyhow::Error::from)?;
@@ -255,7 +278,8 @@ impl SelectionServiceBuilder {
         };
         let core = Arc::new(core);
 
-        if recover_from_peers {
+        #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+        if !self.indexer_peers.is_empty() {
             match crate::services::indexer::recovery::recover_from_peers(
                 &self.indexer_peers,
                 core.index_registry(),
@@ -275,6 +299,7 @@ impl SelectionServiceBuilder {
         }
         core.signal_indexer_ready();
 
+        #[cfg(feature = "replica-sync-zmq")]
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
             let affinity_core = Arc::downgrade(&core);
@@ -302,8 +327,11 @@ impl SelectionServiceBuilder {
         Ok(SelectionService {
             core,
             session_binding_rx,
+            #[cfg(feature = "replica-sync-zmq")]
             peer_manager,
+            #[cfg(feature = "replica-sync-zmq")]
             replica_runtime,
+            #[cfg(feature = "replica-sync-zmq")]
             replica_sync_port: self.replica_sync_port,
             cancel_token,
         })
@@ -369,6 +397,11 @@ pub fn local_selection_core_with_host(
 
 /// The standalone selection service's configuration, as the CLI and the Python bindings
 /// hand it over; `service_builder` turns it into a builder.
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 #[derive(Debug, Clone)]
 pub struct SelectionServiceConfig {
     pub port: u16,
@@ -382,6 +415,11 @@ pub struct SelectionServiceConfig {
     pub session_affinity_ttl: Option<Duration>,
 }
 
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 impl SelectionServiceConfig {
     pub fn service_builder(
         &self,
@@ -436,8 +474,11 @@ pub struct SelectionService {
     core: Arc<SelectionCore>,
     /// `None` when replication is disabled; the inner `None` once taken.
     session_binding_rx: Option<Mutex<Option<mpsc::Receiver<AffinityBindingEvent>>>>,
+    #[cfg(feature = "replica-sync-zmq")]
     peer_manager: Option<Arc<PeerManager>>,
+    #[cfg(feature = "replica-sync-zmq")]
     replica_runtime: Option<ReplicaSyncRuntime>,
+    #[cfg(feature = "replica-sync-zmq")]
     replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
 }
@@ -494,7 +535,13 @@ impl SelectionService {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "http"))]
+    #[cfg(all(
+        test,
+        feature = "http",
+        feature = "ingest-zmq",
+        feature = "replica-sync-zmq",
+        feature = "peer-recovery"
+    ))]
     pub(super) fn new_local_for_test(
         kv_router_config: KvRouterConfig,
         indexer_threads: usize,
@@ -544,6 +591,7 @@ impl SelectionService {
     }
 
     /// The port this service uses for replica synchronization, if enabled.
+    #[cfg(feature = "replica-sync-zmq")]
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port
     }
@@ -649,6 +697,7 @@ impl SelectionService {
         self.core.overlap_scores(req).await
     }
 
+    #[cfg(feature = "replica-sync-zmq")]
     pub async fn register_replica_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
         let peer_manager = self
             .peer_manager
@@ -657,6 +706,7 @@ impl SelectionService {
         peer_manager.register_peer(endpoint).await
     }
 
+    #[cfg(feature = "replica-sync-zmq")]
     pub async fn deregister_replica_peer(
         &self,
         endpoint: String,
@@ -668,6 +718,7 @@ impl SelectionService {
         peer_manager.deregister_peer(endpoint).await
     }
 
+    #[cfg(feature = "replica-sync-zmq")]
     pub fn list_replica_peers(&self) -> Vec<String> {
         self.peer_manager
             .as_ref()
@@ -675,17 +726,25 @@ impl SelectionService {
             .unwrap_or_default()
     }
 
-    #[cfg(feature = "http")]
+    // Only the HTTP server's replica-peer routes read it.
+    #[cfg(all(
+        feature = "http",
+        feature = "ingest-zmq",
+        feature = "replica-sync-zmq",
+        feature = "peer-recovery"
+    ))]
     pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
         self.peer_manager.clone()
     }
 
     /// The registry in the HTTP dump format the peer-recovery endpoint serves.
-    #[cfg(feature = "http")]
+    #[cfg(all(feature = "http", feature = "ingest-zmq"))]
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
         crate::services::indexer::server::dump_registry(self.core.index_registry()).await
     }
 
+    /// Replay `peers`' indexer state into this service's index.
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
         crate::services::indexer::recovery::recover_from_peers(peers, self.core.index_registry())
             .await
@@ -694,6 +753,7 @@ impl SelectionService {
     pub async fn shutdown(&self) {
         self.cancel_token.cancel();
         self.core.shutdown();
+        #[cfg(feature = "replica-sync-zmq")]
         if let (Some(peer_manager), Some(replica_runtime)) =
             (&self.peer_manager, &self.replica_runtime)
         {
@@ -713,7 +773,13 @@ impl Drop for SelectionService {
     }
 }
 
-#[cfg(all(test, feature = "http"))]
+#[cfg(all(
+    test,
+    feature = "http",
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 mod tests {
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;

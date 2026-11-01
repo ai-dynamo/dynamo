@@ -27,14 +27,29 @@ mod pending {
 mod types {
     pub use dynamo_scheduler::selection::types::*;
 }
-#[cfg(feature = "http")]
+// The HTTP server drives every adapter: the peer-recovery endpoint, the replica-peer
+// routes, and the ZMQ listener registry.
+#[cfg(all(
+    feature = "http",
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 mod server;
 mod service;
+#[cfg(feature = "ingest-zmq")]
 mod zmq_ingress;
 
-#[cfg(test)]
+// Five of these six tests drive the ZMQ-direct ingress.
+#[cfg(all(test, feature = "ingest-zmq"))]
 mod core_host_tests;
-#[cfg(all(test, feature = "http"))]
+#[cfg(all(
+    test,
+    feature = "http",
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 mod tests;
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
@@ -45,6 +60,7 @@ pub use crate::plugins::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
+#[cfg(feature = "replica-sync-zmq")]
 pub use crate::services::common::replica_sync::ReplicaPeerError;
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
@@ -62,12 +78,22 @@ pub use error::SelectionError;
 pub use ingress::{KvEventIngress, LocalIndexIngress};
 pub use input::{PromptRequest, PromptView};
 pub use pending::SelectionCacheConfig;
-#[cfg(feature = "http")]
+#[cfg(all(
+    feature = "http",
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
 pub use server::{AppState, run_server};
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
+pub use service::SelectionServiceConfig;
 pub use service::{
-    SelectionService, SelectionServiceBuilder, SelectionServiceConfig, SessionBindingUpdates,
-    local_selection_core, local_selection_core_with_host,
-    warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, SessionBindingUpdates, local_selection_core,
+    local_selection_core_with_host, warn_for_unserved_worker_selection_policies,
 };
 pub use types::{
     DEFAULT_MODEL_NAME, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,
@@ -77,4 +103,5 @@ pub use types::{
     SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
     WorkerPatchRequest, WorkerRequest,
 };
+#[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;

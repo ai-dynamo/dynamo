@@ -57,9 +57,11 @@ and the stage crates compile without any transport crate. Each adapter is a feat
   (`services::indexer::recovery`)
 
 A service is a combination: the standalone indexer is `http` + `ingest-zmq` + `peer-recovery`;
-the slot tracker is `http` + `replica-sync-zmq`; the selection service builder
-(`services::selection`) needs `ingest-zmq` + `replica-sync-zmq` + `peer-recovery`, and its
-HTTP server `http` as well. The pre-split names stay for one release as aliases of those
+the slot tracker is `http` + `replica-sync-zmq`. The selection service (`services::selection`)
+compiles with no adapter: an embedding host supplies its own index ingress and replica
+channels. Its ZMQ-direct ingress needs `ingest-zmq`, indexer peer recovery `ingest-zmq` +
+`peer-recovery`, the replica mesh `replica-sync-zmq`, and its HTTP server and CLI config all
+three plus `http`. The pre-split names stay for one release as aliases of those
 combinations: `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`.
 
 Other features:

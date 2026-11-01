@@ -11,13 +11,9 @@ pub mod indexer;
 
 pub mod overlap;
 
-// The selection service builder composes the ZMQ ingress, the peer mesh, and peer recovery;
-// its HTTP server needs `http` as well.
-#[cfg(all(
-    feature = "ingest-zmq",
-    feature = "replica-sync-zmq",
-    feature = "peer-recovery"
-))]
+// The selection service: its composition needs no adapter. The ZMQ-direct ingress needs
+// `ingest-zmq`, indexer peer recovery `ingest-zmq` + `peer-recovery`, the replica mesh
+// `replica-sync-zmq`, and its HTTP server and CLI config all three plus `http`.
 pub mod selection;
 
 // The slot-tracker service: an HTTP server over the registry, replicated through the mesh.

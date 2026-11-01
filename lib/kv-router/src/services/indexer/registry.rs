@@ -758,7 +758,7 @@ impl WorkerRegistry {
         self.index.all_indexers_with_block_size()
     }
 
-    #[cfg(all(test, feature = "replica-sync-zmq", feature = "peer-recovery"))]
+    #[cfg(test)]
     pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
         if let Some(mut entry) = self.workers.get_mut(&instance_id) {
             entry.listeners.remove(&dp_rank);

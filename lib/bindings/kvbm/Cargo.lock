@@ -2181,14 +2181,12 @@ dependencies = [
  "dynamo-tokens",
  "dynamo-truthy",
  "dynamo-worker-selection",
- "dynamo-zmq",
  "fastrand",
  "flume",
  "futures-util",
  "http 1.4.1",
  "parking_lot",
  "prometheus",
- "reqwest 0.12.28",
  "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
@@ -2201,7 +2199,6 @@ dependencies = [
  "uuid",
  "xxhash-rust",
  "zeroize",
- "zmq",
 ]
 
 [[package]]
@@ -2705,16 +2702,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "dynamo-zmq"
-version = "1.7.0"
-dependencies = [
- "anyhow",
- "tokio",
- "tracing",
- "zmq",
 ]
 
 [[package]]
