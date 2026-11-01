@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Install the pinned Substrate pieces for the
 [Harbor tutorial](../../../docs/fern/pages/use-cases/agents/harbor-substrate.mdx).
-Run these commands from the example directory. Set `EXAMPLE_DIR`,
-`KUBE_CONTEXT`, and `IMAGE_REPO` as described there.
+Run these commands from the example directory. Set `EXAMPLE_DIR` and
+`KUBE_CONTEXT` as described there.
 
 The Harbor adapter talks to Substrate directly. It creates and deletes actors
 through `kubectl-ate`, and it reaches the guest daemon inside each actor
@@ -47,7 +47,7 @@ git clone --branch v1.0.0-rc.1 https://github.com/agent-substrate/substrate deps
 export PATH="$EXAMPLE_DIR/deps/bin:$PATH"
 ```
 
-Prepare `.local/substrate-install.yaml` using the upstream installation guide.
+Prepare `substrate-install.yaml` using the upstream installation guide.
 Select `ghcr.io/agent-substrate/substrate` and `v1.0.0-rc.1` for the runtime
 images. The router admits only clients whose SPIFFE ID it is given. Include the
 runner's identity:
@@ -87,7 +87,7 @@ Install the configured control plane:
 
 ```bash
 ate-setup deploy ate-system --context "$KUBE_CONTEXT" \
-  --config .local/substrate-install.yaml
+  --config substrate-install.yaml
 ```
 
 Omit or adapt optional Google `PodMonitoring` resources on clusters without
@@ -102,7 +102,7 @@ the `atelet` DaemonSet:
 kubectl --context "$KUBE_CONTEXT" -n ate-system create secret generic ate-objectstore \
   --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
   --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key
-cat > .local/objectstore-s3.json <<'EOF'
+cat > objectstore-s3.json <<'EOF'
 {"spec":{"template":{"spec":{"initContainers":[{"name":"objectstore-plugin","env":[
   {"name":"ATE_STORAGE_BACKEND","value":"s3"},
   {"name":"AWS_REGION","value":"us-east-1"},
@@ -112,8 +112,8 @@ cat > .local/objectstore-s3.json <<'EOF'
   {"name":"AWS_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"ate-objectstore","key":"AWS_SECRET_ACCESS_KEY"}}}
 ]}]}}}}
 EOF
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch deployment ate-api-server --patch-file .local/objectstore-s3.json
-kubectl --context "$KUBE_CONTEXT" -n ate-system patch daemonset atelet --patch-file .local/objectstore-s3.json
+kubectl --context "$KUBE_CONTEXT" -n ate-system patch deployment ate-api-server --patch-file objectstore-s3.json
+kubectl --context "$KUBE_CONTEXT" -n ate-system patch daemonset atelet --patch-file objectstore-s3.json
 kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status deployment/ate-api-server --timeout=300s
 kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status daemonset/atelet --timeout=600s
 ```
@@ -131,7 +131,9 @@ not replace the whole shared install.
 
 `ate-env-guest` is the daemon that runs commands and moves files inside an
 actor. It comes from the env repository and does not depend on the Substrate Go
-module, so it builds from the pinned commit without changes:
+module, so it builds from the pinned commit without changes. Replace
+`registry.example.com/harbor-substrate` in the build command with your image
+repository:
 
 ```bash
 git clone https://github.com/agent-substrate/env deps/env
@@ -139,15 +141,15 @@ git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
 (
 	cd deps/env
 	umask 022
-	KO_DOCKER_REPO="$IMAGE_REPO/env-guest" ko build --bare \
+	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
 	  --platform=linux/amd64 ./cmd/ate-env-guest
 )
 ```
 
-Save the printed digest reference as `GUEST_IMAGE` in `.local/config.env`. The
-actor template mounts this image as a volume at `/ate`, so the task image stays
-untouched. Configure image-pull credentials separately if the registry is
-private. The same checkout supplies the Python client the runner installs
+In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
+digest reference. The actor template mounts this image as a volume at `/ate`,
+so the task image stays untouched. Configure image-pull credentials separately
+if the registry is private. The same checkout supplies the Python client the runner installs
 later; the adapter uses its generated gRPC stubs for the guest.
 
 ## Create the namespace, atespace, and access policy

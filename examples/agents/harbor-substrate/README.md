@@ -24,8 +24,10 @@ This directory contains the runnable files:
   and [Collect Substrate metrics](METRICS.md): supporting procedures.
 
 Generate the file list with `git ls-files examples/agents/harbor-substrate`.
-Keep local settings, credentials, builds, and results under the ignored `.local/`
-directory. The example does not contain model deployment manifests or run data.
+Edit the supplied configuration files in place as the tutorial describes.
+Generated builds, certificates, and results use the ignored `.build/`, `.trace/`,
+and `results/` directories. Keep credentials out of configuration files.
+The example does not contain model deployment manifests or run data.
 
 The adapter requires Harbor 0.16.0 and the env client pinned in `requirements.txt`.
 The tutorial installs the upstream Pi adapter with the supplied patches. Changes

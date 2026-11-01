@@ -28,26 +28,33 @@ Service, ServiceMonitor, and ingress NetworkPolicy in `ate-system`. The
 policy permits OTLP from Substrate components and workers, and scraping from
 `monitoring`. No cluster-scoped permissions are required by the Collector.
 
+Before applying, edit `metrics-bridge.yaml` if your monitoring installation
+uses different names. Match the ServiceMonitor's `metadata.labels.release`
+(`kube-prometheus-stack`) to your Prometheus selector, and the NetworkPolicy's
+monitoring namespace selector to your Prometheus namespace (`monitoring`).
+Keep the Collector endpoint, port mappings, and resource limits for this run:
+
 ```bash
 kubectl --context "$KUBE_CONTEXT" apply -f metrics-bridge.yaml
 kubectl --context "$KUBE_CONTEXT" -n ate-system rollout status \
   deployment/substrate-metrics-bridge --timeout=120s
 ```
 
-The ServiceMonitor uses `release: kube-prometheus-stack`. Match that label to
-your Prometheus selector if it differs. Collection and scraping run every five
-seconds. Native CPU/memory sampling still runs approximately once per minute.
+Collection and worker-metric scraping run every five seconds; Collector
+self-metrics are scraped every 15 seconds. Native CPU/memory sampling still
+runs approximately once per minute.
 
 For a dedicated tutorial installation, point Substrate at this Collector.
 These commands replace its telemetry destination and disable OTLP traces and
-logs. Save the current configuration for cleanup. On a shared installation,
-instead add a metrics export to the existing Collector and preserve its other
+logs. Save the current configuration under `.build/` for cleanup. On a shared
+installation, instead add a metrics export to the existing Collector and preserve its other
 pipelines. The rc1 atelet relay requires a common destination for all signals,
 so a separate metrics endpoint override cannot preserve the other destinations.
 
 ```bash
+mkdir -p .build
 kubectl --context "$KUBE_CONTEXT" -n ate-system get configmap ate-otel-config \
-  -o yaml > .local/ate-otel-config.before.yaml
+  -o yaml > .build/ate-otel-config.before.yaml
 kubectl --context "$KUBE_CONTEXT" -n ate-system patch configmap ate-otel-config \
   --type=merge -p '{"data":{
     "OTEL_EXPORTER_OTLP_ENDPOINT":"http://substrate-metrics-bridge.ate-system.svc.cluster.local:4317",
@@ -86,16 +93,15 @@ Import [substrate-dashboard.json](substrate-dashboard.json) through Grafana's
 data-source UID is `prometheus`; the dashboard has a selector for other UIDs.
 
 For kube-prometheus-stack installations with the dashboard sidecar enabled,
-provision the same dashboard from a labeled ConfigMap:
+provision the same dashboard from a labeled ConfigMap. Replace `monitoring`
+in these commands if Grafana runs in a different namespace:
 
 ```bash
 kubectl --context "$KUBE_CONTEXT" -n monitoring create configmap \
   substrate-native-metrics-dashboard \
   --from-file=substrate-native-metrics.json=substrate-dashboard.json \
-  --dry-run=client -o yaml > .local/substrate-dashboard-configmap.yaml
-kubectl label --local -f .local/substrate-dashboard-configmap.yaml \
-  grafana_dashboard=1 -o yaml > .local/substrate-dashboard-labeled.yaml
-kubectl --context "$KUBE_CONTEXT" apply -f .local/substrate-dashboard-labeled.yaml
+  --dry-run=client -o yaml | kubectl label --local -f - \
+  grafana_dashboard=1 -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
 kubectl --context "$KUBE_CONTEXT" -n monitoring port-forward \
   service/kube-prometheus-stack-grafana 3007:80
 ```
@@ -142,19 +148,19 @@ After saving results and stopping actors, restore the complete ConfigMap data.
 Replacing the data field also removes settings added by this walkthrough:
 
 ```bash
-python3 -m venv .local/metrics-tools
-.local/metrics-tools/bin/pip install pyyaml
-.local/metrics-tools/bin/python - <<'PY'
+python3 -m venv .venv/metrics-tools
+.venv/metrics-tools/bin/pip install pyyaml
+.venv/metrics-tools/bin/python - <<'PY'
 import json
 from pathlib import Path
 import yaml
-before = yaml.safe_load(Path('.local/ate-otel-config.before.yaml').read_text())
-Path('.local/restore-otel.json').write_text(json.dumps([
+before = yaml.safe_load(Path('.build/ate-otel-config.before.yaml').read_text())
+Path('.build/restore-otel.json').write_text(json.dumps([
     {'op': 'replace', 'path': '/data', 'value': before.get('data', {})}
 ]))
 PY
 kubectl --context "$KUBE_CONTEXT" -n ate-system patch configmap ate-otel-config \
-  --type=json --patch-file .local/restore-otel.json
+  --type=json --patch-file .build/restore-otel.json
 kubectl --context "$KUBE_CONTEXT" -n ate-system rollout restart \
   daemonset/atelet deployment/ate-api-server deployment/atenet-router \
   deployment/atenet-egress deployment/ate-controller

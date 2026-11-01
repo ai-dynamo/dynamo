@@ -22,7 +22,7 @@ containers:
   env:
   - name: PORT
     value: '80'
-  image: ${PREPARED_IMAGE}
+  image: registry.example.com/harbor-substrate/astropy-pi@sha256:REPLACE
   name: guest
   volumeMounts:
   - mountPath: /ate
@@ -40,7 +40,7 @@ containers:
       - SETGID
       - SETUID
 metadata:
-  name: ${ACTOR_TEMPLATE}
+  name: swe-astropy-12907-pi
   atespace: ate-env
 resources:
   limits:
@@ -52,7 +52,7 @@ snapshotConfig:
     mode: GOLDEN_SNAPSHOT_MODE_DISABLED
 volumes:
 - image:
-    reference: ${GUEST_IMAGE}
+    reference: registry.example.com/harbor-substrate/env-guest@sha256:REPLACE
   name: guest
 workerSelector:
   matchLabels:

@@ -27,24 +27,37 @@ flowchart LR
 ```
 
 Set `MODEL_NAMESPACE` and `DGD_NAME` to the namespace and name from your model
-recipe. Work from the example directory. Create a certificate for the trace
-Service before changing the frontend:
+recipe. These shell variables select resources for CLI commands. Work from
+the example directory and set `KUBE_CONTEXT` as in the tutorial.
+
+Edit `tool-trace-service.yaml` in place:
+
+- Set both `metadata.namespace` fields to the model namespace (`inference` in
+  the example).
+- Set `spec.selector.nvidia.com/dynamo-namespace` to the frontend Pod's label
+  value, normally `<namespace>-<DGD name>`. Replace `your-model-deployment` in
+  the supplied selector with your DGD name. Keep the `Frontend` component selector.
+
+In `stunnel-client.conf`, keep port 20391 and set the hostname in `connect`,
+`sni`, and `checkHost` to `harbor-tool-events.<namespace>.svc.cluster.local`.
+The supplied hostname uses `inference`. It must match the Service namespace
+and the certificate's DNS name below.
+
+Create the certificate and apply the edited Service and ConfigMap:
 
 ```bash
 export MODEL_NAMESPACE=inference
 export DGD_NAME=your-model-deployment
 export TRACE_HOST="harbor-tool-events.$MODEL_NAMESPACE.svc.cluster.local"
-mkdir -p .local/trace-private .local/tool-trace
-chmod 700 .local/trace-private
+mkdir -p .trace/private .trace/public
+chmod 700 .trace/private
 openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
-  -keyout .local/trace-private/tls.key -out .local/tool-trace/tls.crt \
+  -keyout .trace/private/tls.key -out .trace/public/tls.crt \
   -subj "/CN=$TRACE_HOST" -addext "subjectAltName=DNS:$TRACE_HOST"
-chmod 600 .local/trace-private/tls.key
-envsubst '${TRACE_HOST}' < stunnel-client.conf > .local/tool-trace/stunnel-client.conf
+chmod 600 .trace/private/tls.key
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" create secret tls harbor-tool-trace-tls \
-  --cert=.local/tool-trace/tls.crt --key=.local/trace-private/tls.key
-envsubst '${MODEL_NAMESPACE} ${DGD_NAME}' < tool-trace-service.yaml > .local/tool-trace-service.yaml
-kubectl --context "$KUBE_CONTEXT" apply -f .local/tool-trace-service.yaml
+  --cert=.trace/public/tls.crt --key=.trace/private/tls.key
+kubectl --context "$KUBE_CONTEXT" apply -f tool-trace-service.yaml
 ```
 
 Only the public certificate and client configuration go into actors. The
@@ -62,14 +75,16 @@ chain and hostname.
 
 ## Add capture to the recipe frontend
 
-Set `DEPLOYMENT_YAML` to the manifest selected from the model recipe. Save a
-copy for the trace additions:
+Set `DEPLOYMENT_YAML` to the manifest selected from the model recipe. Save its
+current contents for cleanup, then edit the original file in place:
 
 ```bash
-cp "$DEPLOYMENT_YAML" .local/traced-dgd.yaml
+export DEPLOYMENT_YAML=/path/to/your/model-deployment.yaml
+mkdir -p .build
+cp "$DEPLOYMENT_YAML" .build/frontend-before.yaml
 ```
 
-Edit `.local/traced-dgd.yaml`. In the `Frontend` entry under `spec.components`,
+Edit the file named by `DEPLOYMENT_YAML`. In the `Frontend` entry under `spec.components`,
 merge the following fields into `podTemplate.spec`. Append to the existing
 `main` container's `env` and `volumeMounts` lists, add the sidecar to
 `containers`, and add the volumes. Preserve the recipe's images, arguments,
@@ -135,8 +150,8 @@ If the frontend already has trace settings or these volume names, merge the
 configuration without duplicate entries. Inspect the diff, then apply it:
 
 ```bash
-diff -u "$DEPLOYMENT_YAML" .local/traced-dgd.yaml
-kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" apply -f .local/traced-dgd.yaml
+diff -u .build/frontend-before.yaml "$DEPLOYMENT_YAML"
+kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" apply -f "$DEPLOYMENT_YAML"
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" wait \
   --for=condition=Ready "dgd/$DGD_NAME" --timeout=1800s
 ```
@@ -148,7 +163,7 @@ replacing or deleting the frontend Pod.
 
 ## Connect actor tool events
 
-Append a rule to `rules` in `.local/egress.yaml`. Replace the example hostname
+Append a rule to `rules` in `egress.yaml`. Replace the example hostname
 with the value of `TRACE_HOST` from the certificate step:
 
 ```yaml
@@ -159,7 +174,7 @@ with the value of `TRACE_HOST` from the certificate step:
         numbers: [20391]
 ```
 
-In `.local/harbor-job.yaml`, append these entries to the existing
+In `harbor-job.yaml`, append these entries to the existing
 `agents[0].env` mapping:
 
 ```yaml
@@ -184,8 +199,10 @@ Copy the policy and public client files to the runner, then return to the
 tutorial to upload the edited job:
 
 ```bash
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/egress.yaml harbor-runner:/work/example/egress.yaml
-kubectl --context "$KUBE_CONTEXT" -n ate-env cp .local/tool-trace harbor-runner:/work/tool-trace
+kubectl --context "$KUBE_CONTEXT" -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
+kubectl --context "$KUBE_CONTEXT" -n ate-env exec harbor-runner -- mkdir -p /work/tool-trace
+kubectl --context "$KUBE_CONTEXT" -n ate-env cp .trace/public/tls.crt harbor-runner:/work/tool-trace/tls.crt
+kubectl --context "$KUBE_CONTEXT" -n ate-env cp stunnel-client.conf harbor-runner:/work/tool-trace/stunnel-client.conf
 ```
 
 Run one trial and confirm that Pi's `toolCallId` values appear in native tool
@@ -202,12 +219,12 @@ frontend Pod using your deployment's labels, then copy its trace directory:
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" get pods \
   -l "nvidia.com/dynamo-namespace=$MODEL_NAMESPACE-$DGD_NAME,nvidia.com/dynamo-component=Frontend"
 export FRONTEND_POD=your-frontend-pod
-mkdir -p .local/results/traces
+mkdir -p results/traces
 kubectl --context "$KUBE_CONTEXT" -n "$MODEL_NAMESPACE" cp -c main \
-  "$FRONTEND_POD:/traces/." .local/results/traces
+  "$FRONTEND_POD:/traces/." results/traces
 python3 ../../../benchmarks/request_trace/convert_to_perfetto.py \
-  .local/results/traces/request-trace*.jsonl \
-  --output .local/results/trace.perfetto.json
+  results/traces/request-trace*.jsonl \
+  --output results/trace.perfetto.json
 ```
 
 Open `trace.perfetto.json` in the [Perfetto UI](https://ui.perfetto.dev/).

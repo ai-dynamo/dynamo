@@ -17,7 +17,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: harbor-tool-trace-tls
-  namespace: ${MODEL_NAMESPACE}
+  namespace: inference
 data:
   stunnel.conf: |
     foreground = yes
@@ -32,10 +32,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: harbor-tool-events
-  namespace: ${MODEL_NAMESPACE}
+  namespace: inference
 spec:
   selector:
-    nvidia.com/dynamo-namespace: ${MODEL_NAMESPACE}-${DGD_NAME}
+    nvidia.com/dynamo-namespace: inference-your-model-deployment
     nvidia.com/dynamo-component: Frontend
   ports:
     - name: tls-zmq

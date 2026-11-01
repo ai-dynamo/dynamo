@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-# Render SANDBOX_NODE with envsubst before applying. It must run atelet.
+# Replace the hostname with an amd64 node running atelet.
 apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
@@ -31,7 +31,7 @@ spec:
   template:
     nodeSelector:
       kubernetes.io/arch: amd64
-      kubernetes.io/hostname: ${SANDBOX_NODE}
+      kubernetes.io/hostname: your-amd64-sandbox-node
     resources:
       limits:
         cpu: '2'

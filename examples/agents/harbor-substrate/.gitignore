@@ -8,3 +8,9 @@ __pycache__/
 .env
 .trace/
 .build/
+substrate-install.yaml
+objectstore-s3.json
+oracle-job.yaml
+golden-template.yaml
+golden-job.yaml
+batch-job.yaml

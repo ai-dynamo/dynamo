@@ -19,16 +19,16 @@ n_attempts: 1
 n_concurrent_trials: 1
 agents:
   - import_path: dynamo_pi:DynamoPi
-    model_name: dynamo/${SERVED_MODEL}
+    model_name: dynamo/RadixArk/GLM-5.3-Flash-NVFP4
     kwargs:
       version: "0.72.1"
       thinking: "off"
     env:
-      DYNAMO_BASE_URL: ${MODEL_BASE_URL}
+      DYNAMO_BASE_URL: http://model-frontend.inference.svc.cluster.local:8000/v1
       # Blank means "use the context window the endpoint advertises".
-      DYNAMO_CONTEXT_WINDOW: "${MODEL_CONTEXT_WINDOW}"
-      DYNAMO_MAX_TOKENS: "${MODEL_MAX_TOKENS}"
-      DYN_AGENT_SESSION_FINAL: "${DYN_AGENT_SESSION_FINAL}"
+      DYNAMO_CONTEXT_WINDOW: ""
+      DYNAMO_MAX_TOKENS: "8192"
+      DYN_AGENT_SESSION_FINAL: "1"
 verifier:
   # The prepared image carries the build wheels and the grader's packages, so
   # the unchanged test script runs without registry access.
@@ -52,6 +52,6 @@ environment:
     egress_policy: /work/example/egress.yaml
     ready_timeout: 1200
     template_map:
-      astropy__astropy-12907: ${ACTOR_TEMPLATE}
+      astropy__astropy-12907: swe-astropy-12907-pi
 tasks:
   - path: /work/tasks/astropy__astropy-12907
