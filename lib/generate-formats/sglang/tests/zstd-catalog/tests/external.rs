@@ -188,7 +188,7 @@ fn joined(prefill: Value, decode: Value, stream: bool) -> Value {
             default_request_id: "id",
         })
         .unwrap();
-    let mut exchange = (opened.bind)(&dynamo_sglang_generate::testkit::worker(&Value::Null))
+    let mut exchange = (opened.bind)(&dynamo_sglang_generate::testkit::worker())
         .unwrap()
         .exchange;
     let mut chunks = Vec::new();
