@@ -331,12 +331,15 @@ class RouterSearchSpace(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_public_schema(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping) or "policy" not in value:
+        # An omitted policy searches both policies.
+        if not isinstance(value, Mapping) or not is_public_search_spec(value):
             return value
         public = dict(value)
         normalized = {
             "public_schema": True,
-            "mode": domain_choices(public.pop("policy"), ["kv_router", "round_robin"]),
+            "mode": domain_choices(
+                public.pop("policy", None), ["kv_router", "round_robin"]
+            ),
             "overlap_score_credit": domain_choices(
                 public.pop("overlap_score_credit", None),
                 list(OVERLAP_SCORE_CREDIT_DEFAULTS),
@@ -413,6 +416,11 @@ class RouterSearchSpace(BaseModel):
                 "replay API; remove " + ", ".join(enabled)
             )
         return self
+
+
+def is_public_search_spec(spec: Mapping[str, Any]) -> bool:
+    """Whether a router search spec uses the public schema, not the legacy one."""
+    return "policy" in spec or "prefill_load_model" in spec
 
 
 def domain_choices(value: Any, default: list[Any]) -> list[Any]:

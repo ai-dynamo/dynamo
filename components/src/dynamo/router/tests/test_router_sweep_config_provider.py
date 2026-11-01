@@ -233,6 +233,18 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
     assert replay_spec.runtime_hooks[0].config["ais_perf_config"] is None
 
 
+def test_public_router_search_without_policy_searches_both_policies() -> None:
+    plan = create_provider().generate_search_space(
+        {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}},
+        _sweep_context(),
+    )
+
+    assert plan.state["public_schema"] is True
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert choices["mode"] == ["kv_router", "round_robin"]
+    assert choices["prefill_load_model_type"] == ["none", "ais"]
+
+
 def test_public_router_prediction_materializes_runtime_hook() -> None:
     replay_spec = create_provider().compile_prediction(
         {
