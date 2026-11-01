@@ -19,15 +19,18 @@ n_attempts: 1
 n_concurrent_trials: 1
 agents:
   - import_path: dynamo_pi:DynamoPi
+    # Keep "dynamo/" and match the served model ID from /v1/models.
     model_name: dynamo/RadixArk/GLM-5.3-Flash-NVFP4
     kwargs:
       version: "0.72.1"
       thinking: "off"
     env:
-      DYNAMO_BASE_URL: http://model-frontend.inference.svc.cluster.local:8000/v1
+      # SGLang aggregated GB200 recipe in namespace inference. Update for your deployment.
+      DYNAMO_BASE_URL: http://glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local:8000/v1
       # Blank means "use the context window the endpoint advertises".
       DYNAMO_CONTEXT_WINDOW: ""
       DYNAMO_MAX_TOKENS: "8192"
+      # Use "1" for Dynamo or "0" for an external endpoint.
       DYN_AGENT_SESSION_FINAL: "1"
 verifier:
   # The prepared image carries the build wheels and the grader's packages, so

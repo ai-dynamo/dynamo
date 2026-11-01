@@ -101,101 +101,127 @@ directed.
 
 <Step title="Choose an inference endpoint" id="choose-an-inference-endpoint">
 
-Edit `harbor-job.yaml` and `egress.yaml` together. The URL selects where Pi
-sends requests; the egress policy decides whether the actor may reach it.
-Choose one of the following paths:
+Pi uses the inference endpoint to generate responses and tool calls. We
+recommend serving the model with Dynamo so you can capture the inference and
+tool traces shown later in this tutorial.
+
+Start with the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx)
+for this coding workload, or browse our [model recipes](../../recipes/model-recipes/overview.mdx)
+for other models, GPU types, and serving configurations. Choose a model with
+reliable tool calling, enough context for repository files and tool results,
+and serving requirements that fit your hardware.
+
+Configure Pi's endpoint in `harbor-job.yaml` and allow it in `egress.yaml`.
+Substrate denies actor egress by default. The adapter applies `egress.yaml` to
+each actor, explicitly allowing Pi to send requests to the model endpoint by
+protocol, hostname, and port. Other destinations remain blocked. See
+[Substrate egress policies](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-traffic.md)
+for details.
 
 <Tabs>
 <Tab title="Serve with Dynamo">
 
-For self-hosted inference, use the [GLM-5.3-Flash recipe](../../recipes/model-recipes/glm-5-3-flash.mdx).
-Follow the recipe from the root of your Dynamo clone and complete its smoke
-test. Select a recipe target and serving images for your inference hardware.
-Record the served model ID, frontend Service name, and namespace. Then
-return to this tutorial's directory from the repository root:
+Deploy the GLM-5.3-Flash recipe and complete its smoke test. The checked-in
+configuration assumes **SGLang aggregated GB200** in namespace `inference`.
+For another recipe target, update the served model ID and frontend address
+in these excerpts. Keep the remaining settings in each file.
 
-```bash title="Workstation"
-cd examples/agents/harbor-substrate
+```yaml title="harbor-job.yaml: agents"
+agents:
+  - import_path: dynamo_pi:DynamoPi
+    # Keep "dynamo/" and match the served model ID from /v1/models.
+    model_name: dynamo/RadixArk/GLM-5.3-Flash-NVFP4
+    kwargs:
+      version: "0.72.1"
+      thinking: "off"
+    env:
+      # SGLang aggregated GB200 recipe in namespace inference. Update for your deployment.
+      DYNAMO_BASE_URL: http://glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local:8000/v1
+      # Blank means "use the context window the endpoint advertises".
+      DYNAMO_CONTEXT_WINDOW: ""
+      DYNAMO_MAX_TOKENS: "8192"
+      # Use "1" for Dynamo or "0" for an external endpoint.
+      DYN_AGENT_SESSION_FINAL: "1"
 ```
 
-The recipe's `localhost` port-forward address tests access from your workstation.
-For Pi, use the frontend's Service DNS name or another address reachable from
-the actor. In `harbor-job.yaml`, edit `agents[0].model_name` to match the exact served model ID,
-keeping the `dynamo/` provider prefix. Set `agents[0].env.DYNAMO_BASE_URL` to the
-frontend URL reachable from the sandbox, including `/v1`. The supplied values
-are:
+For these recipes, the frontend address is
+`http://<dgd-name>-frontend.<namespace>.svc.cluster.local:8000/v1`.
+Use an address reachable from the sandbox; your workstation's `localhost`
+port-forward address will not work.
 
-```yaml
-model_name: dynamo/RadixArk/GLM-5.3-Flash-NVFP4
-env:
-  DYNAMO_BASE_URL: http://model-frontend.inference.svc.cluster.local:8000/v1
-  DYNAMO_CONTEXT_WINDOW: ""
-  DYNAMO_MAX_TOKENS: "8192"
-  DYN_AGENT_SESSION_FINAL: "1"
-```
+The matching egress rule allows HTTP requests to that frontend:
 
-Keep `DYN_AGENT_SESSION_FINAL: "1"` for Dynamo. Optional tracing later adds
-capture to this frontend without changing its engine or GPU configuration.
-
-In `egress.yaml`, match the hostname and port of that URL. The supplied rule is:
-
-```yaml
+```yaml title="egress.yaml: rules"
 rules:
   - http:
-      hostnames: ["model-frontend.inference.svc.cluster.local"]
+      # Hostname only: no scheme or path.
+      hostnames:
+        - glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local
       ports:
+        # Match the endpoint's port.
         numbers: [8000]
 ```
 
-Use only the hostname, without a scheme or path. For a Dynamo frontend served
-over HTTPS, use `tlsPassthrough` and its HTTPS port instead.
+For a frontend served over HTTPS, use `tlsPassthrough` and its HTTPS port as
+shown in the external-endpoint tab.
 
 </Tab>
 <Tab title="Use an external endpoint">
 
-For an external service, change `DYN_AGENT_SESSION_FINAL` to `"0"`, use its
-HTTPS base URL including the API prefix, and set `model_name` to
-`dynamo/` followed by its served model ID. No GPU is required in the sandbox
-cluster. The pinned provider requires:
+No GPU is required in the sandbox cluster. The endpoint must list the selected
+model through `GET /models` under its API base URL and support streaming Chat
+Completions with tool calls, tool-result continuation, `max_tokens`, and
+streaming usage. Keep the `dynamo/` prefix used by the Pi adapter.
 
-- `GET /models` that lists the selected model.
-- Streaming Chat Completions with tool calls, tool-result continuation,
-  `max_tokens`, and streaming usage support.
-- A model context window and output limit that you can configure explicitly.
+Edit the endpoint settings below and keep the rest of `harbor-job.yaml`:
 
-In `egress.yaml`, replace the example HTTP rule with a TLS rule for your API's
-hostname and port:
+```yaml title="harbor-job.yaml: agents"
+agents:
+  - import_path: dynamo_pi:DynamoPi
+    # Keep the provider prefix; replace your-model-id with the served model ID.
+    model_name: dynamo/your-model-id
+    kwargs:
+      version: "0.72.1"
+      thinking: "off"
+    env:
+      # Use your provider's base URL, including its API prefix.
+      DYNAMO_BASE_URL: https://api.example.com/v1
+      # Set a quoted token count if the endpoint does not advertise its limit.
+      DYNAMO_CONTEXT_WINDOW: ""
+      DYNAMO_MAX_TOKENS: "8192"
+      # External endpoints do not accept Dynamo's end-of-session notification.
+      DYN_AGENT_SESSION_FINAL: "0"
+```
 
-```yaml
+Replace the HTTP rule with a TLS-passthrough rule matching your provider's
+hostname and port. This permits HTTPS without intercepting its TLS connection:
+
+```yaml title="egress.yaml: rules"
 rules:
   - tlsPassthrough:
+      # Match DYNAMO_BASE_URL, without the scheme or API path.
       hostnames: ["api.example.com"]
       ports:
         numbers: [443]
 ```
 
-Replace `api.example.com` with the hostname from your base URL, without a scheme
-or path. Supply the API key when preparing the runner below. An
-OpenAI-compatible label alone is not a compatibility check; the first Pi trial
-must exercise tool calls and continuation against your selected endpoint.
-
-External jobs disable Dynamo's session-final control requests. Harbor results
-and Substrate metrics remain available. Dynamo's server-side inference traces
-require a Dynamo endpoint you control.
+Supply the API key when [setting up the runner](#prepare-the-harbor-runner).
+The first Pi trial checks tool calls and continuation against your endpoint.
+Harbor results and sandbox metrics remain available; the Dynamo trace
+walkthrough requires a Dynamo endpoint you control.
 
 </Tab>
 </Tabs>
 
-`DYNAMO_MAX_TOKENS: "8192"` caps each response at 8,192 tokens. Leave
-`DYNAMO_CONTEXT_WINDOW` empty for an endpoint that advertises its limit.
-Dynamo lists the engine's serving limit as `context_window` in `GET /v1/models`,
-and the provider patch reads it. To override that value, set
-`DYNAMO_CONTEXT_WINDOW` to a quoted token count. The provider uses the explicit
-value first, then the advertised value, then a default of 128,000 tokens.
-A provider with a different protocol needs its own Pi provider configuration.
-Before continuing, check that the job's model ID and base URL describe the
-selected endpoint and that the policy allows its hostname and port. Use port
-80 for HTTP or 443 for HTTPS when the URL does not specify a port.
+<Accordion title="Configure context and output limits">
+
+`DYNAMO_MAX_TOKENS: "8192"` caps each response at 8,192 tokens.
+`DYNAMO_CONTEXT_WINDOW` accepts a quoted token count. When it is blank, the
+provider reads `context_window` from the endpoint's model listing, falling
+back to 128,000 tokens if absent. Set the value explicitly if your endpoint
+does not advertise its limit. Dynamo advertises the engine's serving limit.
+
+</Accordion>
 
 </Step>
 
@@ -589,12 +615,9 @@ Upload the egress policy you edited with the inference endpoint:
 kubectl -n ate-env cp egress.yaml harbor-runner:/work/example/egress.yaml
 ```
 
-This is a Substrate egress policy, not a Kubernetes NetworkPolicy. The adapter
-applies it separately to each actor. The policy allows only the model endpoint.
-Names outside the allowlist are denied by actor DNS. Commands that try to
-download dependencies therefore fail under this policy. The prepared image
-carries what the verifier needs, and the Harbor job tells pip and uv to work
-offline.
+The default policy allows only the model endpoint, so dependency downloads
+are blocked. The prepared image carries what the verifier needs, and the
+Harbor job tells pip and uv to work offline.
 
 <Accordion title="Allow additional egress">
 

@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A Substrate policy, applied to each actor by the environment adapter.
+# Substrate denies actor egress by default. The adapter applies this policy
+# to each actor so Pi can send HTTP requests to the Dynamo endpoint.
 # Match the protocol, hostname, and port to DYNAMO_BASE_URL in harbor-job.yaml.
-#
-# Only the model endpoint is reachable. The prepared image carries everything
-# the agent and the verifier need, and any other name resolves to NXDOMAIN
-# inside the actor. Read "Allow more egress" in the tutorial before adding rules.
+# Other destinations remain blocked. See "Allow additional egress" in the tutorial.
 rules:
   - http:
-      hostnames: ["model-frontend.inference.svc.cluster.local"]
+      # Hostname only: no scheme or path.
+      hostnames:
+        - glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local
       ports:
-        numbers:
-          - 8000
+        # Match the endpoint's port.
+        numbers: [8000]
