@@ -2364,6 +2364,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nemotron_already_parsed_answer_survives_aggregation() {
+        // A non-streaming request still runs the unified stream parser first, so the
+        // aggregator receives the split `reasoning_content` + `content` deltas and then
+        // re-reads the choice text as a safety net. Nemotron's implicit-thought default
+        // must not relabel that already-parsed answer as reasoning.
+        const CHILD: &str = "DYNAMO_NEMOTRON_AGGREGATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "protocols::openai::chat_completions::aggregator::tests::nemotron_already_parsed_answer_survives_aggregation",
+            )
+            .env(CHILD, "1")
+            .env(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )
+            .output()
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        let options = ParsingOptions::new(
+            Some("qwen3_coder".to_string()),
+            Some("nemotron_v3".to_string()),
+        );
+        assert_eq!(
+            super::super::unified_parser::selected_batch_family(
+                options.tool_call_parser.as_deref(),
+                options.reasoning_parser.as_deref(),
+            ),
+            Some("nemotron_v3")
+        );
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "Hello!", "Let me greet them.")]),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text("Hello!".to_string()))
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Let me greet them.")
+        );
+        assert!(message.tool_calls.is_none());
+
+        // Reasoning-only, empty answer: the safety net has nothing to re-read, and
+        // force_nonempty_content still surfaces the thought as content.
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "", "Only thinking.")]),
+            options.with_move_reasoning_to_content_when_empty(true),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "Only thinking.".to_string()
+            ))
+        );
+        assert!(message.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
     async fn terminal_validation_preserves_legacy_structured_calls() {
         use super::super::unified_parser;
         use dynamo_protocols::types::FinishReason;

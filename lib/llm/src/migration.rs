@@ -36,6 +36,8 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
+pub(crate) mod realtime;
+
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
@@ -196,6 +198,46 @@ fn is_migratable_for_request(
     allows_phase(phase)
 }
 
+// Includes the initial dispatch; a migration limit of zero still permits one worker.
+struct AttemptBudget {
+    remaining: u64,
+    next: u64,
+}
+
+impl AttemptBudget {
+    fn new(migration_limit: u32) -> Self {
+        Self {
+            remaining: u64::from(migration_limit) + 1,
+            next: 0,
+        }
+    }
+
+    fn take(&mut self) -> Option<u32> {
+        let remaining = self.remaining.checked_sub(1)?;
+        let attempt = u32::try_from(self.next).ok()?;
+        self.remaining = remaining;
+        self.next += 1;
+        Some(attempt)
+    }
+
+    fn has_remaining(&self) -> bool {
+        self.remaining > 0
+    }
+
+    fn disable(&mut self) {
+        self.remaining = 0;
+    }
+
+    fn next(&self) -> u64 {
+        self.next
+    }
+
+    fn last(&self) -> u32 {
+        // A dispatched attempt always fits in u32, including at the maximum limit.
+        self.next.saturating_sub(1) as u32
+    }
+}
+
 pub struct Migration {
     migration_limit: u32,
     max_seq_len: Option<u32>,
@@ -331,7 +373,7 @@ where
     session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
-    retries_left: u64,
+    attempts: AttemptBudget,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -341,8 +383,6 @@ where
     /// Router-owned metadata for the active attempt. The router fills in its
     /// selected worker ID so a later migration can identify the failed worker.
     active_route_trace: Option<Arc<RouteTraceContext>>,
-    /// Zero-based physical dispatch attempt number.
-    next_attempt: u32,
     /// Number of generated tokens delivered before the next migration.
     completed_tokens: usize,
     /// Failure that caused the next physical dispatch to be a migration retry.
@@ -358,7 +398,7 @@ where
 struct MigrationCause {
     reason: ErrorType,
     from_worker_id: Option<u64>,
-    /// The attempt that *failed*, not the retry it may schedule. `next_attempt`
+    /// The attempt that *failed*, not the retry it may schedule. `attempts.next()`
     /// has already been incremented past this by the time a failure surfaces,
     /// so recording that instead would name an attempt with no route span.
     attempt: u32,
@@ -435,13 +475,12 @@ where
             session_affinity,
             next_generate: next,
             next_stream: None,
-            retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
+            attempts: AttemptBudget::new(retries_left),
             max_seq_len,
             model_name,
             metrics,
             last_worker_link: None,
             active_route_trace: None,
-            next_attempt: 0,
             completed_tokens: 0,
             pending_migration: None,
             prompt_len,
@@ -470,7 +509,7 @@ where
                             tracing::warn!(error = %err, "Migration eligibility had no semantic error");
                             continue;
                         };
-                        if self.retries_left == 0 {
+                        if !self.attempts.has_remaining() {
                             let route_trace = self.active_route_trace.clone();
                             self.record_migration_exhausted(MigrationCause {
                                 reason: migration_error.error_type(),
@@ -529,7 +568,7 @@ where
     }
 
     async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
-        if self.retries_left == 0 {
+        if !self.attempts.has_remaining() {
             if let Some(cause) = self.pending_migration.take() {
                 self.record_migration_exhausted(cause);
             }
@@ -541,8 +580,7 @@ where
             self.abort_request_lifecycle(error.as_ref());
             return Err(error);
         }
-        while self.retries_left > 0 {
-            self.retries_left -= 1;
+        while let Some(attempt) = self.attempts.take() {
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
             // span renders an OTel Link back to it. Guarded so the initial
@@ -556,8 +594,6 @@ where
                 self.metadata.clone(),
             );
             let migration = self.pending_migration.take();
-            let attempt = self.next_attempt;
-            self.next_attempt += 1;
             let route_trace = attach_route_trace_context(
                 &mut request,
                 RouteTraceContext::new(
@@ -668,7 +704,7 @@ where
                     }
                     // Preserve the existing per-attempt metric contract.
                     self.metrics.inc_migration_new_request(&self.model_name);
-                    if self.retries_left == 0 {
+                    if !self.attempts.has_remaining() {
                         let cause = MigrationCause {
                             reason,
                             from_worker_id: route_trace.selected_worker_id(),
@@ -710,10 +746,7 @@ where
     /// The attempt a failure belongs to. Prefers the attempt's own trace
     /// context; falls back to the last dispatched attempt when there is none.
     fn failed_attempt(&self, route_trace: Option<&RouteTraceContext>) -> u32 {
-        route_trace.map_or_else(
-            || self.next_attempt.saturating_sub(1),
-            RouteTraceContext::attempt,
-        )
+        route_trace.map_or_else(|| self.attempts.last(), RouteTraceContext::attempt)
     }
 
     fn queue_migration(&mut self, reason: ErrorType, route_trace: Option<Arc<RouteTraceContext>>) {
@@ -728,7 +761,7 @@ where
         tracing::info!(
             target: "request_span",
             {
-                { "request.attempt" } = self.next_attempt,
+                { "request.attempt" } = self.attempts.next(),
                 { "migration.is_retry" } = true,
                 { "migration.reason" } = error_type_name(reason),
                 { "migration.from_worker_id" } = from_worker_id,
@@ -770,8 +803,8 @@ where
         };
         let token_ids = llm_engine_output.token_ids();
         // Pure telemetry for the migration lifecycle events, so it has to count
-        // the final allowed attempt as well. `new_stream` decrements
-        // `retries_left` *before* dispatching, so that attempt runs with the
+        // the final allowed attempt as well. `new_stream` consumes
+        // the attempt budget *before* dispatching, so that attempt runs with the
         // counter already at zero; keeping this behind the replay guard below
         // would drop its tokens from `migration retries exhausted`.
         self.completed_tokens += token_ids.len();
@@ -779,7 +812,7 @@ where
         // Everything past this point rebuilds replay state for a *future*
         // attempt. Once no retry can happen there is nothing to replay onto,
         // so leave the request untouched.
-        if self.retries_left == 0 {
+        if !self.attempts.has_remaining() {
             return;
         }
         // Capture the worker's engine.generate span pointer so a future
@@ -814,7 +847,7 @@ where
     /// dispatched attempt holds its own reference for as long as it needs one. Release it so a
     /// long prompt is not pinned for the rest of the response stream.
     fn release_replay_prompt_if_final(&mut self) {
-        if self.retries_left == 0 && !self.request.token_ids.is_empty() {
+        if !self.attempts.has_remaining() && !self.request.token_ids.is_empty() {
             self.request.token_ids = Arc::default();
         }
     }
@@ -872,7 +905,7 @@ where
                 );
                 self.metrics
                     .inc_migration_max_seq_len_exceeded(&self.model_name);
-                self.retries_left = 0; // disable migration
+                self.attempts.disable();
                 self.release_replay_prompt_if_final();
                 return true;
             }
@@ -1227,7 +1260,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(manager.retries_left, 0);
+        assert!(!manager.attempts.has_remaining());
         assert!(manager.request.migration_state.is_none());
 
         let mut legacy = create_mock_request(1);
@@ -2793,7 +2826,7 @@ mod tests {
             .expect("Last response should be Disconnected error");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        // Migration was attempted but blocked because max_seq_len set retries_left to 0.
+        // Migration was attempted but blocked because max_seq_len disabled further attempts.
         // The ongoing metric is still incremented (it counts attempts, not successes).
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
@@ -2936,7 +2969,7 @@ mod tests {
             metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
             1
         );
-        // Migration was attempted but blocked (retries_left was already 0).
+        // Migration was attempted but blocked because no attempts remained.
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
     }
 
@@ -3366,7 +3399,7 @@ mod tests {
         assert_eq!(failure.error_type(), ErrorType::Disconnected);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(retry_manager.completed_tokens, 1);
-        assert_eq!(retry_manager.next_attempt, 2);
+        assert_eq!(retry_manager.attempts.next(), 2);
         assert!(retry_manager.pending_migration.is_none());
     }
 
@@ -3552,7 +3585,7 @@ mod tests {
     /// The `migration retries exhausted` event must name the attempt that
     /// *failed*, not the retry that will never happen.
     ///
-    /// `next_attempt` is incremented at dispatch, so after attempt 0 is
+    /// `attempts.next()` is incremented at dispatch, so after attempt 0 is
     /// dispatched it already reads 1. Recording that would emit
     /// `request.attempt=1` for a run whose only route span is attempt 0,
     /// so consumers joining lifecycle events to `router.route_request` spans by
@@ -3696,7 +3729,7 @@ mod tests {
         });
 
         let captured = captured.lock().unwrap();
-        let last_dispatched = manager.next_attempt - 1;
+        let last_dispatched = manager.attempts.last();
         assert_eq!(
             captured.exhausted_attempt,
             Some(u64::from(last_dispatched)),
@@ -3705,7 +3738,7 @@ mod tests {
             captured.scheduled_attempts
         );
         // The tally must include the final allowed attempt. `new_stream`
-        // decrements `retries_left` before dispatching, so that attempt runs
+        // consumes the attempt budget before dispatching, so that attempt runs
         // with the counter already at zero; when the tally sat behind the
         // replay guard in `track_response`, the token it delivered was dropped
         // and this reported 1 instead of 2.
