@@ -17,22 +17,15 @@ around limitations in that release's installer.
 
 ## Prerequisites
 
-- Kubernetes 1.35 or newer, including kubelets on nodes that run Substrate or
-  its clients. Kubernetes 1.37 or newer is recommended because the required
-  certificate APIs and volume projections are stable and enabled by default.
-  On 1.35 and 1.36, complete the explicit configuration in
-  [Check cluster capabilities](#check-cluster-capabilities).
-- Linux x86-64 (`amd64`) or ARM64 (`arm64`) nodes, with images and sandbox
-  runtime assets built for the nodes where each component runs.
-- For the default RustFS path, a StorageClass that can provision a
-  `ReadWriteOnce` volume. This guide uses 50 GiB as a starting allocation;
-  size it for retained snapshots.
-- For bundled PostgreSQL, storage capacity for its default 500 GiB
-  `ReadWriteOnce` volume. Alternatively, prepare an external database using
-  [Substrate's PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md).
-  External database and object-storage services are not required for the example configuration.
-- Git, Go 1.27 or newer, and `kubectl` on the installation workstation, with the
-  intended Kubernetes context already selected.
+- Kubernetes 1.35 or newer. See
+  [Check cluster capabilities](#check-cluster-capabilities) for the required
+  certificate APIs and volume projections.
+- Linux x86-64 (`amd64`) or ARM64 (`arm64`) nodes.
+- For the default RustFS deployment, a StorageClass that can provision a
+  50 GiB `ReadWriteOnce` volume.
+- For the bundled PostgreSQL installation, storage capacity for its default
+  500 GiB `ReadWriteOnce` volume.
+- Git, Go 1.27 or newer, and `kubectl` on the installation workstation.
 
 ## What this installs
 
@@ -177,6 +170,7 @@ affected kubelets using your cluster's configuration mechanism.
 
 </Accordion>
 
+Select the Kubernetes context for the cluster where you want to install Substrate.
 Check the API-server and node versions, then discover the certificate APIs:
 
 ```bash
@@ -461,10 +455,16 @@ below before deploying.
 
 ### Review the installation settings
 
+The example configuration uses bundled PostgreSQL. To use an external database,
+follow [Substrate's PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md)
+and update `substrate-install.yaml` before deployment. Supply connection credentials
+through the installer's supported environment settings. Keep them out of the
+checked-in YAML.
+
 | Setting | Example default and what to change |
 | --- | --- |
 | `images.repo`, `images.tag` | Pin the control-plane and node-runtime images to `v1.0.0-rc.1`, matching the tools built earlier. |
-| `ateapi.postgres.storageClass` | An empty string uses the cluster's default StorageClass for bundled PostgreSQL's 500 GiB volume. Set a class name if needed. For an external database, follow [PostgreSQL setup](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/postgres.md) and supply connection credentials through the installer's supported environment settings; keep them out of the checked-in YAML. |
+| `ateapi.postgres.storageClass` | An empty string uses the cluster's default StorageClass for bundled PostgreSQL's 500 GiB volume. Set a class name if needed. |
 | `ateapi.authz.bootstrapOwners` | The example keeps the upstream development default, `system:serviceaccount:ate-system:ate-client`. For a shared installation, replace it with your administrators' authenticated principal IDs using the [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/authorization.md#bootstrap-owners). Multiple principals form one comma-separated string. |
 | `storage.snapshotLocation` | `s3://ate-snapshots/` points to the bucket created in the RustFS step. Object storage remains required when golden snapshots are disabled. See the plugin configuration below. |
 | `atenet.egress.credentialProvider` | `'{"enabled":false}'` disables gateway credential injection when workloads supply their own credentials. To have the gateway manage credentials, configure a provider using [egress credential injection](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/docs/guides/egress-credential-injection.md). An omitted choice is rejected by the installer. |
