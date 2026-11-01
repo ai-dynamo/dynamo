@@ -120,9 +120,9 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
 
     # Transport breakdown (backend-side metrics)
     for metric_name, attr_name in [
-        ("dynamo_component_network_transit_seconds", "work_handler_network_transit"),
+        ("dynamo_work_handler_network_transit_seconds", "work_handler_network_transit"),
         (
-            "dynamo_component_time_to_first_response_seconds",
+            "dynamo_work_handler_time_to_first_response_seconds",
             "work_handler_time_to_first_response",
         ),
     ]:
