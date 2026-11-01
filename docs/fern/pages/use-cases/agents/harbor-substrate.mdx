@@ -140,8 +140,8 @@ agents:
       # Blank means "use the context window the endpoint advertises".
       DYNAMO_CONTEXT_WINDOW: ""
       DYNAMO_MAX_TOKENS: "8192"
-      # Use "1" for Dynamo or "0" for an external endpoint.
-      DYN_AGENT_SESSION_FINAL: "1"
+      # Enable only for a scheduler that consumes session-final notifications.
+      DYN_AGENT_SESSION_FINAL: "0"
 ```
 
 For these recipes, the frontend address is
@@ -189,7 +189,7 @@ agents:
       # Set a quoted token count if the endpoint does not advertise its limit.
       DYNAMO_CONTEXT_WINDOW: ""
       DYNAMO_MAX_TOKENS: "8192"
-      # External endpoints do not accept Dynamo's end-of-session notification.
+      # Disable the extra session-final request for external endpoints.
       DYN_AGENT_SESSION_FINAL: "0"
 ```
 
@@ -212,6 +212,12 @@ walkthrough requires a Dynamo endpoint you control.
 
 </Tab>
 </Tabs>
+
+Keep `DYN_AGENT_SESSION_FINAL: "0"` for the recommended recipe and external
+endpoints. Set it to `"1"` only for a scheduler that consumes session-final
+notifications, such as ThunderAgent. It sends an extra request when Pi exits
+normally so the scheduler can release session state. Tracing does not require
+this notification.
 
 <Accordion title="Configure context and output limits">
 
@@ -703,8 +709,7 @@ pip and uv at the wheels and cache in the image, so the unchanged test script
 runs without a registry. `delete: true` removes the actor after result
 collection.
 The task directory name must match a key in `template_map`, and its value must
-name the template built for that task. Set `DYN_AGENT_SESSION_FINAL` to `"0"`
-for an external API. All values under `agents[].env` are strings.
+name the template built for that task. All values under `agents[].env` are strings.
 
 <Accordion title="Actor template and Harbor job fields">
 

@@ -30,8 +30,8 @@ agents:
       # Blank means "use the context window the endpoint advertises".
       DYNAMO_CONTEXT_WINDOW: ""
       DYNAMO_MAX_TOKENS: "8192"
-      # Use "1" for Dynamo or "0" for an external endpoint.
-      DYN_AGENT_SESSION_FINAL: "1"
+      # Enable only for a scheduler that consumes session-final notifications.
+      DYN_AGENT_SESSION_FINAL: "0"
 verifier:
   # The prepared image carries the build wheels and the grader's packages, so
   # the unchanged test script runs without registry access.
