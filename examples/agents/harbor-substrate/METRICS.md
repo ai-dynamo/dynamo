@@ -10,7 +10,7 @@ labels, changes no worker capacity, and enables no suspension policy.
 
 ## Prerequisites
 
-- Complete the [Substrate integration setup](INSTALL.md).
+- Complete [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.md).
 - Install Prometheus Operator and Grafana. This example uses the
   `kube-prometheus-stack` release in namespace `monitoring`.
 - Run commands from this directory with the intended Kubernetes context selected.

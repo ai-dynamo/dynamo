@@ -138,6 +138,12 @@ navigation:
                 - page: GKE Setup
                   path: pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx
 
+      - section: Agent Sandboxes
+        collapsed: true
+        contents:
+          - page: Install Substrate
+            path: pages/kubernetes/agent-sandboxes/install-substrate.md
+
       # ==================== Usage ====================
       - section: Model Deployment
         icon: microchip

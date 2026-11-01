@@ -54,14 +54,12 @@ finishes.
 Prepare these resources:
 
 - A local clone of the Dynamo repository.
-- A Kubernetes cluster that supports Substrate's native certificate APIs and
-  projected volumes, with permission to install its controllers and CRDs.
+- A Kubernetes cluster with [Substrate installed](../../kubernetes/agent-sandboxes/install-substrate.md)
+  and the pinned `kubectl-ate` CLI on `PATH`. Administrative access is needed
+  to create the tutorial's atespace and authorize its runner.
 - Linux `amd64` CPU nodes compatible with the pinned gVisor runtime and the
   SWE-bench task images. Start with capacity for a worker requesting two CPUs
   and 6 GiB of memory, plus the control plane and Harbor runner.
-- The database, object storage, runtime assets, and network configuration
-  required by the pinned Substrate installer. Golden snapshots need working
-  durable snapshot storage.
 - An image registry that the workers can pull from. The prepared task images
   can be large; reserve node image-cache space before adding tasks.
 - Git, `kubectl`, `curl`, `sha256sum`, OpenSSL, Python 3.12 or newer,
@@ -70,10 +68,9 @@ Prepare these resources:
 - For Grafana panels, Prometheus Operator and Grafana. The example can use an
   existing `kube-prometheus-stack` installation.
 
-Installing CRDs does not enable Kubernetes certificate APIs or kubelet volume
-projections. Follow the capability checks in
-[Install the Substrate integration](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/INSTALL.md)
-before continuing.
+Complete the installation and its capability checks before continuing. Golden
+snapshots require working durable snapshot storage. The steps below configure
+Harbor on that installation.
 
 From the root of your Dynamo clone, enter the example directory. Run workstation
 commands here unless a step identifies the runner shell. Edit the supplied
@@ -130,29 +127,123 @@ External jobs disable Dynamo's session-final control requests. Harbor
 results and Substrate metrics remain available. Dynamo's server-side
 inference traces require a Dynamo endpoint you control.
 
-## Install Substrate and build the guest image
+## Verify Substrate
 
-Complete [Install the Substrate integration](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/INSTALL.md).
-That procedure installs or checks the pinned control plane, builds the guest
-image, creates the `ate-env` atespace, and grants the runner's identity access.
-
-A Kubernetes namespace and a Substrate atespace are separate objects. The
-example uses `ate-env` for both. The runner holds one ServiceAccount with two
-projected credentials. Its token authenticates `kubectl-ate` to the control
-plane, where the access policy makes it an editor of the atespace. Its pod
-certificate authenticates the adapter to the router, which admits only the
-SPIFFE IDs in its allowlist.
-
-Before continuing, verify the installation:
+Confirm that the installed platform is ready:
 
 ```bash
-kubectl -n ate-system get daemonset atelet
-kubectl -n ate-system get deployment atenet-router \
-  -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ' ' '\n' | grep ingress-allowed
+kubectl -n ate-system rollout status deployment/ate-api-server --timeout=600s
+kubectl -n ate-system rollout status deployment/atenet-router --timeout=600s
+kubectl -n ate-system rollout status daemonset/atelet --timeout=600s
+kubectl -n ate-system get pods -o wide
 ```
 
-`atelet` must be ready on each node eligible for sandbox placement, and the
-router's allowlist must name `spiffe://cluster.local/ns/ate-env/sa/harbor-runner`.
+`atelet` must be ready on each node eligible for sandbox placement. If these
+checks fail, return to [Install Substrate](../../kubernetes/agent-sandboxes/install-substrate.md).
+
+## Create the namespace, atespace, and access policy
+
+A Kubernetes namespace and a Substrate atespace are separate objects. This
+tutorial uses `ate-env` for both. Run the Substrate commands as an administrator
+with global ownership; an atespace-scoped owner cannot create an atespace:
+
+```bash
+kubectl create namespace ate-env
+kubectl-ate create atespace ate-env
+kubectl-ate create access-policy \
+  -a ate-env -f runner-access-policy.yaml
+```
+
+The policy grants the runner's ServiceAccount token the editor role on the
+atespace. That covers creating and deleting actors, creating egress policies,
+and listing templates. The ServiceAccount itself is created with the runner
+Pod in the tutorial. If these objects already exist, inspect and reuse them.
+For an existing access policy, preserve its current bindings and update with
+its `uid` and `version`.
+
+Two identities, one ServiceAccount: `kubectl-ate` sends the projected token,
+whose principal is `user:system:serviceaccount:ate-env:harbor-runner`. The
+adapter's guest calls present the projected pod certificate, whose SPIFFE ID is
+the one in `ingressAllowedSPIFFEIDs`. The access policy covers the first. The
+router allowlist covers the second.
+
+### Authorize the runner at the router
+
+In the `atenet-router` Deployment's container arguments, append
+`spiffe://cluster.local/ns/ate-env/sa/harbor-runner` to the comma-separated
+`--ingress-allowed-spiffe-ids` value. Use your installation's trust domain if it
+differs from `cluster.local`, and preserve existing identities. If the argument
+is absent, add it with this identity as its value:
+
+```bash
+kubectl -n ate-system edit deployment atenet-router
+kubectl -n ate-system rollout status deployment/atenet-router --timeout=300s
+```
+
+Also add the identity to `ingressAllowedSPIFFEIDs` in the installation's managed
+configuration so a later deploy preserves it:
+
+```yaml
+ingressAllowedSPIFFEIDs:
+  - spiffe://cluster.local/ns/ate-env/sa/harbor-runner
+```
+
+The list above shows the identity to add, not a replacement for other clients.
+On a shared installation, have its operator make these changes.
+
+### Align request timeouts
+
+The rc1 router defaults to a five-minute route timeout, which also bounds guest
+process-output streams. In the `atenet-router` container's deployment arguments,
+set `--route-timeout=60m` for the unmodified 3,000-second task deadlines:
+
+```bash
+kubectl -n ate-system edit deployment atenet-router
+kubectl -n ate-system rollout status \
+  deployment/atenet-router --timeout=300s
+```
+
+Preserve the other arguments. Make this change before running actors. If you
+choose shorter task deadlines, choose a route budget longer than the longest
+command. The parking retry budget is a separate setting and does not suspend
+actors to free capacity.
+
+Check the router arguments before creating actors:
+
+```bash
+kubectl -n ate-system get deployment atenet-router \
+  -o jsonpath='{.spec.template.spec.containers[*].args}' | tr ' ' '\n' \
+  | grep -E 'ingress-allowed-spiffe-ids|route-timeout'
+```
+
+The allowlist must include `spiffe://cluster.local/ns/ate-env/sa/harbor-runner`,
+and the route timeout must be `60m`. Keep that timeout in the installation's
+managed router configuration when updating Substrate.
+
+## Build the guest image
+
+`ate-env-guest` is the daemon that runs commands and moves files inside an
+actor. It comes from the env repository and does not depend on the Substrate Go
+module, so it builds from the pinned commit without changes. Replace
+`registry.example.com/harbor-substrate` in the build command with your image
+repository:
+
+```bash
+git clone https://github.com/agent-substrate/env deps/env
+git -C deps/env checkout 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b
+(
+	cd deps/env
+	umask 022
+	KO_DOCKER_REPO=registry.example.com/harbor-substrate/env-guest ko build --bare \
+	  --platform=linux/amd64 ./cmd/ate-env-guest
+)
+```
+
+In `actor-template.yaml`, replace `volumes[0].image.reference` with the printed
+digest reference. The actor template mounts this image as a volume at `/ate`,
+so the task image stays untouched. Configure image-pull credentials separately
+if the registry is private. The same checkout supplies the Python client the
+runner installs later; the adapter uses its generated gRPC stubs for the guest.
 
 ## Create sandbox capacity
 
@@ -202,7 +293,7 @@ intended workers. To add nodes, first ensure that `atelet` and runtime assets
 are present there, then adjust placement and replica count. To fit more actors
 per worker, increase worker capacity while preserving per-actor limits.
 
-The [installation guide](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/INSTALL.md)
+The [installation guide](../../kubernetes/agent-sandboxes/install-substrate.md#resolve-low-port-permission-failures-when-needed)
 includes the conditional low-port permission fix for platforms that need it.
 
 ## Prepare Pi and the task image
@@ -392,7 +483,7 @@ default policy for results you intend to compare.
 
 Open `actor-template.yaml`. Check that `containers[0].image` contains the
 prepared task image digest and `volumes[0].image.reference` contains the guest
-image digest from the installation step. Keep `metadata.name` as
+image digest from the guest-image build step. Keep `metadata.name` as
 `swe-astropy-12907-pi` for this first task.
 
 The actor template is a Substrate API object. Register it with `kubectl-ate`.
@@ -456,8 +547,8 @@ selected task retains its 3,000-second agent and verifier deadlines:
 
 ```bash
 kubectl -n ate-env cp "deps/harbor-datasets/datasets/swebench-verified/$TASK" "harbor-runner:/work/tasks/$TASK"
-deps/bin/kubectl-ate create actor-template -f actor-template.yaml
-deps/bin/kubectl-ate get actor-template swe-astropy-12907-pi -a ate-env -o yaml
+kubectl-ate create actor-template -f actor-template.yaml
+kubectl-ate get actor-template swe-astropy-12907-pi -a ate-env -o yaml
 ```
 
 Actor templates are immutable in the pinned Substrate release. To change an
@@ -583,15 +674,15 @@ In `golden-job.yaml`, set `job_name: swe-golden` and map
 template:
 
 ```bash
-deps/bin/kubectl-ate create actor-template -f golden-template.yaml
-deps/bin/kubectl-ate get actor-template swe-astropy-12907-pi-golden -a ate-env -o json
+kubectl-ate create actor-template -f golden-template.yaml
+kubectl-ate get actor-template swe-astropy-12907-pi-golden -a ate-env -o json
 ```
 
 Read `status.goldenSnapshotStatus.goldenTag`, then fetch that tag:
 
 ```bash
 export GOLDEN_TAG=the-tag-from-template-status
-deps/bin/kubectl-ate get tag "$GOLDEN_TAG" -a ate-env -o json
+kubectl-ate get tag "$GOLDEN_TAG" -a ate-env -o json
 ```
 
 Wait for `status.snapshot.durableSnapshot.state` to become
@@ -730,7 +821,7 @@ First save the results and native trace files. Confirm that Harbor deleted its
 actors. Use the CLI to list actors before removing any retained resources:
 
 ```bash
-deps/bin/kubectl-ate get actors -a ate-env
+kubectl-ate get actors -a ate-env
 kubectl -n ate-env delete pod harbor-runner
 kubectl -n ate-env delete workerpool harbor-workers
 ```

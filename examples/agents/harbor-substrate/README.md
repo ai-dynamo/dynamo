@@ -20,8 +20,10 @@ This directory contains the runnable files:
 - YAML manifests: runner, worker pool, task template, and the atespace access policy.
 - `runner-kubeconfig.yaml`: in-cluster CLI identity using projected token files.
 - `*.patch`: compatibility changes applied to the pinned upstream sources.
-- [Install Substrate integration](INSTALL.md), [Capture inference and tools](TRACING.md),
-  and [Collect Substrate metrics](METRICS.md): supporting procedures.
+- [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.md):
+  platform setup in the Kubernetes Guide.
+- [Capture inference and tools](TRACING.md) and [Collect Substrate metrics](METRICS.md):
+  supporting procedures.
 
 Generate the file list with `git ls-files examples/agents/harbor-substrate`.
 Edit the supplied configuration files in place as the tutorial describes.
