@@ -62,7 +62,15 @@ pub fn decode(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default(), false, false, None, None)
+                Decoder::new(
+                    ds,
+                    StopConditions::default(),
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
             },
             |mut decoder| {
                 for tok in black_box(TEST_TOKS) {
@@ -86,7 +94,15 @@ pub fn decode_big(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default(), false, false, None, None)
+                Decoder::new(
+                    ds,
+                    StopConditions::default(),
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
             },
             |mut decoder| {
                 for tok in black_box(&BIG_TEST_TOKS) {
@@ -127,7 +143,15 @@ pub fn tiktoken_decode(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(TikTokenTokenizer::from_file_auto(TEST_TIKTOKEN).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default(), false, false, None, None)
+                Decoder::new(
+                    ds,
+                    StopConditions::default(),
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
             },
             |mut decoder| {
                 for tok in black_box(&toks) {

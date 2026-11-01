@@ -963,6 +963,13 @@ navigation:
               - page: MiniMax M3
                 path: pages/recipes/model-recipes/minimax-m3.mdx
                 slug: minimax-m3
+          - section: Mistral AI
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Mistral Large 4
+                path: pages/recipes/model-recipes/mistral-large-4.mdx
+                slug: mistral-large-4
           - section: Motif Technologies
             skip-slug: true
             collapsed: true

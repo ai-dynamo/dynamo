@@ -803,7 +803,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # SGLang's _encode outputs are already on CPU; use CPU as target for consistency
         target_device = torch.device("cpu")
         if uncached_inputs:
-            # H.264/H.265 video URLs are hardware-decoded  to frames here when NVDEC is enabled;
+            # H.264/H.265 video URLs are hardware-decoded to frames here when NVDEC is enabled;
             # decoded images and other media inputs pass through unchanged.
             # Cache keys remain based on the original media descriptors.
             encode_inputs = await self._build_encode_inputs(
