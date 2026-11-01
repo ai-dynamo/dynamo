@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
@@ -252,6 +253,49 @@ impl KvRouterConfig {
         self.clone()
     }
 
+    /// Serialize this configuration as JSON that `from_json` accepts.
+    ///
+    /// The serialization is lossy: the process-local fields `router_approximate_cache_policy`,
+    /// `router_prefill_policy`, `router_decode_policy` and the replay model selector are not
+    /// serialized, so `from_json` restores their defaults. Re-serializing the parsed result
+    /// yields the same JSON.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            PyValueError::new_err(format!("Failed to serialize KvRouterConfig JSON: {e}"))
+        })
+    }
+
+    /// Resolved default-policy parameters a router built from this configuration starts with
+    /// for `worker_type` (`"aggregated"`, `"prefill"` or `"decode"`).
+    ///
+    /// The keys are the `PATCH /router_policy` parameter names. Plain decode workers (decode
+    /// without conditional disaggregation) report zero cache credits. Raises `ValueError` when
+    /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
+    /// policy instance for `worker_type`: its own parameters are not resolved here.
+    fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
+        let selected = self
+            .inner
+            .selected_worker_selection_policy_instance_for(role)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(instance) = selected {
+            return Err(PyValueError::new_err(format!(
+                "policy_parameters covers the builtin default policy only; this configuration \
+                 selects worker-selection policy instance {instance:?} for {worker_type}"
+            )));
+        }
+        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+            .into_iter()
+            .map(|(name, value)| match value.as_f64() {
+                Some(value) => Ok((name, value)),
+                None => Err(PyValueError::new_err(format!(
+                    "policy parameter {name} is not a number: {value}"
+                ))),
+            })
+            .collect()
+    }
+
     #[getter]
     fn overlap_score_credit(&self) -> f64 {
         self.inner.overlap_score_credit
@@ -493,7 +537,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -522,6 +566,7 @@ impl EntrypointArgs {
         tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
+        enable_systemone_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
@@ -603,6 +648,7 @@ impl EntrypointArgs {
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
             frontend_api_config: FrontendApiConfig::from_optional_flags(
                 enable_anthropic_api,
+                enable_systemone_api,
                 strip_anthropic_preamble,
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
@@ -718,6 +764,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
             let locals = locals.clone();
 
             Box::pin(async move {
+                let runtime_config = card.runtime_config.clone();
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
                     let py_instance_id =
@@ -754,7 +801,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config)))
                 })?;
 
                 Ok(engine)

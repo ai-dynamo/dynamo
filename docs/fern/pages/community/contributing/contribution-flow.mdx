@@ -59,8 +59,8 @@ or multiple major components require a
 
     [Open a pull request](https://github.com/ai-dynamo/dynamo/compare) against `main`. Link the
     approved issue when one exists. Use a Conventional Commit title, such as
-    `fix(router): handle streaming timeout`, and include **Summary** and **Validation** sections in
-    the pull request description.
+    `fix(router): handle streaming timeout`, and fill in every section of the pull request
+    template.
   </Step>
 
   <Step title="Complete automated review and CI">

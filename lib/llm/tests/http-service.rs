@@ -623,6 +623,9 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
         Endpoint::Generate => todo!(),
+        Endpoint::SystemOne | Endpoint::Decisions => {
+            unreachable!("this fixture indexes only completion endpoints")
+        }
     };
 
     let request_type = match request_type {
@@ -1024,6 +1027,104 @@ async fn wait_for_service_ready(port: u16) {
             Err(e) => panic!("Service failed to start within timeout: {}", e),
         }
     }
+}
+
+#[tokio::test]
+async fn test_draining_http1_rejection_closes_keepalive_without_cutting_admitted_stream() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let scenario = async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .streaming_backend_error_check(BackendErrorCheck::Skip)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let card = ModelDeploymentCard::with_name_only("drain-model");
+        state
+            .manager()
+            .add_chat_completions_model(
+                "drain-model",
+                card.mdcsum(),
+                Arc::new(FirstTokenGateEngine {
+                    release: release.clone(),
+                }),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { service.run_with_listener(server_cancel, listener).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .http1_only()
+            .build()
+            .unwrap();
+        let admitted = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "drain-model", "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::OK);
+
+        cancel.cancel();
+        while state.is_ready() {
+            tokio::task::yield_now().await;
+        }
+        for version in ["HTTP/1.1", "HTTP/1.0"] {
+            let mut connection = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let request = format!(
+                "POST /v1/chat/completions {version}\r\n\
+                 Host: localhost\r\nContent-Type: application/json\r\n\
+                 Connection: keep-alive\r\nContent-Length: 2\r\n\r\n{{}}"
+            );
+            connection.write_all(request.as_bytes()).await.unwrap();
+            let mut rejected = String::new();
+            timeout(
+                std::time::Duration::from_secs(1),
+                connection.read_to_string(&mut rejected),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("draining {version} connection stayed open after rejection"))
+            .unwrap();
+            assert!(
+                rejected.starts_with(&format!("{version} 503")),
+                "{rejected}"
+            );
+            assert!(
+                rejected
+                    .to_ascii_lowercase()
+                    .contains("connection: close\r\n"),
+                "{rejected}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(rejected.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["message"], "Service is not ready");
+            assert!(
+                !server.is_finished(),
+                "admitted stream must keep the frontend draining"
+            );
+        }
+
+        release.notify_one();
+        let body = admitted.text().await.unwrap();
+        assert!(body.contains("choice 0"), "{body}");
+        assert!(body.contains("data: [DONE]"), "{body}");
+        server.await.unwrap().unwrap();
+    };
+    timeout(std::time::Duration::from_secs(5), scenario)
+        .await
+        .expect("HTTP/1 drain regression timed out");
 }
 
 #[tokio::test]
@@ -1522,19 +1623,169 @@ async fn test_request_id_annotation() {
     );
 
     let received_uuid_str = received_request_id.unwrap();
-    assert_eq!(
+    assert!(
+        uuid::Uuid::parse_str(&received_uuid_str).is_ok(),
+        "request_id annotation should be a UUID, got {received_uuid_str}"
+    );
+    assert_ne!(
         received_uuid_str,
         request_uuid.to_string(),
-        "Received request ID should match the one we sent: expected {}, got {}",
-        request_uuid,
-        received_uuid_str
+        "client-supplied x-dynamo-request-id must not become the request id"
     );
 
-    tracing::info!(
-        "✅ Request ID annotation test passed! Sent UUID: {}, Received: {}",
-        request_uuid,
-        received_uuid_str
-    );
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Echoes each request's messages back and holds every request until `barrier` releases them
+/// together, so concurrent requests overlap in the frontend. Records each request's context id.
+struct ConcurrentEchoChatEngine {
+    barrier: tokio::sync::Barrier,
+    context_ids: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for ConcurrentEchoChatEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        self.context_ids.lock().unwrap().push(ctx.id().to_string());
+        self.barrier.wait().await;
+
+        let echo = serde_json::to_string(&request.inner.messages)?;
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let output = generator.create_choice(
+            0,
+            Some(echo),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+        );
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+            ctx,
+        ))
+    }
+}
+
+/// Two concurrent requests on each OpenAI-compatible route share client-supplied
+/// `x-dynamo-request-id` and `request-id` headers. Each must complete with its own output, and
+/// the engine must see distinct server-minted context ids rather than the client's id.
+#[tokio::test]
+async fn test_concurrent_requests_with_shared_client_request_id() {
+    use dynamo_runtime::pipeline::{ServiceBackend, ServiceFrontend, Source};
+
+    const MODEL: &str = "concurrent-echo-model";
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_responses_endpoints(true)
+        .enable_anthropic_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let engine = Arc::new(ConcurrentEchoChatEngine {
+        barrier: tokio::sync::Barrier::new(2),
+        context_ids: std::sync::Mutex::new(Vec::new()),
+    });
+    // Discovery-built pipelines start with a frontend source that matches responses to callers
+    // by request id; serve the engine through one so the test exercises that map.
+    let frontend = ServiceFrontend::<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >::new();
+    let pipeline = frontend
+        .link(ServiceBackend::from_engine(engine.clone()))
+        .unwrap()
+        .link_terminal(frontend)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    state
+        .manager()
+        .add_chat_completions_model(MODEL, card.mdcsum(), pipeline)
+        .unwrap();
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let client = reqwest::Client::new();
+    type RequestBody = fn(&str) -> serde_json::Value;
+    let routes: [(&str, RequestBody); 3] = [
+        ("/v1/chat/completions", |marker| {
+            serde_json::json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": marker}],
+            })
+        }),
+        (
+            "/v1/responses",
+            |marker| serde_json::json!({"model": MODEL, "input": marker}),
+        ),
+        ("/v1/messages", |marker| {
+            serde_json::json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": marker}],
+            })
+        }),
+    ];
+
+    for (path, body) in routes {
+        let send = |marker: &'static str| {
+            client
+                .post(format!("http://localhost:{port}{path}"))
+                .header("x-dynamo-request-id", &client_id)
+                .header("request-id", &client_id)
+                .json(&body(marker))
+                .send()
+        };
+        let (first, second) = timeout(
+            std::time::Duration::from_secs(10),
+            futures::future::join(send("alpha-marker"), send("bravo-marker")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path}: concurrent requests must not hang"));
+
+        for (response, own, other) in [
+            (first, "alpha-marker", "bravo-marker"),
+            (second, "bravo-marker", "alpha-marker"),
+        ] {
+            let response = response.unwrap();
+            let status = response.status();
+            let text = response.text().await.unwrap();
+            assert!(status.is_success(), "{path}: status {status}, body {text}");
+            assert!(text.contains(own), "{path}: missing own output: {text}");
+            assert!(
+                !text.contains(other),
+                "{path}: got the other request's output: {text}"
+            );
+        }
+
+        let context_ids = std::mem::take(&mut *engine.context_ids.lock().unwrap());
+        assert_eq!(context_ids.len(), 2, "{path}");
+        assert_ne!(
+            context_ids[0], context_ids[1],
+            "{path}: context ids must differ"
+        );
+        for context_id in &context_ids {
+            assert_ne!(
+                context_id, &client_id,
+                "{path}: client id became the context id"
+            );
+        }
+    }
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -3366,6 +3617,7 @@ async fn test_pooling_family_validation_errors_are_metered() {
 // =============================================================================
 
 use dynamo_llm::protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_llm::protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
 use dynamo_llm::types::openai::images::OpenAIImagesStreamingEngine;
 
 /// Images engine whose stream carries a single error annotation, emulating a
@@ -3433,6 +3685,148 @@ async fn post_images_generation(port: u16) -> reqwest::Response {
         .send()
         .await
         .unwrap()
+}
+
+/// Images engine that must not receive a request. The frontend rejects the
+/// request before dispatch. A call to `generate` is a test failure.
+struct UncalledImagesEngine {}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, Error>
+    for UncalledImagesEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateImageRequest>,
+    ) -> Result<ManyOut<Annotated<NvImagesResponse>>, Error> {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// The frontend owns the `n` range rule (1 to 10) and the
+/// `nvext.num_inference_steps` lower bound. A value outside the range
+/// returns a 400 that states the rule. The engine does not see the request.
+#[tokio::test]
+async fn test_images_out_of_range_values_return_400() {
+    let (port, token, task) = start_images_service(Arc::new(UncalledImagesEngine {})).await;
+
+    for (body, rule) in [
+        (
+            serde_json::json!({"model": "image-model", "prompt": "a red apple", "n": 0}),
+            "n must be between 1 and 10",
+        ),
+        (
+            serde_json::json!({
+                "model": "image-model",
+                "prompt": "a red apple",
+                "nvext": {"num_inference_steps": 0},
+            }),
+            "num_inference_steps must be at least 1",
+        ),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://localhost:{}/v1/images/generations", port))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} must return HTTP 400; got {status}, body: {text}"
+        );
+        assert!(
+            text.contains(rule),
+            "expected the validation message for {body} to state the rule; got: {text}"
+        );
+    }
+
+    token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Videos engine that must not receive a request. The frontend rejects the
+/// request before dispatch. A call to `generate` is a test failure.
+struct UncalledVideosEngine {}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosResponse>>, Error>
+    for UncalledVideosEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateVideoRequest>,
+    ) -> Result<ManyOut<Annotated<NvVideosResponse>>, Error> {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// The frontend owns the `seconds`, `nvext.fps`, and
+/// `nvext.num_inference_steps` lower bounds. A value below 1 returns a 400
+/// that states the rule. The engine does not see the request.
+#[tokio::test]
+async fn test_videos_non_positive_counts_return_400() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Videos, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("video-model");
+    service
+        .state_clone()
+        .manager()
+        .add_videos_model(
+            "video-model",
+            card.mdcsum(),
+            Arc::new(UncalledVideosEngine {}),
+        )
+        .unwrap();
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+
+    for (body, rule) in [
+        (
+            serde_json::json!({"model": "video-model", "prompt": "cat", "seconds": 0}),
+            "seconds must be at least 1",
+        ),
+        (
+            serde_json::json!({"model": "video-model", "prompt": "cat", "nvext": {"fps": 0}}),
+            "fps must be at least 1",
+        ),
+        (
+            serde_json::json!({
+                "model": "video-model",
+                "prompt": "cat",
+                "nvext": {"num_inference_steps": 0},
+            }),
+            "num_inference_steps must be at least 1",
+        ),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://localhost:{}/v1/videos", port))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} must return HTTP 400; got {status}, body: {text}"
+        );
+        assert!(
+            text.contains(rule),
+            "expected the validation message to state the rule; got: {text}"
+        );
+    }
+
+    token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

@@ -19,16 +19,25 @@ from dynamo.planner.core.engine_protocol import (
 )
 from dynamo.planner.core.load.predictors import ARIMAPredictor, KalmanPredictor
 from dynamo.planner.core.types import (
+    EngineCapabilities,
     FpmObservations,
     ScheduledTick,
     TickInput,
     TrafficObservation,
+    WorkerCapabilities,
     WorkerCounts,
 )
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.planner.reconfiguration import ConfigurationConflict, ReconfigureRequest
+from dynamo.planner.reconfiguration import (
+    ConfigurationConflict,
+    ReconfigureRequest,
+    candidate_config,
+    prepare_predictor,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
 from dynamo.planner.tests.unit.test_control_api import _planner
 
 pytestmark = [
@@ -601,3 +610,111 @@ async def test_http_contract_rejects_unsupported_or_invalid_updates(changes):
     assert result["status"] == 422
     assert await controller.get_config() == initial["body"]
     await planner._shutdown_runtime()
+
+
+def test_runtime_configuration_errors_skip_unknown_power():
+    capabilities = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1), decode=EngineCapabilities(num_gpu=1)
+    )
+    assert runtime_configuration_errors(100, 100, -1, -1, 1, capabilities) == []
+
+
+def test_candidate_config_keeps_the_fields_excluded_from_the_dump(monkeypatch):
+    # The Redis URL comes from the config file, not the environment; the dump
+    # excludes it, and non-advisory batch scheduling requires it.
+    monkeypatch.delenv("DYN_PLANNER_BATCH_REDIS_URL", raising=False)
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="kubernetes",
+        mode="agg",
+        metric_pulling_prometheus_endpoint="http://prometheus.test:9090",
+        batch_scheduling={
+            "enabled": True,
+            "gateway": {"base_url": "http://gateway:8000", "tenant": "tenant"},
+            "metrics": {
+                "frontend_metrics_url": "http://frontend:8000/metrics",
+                "dispatcher_metrics_url": "http://dispatcher:9090/metrics",
+                "online_match_labels": {"model": "test-model"},
+            },
+            "redis": {"url": "redis://valkey:6379/0", "control_key": "drain-limit"},
+            "pool": {
+                "pool_id": "pool",
+                "work_class": "work",
+                "safe_rps_per_ready_replica": 1.0,
+                "max_replicas": 4,
+                "drain_lease_duration_seconds": 600.0,
+            },
+        },
+    )
+    dumped = config.model_dump()
+    assert "url" not in dumped["batch_scheduling"]["redis"]
+    assert "metric_pulling_prometheus_endpoint" not in dumped
+
+    candidate = candidate_config(config, {"min_endpoint": 2})
+
+    assert candidate.min_endpoint == 2
+    redis = candidate.batch_scheduling.redis
+    assert redis is not None and redis.url is not None
+    assert redis.url.get_secret_value() == "redis://valkey:6379/0"
+    assert candidate.metric_pulling_prometheus_endpoint == "http://prometheus.test:9090"
+    assert candidate.namespace == "test-ns"
+
+
+async def test_runtime_candidate_errors_match_runtime_validation():
+    planner = _planner(
+        "disagg", prefill_gpu_cost=2, decode_gpu_cost=1, total_gpu_power_limit=2000
+    )
+    capabilities = planner._build_worker_capabilities()
+    candidate = candidate_config(
+        planner.config, {"prefill_min_endpoint": 8, "max_gpu_budget": 16}
+    )
+    errors = runtime_candidate_errors(candidate, capabilities)
+    assert errors == [
+        "minimum endpoint footprint requires 17 GPUs, exceeding max_gpu_budget=16"
+    ]
+    with pytest.raises(ValueError) as error:
+        planner.validate_runtime_candidate(candidate)
+    assert str(error.value) == errors[0]
+    fitting = candidate_config(planner.config, {"max_gpu_budget": 24})
+    assert runtime_candidate_errors(fitting, capabilities) == []
+    await planner._shutdown_runtime()
+
+
+async def test_prepare_predictor_warms_from_observations_like_the_trace_path(tmp_path):
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
+    candidate = candidate_config(planner.config, {"load_predictor": "kalman"})
+    capabilities = planner._build_worker_capabilities()
+    source = trace(tmp_path)
+    observations = reconfiguration._load_runtime_warmup(
+        source,
+        candidate.throughput_adjustment_interval_seconds,
+        candidate.runtime_warmup_trace_dir,
+    )
+
+    from_trace = reconfiguration._prepare_predictor(candidate, capabilities, source)
+    warmed = prepare_predictor(candidate, capabilities, tuple(observations))
+    for name in ("_num_req_predictor", "_isl_predictor", "_osl_predictor"):
+        predictor = getattr(warmed, name)
+        assert isinstance(predictor, KalmanPredictor)
+        assert predictor.data_buffer == getattr(from_trace, name).data_buffer
+        assert len(predictor.data_buffer) >= predictor.minimum_data_points
+    assert warmed._last_observed_isl == from_trace._last_observed_isl
+
+    cold = prepare_predictor(candidate, capabilities, None)
+    assert cold._num_req_predictor.data_buffer == []
+    with pytest.raises(ValueError, match="effective warmup points"):
+        prepare_predictor(candidate, capabilities, observations[:1])
+    await planner._shutdown_runtime()
+
+
+def test_native_planner_rejects_retune_config():
+    with pytest.raises(ValueError, match="planner.retune is replay-only"):
+        _planner(
+            "disagg",
+            enable_load_scaling=False,
+            enable_throughput_scaling=False,
+            retune={
+                "interval_seconds": 600,
+                "router": {"overlap_score_credit": {"choices": [0.0, 1.0]}},
+            },
+        )

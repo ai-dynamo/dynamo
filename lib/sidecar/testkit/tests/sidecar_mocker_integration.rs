@@ -23,7 +23,8 @@ mod support;
 use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
 use support::{
-    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, Rejection, SidecarFixture,
+    WireFixture,
 };
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
@@ -148,21 +149,24 @@ async fn failures<F: SidecarFixture>() {
     let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
-    for (plan, kind) in [
+    for (plan, kind, is_injected) in [
         (
             RequestPlan {
                 open: OpenAction::Fail,
                 ..Default::default()
             },
             BackendError::CannotConnect,
+            true,
         ),
         (
             after_token_responses(1, StreamAction::Close),
             F::eof_error(),
+            false,
         ),
         (
             after_token_responses(1, StreamAction::Fail),
-            BackendError::CannotConnect,
+            F::read_error(),
+            true,
         ),
     ] {
         let ctx = mock_context();
@@ -171,7 +175,20 @@ async fn failures<F: SidecarFixture>() {
         let req = request("mocker-model", vec![11, 22, 33], 6);
         let ctx = GenerateContext::new(ctx, None);
         let outputs = if is_open_failure {
-            collect(&engine, req, ctx).await
+            // The injected open failure is UNAVAILABLE.
+            let opening = bounded("failed native opening", engine.generate(req, ctx)).await;
+            match F::GENERATE_OPENING {
+                GenerateOpening::WaitsForHeaders => vec![Err(opening
+                    .err()
+                    .expect("native UNAVAILABLE must fail before a response stream opens"))],
+                GenerateOpening::OnStreamPoll => {
+                    bounded(
+                        "failed native opening",
+                        opening.unwrap().collect::<Outputs>(),
+                    )
+                    .await
+                }
+            }
         } else {
             let mut stream = engine.generate(req, ctx).await.unwrap();
             let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
@@ -182,7 +199,7 @@ async fn failures<F: SidecarFixture>() {
         let tokens = handle.tokens();
         assert_eq!(tokens.is_empty(), is_open_failure);
         let error = failure(outputs, &tokens, kind);
-        if kind == BackendError::CannotConnect {
+        if is_injected {
             assert!(error.to_string().contains("injected"));
             assert!(error.to_string().contains("Generate"));
         }
@@ -555,6 +572,7 @@ macro_rules! enroll_baseline {
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
 enroll_baseline!(trtllm, support::trtllm::Fixture);
+enroll_baseline!(lpx, support::lpx::Fixture);
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -602,11 +620,12 @@ async fn native_rejection<F: WireFixture>(max_tokens: u32) -> DynamoError {
             GenerateContext::new(ctx, None),
         )
         .await;
-    let outputs = match F::GENERATE_OPENING {
-        GenerateOpening::WaitsForHeaders => vec![Err(opening
+    let outputs = match (F::GENERATE_OPENING, F::REJECTION) {
+        (GenerateOpening::WaitsForHeaders, Rejection::Returned) => vec![Err(opening
             .err()
             .expect("native rejection must fail before a response stream opens"))],
-        GenerateOpening::OnStreamPoll => {
+        (GenerateOpening::OnStreamPoll, _)
+        | (GenerateOpening::WaitsForHeaders, Rejection::FirstStreamItem) => {
             bounded("native rejection", opening.unwrap().collect::<Outputs>()).await
         }
     };
@@ -648,11 +667,39 @@ async fn sglang_native_rejection_recovers_on_same_engine() {
     );
 }
 
+/// Another worker would refuse the request the same way, so the sidecar
+/// delivers the refusal in the stream rather than as a migratable error.
+#[tokio::test]
+async fn lpx_native_rejection_is_the_first_stream_item() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::lpx::Fixture>(1_000_001),
+    )
+    .await;
+    assert!(error.to_string().contains("Generate"));
+    assert!(
+        error
+            .to_string()
+            .contains("max_tokens 1000001 exceeds the Mocker limit of 1000000")
+    );
+}
+
 #[tokio::test]
 async fn sglang_teardown_terminates_handlers_with_clients_alive() {
     let (outputs, tokens) = bounded(
         "server teardown with live clients",
         teardown_with_live_clients::<support::sglang::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
+}
+
+#[tokio::test]
+async fn lpx_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::lpx::Fixture>(),
     )
     .await;
     let error = failure(outputs, &tokens, BackendError::Unknown);
@@ -847,7 +894,11 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     assert_eq!(outputs.len(), 2);
     assert!(outputs[0].finish_reason.is_none());
     assert_eq!(outputs[1].finish_reason, Some(FinishReason::Length));
-    for (output, expected) in outputs.iter().zip(http::responses(request_id)) {
+    let native_id = outputs[0].engine_data.as_ref().unwrap()["sglang_response"]["meta_info"]["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(http::logical_request_id(native_id), request_id);
+    for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
             Some(json!({"sglang_response": expected}))
@@ -904,6 +955,8 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                 } else {
                     http_checkpoint(&mut stream, &target).await
                 };
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 let tokens = target.tokens();
                 let survivor_ctx = mock_context();
                 let survivor_id = survivor_ctx.id().to_string();
@@ -923,9 +976,9 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                     failure(outputs, &tokens, BackendError::Cancelled);
                 }
                 drop(stream);
-                http.wait_aborted(ctx.id()).await;
+                http.wait_aborted(&native_id).await;
                 bounded("HTTP target transport released", target.wait(Event::Dropped)).await;
-                aborted.push(ctx.id().to_string());
+                aborted.push(native_id.clone());
                 assert_eq!(http.aborted_requests(), aborted);
                 assert_eq!(target.tokens(), tokens);
                 assert!(!survivor.reached(Event::Dropped));
@@ -1121,6 +1174,8 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     output = stream.next() => panic!("response arrived before headers: {output:?}"),
                 }
                 assert!(poll!(stream.next()).is_pending());
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 if matches!(cancellation, Cancellation::Explicit) {
                     ctx.stop_generating();
                     failure(
@@ -1139,7 +1194,7 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     assert!(
                         tokio::time::timeout(std::time::Duration::from_millis(100), async {
                             tokio::select! {
-                                _ = http.wait_aborted(ctx.id()) => panic!("decode aborted before transfer completed"),
+                                _ = http.wait_aborted(&native_id) => panic!("decode aborted before transfer completed"),
                                 _ = target.wait(Event::Dropped) => panic!("decode transport dropped before transfer completed"),
                             }
                         })
@@ -1150,17 +1205,17 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                 }
                 gate.release();
                 if !is_terminal_without_tokens {
-                    http.wait_aborted(ctx.id()).await;
+                    http.wait_aborted(&native_id).await;
                     assert!(*first_token.borrow());
                     assert_eq!(target.tokens(), vec![101]);
-                    aborted.push(ctx.id().to_string());
+                    aborted.push(native_id.clone());
                 }
                 bounded("HTTP decode transport released", target.wait(Event::Dropped)).await;
                 if is_terminal_without_tokens {
                     assert!(
                         tokio::time::timeout(
                             std::time::Duration::from_millis(100),
-                            http.wait_aborted(ctx.id()),
+                            http.wait_aborted(&native_id),
                         )
                         .await
                         .is_err()
