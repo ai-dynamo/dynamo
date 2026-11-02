@@ -34,6 +34,11 @@ from dynamo.global_planner.capacity_manager import (
     PoolSnapshot,
     PoolSpec,
 )
+from dynamo.global_planner.priority import (
+    PriorityContext,
+    PriorityResolver,
+    ResolvedPriority,
+)
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleStatus
 from dynamo.planner.core import budget
@@ -125,8 +130,16 @@ class Orchestrator:
         intent_cache_ttl_seconds: float = 360.0,
         now: Callable[[], float] = time.time,
         use_lock: bool = True,
+        priority_resolver: Optional[PriorityResolver] = None,
     ):
         self.capacity_manager = capacity_manager
+
+        # Pool priorities order partner selection under contention. Defaulting
+        # to an empty resolver gives every pool the same priority, which makes
+        # the priority term constant and collapses the sort back to exactly the
+        # pre-priority ordering -- an unconfigured GlobalPlanner arbitrates
+        # identically to one built before priorities existed.
+        self.priority_resolver = priority_resolver or PriorityResolver()
 
         # TODO(global-planner): Validate configuration and requests at the
         # boundary: reject min > max and invalid TTLs, preserve an explicit empty
@@ -450,6 +463,7 @@ class Orchestrator:
         ``log_*`` values are used only for parity-identical log lines.
         """
         pools = all_pools.get(participant_id, {})
+        ctx = PriorityContext()
 
         # Always update the intent cache with this request's targets, regardless
         # of decision. A later request from a complementary pool may need to pair
@@ -491,9 +505,8 @@ class Orchestrator:
 
         # TODO(global-planner): Rework boundary and partner selection to allow
         # monotonic recovery from an already-out-of-bounds state, compute
-        # tolerance only from selected pools, continue after an unpartializable
-        # candidate, prefer an already-valid standalone request, and preserve
-        # same-participant priority during sorting.
+        # tolerance only from selected pools, and prefer an already-valid
+        # standalone request, and preserve same-participant priority during sorting.
         # Multi-partner packing: pack as many opposite-direction cached intents
         # as fit within the band, partially consuming one over-sized candidate if
         # needed.
@@ -522,6 +535,8 @@ class Orchestrator:
             )
             partners_desc = ", ".join(
                 f"{p.participant_id}/{p.sub_type}={p.applied_desired}"
+                f" (priority "
+                f"{self.priority_resolver.resolve(p.participant_id, p.sub_type, ctx).priority})"
                 for p in selected_partners
             )
             logger.info(
@@ -545,8 +560,12 @@ class Orchestrator:
         else:
             # Budget breach: standalone out-of-bounds and no feasible partner set
             # found.
+            requester = self._summarize_request_priority(
+                participant_id, targets, pools, net_delta, ctx
+            )
             logger.warning(
-                f"Rejecting scale request from {log_caller_name}: "
+                f"Rejecting scale request from {log_caller_name} "
+                f"(priority {requester.priority} via {requester.selector}): "
                 f"{standalone_reason}; no feasible pair packing"
             )
             # Soft denial: budget breach is an expected operational outcome in
@@ -559,6 +578,30 @@ class Orchestrator:
                     f"GPU budget breach: {standalone_reason}; no feasible pair packing"
                 ),
             )
+
+    def _summarize_request_priority(
+        self,
+        participant_id: str,
+        targets: list[TargetReplica],
+        pools: dict[str, PoolSpec],
+        net_delta: int,
+        ctx: PriorityContext,
+    ) -> ResolvedPriority:
+        """Report a priority from a target driving the net budget breach."""
+        resolved = [
+            self.priority_resolver.resolve(
+                participant_id, target.sub_component_type.value, ctx
+            )
+            for target in targets
+            if (spec := pools.get(target.sub_component_type.value)) is not None
+            and (target.desired_replicas - spec.current_replicas)
+            * spec.gpu_per_replica
+            * net_delta
+            > 0
+        ]
+        if not resolved:
+            return self.priority_resolver.resolve(participant_id, "", ctx)
+        return max(resolved, key=lambda r: r.priority)
 
     def _total_gpus_from_snapshot(
         self,
@@ -801,13 +844,40 @@ class Orchestrator:
             + [s.gpu_per_replica for s in candidate_specs]
         )
 
-        # Sort ascending by |delta_gpu| — smaller pieces overshoot less.
         def cand_delta(c: PartnerTransfer) -> int:
             return (
                 c.applied_desired - c.spec.current_replicas
             ) * c.spec.gpu_per_replica
 
-        all_candidates.sort(key=lambda c: abs(cand_delta(c)))
+        # Resolve each candidate's priority once; the sort would otherwise
+        # re-resolve on every comparison.
+        ctx = PriorityContext()
+        priorities = {
+            (c.participant_id, c.sub_type): self.priority_resolver.resolve(
+                c.participant_id, c.sub_type, ctx
+            )
+            for c in all_candidates
+        }
+
+        # Priority leads, and its sign depends on which way capacity is moving.
+        # A scale-up request is served by donors giving GPUs up, so take from
+        # the LEAST important pool first. A scale-down request below the floor
+        # is paired with recipients taking GPUs on, so give to the MOST
+        # important pool first. Priorities are higher-is-more-important, so
+        # ascending order serves donors and descending serves recipients.
+        # Getting this backwards still produces in-band totals, so it would not
+        # fail loudly -- the two ordering tests cover both directions.
+        direction = 1 if request_net_delta_gpu > 0 else -1
+
+        # Then ascending |delta_gpu|, preserving the existing ordering among
+        # equal-priority pools. The stable sort retains the iterator's locality
+        # preference only when both priority and delta are tied.
+        all_candidates.sort(
+            key=lambda c: (
+                direction * priorities[(c.participant_id, c.sub_type)].priority,
+                abs(cand_delta(c)),
+            )
+        )
 
         selected: list[PartnerTransfer] = []
         overrides = dict(standalone_overrides)
@@ -863,13 +933,14 @@ class Orchestrator:
                 continue
 
             # Full inclusion crossed the band. Try partial consumption that lands
-            # at the appropriate band edge, then stop.
+            # at the appropriate band edge. If even one replica cannot fit,
+            # skip this candidate and try a finer-grained partner.
             partial_k = self._partial_partner(cand, all_pools, overrides, tolerance)
             if partial_k is not None and partial_k != cand_spec.current_replicas:
                 partial_cand = PartnerTransfer(cand_pid, cand_sub, partial_k, cand_spec)
                 selected.append(partial_cand)
                 overrides[(cand_pid, cand_sub)] = partial_k
-            break
+                break
 
         # Loop ended with the running total possibly still on the wrong side (no
         # candidate fully reached the band, none of them crossed). Try partial of

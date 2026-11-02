@@ -14,7 +14,9 @@ use super::filter::{
     BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField, KvCacheSpecKind,
 };
 use super::trtllm::{self, MapTokenIds};
-use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
+use super::types::{
+    BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent, WIDE_TOKEN_SENTINEL,
+};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -152,7 +154,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                         }
                         let tokens = match ids {
                             MapTokenIds::Single(ids) => {
-                                ids.into_iter().map(trtllm::Token::Id).collect()
+                                let Some(tokens) = ids
+                                    .into_iter()
+                                    .map(|id| u32::try_from(id).ok().map(trtllm::Token::Id))
+                                    .collect::<Option<Vec<_>>>()
+                                else {
+                                    return Ok(RawKvEvent::Ignored);
+                                };
+                                tokens
                             }
                             MapTokenIds::DigestFirst(tokens) => tokens,
                             _ => return Ok(RawKvEvent::Ignored),
@@ -540,14 +549,20 @@ fn normalize_medium(medium: Option<String>) -> Option<String> {
     medium.filter(|value| !value.is_empty())
 }
 
+fn narrow_token_id(token_id: u64) -> u32 {
+    u32::try_from(token_id).unwrap_or(WIDE_TOKEN_SENTINEL)
+}
+
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
     match token_ids {
-        KvTokenIds::Single(tids) => (tids, false),
+        KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), false),
         KvTokenIds::Bigram(tids) => {
-            let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
-            if !tids.is_empty() {
-                let last_token = tids.last().map(|&(_, second)| second).unwrap();
-                new_tids.push(last_token);
+            let mut new_tids: Vec<u32> = tids
+                .iter()
+                .map(|&(first, _)| narrow_token_id(first))
+                .collect();
+            if let Some(&(_, last_token)) = tids.last() {
+                new_tids.push(narrow_token_id(last_token));
             }
             (new_tids, true)
         }

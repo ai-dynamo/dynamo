@@ -8,8 +8,8 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(super) enum MapTokenIds {
-    Single(Vec<u32>),
-    Bigram(Vec<(u32, u32)>),
+    Single(Vec<u64>),
+    Bigram(Vec<(u64, u64)>),
     DigestFirst(Vec<Token>),
 }
 

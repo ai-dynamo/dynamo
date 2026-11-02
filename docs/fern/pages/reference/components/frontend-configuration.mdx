@@ -744,6 +744,13 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 <ParamField path="--enable-anthropic-api" type="boolean" default="false">
   Enable `/v1/messages` (the Anthropic Messages API).
 
+  With a V2 unified parser that provides per-call completion evidence, streaming responses release
+  completed tool blocks in call order once the identity is available and the arguments form a valid
+  JSON object. This lets clients receive a completed call while later calls are still generating.
+  V1 parsers, including those selected with `DYN_PARSER_VERSION=1`, retain the finish-reason or
+  end-of-stream fallback. Calls whose argument string remains empty wait until end of stream,
+  even if the parser reports completion.
+
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
 
