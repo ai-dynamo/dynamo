@@ -176,56 +176,45 @@ async fn every_streamed_token_carries_a_logprob_when_requested() {
 }
 
 /// The real servicer sends no `TokenOutput.text` when `extra.detokenize` is
-/// false, and decodes `TokenInfo.token` only on the logprobs path.
+/// false, decodes `TokenInfo.token` only on the logprobs path, and refuses a
+/// non-boolean `detokenize`.
 #[tokio::test]
 async fn token_strings_follow_detokenize_and_logprobs() {
     let service = service();
-    let token_only = |request_id: &str, logprobs: bool| {
+    let detokenize = |kind| prost_types::Struct {
+        fields: [("detokenize".to_string(), Value { kind: Some(kind) })].into(),
+    };
+    for (request_id, extra, logprobs) in [
+        ("req-ids", Some(detokenize(Kind::BoolValue(false))), false),
+        ("req-lp", Some(detokenize(Kind::BoolValue(false))), true),
+        ("req-text", None, false),
+    ] {
+        let has_text = extra.is_none();
         let mut request = request(request_id, 4);
-        request.extra = Some(prost_types::Struct {
-            fields: [(
-                "detokenize".to_string(),
-                Value {
-                    kind: Some(Kind::BoolValue(false)),
-                },
-            )]
-            .into(),
-        });
+        request.extra = extra;
         request.response = Some(pb::ResponseOptions {
             return_output_logprobs: Some(logprobs),
             ..Default::default()
         });
-        request
-    };
-    let tokens = |responses: &[pb::GenerateResponse]| -> Vec<pb::TokenOutput> {
-        events(responses)
-            .into_iter()
-            .filter_map(|event| match event {
-                pb::generate_response::Event::Token(token) => Some(token.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-
-    let responses = drain(&service, token_only("req-ids", false)).await.unwrap();
-    let streamed = tokens(&responses);
-    assert_eq!(streamed.len(), 4);
-    for token in &streamed {
-        assert!(token.text.is_empty());
-        assert!(token.tokens.iter().all(|info| info.token.is_empty()));
+        let responses = drain(&service, request).await.unwrap();
+        let mut streamed = 0;
+        for event in events(&responses) {
+            if let pb::generate_response::Event::Token(token) = event {
+                assert_eq!(!token.text.is_empty(), has_text, "{request_id}");
+                let [info] = token.tokens.as_slice() else {
+                    panic!("{request_id}: expected one TokenInfo per event");
+                };
+                assert_eq!(!info.token.is_empty(), logprobs, "{request_id}");
+                streamed += 1;
+            }
+        }
+        assert_eq!(streamed, 4, "{request_id}");
     }
 
-    let responses = drain(&service, token_only("req-lp", true)).await.unwrap();
-    for token in &tokens(&responses) {
-        assert!(token.text.is_empty());
-        assert!(token.tokens.iter().all(|info| !info.token.is_empty()));
-    }
-
-    let responses = drain(&service, request("req-text", 4)).await.unwrap();
-    for token in &tokens(&responses) {
-        assert!(!token.text.is_empty());
-        assert!(token.tokens.iter().all(|info| info.token.is_empty()));
-    }
+    let mut request = request("req-bad", 4);
+    request.extra = Some(detokenize(Kind::StringValue("false".to_string())));
+    let error = generate_error(&service, request).await;
+    assert_eq!(error.code(), Code::InvalidArgument);
 }
 
 /// Pins the terminal shape the sidecar requires: exactly one `finished`, never
