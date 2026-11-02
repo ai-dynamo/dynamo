@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the GMS V1 loader options."""
-
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -26,7 +24,6 @@ pytestmark = [
 ]
 
 
-# A pod's GPUs in PCI bus order, and in the order CUDA numbers them.
 _BUS_ORDER = ["GPU-a", "GPU-b", "GPU-c", "GPU-d"]
 _CUDA_ORDER = ["GPU-b", "GPU-a", "GPU-c", "GPU-d"]
 

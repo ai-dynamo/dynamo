@@ -105,7 +105,31 @@ def test_each_device_process_is_pinned_to_its_gpu(node, monkeypatch, confine):
         assert [fn for _, _, fn in started] == [None, None]
 
 
-def test_supervisor_without_landlock_runs_unconfined(node, monkeypatch, caplog):
+def test_failed_start_stops_the_processes_already_started(node, monkeypatch):
+    started = []
+
+    class Popen:
+        def __init__(self, command, env, preexec_fn):
+            if started:
+                raise OSError("spawn failed")
+            self.pid = 1
+            self.terminated = False
+            started.append(self)
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(ranks.subprocess, "Popen", Popen)
+
+    with pytest.raises(OSError, match="spawn failed"):
+        ranks.start_ranks(
+            device.node_gpus(*node), lambda n, gpu: [f"device{n}"], confine=False
+        )
+    [first] = started
+    assert first.terminated
+
+
+def test_supervisor_without_landlock_runs_unconfined(node, monkeypatch):
     def unavailable():
         raise OSError(38, "Landlock: Function not implemented")
 
@@ -119,12 +143,19 @@ def test_supervisor_without_landlock_runs_unconfined(node, monkeypatch, caplog):
     monkeypatch.setattr(server, "node_gpus", lambda: device.node_gpus(*node))
     monkeypatch.setattr(server.ranks, "start_ranks", start_ranks)
     monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+    # Record the warning on the module's logger: the vLLM worker integration
+    # stops gpu_memory_service records from reaching the root logger.
+    warnings = []
+    monkeypatch.setattr(
+        server.logger, "warning", lambda msg, *args: warnings.append(msg % args)
+    )
 
     assert server._run_v1_ranks(["--checkpoint-dir", "/ckpt"], confine=True) == 0
 
     [(commands, confine)] = started
     assert not confine
-    assert "Running them unconfined" in caplog.text
+    [warning] = warnings
+    assert "Running them unconfined" in warning
     # Each process is told its GPU, ahead of the loader's arguments.
     assert commands[1][-6:] == [
         "1",

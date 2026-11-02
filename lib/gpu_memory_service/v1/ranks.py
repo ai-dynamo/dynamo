@@ -31,23 +31,29 @@ def start_ranks(
     list the other GPUs, so ``command`` must tell it which GPU is its own.
     """
     processes = []
-    for device, gpu in enumerate(gpus):
-        process = subprocess.Popen(
-            command(device, gpu),
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
-            preexec_fn=(
-                functools.partial(landlock.confine_to_gpu, gpu.minor)
-                if confine
-                else None
-            ),
-        )
-        logger.info(
-            "Started GMS V1 device=%d gpu=%s bus=%s confined=%s pid=%d",
-            device,
-            gpu.uuid,
-            gpu.bus_id,
-            confine,
-            process.pid,
-        )
-        processes.append(process)
+    try:
+        for device, gpu in enumerate(gpus):
+            process = subprocess.Popen(
+                command(device, gpu),
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
+                preexec_fn=(
+                    functools.partial(landlock.confine_to_gpu, gpu.minor)
+                    if confine
+                    else None
+                ),
+            )
+            logger.info(
+                "Started GMS V1 device=%d gpu=%s bus=%s confined=%s pid=%d",
+                device,
+                gpu.uuid,
+                gpu.bus_id,
+                confine,
+                process.pid,
+            )
+            processes.append(process)
+    except BaseException:
+        # The caller never receives these processes, so stop them here.
+        for process in processes:
+            process.terminate()
+        raise
     return processes
