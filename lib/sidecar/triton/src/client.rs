@@ -92,7 +92,7 @@ impl TritonClient {
             .collect();
         if transports.is_empty() {
             return Err(dynamo_sidecar_common::invalid_argument(
-                "at least one of `--grpc-endpoint` and `--http-endpoint` is required",
+                "at least one of `--grpc` and `--http` is required",
             ));
         }
         Ok(Self {

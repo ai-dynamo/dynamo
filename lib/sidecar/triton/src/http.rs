@@ -442,7 +442,7 @@ pub(crate) mod tests {
         ])
         .await;
 
-        let endpoint = HttpEndpoint::parse(&endpoint, "--http-endpoint").unwrap();
+        let endpoint = HttpEndpoint::parse(&endpoint, "--http").unwrap();
         let client = HttpClient::connect(&endpoint, transport()).await.unwrap();
         assert_eq!(client.ready_models().await.unwrap(), ["a", "b"]);
         assert!(!client.model_ready("my model").await.unwrap());

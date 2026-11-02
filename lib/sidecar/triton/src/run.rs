@@ -10,7 +10,6 @@ use anyhow::{Context, ensure};
 use clap::Parser;
 use dynamo_backend_common::{DisaggregationMode, ModelInput, RawEngine, Worker, WorkerConfig};
 use dynamo_llm::grpc::service::kserve::inference;
-use dynamo_llm::grpc::service::kserve::inference::model_config::SchedulingChoice;
 use dynamo_llm::protocols::tensor::TensorModelConfig;
 use dynamo_runtime::Runtime;
 use dynamo_runtime::system_status_server::SystemProbePolicy;
@@ -26,9 +25,16 @@ use crate::pooling::{Classify, Embeddings, TextEngine, TextModel, TextTask};
 
 type RunFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
+/// Parse and validate the command line, then write the resolved endpoints to their environment variables for subprocesses.
+///
+/// Call this before starting any other thread: it modifies the process environment.
 pub fn from_cli() -> anyhow::Result<impl FnOnce(Runtime, CancellationToken) -> RunFuture> {
-    let args = Args::parse();
+    let mut args = Args::parse();
     args.validate().map_err(anyhow::Error::msg)?;
+    for (name, value) in args.endpoint_env() {
+        // SAFETY: `main` calls `from_cli` before the Tokio runtime starts, while the process has one thread.
+        unsafe { std::env::set_var(name, value) };
+    }
     Ok(move |runtime, shutdown| -> RunFuture { Box::pin(run(args, runtime, shutdown)) })
 }
 
@@ -56,35 +62,33 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
         let config = client.model_config(&model).await?;
         configs.push((model, config));
     }
-    if args.task != Task::Tensor && args.model_names.is_empty() {
-        configs = skip_ensemble_dependencies(configs, args.task)?;
-    }
 
     let mut workers = JoinSet::new();
     for (model, config) in configs {
-        let (engine, model_input, endpoint_types): (Arc<dyn RawEngine>, _, _) = match args.task {
-            Task::Tensor => {
-                let tensor_model_config = TensorModelConfig {
-                    name: model.clone(),
-                    inputs: Vec::new(),
-                    outputs: Vec::new(),
-                    triton_model_config: Some(config.encode_to_vec()),
-                };
-                let engine =
-                    TritonModelEngine::new(model.clone(), client.clone(), tensor_model_config);
-                (Arc::new(engine), ModelInput::Tensor, "tensor")
-            }
-            Task::Classify => (
-                text_engine(Classify::default(), &model, &config, &args, &client)?,
-                ModelInput::Text,
-                "classify",
-            ),
-            Task::Embeddings => (
-                text_engine(Embeddings, &model, &config, &args, &client)?,
-                ModelInput::Text,
-                "embedding",
-            ),
-        };
+        let (engine, model_input, endpoint_types): (Arc<dyn RawEngine>, _, _) =
+            match args.task(&model) {
+                Task::Tensor => {
+                    let tensor_model_config = TensorModelConfig {
+                        name: model.clone(),
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                        triton_model_config: Some(config.encode_to_vec()),
+                    };
+                    let engine =
+                        TritonModelEngine::new(model.clone(), client.clone(), tensor_model_config);
+                    (Arc::new(engine), ModelInput::Tensor, "tensor")
+                }
+                Task::Classify => (
+                    text_engine(Classify::default(), &model, &config, &client)?,
+                    ModelInput::Text,
+                    "classify",
+                ),
+                Task::Embeddings => (
+                    text_engine(Embeddings, &model, &config, &client)?,
+                    ModelInput::Text,
+                    "embedding",
+                ),
+            };
         let worker_config = WorkerConfig {
             namespace: args.namespace.clone(),
             component: args.component.clone(),
@@ -137,76 +141,40 @@ fn text_engine<T: TextTask>(
     task: T,
     model: &str,
     config: &inference::ModelConfig,
-    args: &Args,
     client: &TritonClient,
 ) -> anyhow::Result<Arc<dyn RawEngine>> {
-    let (input, output) = args.tensor_name_overrides();
-    let model = TextModel::new::<T>(model, config, input, output, client.clone())?;
+    let model = TextModel::new::<T>(model, config, client.clone())?;
     Ok(Arc::new(TextEngine::new(task, model)))
 }
 
-/// Drop models that only serve as steps of another model's ensemble.
-///
-/// A classify or embedding repository pairs one user-facing ensemble (STRING in, FP32 out) with tokenizer and encoder models that have neither shape.
-/// Those stay loaded in Triton for their ensemble but are not registered, so they do not fail startup.
-fn skip_ensemble_dependencies(
-    configs: Vec<(String, inference::ModelConfig)>,
-    task: Task,
-) -> anyhow::Result<Vec<(String, inference::ModelConfig)>> {
-    let dependencies: BTreeSet<&str> = configs
-        .iter()
-        .filter_map(|(_, config)| match &config.scheduling_choice {
-            Some(SchedulingChoice::EnsembleScheduling(ensemble)) => Some(ensemble),
-            _ => None,
-        })
-        .flat_map(|ensemble| ensemble.step.iter().map(|step| step.model_name.as_str()))
-        .filter(|name| !name.is_empty())
-        .collect();
-    let (skipped, exposed): (Vec<_>, Vec<_>) = configs
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .partition(|name| dependencies.contains(name));
-    let (task_name, endpoint) = match task {
-        Task::Classify => ("classify", Classify::ENDPOINT),
-        Task::Embeddings => ("embeddings", Embeddings::ENDPOINT),
-        Task::Tensor => unreachable!("tensor models are not filtered"),
-    };
-    ensure!(
-        !exposed.is_empty(),
-        "No user-facing {task_name} models found: every ready model is a step of another model's ensemble. \
-         Add a user-facing ensemble (STRING in, FP32 out) that wires them together, or run with --task tensor."
-    );
-    if !skipped.is_empty() {
-        tracing::info!(
-            ?skipped,
-            endpoint,
-            "Skipping ensemble dependency models; they stay loaded in Triton for their ensembles"
-        );
-    }
-    let skipped: BTreeSet<String> = skipped.into_iter().map(str::to_string).collect();
-    Ok(configs
-        .into_iter()
-        .filter(|(name, _)| !skipped.contains(name))
-        .collect())
-}
-
+/// Models to register: the explicit `--model-name` list plus every `--classify` and `--embeddings` model, or else every ready model in Triton.
 async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<Vec<String>> {
     if !args.model_names.is_empty() {
         return Ok(args
             .model_names
             .iter()
-            .map(|name| name.trim())
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
+            .chain(args.text_models())
+            .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect());
     }
 
-    client
+    let models = client
         .ready_models()
         .await
-        .context("query Triton repository index")
+        .context("query Triton repository index")?;
+    for model in args.text_models() {
+        ensure!(
+            models.contains(model),
+            "Triton model '{model}' passed to {} is not ready; ready models: {models:?}",
+            match args.task(model) {
+                Task::Classify => "--classify",
+                _ => "--embeddings",
+            }
+        );
+    }
+    Ok(models)
 }
 
 fn endpoint_slug(model: &str) -> String {
@@ -233,59 +201,7 @@ fn endpoint_slug(model: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_llm::grpc::service::kserve::inference;
-    use dynamo_llm::grpc::service::kserve::inference::model_config::SchedulingChoice;
-
-    use super::{endpoint_slug, skip_ensemble_dependencies};
-    use crate::args::Task;
-
-    fn ensemble(steps: &[&str]) -> inference::ModelConfig {
-        inference::ModelConfig {
-            scheduling_choice: Some(SchedulingChoice::EnsembleScheduling(
-                inference::ModelEnsembling {
-                    step: steps
-                        .iter()
-                        .map(|name| inference::model_ensembling::Step {
-                            model_name: name.to_string(),
-                            ..Default::default()
-                        })
-                        .collect(),
-                },
-            )),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn skips_ensemble_dependencies() {
-        let configs = vec![
-            ("encoder".to_string(), Default::default()),
-            (
-                "text_classifier".to_string(),
-                ensemble(&["tokenizer", "encoder"]),
-            ),
-            ("tokenizer".to_string(), Default::default()),
-            ("other".to_string(), Default::default()),
-        ];
-        let exposed: Vec<_> = skip_ensemble_dependencies(configs, Task::Classify)
-            .unwrap()
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        assert_eq!(exposed, ["text_classifier", "other"]);
-
-        let only_dependencies = vec![
-            ("a".to_string(), ensemble(&["b"])),
-            ("b".to_string(), ensemble(&["a"])),
-        ];
-        let error = skip_ensemble_dependencies(only_dependencies, Task::Embeddings)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("No user-facing embeddings models"),
-            "{error}"
-        );
-    }
+    use super::endpoint_slug;
 
     #[test]
     fn endpoint_slug_is_safe_and_unique() {

@@ -56,8 +56,7 @@ impl Classify {
 impl TextTask for Classify {
     const LABEL: &'static str = "classify";
     const ENDPOINT: &'static str = "/v1/classify";
-    const INPUT_FLAG: &'static str = "--classify-input-name";
-    const OUTPUT_FLAG: &'static str = "--classify-output-name";
+    const FLAG: &'static str = "--classify";
 
     type Request = NvCreateClassifyRequest;
 
@@ -210,15 +209,11 @@ mod tests {
     use super::{Classify, argmax, parse_labels};
 
     fn parse(request: serde_json::Value) -> Result<Vec<String>, String> {
-        let model = resolve(
-            &config(
-                4,
-                &[tensor("TEXT", TypeString, &[1])],
-                &[tensor("probs", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let model = resolve(&config(
+            4,
+            &[tensor("TEXT", TypeString, &[1])],
+            &[tensor("probs", TypeFp32, &[3])],
+        ))
         .unwrap();
         Classify::default()
             .parse(&model, request)
@@ -273,15 +268,11 @@ mod tests {
 
     #[tokio::test]
     async fn responds_with_probabilities_and_request_id() {
-        let model = resolve(
-            &config(
-                4,
-                &[tensor("TEXT", TypeString, &[1])],
-                &[tensor("probs", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let model = resolve(&config(
+            4,
+            &[tensor("TEXT", TypeString, &[1])],
+            &[tensor("probs", TypeFp32, &[3])],
+        ))
         .unwrap();
         let task = Classify::default();
         let (request, prompts) = task

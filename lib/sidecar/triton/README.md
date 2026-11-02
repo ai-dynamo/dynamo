@@ -11,29 +11,39 @@ SPDX-License-Identifier: Apache-2.0
 
 `dynamo-triton-sidecar` connects Dynamo to a separately managed NVIDIA Triton Inference Server over its KServe v2 gRPC API, its KServe v2 HTTP/REST API, or both.
 It registers one Dynamo endpoint for every ready Triton model and forwards unary model-infer requests without loading Triton or GPU libraries into the sidecar process.
-By default each model is served as a KServe tensor model; `--task classify` and `--task embeddings` serve text models through the frontend's OpenAI `/v1/classify` and `/v1/embeddings` endpoints instead (see [OpenAI classify and embeddings](#openai-classify-and-embeddings)).
+By default each model is served as a KServe tensor model; `--classify <model>` and `--embeddings <model>` serve the named text models through the frontend's OpenAI `/v1/classify` and `/v1/embeddings` endpoints instead (see [OpenAI classify and embeddings](#openai-classify-and-embeddings)).
 
 Choose the protocols at runtime by passing their endpoints.
 At least one is required.
 
 ```bash
-# gRPC only
-dynamo-triton-sidecar --grpc-endpoint localhost:8001 --discovery-backend file
+# gRPC only, on localhost:8001
+dynamo-triton-sidecar --grpc --discovery-backend file
 
-# HTTP only
-dynamo-triton-sidecar --http-endpoint localhost:8000 --discovery-backend file
+# HTTP only, on localhost:8000
+dynamo-triton-sidecar --http --discovery-backend file
 
-# Both
+# Both, on Triton's default ports
+dynamo-triton-sidecar --grpc --http --discovery-backend file
+
+# Both, on a remote server
 dynamo-triton-sidecar \
-  --grpc-endpoint localhost:8001 \
-  --http-endpoint localhost:8000 \
+  --grpc triton.example.com:8001 \
+  --http https://triton.example.com/prefix \
   --discovery-backend file
 ```
 
-| Flag              | Environment Variable        | Value                                                                       |
-| :---------------- | :-------------------------- | :-------------------------------------------------------------------------- |
-| `--grpc-endpoint` | `DYN_SIDECAR_GRPC_ENDPOINT` | `host:port` or a plaintext `http://` / `grpc://` URL                        |
-| `--http-endpoint` | `DYN_SIDECAR_HTTP_ENDPOINT` | `host:port` or an `http://` / `https://` URL, optionally with a path prefix |
+| Flag     | Environment Variable        | Value                                                                               | With No Value    |
+| :------- | :-------------------------- | :---------------------------------------------------------------------------------- | :--------------- |
+| `--grpc` | `DYN_SIDECAR_GRPC_ENDPOINT` | port, `host:port`, or a plaintext `http://` / `grpc://` URL                         | `localhost:8001` |
+| `--http` | `DYN_SIDECAR_HTTP_ENDPOINT` | port, `host:port`, or an `http://` / `https://` URL, optionally with a path prefix  | `localhost:8000` |
+
+A bare port, such as `--grpc 9001`, means `localhost:<port>`.
+The environment variables take the same values as `--grpc` and `--http` and apply only when neither form of the flag is passed.
+At startup, the sidecar writes each endpoint it uses back to its environment variable in full, such as `http://localhost:8000`, so subprocesses see the same endpoints.
+
+`--grpc-endpoint` and `--http-endpoint` are the same as `--grpc` and `--http`, matching the flags of the other Dynamo sidecars: each takes a required `host:port` or URL, with no bare-port or no-value default.
+When one is passed along with its short form, the last one on the command line wins; either flag on the command line overrides the environment variable.
 
 When both protocols are enabled:
 
@@ -50,25 +60,30 @@ Use one or more `--model-name <name>` options to skip repository auto-discovery.
 
 ## OpenAI classify and embeddings
 
-`--task` (`DYN_TRITON_TASK`) selects the endpoint every registered model serves:
+Each model is served through one endpoint, chosen by the flags that name it:
 
-| Task               | Frontend Endpoint            | Registration                        |
-| :----------------- | :--------------------------- | :---------------------------------- |
-| `tensor` (default) | KServe gRPC tensor inference | `Tensor` input, `TensorBased` model |
-| `classify`         | `POST /v1/classify`          | `Text` input, `Classify` model      |
-| `embeddings`       | `POST /v1/embeddings`        | `Text` input, `Embedding` model     |
+| Flag                                                         | Frontend Endpoint            | Registration                        |
+| :----------------------------------------------------------- | :--------------------------- | :---------------------------------- |
+| (none, the default) or `--model-name <model>`                | KServe gRPC Tensor Inference | `Tensor` input, `TensorBased` model |
+| `--classify <model>` (`DYN_TRITON_CLASSIFY_MODELS`)          | `POST /v1/classify`          | `Text` input, `Classify` model      |
+| `--embeddings <model>` (`DYN_TRITON_EMBEDDINGS_MODELS`)      | `POST /v1/embeddings`        | `Text` input, `Embedding` model     |
 
-These tasks match the Python Triton worker's `--task classify` and `--task embeddings`.
-The model must declare exactly one `TYPE_STRING` input with `dims: [1]` or `dims: [-1]` and exactly one `TYPE_FP32` output, typically an ensemble that tokenizes inside Triton.
-Name the tensors with `--classify-input-name` / `--classify-output-name` or `--embeddings-input-name` / `--embeddings-output-name` when the model has more than one candidate.
-A model that does not fit fails startup with its name in the error.
+Repeat `--classify` and `--embeddings`, or pass a comma-separated list, to serve several models; one Triton server can serve tensor, classify, and embeddings models side by side.
+A model cannot be passed to both flags.
+The named models are served in addition to any `--model-name` models; when auto-discovering, each named model must be ready in Triton.
 
 ```bash
-dynamo-triton-sidecar --grpc-endpoint localhost:8001 --task classify --discovery-backend file
+dynamo-triton-sidecar --grpc \
+  --classify text_classifier \
+  --embeddings text_embedder \
+  --discovery-backend file
 ```
 
+A classify or embeddings model must declare exactly one `TYPE_STRING` input with `dims: [1]` or `dims: [-1]` and exactly one `TYPE_FP32` output, typically an ensemble that tokenizes inside Triton.
+A named model that does not fit fails startup with its name in the error.
+
 - Each request's text prompts are sent to Triton as one `BYTES` tensor, shaped `[N, 1]` for a batching model and `[N]` otherwise, and Triton returns one `FP32` row per prompt.
-- When auto-discovering models, ensemble steps (tokenizer, encoder, and so on) stay loaded in Triton but are not registered.
+- Ensemble steps (tokenizer, encoder, and so on) that are not named are served as tensor models like any other model; pass `--model-name` to register only the models you want.
 - Token-ID input is rejected, as are request controls owned by the Triton model: `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `mm_processor_kwargs`, `cache_salt`, and non-zero `priority` for classify; `dimensions`, `add_special_tokens`, and `truncate_prompt_tokens` for embeddings.
 - Classify labels come from the output's `label_filename`.
   Triton exposes labels only through its classification extension, which rounds scores, so the sidecar reads probabilities from the raw output and fetches the labels once per model with one extra classification request.
@@ -87,7 +102,7 @@ dynamo-triton-sidecar --grpc-endpoint localhost:8001 --task classify --discovery
 | Classification output parameters  | Passed through                             |
 | Bidirectional streaming inference | No                                         |
 | Shared-memory tensor I/O          | No                                         |
-| OpenAI `/v1/classify` (text in)   | Yes, with `--task classify`                |
-| OpenAI `/v1/embeddings` (text in) | Yes, with `--task embeddings`              |
+| OpenAI `/v1/classify` (text in)   | Yes, with `--classify <model>`             |
+| OpenAI `/v1/embeddings` (text in) | Yes, with `--embeddings <model>`           |
 | OpenAI `/v1/pooling`              | No                                         |
 | Dynamic model repository updates  | No; restart the sidecar                    |

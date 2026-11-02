@@ -25,8 +25,7 @@ pub(crate) struct Embeddings;
 impl TextTask for Embeddings {
     const LABEL: &'static str = "embedding";
     const ENDPOINT: &'static str = "/v1/embeddings";
-    const INPUT_FLAG: &'static str = "--embeddings-input-name";
-    const OUTPUT_FLAG: &'static str = "--embeddings-output-name";
+    const FLAG: &'static str = "--embeddings";
 
     type Request = NvCreateEmbeddingRequest;
 
@@ -132,15 +131,11 @@ mod tests {
     use super::Embeddings;
 
     fn model(max_batch_size: i32) -> super::super::TextModel {
-        resolve(
-            &config(
-                max_batch_size,
-                &[tensor("TEXT", TypeString, &[1])],
-                &[tensor("embedding", TypeFp32, &[2])],
-            ),
-            None,
-            None,
-        )
+        resolve(&config(
+            max_batch_size,
+            &[tensor("TEXT", TypeString, &[1])],
+            &[tensor("embedding", TypeFp32, &[2])],
+        ))
         .unwrap()
     }
 

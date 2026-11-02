@@ -21,15 +21,17 @@ fn executable_exposes_triton_configuration() {
         "--request-plane",
         "--response-plane",
         "--event-plane",
+        "--grpc",
         "--grpc-endpoint",
         "--grpc-connections",
+        "--http",
         "--http-endpoint",
-        "--task",
-        "--classify-input-name",
-        "--classify-output-name",
-        "--embeddings-input-name",
-        "--embeddings-output-name",
+        "--classify",
+        "--embeddings",
         "--model-name",
+        "DYN_TRITON_MODEL_NAMES",
+        "DYN_TRITON_CLASSIFY_MODELS",
+        "DYN_TRITON_EMBEDDINGS_MODELS",
     ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }

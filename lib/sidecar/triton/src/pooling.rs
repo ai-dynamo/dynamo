@@ -35,10 +35,8 @@ pub(crate) trait TextTask: Send + Sync + 'static {
     const LABEL: &'static str;
     /// OpenAI endpoint this task serves.
     const ENDPOINT: &'static str;
-    /// CLI flag that selects the input tensor.
-    const INPUT_FLAG: &'static str;
-    /// CLI flag that selects the output tensor.
-    const OUTPUT_FLAG: &'static str;
+    /// CLI flag that serves a model through this task.
+    const FLAG: &'static str;
 
     type Request: Send + 'static;
 
@@ -79,8 +77,6 @@ impl TextModel {
     pub(crate) fn new<T: TextTask>(
         name: &str,
         config: &inference::ModelConfig,
-        input_override: Option<&str>,
-        output_override: Option<&str>,
         client: TritonClient,
     ) -> Result<Self, DynamoError> {
         let label = T::LABEL;
@@ -92,10 +88,8 @@ impl TextModel {
             .collect();
         let input = resolve_tensor(
             &string_inputs,
-            input_override,
             || format!("Triton {label} model '{name}'"),
             "TYPE_STRING input",
-            T::INPUT_FLAG,
         )?;
         // Requests carry one string per item, so the input must be shaped [1] or [-1].
         let dims = &config
@@ -107,8 +101,9 @@ impl TextModel {
         if !matches!(dims.as_slice(), [1] | [-1]) {
             return Err(invalid_argument(format!(
                 "Triton {label} model '{name}' STRING input '{input}' has dims={dims:?}; the {} path supports only dims=[1] or dims=[-1] (one string per request item). \
-                 Change the model's config.pbtxt to one of the supported layouts, or serve the model with --task tensor and address it over KServe gRPC.",
-                T::ENDPOINT
+                 Change the model's config.pbtxt to one of the supported layouts, or drop it from {} to serve it as a KServe tensor model.",
+                T::ENDPOINT,
+                T::FLAG
             )));
         }
 
@@ -120,10 +115,8 @@ impl TextModel {
             .collect();
         let output = resolve_tensor(
             &fp32_outputs,
-            output_override,
             || format!("Triton {label} model '{name}'"),
             "TYPE_FP32 output",
-            T::OUTPUT_FLAG,
         )?;
         let labelled = config
             .output
@@ -346,24 +339,13 @@ impl TextModel {
 
 fn resolve_tensor(
     candidates: &[&str],
-    override_name: Option<&str>,
     model: impl Fn() -> String,
     kind: &str,
-    flag: &str,
 ) -> Result<String, DynamoError> {
-    if let Some(name) = override_name {
-        if !candidates.contains(&name) {
-            return Err(invalid_argument(format!(
-                "{} has no {kind} named '{name}'; {kind}s: {candidates:?}.",
-                model()
-            )));
-        }
-        return Ok(name.to_string());
-    }
     match candidates {
         [name] => Ok((*name).to_string()),
         _ => Err(invalid_argument(format!(
-            "{} has {} {kind} tensor(s); expected exactly 1. Pass {flag} to disambiguate.",
+            "{} has {} {kind} tensor(s); expected exactly 1.",
             model(),
             candidates.len()
         ))),
@@ -615,19 +597,9 @@ mod tests {
         }
     }
 
-    pub(super) fn resolve(
-        config: &inference::ModelConfig,
-        input: Option<&str>,
-        output: Option<&str>,
-    ) -> Result<TextModel, String> {
-        TextModel::new::<Classify>(
-            "model",
-            config,
-            input,
-            output,
-            crate::client::TritonClient::for_tests(),
-        )
-        .map_err(|error| error.to_string())
+    pub(super) fn resolve(config: &inference::ModelConfig) -> Result<TextModel, String> {
+        TextModel::new::<Classify>("model", config, crate::client::TritonClient::for_tests())
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -644,7 +616,7 @@ mod tests {
                 tensor("ids", TypeInt32, &[-1]),
             ],
         );
-        let model = resolve(&config, None, None).unwrap();
+        let model = resolve(&config).unwrap();
         assert_eq!(
             (model.input.as_str(), model.output.as_str()),
             ("TEXT", "probs")
@@ -654,7 +626,7 @@ mod tests {
 
         let mut labelled = config.clone();
         labelled.output[0].label_filename = "labels.txt".to_string();
-        assert!(resolve(&labelled, None, None).unwrap().labelled());
+        assert!(resolve(&labelled).unwrap().labelled());
     }
 
     #[test]
@@ -668,16 +640,12 @@ mod tests {
             ],
             &[tensor("out", TypeFp32, &[3])],
         );
-        let error = resolve(&two_inputs, None, None).err().unwrap();
+        let error = resolve(&two_inputs).err().unwrap();
         assert!(error.contains("2 TYPE_STRING input tensor(s)"), "{error}");
-        assert!(error.contains("--classify-input-name"), "{error}");
-        assert_eq!(resolve(&two_inputs, Some("B"), None).unwrap().input, "B");
-        let error = resolve(&two_inputs, Some("C"), None).err().unwrap();
-        assert!(error.contains("no TYPE_STRING input named 'C'"), "{error}");
 
         let no_output = config(0, &[tensor("A", TypeString, &[1])], &[]);
         assert!(
-            resolve(&no_output, None, None)
+            resolve(&no_output)
                 .err()
                 .unwrap()
                 .contains("0 TYPE_FP32 output")
@@ -688,37 +656,30 @@ mod tests {
             &[tensor("A", TypeString, &[2])],
             &[tensor("out", TypeFp32, &[3])],
         );
-        let error = resolve(&wide, None, None).err().unwrap();
+        let error = resolve(&wide).err().unwrap();
         assert!(error.contains("dims=[2]"), "{error}");
         assert!(error.contains("/v1/classify"), "{error}");
+        assert!(error.contains("--classify"), "{error}");
     }
 
     #[test]
     fn checks_batch_against_max_batch_size() {
         use inference::DataType::{TypeFp32, TypeString};
         let prompts = |count: usize| vec!["text".to_string(); count];
-        let unbatched = resolve(
-            &config(
-                0,
-                &[tensor("A", TypeString, &[1])],
-                &[tensor("o", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let unbatched = resolve(&config(
+            0,
+            &[tensor("A", TypeString, &[1])],
+            &[tensor("o", TypeFp32, &[3])],
+        ))
         .unwrap();
         assert!(unbatched.check_batch::<Classify>(&prompts(1)).is_ok());
         assert!(unbatched.check_batch::<Classify>(&prompts(2)).is_err());
 
-        let batched = resolve(
-            &config(
-                2,
-                &[tensor("A", TypeString, &[1])],
-                &[tensor("o", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let batched = resolve(&config(
+            2,
+            &[tensor("A", TypeString, &[1])],
+            &[tensor("o", TypeFp32, &[3])],
+        ))
         .unwrap();
         assert!(batched.check_batch::<Embeddings>(&prompts(2)).is_ok());
         let error = batched
@@ -732,15 +693,11 @@ mod tests {
     #[test]
     fn builds_bytes_requests_shaped_by_batching() {
         use inference::DataType::{TypeFp32, TypeString};
-        let batched = resolve(
-            &config(
-                4,
-                &[tensor("TEXT", TypeString, &[1])],
-                &[tensor("o", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let batched = resolve(&config(
+            4,
+            &[tensor("TEXT", TypeString, &[1])],
+            &[tensor("o", TypeFp32, &[3])],
+        ))
         .unwrap();
         let prompts = ["ab".to_string(), "c".to_string()];
         let request = batched.request(&prompts, Default::default());
@@ -751,15 +708,11 @@ mod tests {
             [vec![2, 0, 0, 0, b'a', b'b', 1, 0, 0, 0, b'c']]
         );
 
-        let unbatched = resolve(
-            &config(
-                0,
-                &[tensor("TEXT", TypeString, &[-1])],
-                &[tensor("o", TypeFp32, &[3])],
-            ),
-            None,
-            None,
-        )
+        let unbatched = resolve(&config(
+            0,
+            &[tensor("TEXT", TypeString, &[-1])],
+            &[tensor("o", TypeFp32, &[3])],
+        ))
         .unwrap();
         assert_eq!(
             unbatched.request(&prompts[..1], Default::default()).inputs[0].shape,
@@ -920,7 +873,7 @@ mod tests {
             &[tensor("probs", TypeFp32, &[3])],
         );
         model_config.output[0].label_filename = "labels.txt".to_string();
-        let model = TextModel::new::<Classify>("model", &model_config, None, None, client).unwrap();
+        let model = TextModel::new::<Classify>("model", &model_config, client).unwrap();
         let engine = super::TextEngine::new(Classify::default(), model);
 
         let response = generate(
@@ -990,8 +943,6 @@ mod tests {
                 &[tensor("TEXT", TypeString, &[-1])],
                 &[tensor("embedding", TypeFp32, &[-1])],
             ),
-            None,
-            None,
             client,
         )
         .unwrap();
