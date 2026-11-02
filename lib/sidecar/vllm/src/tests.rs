@@ -39,6 +39,7 @@ use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
 #[derive(Clone, Default)]
 struct FakeVllm {
     sequence_outputs: Option<Vec<pb::SequenceOutput>>,
+    shutdown_replacement: Arc<Mutex<Option<String>>>,
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     loras: Arc<Mutex<Vec<pb::LoraAdapter>>>,
@@ -299,10 +300,16 @@ impl pb::inference_server::Inference for FakeVllm {
 impl pb::control_server::Control for FakeVllm {
     async fn shutdown(
         &self,
-        _: Request<pb::ShutdownRequest>,
+        _request: Request<pb::ShutdownRequest>,
     ) -> Result<Response<pb::ShutdownResponse>, Status> {
-        Err(Status::unimplemented(
-            "shutdown is not supported by the test server",
+        self.record_control("shutdown", json!({})).await;
+        if let Some(instance) = self.shutdown_replacement.lock().await.take() {
+            let mut server = self.server_info_override.lock().await;
+            server.get_or_insert_with(server_info).instance_id = instance;
+            return Err(Status::unavailable("engine exited before acknowledgement"));
+        }
+        Err(Status::failed_precondition(
+            "fake frontend does not own engine",
         ))
     }
 
