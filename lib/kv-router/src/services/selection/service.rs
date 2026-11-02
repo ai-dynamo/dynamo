@@ -22,19 +22,19 @@ use dynamo_scheduler::replication::AffinityBindingEvent;
 use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
 
 #[cfg(feature = "ingest-zmq")]
-use super::core::HostCache;
-use super::core::{KvIndexSource, SelectionCore, SelectionHost};
-use super::error::SelectionError;
-use super::pending::SelectionCacheConfig;
-use super::types::{
+use super::zmq_ingress::ZmqDirectIngress;
+use crate::plugins::RouterPluginRegistry;
+use dynamo_router_protocol::WorkerType;
+#[cfg(feature = "ingest-zmq")]
+use dynamo_scheduler::host::HostCache;
+use dynamo_scheduler::host::SelectionCacheConfig;
+use dynamo_scheduler::host::SelectionError;
+use dynamo_scheduler::host::{KvIndexSource, SelectionCore, SelectionHost};
+use dynamo_scheduler::host::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
-#[cfg(feature = "ingest-zmq")]
-use super::zmq_ingress::ZmqDirectIngress;
-use crate::plugins::RouterPluginRegistry;
-use dynamo_router_protocol::WorkerType;
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 
 pub struct SelectionServiceBuilder {

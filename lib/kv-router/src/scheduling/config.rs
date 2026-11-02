@@ -374,7 +374,7 @@ fn kv_router_config_from_lookup(
 
 pub use dynamo_kv_indexer::config::ApproximateCachePolicyKind;
 
-pub use super::admission_config::RouterQueuePolicy;
+pub use dynamo_admission::profile::RouterQueuePolicy;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]

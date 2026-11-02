@@ -3,8 +3,7 @@
 
 //! A worker-selection policy and a request classifier written against
 //! `dynamo_kv_router::plugins::prelude` alone: no other path from this crate, no other
-//! router crate. `plugin_api_compat.rs` keeps the pre-prelude paths compiling; this file is
-//! the surface new plugins target.
+//! router crate. This file is the surface new plugins target.
 
 use std::sync::Arc;
 

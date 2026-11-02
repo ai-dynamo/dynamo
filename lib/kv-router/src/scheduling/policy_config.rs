@@ -45,7 +45,7 @@ pub use dynamo_scheduler::types::RejectThresholdsProvider;
 pub use dynamo_slot_tracker::busy::BusyRanksExt;
 pub use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
 
-pub use super::admission_config::{
+pub use dynamo_admission::profile::{
     AdmissionConfigError, FamilyBucketTable, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS,
 };

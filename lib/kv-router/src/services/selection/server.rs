@@ -19,12 +19,13 @@ use crate::services::common::replica_sync_http;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::KvSchedulerError;
 
-use super::error::SelectionError;
 use super::service::SelectionService;
-use super::types::{
-    OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, REQUEST_BODY_LIMIT_BYTES,
-    ReservationRequest, SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
+use dynamo_scheduler::host::SelectionError;
+use dynamo_scheduler::host::{
+    OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
 };
+use dynamo_scheduler::selection::types::REQUEST_BODY_LIMIT_BYTES;
 
 #[derive(Debug, Deserialize)]
 struct FilterQuery {

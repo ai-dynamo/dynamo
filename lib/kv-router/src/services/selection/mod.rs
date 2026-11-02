@@ -6,31 +6,6 @@
 //! The service owns worker selection and reservation state, but never forwards
 //! model requests and never owns model responses.
 
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use dynamo_session_affinity as affinity;
-// Shims over the kernel's selection modules, so the server, the service, the ZMQ ingress, and
-// the HTTP tests keep their `super::` paths until step 8 flips hosts to the owners.
-mod core {
-    pub use dynamo_scheduler::selection::core::*;
-}
-mod error {
-    pub use dynamo_scheduler::selection::error::*;
-}
-mod ingress {
-    pub use dynamo_scheduler::selection::ingress::*;
-}
-mod input {
-    pub use dynamo_scheduler::selection::input::*;
-}
-mod pending {
-    pub use dynamo_scheduler::selection::pending::*;
-}
-mod types {
-    pub use dynamo_scheduler::selection::types::*;
-}
 // The HTTP server drives every adapter: the peer-recovery endpoint, the replica-peer
 // routes, and the ZMQ listener registry.
 #[cfg(all(
@@ -54,72 +29,10 @@ mod core_host_tests;
     feature = "replica-sync-zmq",
     feature = "peer-recovery"
 ))]
-// `use super::*` in the HTTP tests reaches the compatibility re-exports above.
-#[allow(deprecated)]
 mod tests;
 
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use crate::plugins::{
-    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
 #[cfg(feature = "replica-sync-zmq")]
 pub use crate::services::common::replica_sync::ReplicaPeerError;
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
-};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use dynamo_scheduler::replication::{
-    AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
-    SchedulerLoadSink,
-};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use dynamo_scheduler::selection::membership::{
-    CatalogObserver, CatalogReconciler, WorkerCatalogSource,
-};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use error::SelectionError;
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use ingress::{KvEventIngress, LocalIndexIngress};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use input::{PromptRequest, PromptView};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use pending::SelectionCacheConfig;
 #[cfg(all(
     feature = "http",
     feature = "ingest-zmq",
@@ -136,18 +49,6 @@ pub use service::SelectionServiceConfig;
 pub use service::{
     SelectionService, SelectionServiceBuilder, SessionBindingUpdates, local_selection_core,
     local_selection_core_with_host, warn_for_unserved_worker_selection_policies,
-};
-#[deprecated(
-    since = "1.7.0",
-    note = "hosts import dynamo_scheduler::host (or dynamo_session_affinity::host); plugins import plugins::prelude; see lib/kv-router/README.md, Deprecated paths"
-)]
-pub use types::{
-    DEFAULT_MODEL_NAME, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,
-    OverlapScoresResponse, PotentialLoadsRequest, ReadyResponse, ReservationRequest,
-    ReservationResponse, SelectAndReserveRequest, SelectRequest, SelectResponse,
-    SelectionInputTrigger, SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad,
-    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
-    WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;

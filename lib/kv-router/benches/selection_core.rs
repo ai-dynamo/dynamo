@@ -20,13 +20,13 @@ use dynamo_kv_hashing::routing::{
 use dynamo_kv_indexer::KvIndexerInterface;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::services::indexer::backend::Indexer;
-use dynamo_kv_router::services::selection::{
-    HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
-    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory, local_selection_core,
-    local_selection_core_with_host,
-};
+use dynamo_kv_router::services::selection::{local_selection_core, local_selection_core_with_host};
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_scheduler::host::{
+    HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
+    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory,
+};
 use dynamo_scheduler::protocols::RoutingConstraints;
 use dynamo_scheduler::types::RejectThresholdsProvider;
 use dynamo_slot_tracker::busy::BusyThresholds;

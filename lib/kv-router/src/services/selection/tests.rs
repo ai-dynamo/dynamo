@@ -13,10 +13,12 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
-use super::input::{MmRoutingInfoRequest, PromptRequest, TrackingHashInput};
 use super::server::create_router;
 use super::*;
 use crate::plugins::worker_selection::SelectionConfig;
+use crate::plugins::{
+    RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+};
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::routing::{
@@ -27,7 +29,15 @@ use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails}
 use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{
+    DEFAULT_MODEL_NAME, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest,
+    ReservationRequest, SelectAndReserveRequest, SelectRequest, SelectionCacheConfig,
+    SelectionError, WorkerRequest,
+};
 use dynamo_scheduler::overlap::build_overlap_scores_response;
+use dynamo_scheduler::selection::input::{
+    MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput,
+};
 use dynamo_scheduler::tracking_hash::{TrackingHashContext, TrackingHashScope};
 use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
@@ -161,7 +171,7 @@ fn normalize_with(
     request: &PromptRequest,
     context: &TrackingHashContext,
     assume_kv_reuse: bool,
-) -> Result<super::input::NormalizedPrompt, SelectionError> {
+) -> Result<NormalizedPrompt, SelectionError> {
     request.view().normalize_for_selection(
         4,
         false,
@@ -176,7 +186,7 @@ fn normalize_with(
     )
 }
 
-fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
+fn normalize_prompt(request: &PromptRequest) -> NormalizedPrompt {
     let config = test_config();
     let context = tracking_hash_context(&config).unwrap();
     normalize_with(request, &context, true).expect("normalize prompt")

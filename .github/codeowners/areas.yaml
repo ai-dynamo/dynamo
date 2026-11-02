@@ -59,8 +59,6 @@ areas:
   - lib/multimodal/
   - lib/zmq/
   - lib/kv-router/
-  - lib/kv-router/src/indexer/
-  - lib/kv-router/src/recovery/
   - lib/kv-router/src/scheduling/
   - lib/kv-router/src/sequences/
   - lib/kv-events/src/zmq_wire/

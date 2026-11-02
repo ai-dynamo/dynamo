@@ -293,8 +293,9 @@ fi
 # ---------------------------------------------------------------------------
 # Source rules over every router crate (SPLIT_V2 G10): no #[doc(hidden)] (an
 # item is documented or absent), no cross-crate glob re-export, and the
-# README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate's
-# deprecated shims are glob re-exports by design until their removal release.
+# README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate is
+# exempt for its one remaining glob: `test_utils` over the kernel's test
+# helpers, compiled for tests and the `bench` feature only.
 # ---------------------------------------------------------------------------
 ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints lib/zmq"
 GLOB_EXEMPT_DIRS="lib/kv-router"

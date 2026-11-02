@@ -9,12 +9,10 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::error::SelectionError;
-use super::ingress::KvEventIngress;
-use super::types::WorkerCatalogRecord;
 use crate::services::indexer::backend::Indexer;
 use crate::services::indexer::registry::{IndexRegistry, WorkerRegistry};
 use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_scheduler::host::{KvEventIngress, SelectionError, WorkerCatalogRecord};
 
 /// One ZMQ SUB socket per worker rank on the engine's KV-event publisher, with
 /// gap replay from the engine's replay endpoint when it advertises one.

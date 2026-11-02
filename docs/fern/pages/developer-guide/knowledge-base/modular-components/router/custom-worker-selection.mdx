@@ -562,7 +562,7 @@ cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" tokio@=1.48.0 --features 
 
 # Add the policy catalog and worker-selection API.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$POLICY_DIR/catalog" acme-routing-catalog
-cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" --features http,ingest-zmq,replica-sync-zmq,peer-recovery dynamo-kv-router
 
 # Add the standard EPP runner.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc

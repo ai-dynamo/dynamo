@@ -20,14 +20,7 @@ http = ["dep:axum", "dep:chrono", "dep:tracing-appender"]
 ingest-zmq = ["dep:zmq", "dep:dynamo-zmq"]
 replica-sync-zmq = ["dep:zmq", "dep:dynamo-zmq"]
 peer-recovery = ["dep:reqwest"]
-# Deprecated aliases for the pre-split service names, kept for one release: each enables the
-# adapters that service is made of.
-standalone-indexer = ["http", "ingest-zmq", "peer-recovery"]
-standalone-slot-tracker = ["http", "replica-sync-zmq"]
-standalone-selection = ["standalone-indexer", "replica-sync-zmq"]
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
-# Deprecated and empty: the runtime-backed metrics constructor lives in the frontend host now.
-runtime-protocols = []
 bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
 profile = ["dynamo-kv-indexer/profile"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.

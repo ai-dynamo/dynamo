@@ -5,9 +5,9 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_kv_router::services::selection::{
+use dynamo_kv_router::services::selection::local_selection_core;
+use dynamo_scheduler::host::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
-    local_selection_core,
 };
 use std::sync::Arc;
 use std::time::Duration;

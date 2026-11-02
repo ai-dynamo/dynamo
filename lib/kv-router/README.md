@@ -1,23 +1,36 @@
 # dynamo-kv-router
 
-`dynamo-kv-router` provides the core KV-aware routing data structures and scheduling primitives used
-by Dynamo to steer requests toward workers with the best cache overlap.
+`dynamo-kv-router` is the composition crate of the router: it assembles the scheduler kernel
+(`dynamo-scheduler`) and the stage crates into a running router that steers requests toward
+workers with the best cache overlap, and it is the one crate plugins and standalone consumers
+name.
 
 ## What This Crate Provides
 
-- `RadixTree` and `ConcurrentRadixTreeCompressed` for prefix-overlap indexing
-- `ThreadPoolIndexer` and `PositionalIndexer` for higher-throughput index backends
-- `KvRouterConfig`, `RouterQueuePolicy`, and `LocalScheduler` for request routing
-- Protocol and hashing helpers such as `RouterEvent`, `WorkerId`,
-  `compute_block_hash_for_seq`, and `compute_seq_hash_for_block`
+- `services::selection::{SelectionService, SelectionServiceBuilder}`: the composed router an
+  embedding host or the standalone service runs
+- `plugins`: the plugin registry and the worker-selection and request-classifier contracts;
+  `plugins::prelude` is the single import a plugin needs
+- `config::KvRouterConfig` with its CLI, environment, and policy-file parsers, converted once
+  into the kernel's validated configuration; `scheduling::policy_config` is the YAML policy file
+- `tracking_hash`: the tracking-hash key file read and the context built from the flat config
+- Adapters behind features: HTTP servers, the ZMQ KV-event listener and registry, the replica
+  mesh, the peer-recovery client, and Prometheus exposition
+
+The data structures live in their owning crates: hashing in `dynamo_kv_hashing::routing`
+(`compute_block_hash_for_seq`, `compute_seq_hash_for_block`, `BlockHashOptions`), the indexers in
+`dynamo_kv_indexer` (`RadixTree`, `ConcurrentRadixTreeCompressed`, `ThreadPoolIndexer`,
+`PositionalIndexer`), the wire vocabulary in `dynamo_router_protocol` (`WorkerId`) and
+`dynamo_kv_events` (`RouterEvent`), and the kernel's `LocalScheduler` in `dynamo_scheduler`.
 
 ## Basic Rust Usage
 
 ```rust
-use dynamo_kv_router::{
-    KvRouterConfig, RadixTree, compute_block_hash_for_seq, compute_seq_hash_for_block,
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use dynamo_kv_router::protocols::BlockHashOptions;
+use dynamo_kv_indexer::radix_tree::RadixTree;
+use dynamo_kv_router::config::KvRouterConfig;
 
 let prompt_tokens = vec![1_u32, 2, 3, 4, 5, 6, 7, 8];
 let local_hashes = compute_block_hash_for_seq(&prompt_tokens, 4, BlockHashOptions::default());
@@ -32,8 +45,8 @@ assert_eq!(seq_hashes.len(), 2);
 assert!(scores.scores.is_empty());
 ```
 
-For end-to-end routing, pair the indexers with `LocalScheduler` and the worker/config protocol
-types re-exported from the crate root.
+For end-to-end routing, build a `SelectionService` with `SelectionServiceBuilder`; in-tree hosts
+reach the kernel and stage types through each owner's `host` module.
 
 ## Writing a Plugin
 
@@ -44,8 +57,8 @@ names (`tests/plugin_api_prelude.rs` is a policy and a classifier written agains
 
 ## Features
 
-`default = []`: the flat configuration, the plugin registry, and the shims over the kernel
-and the stage crates compile without any transport crate. Each adapter is a feature:
+`default = []`: the flat configuration, the plugin registry, and the selection service compile
+without any transport crate. Each adapter is a feature:
 
 - `http`: the axum servers and their response envelope (`services::indexer::server`,
   `services::slot_tracker`, `services::selection::server`)
@@ -61,13 +74,11 @@ the slot tracker is `http` + `replica-sync-zmq`. The selection service (`service
 compiles with no adapter: an embedding host supplies its own index ingress and replica
 channels. Its ZMQ-direct ingress needs `ingest-zmq`, indexer peer recovery `ingest-zmq` +
 `peer-recovery`, the replica mesh `replica-sync-zmq`, and its HTTP server and CLI config all
-three plus `http`. The pre-split names stay for one release as aliases of those
-combinations: `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`.
+three plus `http`.
 
 Other features:
 
 - `metrics`: Prometheus metrics for router internals
-- `runtime-protocols`: integration points with `dynamo-runtime`
 - `bench`: internal benchmarking helpers
 - `profile`: keeps hot indexer functions un-inlined for profiling
 - `testing`: test-only hooks consumed by dependent crates' tests; never enable in release
@@ -89,17 +100,17 @@ The crate's public surface is a committed snapshot, `public-api.txt`; `bash
 scripts/router_public_api_check.sh` regenerates it with `cargo-public-api` and fails on a
 difference (`--update` rewrites it; review the diff in the PR).
 
-## Deprecated paths
+## Removed paths (migration map)
 
-`dynamo-kv-router` is the composition crate. Every path below is a shim over a stage, the kernel,
-or a vocabulary crate; it carries `#[deprecated]` for one release and goes away in the next.
-In-tree hosts import the owner's `host` module; plugins import `plugins::prelude`.
+`dynamo-kv-router` is the composition crate. Every path below was a shim over a stage, the
+kernel, or a vocabulary crate; the shims were removed in this release. In-tree hosts import the
+owner's `host` module; plugins import `plugins::prelude`.
 
-| Deprecated path | Owner |
+| Removed path | Owner |
 |---|---|
 | root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler::protocols` |
-| `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad`; removed now, not deprecated: this crate cannot see `lib/llm`, which publishes and reads the message |
+| `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad` (this crate cannot see `lib/llm`, which publishes and reads the message) |
 | `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer::identity`) |
 | `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
 | `sequences`, `multi_worker_sequence`, `sequence` | `dynamo_slot_tracker` (`host`) |
@@ -112,9 +123,7 @@ In-tree hosts import the owner's `host` module; plugins import `plugins::prelude
 | `worker_type` | `dynamo_router_protocol::WorkerType` |
 | `services::selection::{affinity, SelectionCore, SelectionHost, PromptRequest, SelectRequest, ...}` | `dynamo_scheduler::host`, `dynamo_session_affinity::host` |
 | `services::overlap` | `dynamo_scheduler::overlap_summary` |
-
-The `standalone-indexer`, `standalone-slot-tracker`, and `standalone-selection` features stay as
-aliases of the adapter features for the same release; `runtime-protocols` is empty.
+| features `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`, `runtime-protocols` | the adapter features they expanded to (`http` + `ingest-zmq` + `peer-recovery`; `http` + `replica-sync-zmq`; all four); `runtime-protocols` was empty |
 
 ## Further Reading
 
