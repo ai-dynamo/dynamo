@@ -118,7 +118,10 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = SimpleNamespace()
-    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(), dynamo_args=SimpleNamespace(enable_rl=False)
+    )
+    handler._default_sampling_params = {}
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"
@@ -184,7 +187,10 @@ async def test_prefill_forwards_first_token_logprob_options(wrapped, options, ex
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = SimpleNamespace(async_generate=async_generate)
-    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(), dynamo_args=SimpleNamespace(enable_rl=False)
+    )
+    handler._default_sampling_params = {}
     handler.bootstrap_host = "prefill.invalid"
     handler.bootstrap_port = None
     handler.enable_trace = False
@@ -205,6 +211,54 @@ async def test_prefill_forwards_first_token_logprob_options(wrapped, options, ex
     assert {
         key: value for key, value in calls[0].items() if "logprob" in key
     } == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enable_rl", "nvext", "expected_top_k"),
+    [(False, {}, 20), (True, {"token_data": [1, 2]}, None)],
+)
+async def test_prefill_applies_model_default_sampling_params(
+    enable_rl, nvext, expected_top_k
+):
+    calls = []
+
+    async def async_generate(**kwargs):
+        calls.append(kwargs)
+
+        async def results():
+            yield {"meta_info": {"id": "prefill-request"}}
+
+        return results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace(async_generate=async_generate)
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(),
+        dynamo_args=SimpleNamespace(enable_rl=enable_rl),
+    )
+    handler._default_sampling_params = _model_default_sampling_params(
+        _engine_with_sampling_defaults({"top_k": 20, "top_p": 0.95})
+    )
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = None
+    handler.enable_trace = False
+    handler._generate_bootstrap_room = lambda: 1
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"top_p": 0.5},
+        "nvext": nvext,
+    }
+
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    async with aclosing(handler.generate(request, context)) as stream:
+        await anext(stream)
+
+    assert calls[0]["sampling_params"].get("top_k") == expected_top_k
+    assert calls[0]["sampling_params"]["top_p"] == 0.5
 
 
 def test_extract_media_urls_returns_none_for_missing_modality():
@@ -326,6 +380,7 @@ def _new_decode_handler(
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
     handler._first_token_source = None
+    handler._default_sampling_params = {}
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):

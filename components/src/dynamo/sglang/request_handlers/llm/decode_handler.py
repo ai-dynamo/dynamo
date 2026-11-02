@@ -294,6 +294,20 @@ def _model_default_sampling_params(engine: Any) -> Dict[str, Any]:
     }
 
 
+def _apply_model_default_sampling_params(
+    sampling_params: Dict[str, Any],
+    request: Dict[str, Any],
+    defaults: Dict[str, Any],
+    enable_rl: bool,
+) -> None:
+    """Fill fields the request left unset from the model's defaults. RL token-in
+    requests keep SGLang's plain defaults, as in the vLLM worker."""
+    if enable_rl and _is_token_in_request(request):
+        return
+    for key, value in defaults.items():
+        sampling_params.setdefault(key, value)
+
+
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
@@ -632,11 +646,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
-        # RL token-in requests keep SGLang's plain defaults, as in the vLLM worker.
-        rl = getattr(getattr(self.config, "dynamo_args", None), "enable_rl", False)
-        if not (rl and _is_token_in_request(request)):
-            for key, value in getattr(self, "_default_sampling_params", {}).items():
-                sampling_params.setdefault(key, value)
+        _apply_model_default_sampling_params(
+            sampling_params,
+            request,
+            self._default_sampling_params,
+            self.config.dynamo_args.enable_rl,
+        )
         return apply_thinking_budget(
             request,
             sampling_params,
