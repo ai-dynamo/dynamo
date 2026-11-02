@@ -30,7 +30,7 @@ mod http;
 
 use super::{
     Placement, PreparedBranch, StartedBranch, add_input_tokens, bind_native, dispatch,
-    finish_branch, pin_to_placement, resolve_dp_rank,
+    finish_branch, pin_to_placement, prepare_branches, resolve_dp_rank,
 };
 use crate::{
     discovery::SystemOneExecutionSelection,
