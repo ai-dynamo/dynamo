@@ -1925,9 +1925,10 @@ impl Endpoint {
         crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
-                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client_with_options(
                     client,
                     router_mode.into(),
+                    dynamo_llm::kv_router::plugins::push_router_options(),
                 )
                 .await
                 .map_err(to_pyerr)?;

@@ -4,8 +4,9 @@
 //! The non-KV routing modes as worker-selection policies, one module per mode.
 //!
 //! `--router-mode random`, `round-robin`, `least-loaded` and `power-of-two` resolve to these types
-//! by name. Each picker is a thin adapter over `dynamo-routing-algorithms`, the same selection code
-//! `PushRouter` runs, and declares at most [`WorkerInputs::ACTIVE_REQUESTS`].
+//! by name. Each picker declares at most [`WorkerInputs::ACTIVE_REQUESTS`]. `PushRouter` runs
+//! the same pickers through the instance selectors its caller passes, so each algorithm lives
+//! only here.
 //!
 //! [`WorkerInputs::ACTIVE_REQUESTS`]: dynamo_kv_router::plugins::worker_selection::WorkerInputs::ACTIVE_REQUESTS
 
@@ -30,6 +31,22 @@ pub use least_loaded::LEAST_LOADED;
 pub use power_of_two::POWER_OF_TWO;
 pub use random::RANDOM;
 pub use round_robin::ROUND_ROBIN;
+
+/// Uniform random indexes, injectable so tests can script each choice.
+trait Samples {
+    /// A uniform index in `0..upper`. Callers never pass zero.
+    fn index(&mut self, upper: usize) -> usize;
+}
+
+/// The thread-local `fastrand` generator.
+struct ThreadRandom;
+
+impl Samples for ThreadRandom {
+    #[inline]
+    fn index(&mut self, upper: usize) -> usize {
+        fastrand::usize(..upper)
+    }
+}
 
 fn no_candidates() -> WorkerSelectionPolicyError {
     WorkerSelectionPolicyError::failed("no eligible worker")
@@ -81,4 +98,93 @@ pub(crate) fn register(
         POWER_OF_TWO,
         Arc::new(provider(|| power_of_two::PowerOfTwoPicker)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::Samples;
+    use super::least_loaded::least_loaded;
+    use super::power_of_two::power_of_two;
+    use super::random::random;
+    use super::round_robin::round_robin;
+
+    struct ScriptedSamples {
+        values: Vec<usize>,
+        consumed: usize,
+    }
+
+    impl ScriptedSamples {
+        fn new(values: impl Into<Vec<usize>>) -> Self {
+            Self {
+                values: values.into(),
+                consumed: 0,
+            }
+        }
+    }
+
+    impl Samples for ScriptedSamples {
+        fn index(&mut self, upper: usize) -> usize {
+            let value = self.values[self.consumed];
+            self.consumed += 1;
+            value % upper
+        }
+    }
+
+    #[test]
+    fn empty_candidates_choose_nothing() {
+        let mut samples = ScriptedSamples::new([]);
+        assert_eq!(random(0, &mut samples), None);
+        assert_eq!(round_robin(7, 0), None);
+        assert_eq!(least_loaded(0, |_| 0, &mut samples), None);
+        assert_eq!(power_of_two(0, |_| 0, &mut samples), None);
+        assert_eq!(samples.consumed, 0);
+    }
+
+    #[test]
+    fn round_robin_rotates_with_the_cursor() {
+        let picks: Vec<_> = (0..6)
+            .map(|cursor| round_robin(cursor, 4).unwrap())
+            .collect();
+        assert_eq!(picks, [0, 1, 2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn random_uses_one_sample() {
+        let mut samples = ScriptedSamples::new([2]);
+        assert_eq!(random(4, &mut samples), Some(2));
+        assert_eq!(samples.consumed, 1);
+    }
+
+    #[test]
+    fn power_of_two_uses_exactly_two_samples_and_two_load_reads() {
+        let mut samples = ScriptedSamples::new([1, 1]);
+        let reads = Cell::new(0);
+        let chosen = power_of_two(
+            4,
+            |index| {
+                reads.set(reads.get() + 1);
+                if index == 1 { 5 } else { 1 }
+            },
+            &mut samples,
+        );
+        assert_eq!(chosen, Some(3));
+        assert_eq!(samples.consumed, 2);
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn least_loaded_ties_follow_scripted_reservoir_samples() {
+        let mut samples = ScriptedSamples::new([1, 0]);
+        assert_eq!(least_loaded(3, |_| 3, &mut samples), Some(2));
+        assert_eq!(samples.consumed, 2);
+    }
+
+    #[test]
+    fn least_loaded_picks_the_minimum() {
+        let loads = [4, 1, 3];
+        let mut samples = ScriptedSamples::new([]);
+        assert_eq!(least_loaded(3, |index| loads[index], &mut samples), Some(1));
+    }
 }

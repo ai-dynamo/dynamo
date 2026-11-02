@@ -896,8 +896,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
                     Annotated<NvCreateEmbeddingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -907,8 +909,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateClassifyRequest,
                     Annotated<NvCreateClassifyResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.classify_engine = Some(Arc::new(push_router));
@@ -918,8 +922,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreatePoolingRequest,
                     Annotated<NvCreatePoolingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.pooling_engine = Some(Arc::new(push_router));
@@ -929,8 +935,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateRerankRequest,
                     Annotated<NvCreateRerankResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.rerank_engine = Some(Arc::new(push_router));
@@ -940,8 +948,10 @@ impl ModelWatcher {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -951,8 +961,10 @@ impl ModelWatcher {
                 let completions_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.completions_engine = Some(Arc::new(completions_router));
@@ -962,7 +974,11 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
                 .await?;
                 let admission = worker_set
                     .image_edit_admission
@@ -978,7 +994,11 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -987,8 +1007,10 @@ impl ModelWatcher {
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
@@ -999,8 +1021,10 @@ impl ModelWatcher {
                 let realtime_router = PushRouter::<
                     DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.realtime_engine = Some(Arc::new(realtime_router));
@@ -1035,8 +1059,10 @@ impl ModelWatcher {
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
+            >::from_client_with_options(
+                client,
+                router_config.router_mode,
+                crate::kv_router::plugins::push_router_options(),
             )
             .await?;
 
@@ -1059,9 +1085,11 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
+            >::from_client_with_options(
+                    client,
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_type.is_empty() {

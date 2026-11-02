@@ -153,7 +153,7 @@ impl RoutingHostBuilder {
                 multimodal_cache_indexer,
                 multimodal_cache_key_extractor,
                 dispatch,
-                ..PushRouterOptions::default()
+                ..crate::kv_router::plugins::push_router_options()
             },
         )
         .await?;
@@ -235,7 +235,7 @@ impl PolicyInputs {
 
 /// Resolve a routing mode to its policy by type name in the linked plugin registry, the same way
 /// a policy file names a type, and take out its picker.
-pub(super) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
+pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
     let policy_type = match mode {
         RouterMode::RoundRobin => router_modes::ROUND_ROBIN,
         RouterMode::Random => router_modes::RANDOM,

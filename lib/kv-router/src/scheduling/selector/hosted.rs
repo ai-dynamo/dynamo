@@ -200,6 +200,28 @@ impl fmt::Debug for HostedWorkerPicker {
     }
 }
 
+/// Lets `PushRouter` run the picker. Its callers carry no LLM request, so the selection sees
+/// a zero-token request.
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::pipeline::InstanceSelector for HostedWorkerPicker {
+    fn reads_active_requests(&self) -> bool {
+        self.inputs.contains(WorkerInputs::ACTIVE_REQUESTS)
+    }
+
+    fn select_instance(
+        &self,
+        instance_ids: &[u64],
+        active_requests: &dyn Fn(u64) -> u64,
+        preview: bool,
+    ) -> Option<u64> {
+        let request = HostedSelectionRequest::new(0, 0).with_preview(preview);
+        let active_requests = self.reads_active_requests().then_some(active_requests);
+        self.select(instance_ids, active_requests, &request)
+            .ok()
+            .map(|selected| selected.worker.worker_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, OnceCell};

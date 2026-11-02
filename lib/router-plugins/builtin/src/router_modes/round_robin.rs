@@ -5,12 +5,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::no_candidates;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
-use dynamo_routing_algorithms as algorithms;
-
-use super::no_candidates;
 
 /// One shared rotation over the workers.
 pub const ROUND_ROBIN: &str = "round-robin";
@@ -34,6 +32,12 @@ impl WorkerPicker for RoundRobinPicker {
         } else {
             self.cursor.fetch_add(1, Ordering::Relaxed)
         };
-        algorithms::round_robin(cursor, input.len()).ok_or_else(no_candidates)
+        round_robin(cursor, input.len()).ok_or_else(no_candidates)
     }
+}
+
+/// The position `cursor` reaches in a rotation over `len` candidates.
+#[inline]
+pub(super) fn round_robin(cursor: u64, len: usize) -> Option<usize> {
+    (len > 0).then(|| cursor as usize % len)
 }

@@ -3,9 +3,10 @@
 
 //! Host construction for the resolved router plugin bundle.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
+use dynamo_runtime::pipeline::{InstanceSelector, ModeSelectors, PushRouterOptions};
 
 use super::{KvRouter, SelectionPolicySource};
 
@@ -25,6 +26,24 @@ pub fn router_plugin_registry() -> RouterPluginRegistry {
         .get()
         .cloned()
         .unwrap_or_else(dynamo_router_policies::default_registry)
+}
+
+/// The router-mode plugins as `PushRouter` instance selectors, resolved from the installed
+/// catalog. Each call to the returned function builds a fresh plugin, so every router keeps
+/// its own state, such as its round-robin rotation.
+pub fn mode_selectors() -> ModeSelectors {
+    Arc::new(|mode| {
+        let picker = super::routing_host::hosted_picker(mode).ok()?;
+        Some(Arc::new(picker) as Arc<dyn InstanceSelector>)
+    })
+}
+
+/// `PushRouter` options that pick with the router-mode plugins.
+pub fn push_router_options<T, U>() -> PushRouterOptions<T, U> {
+    PushRouterOptions {
+        selectors: Some(mode_selectors()),
+        ..PushRouterOptions::default()
+    }
 }
 
 /// Carries configured plugins through the host's shared router construction.

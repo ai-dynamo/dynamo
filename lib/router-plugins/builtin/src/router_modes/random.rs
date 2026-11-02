@@ -3,12 +3,10 @@
 
 //! `random`: a uniform random worker.
 
+use super::{Samples, ThreadRandom, no_candidates};
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
-use dynamo_routing_algorithms::{self as algorithms, ThreadRandom};
-
-use super::no_candidates;
 
 /// A uniform random worker.
 pub const RANDOM: &str = "random";
@@ -21,6 +19,12 @@ impl WorkerPicker for RandomPicker {
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        algorithms::random(input.len(), &mut ThreadRandom).ok_or_else(no_candidates)
+        random(input.len(), &mut ThreadRandom).ok_or_else(no_candidates)
     }
+}
+
+/// One uniform draw.
+#[inline]
+pub(super) fn random(len: usize, samples: &mut impl Samples) -> Option<usize> {
+    (len > 0).then(|| samples.index(len))
 }
