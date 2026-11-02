@@ -86,6 +86,9 @@ impl WorkerSelectionContext<'_> {
     /// request to it. A picker that keeps state between selections, such as a rotation
     /// cursor, should read that state without advancing it. Always `false` when the router
     /// routes with KV state.
+    // TODO(v1.8): document once custom pickers can run on the hosted path; until then only the
+    // builtin router-mode plugins receive previews.
+    #[doc(hidden)]
     pub fn is_preview(&self) -> bool {
         self.preview
     }
