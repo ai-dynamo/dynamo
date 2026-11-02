@@ -420,6 +420,9 @@ def _bench_capture_engine(
 
         engine["attention"] = _bench_engine_attention(attention_config, hf_config)
         engine["kv_cache"] = _bench_engine_kv_cache(cache_config, kv_cache_config)
+        engine["kv_cache"]["num_hash_lookahead_tokens"] = _json_safe(
+            getattr(vllm_config, "num_hash_lookahead_tokens", 0)
+        )
         engine["quantization"] = _bench_engine_quantization(vllm_config, model_config)
         engine["scheduler"] = {
             "max_num_batched_tokens": _json_safe(
@@ -2499,6 +2502,11 @@ class InstrumentedScheduler(AsyncScheduler):
                             "end_monotonic": model_output_arrival,
                         },
                         "cudagraph": _bench_observed_cudagraph(stats),
+                        # The scheduler decision is not proof of the runner's
+                        # executed drafts (V1 and DP may handle it differently).
+                        "scheduler_skip_drafts": getattr(
+                            scheduler_output, "skip_drafts", None
+                        ),
                     }
             self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
@@ -2969,8 +2977,17 @@ class InstrumentedScheduler(AsyncScheduler):
                 self.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
+            # vLLM 0.33 hashes the drafter's lookahead tokens too. Earlier
+            # runtimes expose neither the config property nor the argument.
+            hash_lookahead = getattr(vllm_config, "num_hash_lookahead_tokens", 0)
             self._bench_block_hasher = get_request_block_hasher(
-                self._bench_hash_block_size, caching_hash_fn
+                self._bench_hash_block_size,
+                caching_hash_fn,
+                **(
+                    {"num_hash_lookahead_tokens": hash_lookahead}
+                    if hash_lookahead
+                    else {}
+                ),
             )
         else:
             self._bench_block_hasher = None
@@ -3063,6 +3080,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "measurement_protocol": self._bench_measurement_protocol(),
             "block_size": self.block_size,
             "hash_block_size": self._bench_hash_block_size,
+            "num_hash_lookahead_tokens": getattr(self, "num_hash_lookahead_tokens", 0),
             "cache_block_size": getattr(self.cache_config, "block_size", None),
             "enable_prefix_caching": getattr(
                 self.cache_config, "enable_prefix_caching", True
@@ -3730,16 +3748,15 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
 
-        eagle_cache_drop_tokens = self._bench_eagle_cache_drop_tokens()
-        if eagle_cache_drop_tokens and any(
-            kv_read_tokens > 0 and new_tokens <= eagle_cache_drop_tokens
+        proof_tokens = self._bench_prefix_proof_tokens()
+        if proof_tokens and any(
+            kv_read_tokens > 0 and new_tokens <= proof_tokens
             for new_tokens, kv_read_tokens in zip(
                 new_token_lengths, kv_read_lengths, strict=True
             )
         ):
-            # EAGLE recomputes the last matched cache block. A request needs
-            # more than that block's tokens to reach the extra seeded block
-            # while preserving both benchmark axes.
+            # Keep an independent measured tail after the shared tokens that
+            # prove the last cache hit, for both EAGLE hashing regimes.
             return False
 
         prompt_lengths = [
@@ -4013,9 +4030,16 @@ class InstrumentedScheduler(AsyncScheduler):
         return chain
 
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
-        # EAGLE/MTP deliberately drops the last matched cache block. Seed one
-        # additional block so the measured request still reads the grid target.
-        return kv_read_tokens + self._bench_eagle_cache_drop_tokens()
+        if kv_read_tokens == 0:
+            return 0
+        return kv_read_tokens + self._bench_prefix_proof_tokens()
+
+    def _bench_prefix_proof_tokens(self) -> int:
+        # 0.33 replaces EAGLE's trailing block drop with lookahead hashes
+        # where supported; KV connectors retain the legacy drop regime.
+        return self._bench_eagle_cache_drop_tokens() + getattr(
+            self, "num_hash_lookahead_tokens", 0
+        )
 
     def _bench_uses_per_group_cache_lookup(self) -> bool:
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
@@ -5235,11 +5259,9 @@ class InstrumentedScheduler(AsyncScheduler):
         # Completion alone does not prove a cache hit or exact shape warming.
         self._bench_finish_warmup()
         chain = self._bench_realseed_chain(point.batch_size)
-        # Under EAGLE/MTP the prefix-cache lookup drops the last matched
-        # block, so the chain holds ``seed_len = kv + drop`` tokens per slot
-        # and the measured prompt must reproduce all of them for the hit to
-        # come back as exactly ``kv``; the fresh tail fills the rest of the
-        # request's new tokens (feasibility guarantees new > drop).
+        # Reproduce the proof tokens after the cached prefix too: either the
+        # legacy EAGLE block or the tokens covered by lookahead hashes. Only
+        # the remaining tail differs between the warm and measured shots.
         seed_lens = [
             self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
         ]

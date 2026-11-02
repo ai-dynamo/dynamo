@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import subprocess
@@ -354,6 +355,7 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("graph_observation", ["observed", "absent", "incomplete"])
+@pytest.mark.parametrize("skip_drafts", [None, False, True])
 def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monkeypatch,
     phase,
@@ -362,6 +364,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     expected_start,
     expected_wall,
     graph_observation,
+    skip_drafts,
 ):
     point = BenchmarkPoint(
         phase,
@@ -406,9 +409,10 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monotonic = MagicMock(return_value=20.0)
     monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", monotonic)
 
-    result = stub.update_from_output(
-        SimpleNamespace(total_num_scheduled_tokens=80), model_output
-    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=80)
+    if skip_drafts is not None:
+        scheduler_output.skip_drafts = skip_drafts
+    result = stub.update_from_output(scheduler_output, model_output)
 
     assert result == "parent-result"
     raw = stub._bench_current_fpms[-1]
@@ -416,6 +420,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     sample = raw["benchmark_sample"]
     assert sample["sample_index"] == int(steady)
     assert sample["forward_index"] == 12
+    assert sample["scheduler_skip_drafts"] is skip_drafts
     assert sample["timing"] == {
         "basis": expected_basis,
         "start_monotonic": expected_start,
@@ -2388,7 +2393,10 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 1, 3])
+def test_benchmark_hasher_uses_vllm_hash_granularity(
+    monkeypatch, tmp_path, hash_lookahead
+):
     parent_init_args = {}
 
     def fake_parent_init(self, **kwargs):
@@ -2442,6 +2450,8 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
             "benchmark": {"output_path": str(tmp_path / "benchmark.json")}
         },
     )
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
     scheduler = InstrumentedScheduler(
         vllm_config=vllm_config,
         kv_cache_config=object(),
@@ -2453,7 +2463,10 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     assert parent_init_args["hash_block_size"] == 16
     assert scheduler._bench_hash_block_size == 16
     assert scheduler._bench_block_hasher is block_hasher
-    block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
+    expected_kwargs = (
+        {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+    )
+    block_hasher_factory.assert_called_once_with(16, caching_hash_fn, **expected_kwargs)
 
 
 def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):
@@ -8599,8 +8612,11 @@ def test_json_safe_coerces_enums_dtypes_and_dataclasses():
     assert coerce(_ProvenanceNumpyScalar(42)) == 42
 
 
-def test_bench_capture_engine_records_requested_engine_facts():
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 3])
+def test_bench_capture_engine_records_requested_engine_facts(hash_lookahead):
     vllm_config, kv_cache_config = _provenance_vllm_config()
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
 
     engine = instrumented_scheduler_module._bench_capture_engine(
         vllm_config,
@@ -8635,6 +8651,7 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "cache_dtype": "fp8_ds_mla",
         "block_size": 64,
         "enable_prefix_caching": True,
+        "num_hash_lookahead_tokens": hash_lookahead or 0,
         "kv_cache_layout": "LBNHC",
         "groups": [
             {
@@ -9259,7 +9276,16 @@ def realseed_prefix_cache(monkeypatch):
 
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
 
-    def build(point, *, drop=0, seq=0, block_size=32):
+    def build(point, *, drop=0, seq=0, block_size=32, hash_lookahead=0):
+        if (
+            hash_lookahead
+            and "num_hash_lookahead_tokens"
+            not in inspect.signature(kv_cache_utils.get_request_block_hasher).parameters
+        ):
+            pytest.skip("lookahead block hashing requires vLLM 0.33+")
+        hash_kwargs = (
+            {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+        )
         stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
         del stub._bench_inject_prefill
         del stub._bench_synthetic_token_ids
@@ -9268,8 +9294,9 @@ def realseed_prefix_cache(monkeypatch):
         stub._bench_vocab_size = 4096
         stub._bench_content_seed = "0"
         stub._fpm_dp_rank = 0
+        stub.num_hash_lookahead_tokens = hash_lookahead
         stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(
-            block_size, sha256
+            block_size, sha256, **hash_kwargs
         )
         stub.kv_cache_manager = KVCacheManager(
             KVCacheConfig(
@@ -9292,6 +9319,7 @@ def realseed_prefix_cache(monkeypatch):
             hash_block_size=block_size,
             enable_caching=True,
             use_eagle=bool(drop),
+            **hash_kwargs,
         )
         stub.add_request = lambda req: stub.requests.__setitem__(req.request_id, req)
         stub._bench_results = []
@@ -9346,27 +9374,41 @@ def _complete_realseed_cache_shot(stub):
     return requests, hits
 
 
-@pytest.mark.parametrize(("new_tokens", "kv_read_tokens"), [(1, 16), (16, 64)])
+@pytest.mark.parametrize(
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [(16, 0, 1, 16), (16, 0, 16, 64), (0, 1, 1, 16), (0, 3, 3, 64)],
+)
 def test_prefill_grid_rejects_eagle_points_without_a_measurable_tail(
-    new_tokens, kv_read_tokens
+    drop, hash_lookahead, new_tokens, kv_read_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
-    grid.kv_cache_manager.use_eagle = True
+    grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert not grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
 
 @pytest.mark.parametrize(
-    ("drop", "new_tokens", "kv_read_tokens"),
-    [(0, 1, 16), (0, 16, 64), (16, 17, 16), (16, 32, 1024)],
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [
+        (0, 0, 1, 16),
+        (0, 0, 16, 64),
+        (16, 0, 17, 16),
+        (16, 0, 32, 1024),
+        (0, 1, 2, 16),
+        (0, 1, 16, 64),
+        (0, 3, 4, 64),
+        (0, 3, 32, 1024),
+    ],
 )
 def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
-    realseed_prefix_cache, kv_read_tokens, drop, new_tokens
+    realseed_prefix_cache, kv_read_tokens, drop, hash_lookahead, new_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
     grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
@@ -9376,18 +9418,54 @@ def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
         total_kv_read_tokens=kv_read_tokens,
         batch_size=1,
     )
-    scheduler = realseed_prefix_cache(point, drop=drop, block_size=16)
+    scheduler = realseed_prefix_cache(
+        point, drop=drop, block_size=16, hash_lookahead=hash_lookahead
+    )
     del scheduler._bench_eagle_cache_drop_tokens
     scheduler._bench_realseed_stage_point(point, [kv_read_tokens], [new_tokens])
     seeded, _ = _complete_realseed_cache_shot(scheduler)
-    assert [request.num_tokens for request in seeded] == [kv_read_tokens + drop]
+    seed_len = kv_read_tokens + drop + hash_lookahead
+    assert [request.num_tokens for request in seeded] == [seed_len]
 
+    shots = []
     for _ in ("warm", "measure"):
         assert scheduler._bench_realseed_pending_step()
         requests, hits = _complete_realseed_cache_shot(scheduler)
         assert hits == [kv_read_tokens]
         assert requests[0].num_tokens - hits[0] == new_tokens
+        assert requests[0].prompt_token_ids[:seed_len] == seeded[0].prompt_token_ids
+        shots.append(requests[0].prompt_token_ids)
 
+    if hash_lookahead:
+        assert shots[0][seed_len:] != shots[1][seed_len:]
+
+    assert scheduler._bench_skipped_points == []
+    assert len(scheduler._bench_results) == 1
+
+
+@pytest.mark.parametrize("hash_lookahead", [0, 1, 3])
+def test_fake_prefix_lookahead_preserves_mixed_zero_and_cached_rows(
+    monkeypatch, realseed_prefix_cache, hash_lookahead
+):
+    point = BenchmarkPoint(
+        "prefill",
+        batch_size=2,
+        total_prefill_tokens=48,
+        total_kv_read_tokens=32,
+        rows=[[16, 0], [32, 32]],
+    )
+    scheduler = realseed_prefix_cache(
+        point, block_size=16, hash_lookahead=hash_lookahead
+    )
+    del scheduler._bench_cache_fake_prefixes
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "off")
+    scheduler._bench_step_prefill()
+    requests, hits = _complete_realseed_cache_shot(scheduler)
+    assert hits == [0, 32]
+    assert [request.num_tokens - hit for request, hit in zip(requests, hits)] == [
+        16,
+        32,
+    ]
     assert scheduler._bench_skipped_points == []
     assert len(scheduler._bench_results) == 1
 
@@ -9437,9 +9515,9 @@ def test_real_seed_aligned_zero_kv_repeats_keep_content_and_miss_cache(
 
 
 @pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
-@pytest.mark.parametrize("drop", [0, 32])
+@pytest.mark.parametrize(("drop", "hash_lookahead"), [(0, 0), (32, 0), (0, 1), (0, 3)])
 def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
-    monkeypatch, realseed_prefix_cache, content, drop
+    monkeypatch, realseed_prefix_cache, content, drop, hash_lookahead
 ):
     monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
     new_tokens = [128, 32 + drop]
@@ -9450,7 +9528,7 @@ def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
         batch_size=2,
         rows=[[new_tokens[0], 0], [new_tokens[1], 64]],
     )
-    stub = realseed_prefix_cache(point, drop=drop)
+    stub = realseed_prefix_cache(point, drop=drop, hash_lookahead=hash_lookahead)
     if content == "zeros":
         stub._bench_vocab_size = 1
     elif content == "sharegpt":
@@ -9657,7 +9735,7 @@ def test_prompt_evidence_does_not_claim_observed_decode_continuations():
     assert [len(row.prompt_token_ids) for row in output.scheduled_new_reqs] == [17, 18]
 
 
-@pytest.mark.parametrize("different", ["seed", "content", "pool_tag"])
+@pytest.mark.parametrize("different", ["seed", "content", "pool_tag", "hash_lookahead"])
 def test_grid_invariants_include_measurement_content_policy(different, monkeypatch):
     first = _digest_stub(max_num_running_reqs=8)
     first._bench_vocab_size = 4096
@@ -9666,6 +9744,8 @@ def test_grid_invariants_include_measurement_content_policy(different, monkeypat
         first._bench_content_seed = "second-content-draw"
     elif different == "content":
         monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    elif different == "hash_lookahead":
+        first.num_hash_lookahead_tokens = 3
     else:
         monkeypatch.setenv("DYN_BENCH_POOL_TAG", "different-pool")
     assert first._bench_grid_invariants_digest() != original
