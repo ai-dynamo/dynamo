@@ -23,6 +23,7 @@ from sglang.srt.managers.io_struct import ProfileReq
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.init_llm as init_llm_mod
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.llm.exceptions import InvalidArgument
@@ -2694,6 +2695,152 @@ async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
             metrics_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await metrics_task
+
+
+def _decode_warmup_engine(events, image=False):
+    async def async_generate(**kwargs):
+        events.append(("generate", kwargs))
+
+    async def freeze_gc():
+        events.append(("freeze_gc", {}))
+
+    return SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(is_image_understandable_model=image),
+            freeze_gc=freeze_gc,
+        ),
+    )
+
+
+def _decode_warmup_server_args(**overrides):
+    values = dict(
+        skip_server_warmup=False,
+        skip_tokenizer_init=False,
+        ep_join_mode=None,
+        language_only=False,
+        language_model_only=False,
+        enable_encoder_swa_bounded_replay=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.fixture
+def record_text_warmup(monkeypatch):
+    events = []
+
+    async def warmup_engine(engine, server_args):
+        events.append(("warmup", {}))
+
+    monkeypatch.setattr(init_llm_mod, "warmup_engine", warmup_engine)
+    return events
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_matches_launch_server_order(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events), _decode_warmup_server_args()
+    )
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+    assert events[2][1]["input_ids"] == [0]
+    assert events[2][1]["sampling_params"]["max_new_tokens"] == 1
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skip_server_warmup_still_freezes_gc(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events),
+        _decode_warmup_server_args(skip_server_warmup=True),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skips_generation_on_scale_joiner(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events, image=True),
+        _decode_warmup_server_args(ep_join_mode="scale"),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_image_failure_aborts_startup(monkeypatch):
+    events = []
+
+    async def failing_image_warmup(engine):
+        raise RuntimeError("image warmup failed")
+
+    monkeypatch.setattr(init_llm_mod, "_image_warmup", failing_image_warmup)
+    with pytest.raises(RuntimeError, match="image warmup failed"):
+        await init_llm_mod._warmup_decode_engine(
+            _decode_warmup_engine(events, image=True), _decode_warmup_server_args()
+        )
+
+    assert events == []
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_final_generation_times_out(
+    monkeypatch, record_text_warmup
+):
+    events = record_text_warmup
+    engine = _decode_warmup_engine(events)
+
+    async def hanging_generate(**kwargs):
+        events.append(("generate", kwargs))
+        await asyncio.Event().wait()
+
+    engine.async_generate = hanging_generate
+    monkeypatch.setattr(init_llm_mod, "_warmup_timeout", lambda: 0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await init_llm_mod._warmup_decode_engine(engine, _decode_warmup_server_args())
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+
+
+@pytest.mark.parametrize(
+    ("image", "overrides", "expected"),
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (True, {"skip_tokenizer_init": True}, False),
+        (True, {"language_only": True}, False),
+        (True, {"language_model_only": True}, False),
+        (True, {"enable_encoder_swa_bounded_replay": True}, False),
+    ],
+)
+def test_decode_warmup_chooses_image_request_like_launch_server(
+    monkeypatch, image, overrides, expected
+):
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    engine = _decode_warmup_engine([], image=image)
+
+    assert (
+        init_llm_mod._uses_image_warmup(engine, _decode_warmup_server_args(**overrides))
+        is expected
+    )
+
+
+def test_decode_warmup_image_check_tolerates_older_sglang_args(monkeypatch):
+    # SGLang 0.5.19 (the XPU image) has no enable_encoder_swa_bounded_replay.
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    server_args = SimpleNamespace(skip_tokenizer_init=False)
+    engine = _decode_warmup_engine([], image=True)
+
+    assert init_llm_mod._uses_image_warmup(engine, server_args) is True
 
 
 def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
