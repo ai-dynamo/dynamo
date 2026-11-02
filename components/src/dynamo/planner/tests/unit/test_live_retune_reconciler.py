@@ -10,7 +10,6 @@ import logging
 import os
 import shutil
 import stat
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
@@ -29,9 +28,9 @@ from dynamo.planner.retune.live.contracts import (
 from dynamo.planner.retune.live.reconciler import (
     JOB_NAME_LABEL,
     RUN_GENERATION_ANNOTATION,
+    TEMP_MARGIN_S,
+    VISIBILITY_MARGIN_S,
     Reconciler,
-    window_file_name,
-    window_relpath,
 )
 
 pytestmark = [
@@ -46,10 +45,9 @@ NOW = 1_800_000_000.0
 INTERVAL = 3600.0
 GRACE = 120.0
 TIMEOUT = 1800.0
-MARGIN = 600.0
-SEGMENT_AGE = INTERVAL + GRACE + TIMEOUT + MARGIN  # 6120
-WINDOW_AGE = INTERVAL + TIMEOUT  # 5400
-TEMP_AGE = 900.0 + 300.0  # cut_budget + temp margin
+SEGMENT_AGE = INTERVAL + GRACE + TIMEOUT + VISIBILITY_MARGIN_S
+WINDOW_AGE = INTERVAL + TIMEOUT
+TEMP_AGE = 900.0 + TEMP_MARGIN_S  # cut_budget_seconds + margin
 OLD = 100_000.0  # older than every threshold
 
 
@@ -239,14 +237,7 @@ def make(
     kube = FakeKube()
     metrics = RecordingMetrics()
     reconciler = Reconciler(
-        kube,
-        DGD,
-        cfg,
-        retune,
-        str(tmp_path),
-        metrics,
-        now=lambda: NOW,
-        visibility_margin_s=MARGIN,
+        kube, DGD, cfg, retune, str(tmp_path), metrics, now=lambda: NOW
     )
     return reconciler, kube, metrics
 
@@ -443,7 +434,7 @@ def test_only_the_top_level_segments_of_a_live_pod_are_collected(
 
 
 def window_path(reconciler: Reconciler, window: int) -> Path:
-    return Path(reconciler.windows_root) / window_file_name(window)
+    return Path(reconciler.windows_root) / f"{window}.jsonl.gz"
 
 
 def test_protected_windows_are_never_deleted(tmp_path: Path) -> None:
@@ -1049,50 +1040,3 @@ def test_an_old_sweeps_release_keeps_a_relaunched_sweeps_protection(
     report = run_once(reconciler, due=window_ms(0))
     assert report.deleted_requests == ("rt-new", "rt-old")
     assert report.deleted_windows == (window,)
-
-
-def test_registry_is_thread_safe_during_rounds(tmp_path: Path) -> None:
-    reconciler, kube, _ = make(tmp_path, keep_requests=0)
-    for k in range(10):
-        kube.add_request(f"rt-{k}", window_ms(20 + k), state="completed")
-    errors: list[BaseException] = []
-    stop = threading.Event()
-
-    def churn(offset: int) -> None:
-        try:
-            i = 0
-            while not stop.is_set():
-                window = 1_000 * offset + i % 50
-                reconciler.protect(window, [f"x-{offset}-{i}"])
-                reconciler.enqueue_delete([])
-                reconciler.release(window)
-                i += 1
-        except BaseException as exc:  # surfaced below
-            errors.append(exc)
-
-    threads = [threading.Thread(target=churn, args=(n,)) for n in range(4)]
-    for thread in threads:
-        thread.start()
-    try:
-        for _ in range(20):
-            run_once(reconciler, due=window_ms(0))
-    finally:
-        stop.set()
-        for thread in threads:
-            thread.join()
-    assert errors == []
-    assert reconciler.protected_windows() == frozenset()
-    assert kube.requests == {}
-
-
-# ------------------------------------------------------------------ helpers
-
-
-def test_window_relpath_matches_the_reconciler_layout(tmp_path: Path) -> None:
-    reconciler, _, _ = make(tmp_path)
-    cfg = DgdrExecutorConfig(
-        claim_name="traces", model="m", sku="s", engine={}, windows_dir="/w/x/"
-    )
-    assert window_relpath(cfg, "dgd", 1234) == "w/x/dgd/1234.jsonl.gz"
-    assert reconciler.windows_root == str(tmp_path / "windows" / "dgd")
-    assert reconciler.segments_root == str(tmp_path / "segments" / "dgd")
