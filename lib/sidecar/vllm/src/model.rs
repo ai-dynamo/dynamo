@@ -7,6 +7,7 @@ use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
 use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use pep440_rs::Version;
 
 use crate::client;
 use crate::proto as pb;
@@ -131,6 +132,15 @@ impl DiscoveredModel {
     /// Whether vLLM confirms it reads the vllm-proto 0.5 generation controls.
     pub(crate) fn reports_proto_0_6(&self) -> bool {
         parse_proto_version(&self.server.proto_version).is_some_and(|version| version >= PROTO_0_6)
+    }
+
+    /// Whether vLLM reports version 0.33 or later, whose gRPC server compiles
+    /// structural tags with xgrammar (vllm-project/vllm#61892).
+    pub(crate) fn compiles_structural_tags(&self) -> bool {
+        self.server
+            .engine_version
+            .parse::<Version>()
+            .is_ok_and(|version| version >= Version::new([0, 33]))
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
