@@ -7,21 +7,6 @@ pub struct dynamo_router_protocol::attempt::AttemptIdMinter
 impl dynamo_router_protocol::attempt::AttemptIdMinter
 pub fn dynamo_router_protocol::attempt::AttemptIdMinter::mint(&self) -> dynamo_router_protocol::attempt::AttemptId
 pub const fn dynamo_router_protocol::attempt::AttemptIdMinter::new() -> Self
-pub mod dynamo_router_protocol::block_hash
-pub struct dynamo_router_protocol::block_hash::ExternalSequenceBlockHash(pub u64)
-impl core::convert::From<i64> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
-pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::from(i64) -> Self
-impl core::convert::From<u64> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
-pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::from(u64) -> Self
-impl serde_core::ser::Serialize for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
-pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::block_hash::ExternalSequenceBlockHash
-pub fn dynamo_router_protocol::block_hash::ExternalSequenceBlockHash::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
-pub struct dynamo_router_protocol::block_hash::LocalBlockHash(pub u64)
-impl serde_core::ser::Serialize for dynamo_router_protocol::block_hash::LocalBlockHash
-pub fn dynamo_router_protocol::block_hash::LocalBlockHash::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for dynamo_router_protocol::block_hash::LocalBlockHash
-pub fn dynamo_router_protocol::block_hash::LocalBlockHash::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
 pub mod dynamo_router_protocol::columns
 pub struct dynamo_router_protocol::columns::WorkerInfo
 impl dynamo_router_protocol::columns::WorkerInfo

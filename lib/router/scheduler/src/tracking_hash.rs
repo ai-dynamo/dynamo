@@ -16,9 +16,10 @@ use zeroize::Zeroizing;
 
 use crate::identity::RoutingPartitionRef;
 use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
-    compute_seq_hash_for_block, compute_seq_hash_for_tokens_with_seeds,
+    BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    compute_seq_hash_for_tokens_with_seeds,
 };
+use dynamo_kv_hashing::LocalBlockHash;
 
 pub const KEY_SIZE: usize = 32;
 

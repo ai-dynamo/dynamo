@@ -6,7 +6,7 @@ use std::collections::hash_map::Entry;
 
 use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData};
 use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EventDedupPolicy {

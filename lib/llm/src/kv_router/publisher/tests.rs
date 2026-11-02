@@ -863,10 +863,10 @@ mod tests_startup_helpers {
     use super::*;
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::host::{
         GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_runtime::discovery::{
         Discovery, DiscoveryQuery, EventSourceQuery, MockDiscovery, SharedMockRegistry,
     };
@@ -4127,7 +4127,7 @@ mod event_plane_batch_tests {
         KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
         KvCacheStoredBlockData, RouterEvent,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
     use dynamo_runtime::distributed::DistributedConfig;

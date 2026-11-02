@@ -6,7 +6,7 @@ use std::{hash::Hash, sync::Arc};
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// Observes the first owner and last owner of a sequence hash within one indexer.

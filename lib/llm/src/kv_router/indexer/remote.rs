@@ -6,12 +6,12 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
 use dashmap::DashMap;
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::host::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};

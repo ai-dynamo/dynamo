@@ -216,7 +216,7 @@ impl RankState {
 mod tests {
     use super::*;
     use dynamo_kv_events::event::{KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData};
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     fn store(event_id: u64) -> RouterEvent {
         RouterEvent::new(

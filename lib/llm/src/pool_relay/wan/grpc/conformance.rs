@@ -10,7 +10,7 @@ use std::time::Duration;
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };

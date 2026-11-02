@@ -13,6 +13,7 @@ use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
 use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
@@ -24,7 +25,6 @@ use dynamo_kv_router::services::selection::{
     SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory, local_selection_core,
     local_selection_core_with_host,
 };
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::protocols::RoutingConstraints;

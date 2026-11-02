@@ -23,9 +23,9 @@ use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::indexer::server::{AppState, create_router};
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use serde_json::json;
 use tokio::net::TcpListener;

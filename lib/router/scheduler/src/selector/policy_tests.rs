@@ -267,7 +267,8 @@ fn custom_picker_receives_requested_cache_inputs() {
 #[test]
 fn components_read_fetchable_prefixes_only_when_declared() {
     use crate::kv_hints::KvTransferCandidates;
-    use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
+    use crate::protocols::KvHintTransferWorkerMetadata;
+    use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use std::sync::{Arc, Mutex};
 
     struct HintWorker;
@@ -492,7 +493,8 @@ fn worker_info_reaches_every_component_without_declaration() {
 fn prepared_candidates_select_like_rows_built_at_selection() {
     use crate::ScheduleMode;
     use crate::kv_hints::KvTransferCandidates;
-    use crate::protocols::{ExternalSequenceBlockHash, KvHintTransferWorkerMetadata};
+    use crate::protocols::KvHintTransferWorkerMetadata;
+    use dynamo_kv_hashing::ExternalSequenceBlockHash;
 
     struct Worker {
         dp_size: u32,

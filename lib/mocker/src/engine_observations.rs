@@ -8,7 +8,7 @@ use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
 use dynamo_kv_events::residency::StorageTier;
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
 use crate::common::protocols::ForwardPassSnapshot;
 
@@ -101,8 +101,8 @@ mod tests {
 
     use aisimulate_core::engine::{KvBlock, StoredBlocks};
     use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+    use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_router_protocol::block_hash::LocalBlockHash;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 

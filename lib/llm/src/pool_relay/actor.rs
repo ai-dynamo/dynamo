@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, RouterEvent};
 #[cfg(test)]
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
+#[cfg(test)]
 use dynamo_kv_indexer::cuckoo::CkfConfig;
 #[cfg(any(test, feature = "ckf-diagnostics"))]
 use dynamo_kv_indexer::cuckoo::DcCkfStats;
@@ -23,8 +25,6 @@ use dynamo_kv_indexer::cuckoo::{
     CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
     DcCkfPublisher, DcCkfRankReplacement, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
-#[cfg(test)]
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
@@ -1464,9 +1464,9 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_indexer::cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId};
     use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse};
-    use dynamo_router_protocol::block_hash::LocalBlockHash;
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };

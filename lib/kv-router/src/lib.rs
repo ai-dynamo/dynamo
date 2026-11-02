@@ -145,6 +145,11 @@ pub use config::{
     since = "1.7.0",
     note = "import from the owner's host module, the vocabulary crate, plugins::prelude, or config::; see lib/kv-router/README.md, Deprecated paths"
 )]
+pub use dynamo_kv_hashing::LocalBlockHash;
+#[deprecated(
+    since = "1.7.0",
+    note = "import from the owner's host module, the vocabulary crate, plugins::prelude, or config::; see lib/kv-router/README.md, Deprecated paths"
+)]
 pub use identity::{ClusterId, DEFAULT_ROUTING_GROUP, RoutingPartitionId, RoutingPartitionRef};
 #[allow(deprecated)]
 pub use indexer::{
@@ -162,8 +167,8 @@ pub use nested_map::PositionalIndexer;
     note = "import from the owner's host module, the vocabulary crate, plugins::prelude, or config::; see lib/kv-router/README.md, Deprecated paths"
 )]
 pub use protocols::{
-    KvCacheEventError, KvTransferEnforcement, LocalBlockHash, OverlapScores, RouterEvent,
-    RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
+    KvCacheEventError, KvTransferEnforcement, OverlapScores, RouterEvent, RouterEventSink,
+    SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 #[deprecated(
     since = "1.7.0",

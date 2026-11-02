@@ -427,7 +427,7 @@ where
 #[cfg(test)]
 mod tests {
     use dynamo_kv_events::event::{KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData};
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 

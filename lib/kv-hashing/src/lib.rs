@@ -15,8 +15,12 @@
 //! This crate is intentionally a library, not a service. It contains no async, no
 //! transports, no traits over runtime/scheduler config, and no event types. Those
 //! belong in higher layers (kvbm-connector, consolidator, kv-router).
+//!
+//! The block hash identities the router and engines exchange, [`LocalBlockHash`] and
+//! [`ExternalSequenceBlockHash`], live here beside the functions that compute them.
 
 mod block;
+mod block_hash;
 mod compute;
 mod error;
 mod request;
@@ -24,6 +28,7 @@ pub mod routing;
 mod salt;
 
 pub use block::UniversalBlock;
+pub use block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 pub use error::KvHashingError;
 pub use request::{Request, RequestBuilder, RequestMmObjectInfo};
 pub use salt::compute_salt_hash;

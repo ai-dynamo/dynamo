@@ -14,11 +14,11 @@ use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::TieredMatchDetails;
 #[cfg(feature = "metrics")]
 use dynamo_kv_indexer::metrics::KvIndexerMetrics;
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::identity::default_routing_group;

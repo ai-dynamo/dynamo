@@ -28,7 +28,7 @@ use async_trait::async_trait;
 
 use super::config::CacheHitWeights;
 use crate::kv_hints::KvTransferCandidates;
-use crate::protocols::LocalBlockHash;
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::{LowerTierQueryOptions, TieredMatchProvider};
 
 use super::overlap::{OverlapAnalysis, OverlapSignals};

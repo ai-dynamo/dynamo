@@ -266,6 +266,7 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
+    use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
@@ -274,7 +275,6 @@ mod tests {
         GlobalCkfSnapshot, LaneLease, PrefixSearchConfig, ProducerIdentity,
     };
     use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
-    use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
     use dynamo_router_protocol::identity::IdentitySource;
 
     use super::*;

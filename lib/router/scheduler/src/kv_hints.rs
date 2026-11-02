@@ -206,9 +206,10 @@ mod summary_tests {
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
-        ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, ResidencyOwner,
-        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+        KvHintTransferWorkerMetadata, ResidencyOwner, ResidencyProjection,
+        ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
+    use dynamo_kv_hashing::ExternalSequenceBlockHash;
 
     struct Worker;
 

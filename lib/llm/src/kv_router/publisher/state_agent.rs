@@ -1931,8 +1931,8 @@ mod tests {
     use dynamo_kv_events::event::{KvCacheStoreData, KvCacheStoredBlockData};
     use dynamo_kv_events::placement::{Placement, PlacementOwner};
     use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::host::WorkerKvQueryResponse;
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,

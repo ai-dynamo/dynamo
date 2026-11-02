@@ -23,9 +23,9 @@ use dynamo_kv_events::zmq_wire::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, RawKvEvent, convert_event,
     create_stored_block_from_parts, extra_keys_to_block_mm_infos, parse_mm_hash_from_extra_key,
 };
-use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
 #[cfg(test)]
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};

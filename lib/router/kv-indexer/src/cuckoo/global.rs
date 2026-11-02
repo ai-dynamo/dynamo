@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
-use dynamo_router_protocol::block_hash::LocalBlockHash;
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::identity::{ClusterId, IdentitySource, IndexerDomainId, PoolId};
 
 use super::addressing::{CkfAddressing, CkfProbe};

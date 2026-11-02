@@ -13,6 +13,7 @@ use dynamo_admission::host::{
     PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, WorkerPlacement,
 };
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::host::RadixTree;
 use dynamo_kv_indexer::host::{
@@ -24,7 +25,6 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -70,16 +70,16 @@ pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayCom
 #[derive(Clone, Copy)]
 enum KvEventSummary {
     Stored {
-        parent_hash: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
+        parent_hash: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
         start_position: Option<u32>,
         count: usize,
-        first: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
-        last: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
+        first: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
     },
     Removed {
         count: usize,
-        first: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
-        last: Option<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>,
+        first: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
     },
     Cleared,
 }
@@ -1572,8 +1572,8 @@ mod tests {
     };
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
         PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,

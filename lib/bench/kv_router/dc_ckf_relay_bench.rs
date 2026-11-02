@@ -27,12 +27,12 @@ use dynamo_bench::kv_router_common::issuer::{
 };
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, KvCacheEventError, RouterEvent};
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_indexer::cuckoo::{
     CanonicalSequenceBlockHash, CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
     DcCkfPublicationBatch, DcCkfPublisher, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_mocker::replay::ReplayWorkerArtifacts;
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };

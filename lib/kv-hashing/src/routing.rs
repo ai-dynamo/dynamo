@@ -3,12 +3,12 @@
 
 //! The router's block and sequence hashes, computed from token ids.
 //!
-//! Engines publish [`ExternalSequenceBlockHash`](dynamo_router_protocol::block_hash::ExternalSequenceBlockHash)
+//! Engines publish [`ExternalSequenceBlockHash`](crate::ExternalSequenceBlockHash)
 //! values they computed themselves; the router recomputes the same identities from the request's
 //! tokens with these functions so the two sides agree. The seed and the multimodal padding rules
 //! here are part of that contract. Nothing in this module reads configuration or performs IO.
 
-use dynamo_router_protocol::block_hash::LocalBlockHash;
+use crate::block_hash::LocalBlockHash;
 use dynamo_router_protocol::mm::BlockExtraInfo;
 use dynamo_tokens::{SequenceHash, compute_hash_v2, compute_next_sequence_hash};
 use xxhash_rust::xxh3;

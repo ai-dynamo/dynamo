@@ -27,9 +27,7 @@ use super::types::{
     WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{
-    LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
-};
+use crate::protocols::{SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
@@ -37,6 +35,7 @@ use dynamo_admission::PolicyProfile;
 use dynamo_admission::RouterQueuePolicy;
 use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
 use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_slot_tracker::topology::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,

@@ -1142,10 +1142,10 @@ mod tests {
         KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
     use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,

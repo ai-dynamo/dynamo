@@ -15,10 +15,11 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use dynamo_admission::queue::QueueRejection;
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_slot_tracker::WorkerLoadProjection;
 
 pub use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};

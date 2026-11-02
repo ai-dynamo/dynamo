@@ -24,8 +24,8 @@ use crate::kv_hints::{
 };
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::queue::SchedulerBookingDescriptor;
 use crate::replication::{
@@ -42,6 +42,7 @@ use crate::{
     SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
 use dynamo_kv_indexer::registry::IndexRegistry;
 use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};

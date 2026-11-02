@@ -37,13 +37,13 @@ pub use crate::plugins::{
 };
 
 // Wire vocabulary the signal views carry.
+pub use dynamo_kv_hashing::ExternalSequenceBlockHash;
 pub use dynamo_kv_hints::{
     KvHintTransferWorkerMetadata, KvTransferEnforcement, WorkerKvTransferKeys,
     WorkerKvTransferKeysCache,
 };
 pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 pub use dynamo_router_protocol::WorkerType;
-pub use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 pub use dynamo_router_protocol::identity::{RoutingPartitionId, RoutingPartitionRef};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_router_protocol::worker::{

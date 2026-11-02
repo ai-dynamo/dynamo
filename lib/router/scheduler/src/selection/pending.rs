@@ -13,7 +13,8 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
-use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
+use crate::protocols::WorkerWithDpRank;
+use dynamo_kv_hashing::LocalBlockHash;
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);

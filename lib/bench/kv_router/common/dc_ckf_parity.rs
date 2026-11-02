@@ -251,14 +251,14 @@ impl DirectCkfParityIndexer {
 
     pub fn find_matches(
         &mut self,
-        sequence: &[dynamo_router_protocol::block_hash::LocalBlockHash],
+        sequence: &[dynamo_kv_hashing::LocalBlockHash],
     ) -> Result<OverlapScores> {
         self.find_matches_with_mode(sequence, DirectCkfParityMatchMode::FullMap)
     }
 
     pub fn find_matches_with_mode(
         &mut self,
-        sequence: &[dynamo_router_protocol::block_hash::LocalBlockHash],
+        sequence: &[dynamo_kv_hashing::LocalBlockHash],
         mode: DirectCkfParityMatchMode,
     ) -> Result<OverlapScores> {
         self.exact_drain()?;
@@ -312,7 +312,7 @@ mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 

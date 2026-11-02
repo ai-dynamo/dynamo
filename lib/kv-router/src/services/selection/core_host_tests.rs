@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::backend::test_util::store_event;
 use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
 use dynamo_scheduler::config::RouterConfig;
 use dynamo_scheduler::identity::RoutingPartitionId;
-use dynamo_scheduler::protocols::{LocalBlockHash, RoutingConstraints, StorageTier, WorkerId};
+use dynamo_scheduler::protocols::{RoutingConstraints, StorageTier, WorkerId};
 use dynamo_scheduler::selection::{
     HostCache, KvIndexSource, PromptRequest, SelectRequest, SelectionCacheConfig, SelectionCore,
     SelectionError, SelectionHost, WorkerLifecycle, WorkerRequest,

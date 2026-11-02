@@ -7,6 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 
 Everything about KV cache events, for both ends of the wire: the event types and the `RouterEvent` envelope (`event`), the engine ZMQ msgpack codec and its filters (`zmq_wire`), the replay cursor a subscriber keeps in step with a publisher (`cursor`), the publisher-side placement helpers (`placement`), and the residency vocabulary engines publish with their events (`residency`: `StorageTier`, `ResidencyDomain`, `ResidencyOwner`, `ResetScope`, `WireResidencyDomain`). Workers, sidecars, and the C bindings publish with this crate; the router's indexer ingests with it.
 
-Dependencies: `dynamo-router-protocol` (identities, block-hash newtypes, multimodal block info), `dynamo-kv-hashing` (the block hash contract the codec recomputes), serde, serde_json, rmp-serde, rustc-hash, thiserror, tracing. No sockets, tasks, or servers: the ZMQ socket is `dynamo-zmq` and the listener that drives it is a `dynamo-kv-router` adapter. The layering gate (`scripts/router_layering_check.sh`) checks the dependency set.
+Dependencies: `dynamo-router-protocol` (identities, multimodal block info), `dynamo-kv-hashing` (the block hash identities and the contract the codec recomputes), serde, serde_json, rmp-serde, rustc-hash, thiserror, tracing. No sockets, tasks, or servers: the ZMQ socket is `dynamo-zmq` and the listener that drives it is a `dynamo-kv-router` adapter. The layering gate (`scripts/router_layering_check.sh`) checks the dependency set.
 
 Part of the router split (see `lib/router/README.md`).

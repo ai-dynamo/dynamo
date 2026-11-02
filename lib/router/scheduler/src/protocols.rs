@@ -36,7 +36,6 @@ pub use dynamo_kv_indexer::residency::{
     ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
     ResidencyRoutingSnapshot, ResolvedRouterHintSource,
 };
-pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 pub use dynamo_router_protocol::mm::{
     BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,

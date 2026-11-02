@@ -30,7 +30,8 @@
 //! selection scope, the `WorkerConfigLike` adapter (`WorkerKvTransferKeysExt`), and the attach
 //! point that puts the hint on the selected request stay in `dynamo-scheduler`.
 //!
-//! Among router crates this one depends on `dynamo-router-protocol` and `dynamo-kv-indexer`;
+//! Among router crates this one depends on `dynamo-router-protocol`, `dynamo-kv-hashing`, and
+//! `dynamo-kv-indexer`;
 //! no transport, no stage logic of its own. The scheduler kernel, `dynamo-kv-router`, and the
 //! hosts consume it; no stage depends on it.
 

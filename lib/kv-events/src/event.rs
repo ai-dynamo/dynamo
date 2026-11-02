@@ -13,7 +13,7 @@ use crate::residency::{
     ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, UnsupportedResidencyDomain,
     WireResidencyDomain,
 };
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_router_protocol::mm::BlockExtraInfo;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};

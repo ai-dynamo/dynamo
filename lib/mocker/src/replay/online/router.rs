@@ -584,7 +584,7 @@ mod tests {
     };
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::*;

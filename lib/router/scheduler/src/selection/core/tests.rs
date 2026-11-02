@@ -3316,7 +3316,7 @@ fn hint_candidates(
     KvTransferCandidates {
         block_hashes: hashes
             .iter()
-            .map(|h| crate::protocols::ExternalSequenceBlockHash(*h))
+            .map(|h| dynamo_kv_hashing::ExternalSequenceBlockHash(*h))
             .collect(),
         owner_prefix_blocks: owners,
         routing_snapshot: None,

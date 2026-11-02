@@ -18,7 +18,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 

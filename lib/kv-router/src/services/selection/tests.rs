@@ -793,8 +793,8 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     assert_eq!(
         selection.block_hashes,
         vec![
-            dynamo_router_protocol::block_hash::LocalBlockHash(11),
-            dynamo_router_protocol::block_hash::LocalBlockHash(29)
+            dynamo_kv_hashing::LocalBlockHash(11),
+            dynamo_kv_hashing::LocalBlockHash(29)
         ]
     );
     assert_eq!(selection.sequence_hashes, vec![u64::MAX, 7]);

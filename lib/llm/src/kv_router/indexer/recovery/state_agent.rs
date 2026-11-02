@@ -2404,13 +2404,13 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 mod tests {
     use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
     use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_hints::KvTransferCandidateSource;
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
         KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
         ResidencyOwnerKeyExt, query_lower_tiers_with_options,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,

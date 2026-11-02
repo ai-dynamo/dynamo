@@ -26,13 +26,13 @@ use dynamo_kv_events::event::{
     RouterEvent,
 };
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::cuckoo::{
     CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
     DcCkfSnapshot, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfIngestionPool,
     GlobalCkfIngestionPoolConfig, GlobalCkfManifest, LaneLease, PrefixSearchConfig,
     ProducerIdentity,
 };
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };

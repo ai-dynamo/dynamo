@@ -10,8 +10,8 @@ use crate::event::{
 };
 use crate::placement::{Placement, PlacementEvent};
 use crate::residency::StorageTier;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
 use dynamo_router_protocol::mm::BlockExtraInfo;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 

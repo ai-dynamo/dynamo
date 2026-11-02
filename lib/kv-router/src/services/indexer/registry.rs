@@ -812,7 +812,7 @@ mod tests {
     use super::*;
     use crate::services::indexer::backend::test_util::store_event;
     use dynamo_kv_events::residency::StorageTier;
-    use dynamo_router_protocol::block_hash::LocalBlockHash;
+    use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::future::Future;
     use std::sync::atomic::Ordering;

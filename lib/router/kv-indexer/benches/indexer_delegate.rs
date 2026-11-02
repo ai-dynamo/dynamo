@@ -8,11 +8,11 @@ use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::{
     KvIndexerDelegate, KvIndexerInterface, ThreadPoolIndexer,
     concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
 };
-use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 
 struct Delegate;
 impl KvIndexerDelegate for Delegate {

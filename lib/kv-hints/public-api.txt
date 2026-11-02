@@ -65,7 +65,7 @@ impl dynamo_kv_hints::wire::KvHintAction
 pub fn dynamo_kv_hints::wire::KvHintAction::fetch(impl core::convert::Into<alloc::string::String>, dynamo_kv_hints::wire::KvSourceLocationsPayload) -> Self
 pub fn dynamo_kv_hints::wire::KvHintAction::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>) -> Self
 pub struct dynamo_kv_hints::wire::KvSourceLocationsPayload
-pub dynamo_kv_hints::wire::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>
+pub dynamo_kv_hints::wire::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_kv_hashing::block_hash::ExternalSequenceBlockHash>
 pub dynamo_kv_hints::wire::KvSourceLocationsPayload::source_control_endpoint: alloc::string::String
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
@@ -91,7 +91,7 @@ pub struct dynamo_kv_hints::KvHintTransferWorkerMetadata<'a>
 pub dynamo_kv_hints::KvHintTransferWorkerMetadata::source_control_endpoint: core::option::Option<&'a str>
 pub dynamo_kv_hints::KvHintTransferWorkerMetadata::worker_type: &'a str
 pub struct dynamo_kv_hints::KvSourceLocationsPayload
-pub dynamo_kv_hints::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_router_protocol::block_hash::ExternalSequenceBlockHash>
+pub dynamo_kv_hints::KvSourceLocationsPayload::block_hashes: alloc::vec::Vec<dynamo_kv_hashing::block_hash::ExternalSequenceBlockHash>
 pub dynamo_kv_hints::KvSourceLocationsPayload::source_control_endpoint: alloc::string::String
 pub struct dynamo_kv_hints::KvTransferScope
 impl dynamo_kv_hints::transfer::KvTransferScope

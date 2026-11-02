@@ -213,10 +213,10 @@ mod tests {
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::cuckoo::{
         CkfConfig, ConsumerInstanceId, DcCkfState, LaneLease, ProducerIdentity,
     };
-    use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };

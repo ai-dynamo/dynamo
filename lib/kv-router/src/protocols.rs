@@ -23,8 +23,6 @@ pub use dynamo_scheduler::protocols::{
     SelectionLogFields, WorkerConfigLike, WorkerSelectionResult,
 };
 
-pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
-
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 
 pub use dynamo_kv_events::residency::{

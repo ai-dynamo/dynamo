@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::compute_next_seq_hash;
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 
 /// Dynamo's canonical rolling sequence hash for one KV-cache block.
 ///
@@ -30,8 +30,8 @@ impl CanonicalSequenceBlockHash {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_hashing::routing::compute_next_seq_hash;
-    use dynamo_router_protocol::block_hash::LocalBlockHash;
 
     use super::CanonicalSequenceBlockHash;
 

@@ -20,11 +20,11 @@ use crate::plugins::worker_selection::selection_config::{
 use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_router_protocol::WorkerType;
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 pub use dynamo_worker_selection::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggPolicyKind,
 };

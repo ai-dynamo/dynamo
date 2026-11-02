@@ -16,7 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, KvCacheStoreData, RouterEvent};
-use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::addressing::CkfAddressing;
@@ -1466,8 +1466,8 @@ mod tests {
         KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
     use dynamo_kv_events::residency::{ResidencyDomain, StorageTier, WireResidencyDomain};
+    use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-    use dynamo_router_protocol::block_hash::LocalBlockHash;
 
     use super::*;
 

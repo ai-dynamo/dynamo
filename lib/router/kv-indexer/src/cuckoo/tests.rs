@@ -3,8 +3,8 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
-use dynamo_router_protocol::block_hash::LocalBlockHash;
 
 use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};

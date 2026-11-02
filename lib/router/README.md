@@ -12,10 +12,10 @@ The Dynamo router as a set of small crates. Every arrow into a stage starts at t
 | Crate | One sentence | Depends on |
 |---|---|---|
 | `dynamo-error` | The error contract: `DynamoError`, `ErrorClass::http_status`, reason catalog, `PublicDetails` | serde, serde_json |
-| `dynamo-kv-hashing` | The hash contract engines and router share: block hashes, sequence hashes, tracking-hash context | dynamo-tokens, xxhash-rust, blake3 |
+| `dynamo-kv-hashing` | The hash contract engines and router share: the block hash identities, block hashes, sequence hashes, tracking-hash context | protocol, dynamo-tokens, xxhash-rust |
 | `dynamo-router-protocol` | The identities and worker-facing vocabulary every crate names | serde, serde_json, thiserror |
 | `dynamo-kv-events` | Everything about KV events: types, engine codec, replay cursor, the residency vocabulary (tiers, domains, owners) | protocol, serde, rmp-serde |
-| `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-indexer, serde, rustc-hash |
+| `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-hashing, kv-indexer, serde, rustc-hash |
 | `dynamo-zmq` | One ZMQ socket helper | zmq, tokio net |
 | `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs, identity config, the transfer candidate vocabulary, and the residency owner key | protocol, kv-events, kv-hashing |
 | `dynamo-slot-tracker` | Bookings per rank in, load and fullness out; owns its replication wire | protocol, kv-hashing |
