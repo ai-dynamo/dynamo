@@ -4866,11 +4866,12 @@ class EmbeddingWorkerHandler:
         accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
         subject to the engine's media limits and allowed media sources.
 
-        Input vLLM rejects (a text-only model given media, a modality or item
-        count the model doesn't take, a malformed message) raises
-        ``InvalidArgument`` with vLLM's message, so the client gets the 400
-        and the reason ``vllm serve`` would give rather than a bare
-        "Invalid request" or a 500.
+        Input vLLM rejects reaches the client with the status and message
+        ``vllm serve`` would give, rather than a bare "Invalid request" or a
+        500: vLLM's typed client errors keep their status (422 for media that
+        can't be loaded, such as an image URL returning 404), and other
+        validation failures (a text-only model given media, a malformed
+        message) raise ``InvalidArgument``, a 400.
         """
         from vllm.entrypoints.pooling.embed.protocol import (
             EmbeddingBatchChatRequest,
@@ -4878,6 +4879,8 @@ class EmbeddingWorkerHandler:
         )
         from vllm.exceptions import VLLMClientError
         from vllm.utils.mistral import is_mistral_tokenizer
+
+        from .errors import vllm_client_error_to_http_error
 
         messages = request["messages"]
         batched = (
@@ -4913,11 +4916,52 @@ class EmbeddingWorkerHandler:
                 chat_params,
                 chat_request.build_tok_params(model_config),
             )
-        # The errors vLLM's server answers with 400 (pydantic's ValidationError
-        # is a ValueError).
-        except (ValueError, TypeError, VLLMClientError) as e:
+        except VLLMClientError as e:
+            raise vllm_client_error_to_http_error(e) from e
+        # The other errors vLLM's server answers with 400 (pydantic's
+        # ValidationError is a ValueError).
+        except (ValueError, TypeError) as e:
             raise InvalidArgument(str(e)) from e
         return list(engine_prompts)
+
+    async def _render_chat_embedding_input_until_stopped(
+        self, request: dict, context: Context
+    ) -> Optional[list[Any]]:
+        """Render chat-style input unless the request stops first.
+
+        Rendering can download media before any engine request exists, so
+        ``_abort_monitor`` has nothing to abort yet. Instead the render is
+        raced against the request stopping and the worker shutting down; when
+        either wins, the render is canceled. Returns None if the request
+        stopped, and raises EngineShutdown on shutdown.
+        """
+        render_task = asyncio.create_task(self._render_chat_embedding_input(request))
+        stopped = context.async_killed_or_stopped()
+        waiters: list[Any] = [render_task, stopped]
+        shutdown_task: Optional[asyncio.Task] = None
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        done: set[Any] = set()
+        try:
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            # Also collects a render error nobody will read, so asyncio
+            # doesn't log it as never retrieved.
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+        if shutdown_task is not None and shutdown_task in done:
+            raise EngineShutdown("Engine was shut down during embedding.")
+        if stopped in done:
+            logger.debug(
+                f"Embedding request {context.id()} stopped while rendering its input"
+            )
+            return None
+        return render_task.result()
 
     async def generate(
         self, request: dict, context: Context
@@ -5042,7 +5086,12 @@ class EmbeddingWorkerHandler:
             pooling_kwargs["dimensions"] = dimensions
         pooling_params = PoolingParams(**pooling_kwargs)
         if messages is not None:
-            prompts = await self._render_chat_embedding_input(request)
+            rendered = await self._render_chat_embedding_input_until_stopped(
+                request, context
+            )
+            if rendered is None:
+                return
+            prompts = rendered
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id

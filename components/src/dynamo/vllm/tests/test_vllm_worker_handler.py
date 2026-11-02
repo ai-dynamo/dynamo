@@ -13,6 +13,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
@@ -26,6 +27,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -3168,11 +3170,16 @@ class TestEmbeddingWorkerHandlerChatInput:
         handler.engine_client.encode = fake_encode
         return handler, encoded
 
-    def _make_context(self) -> MagicMock:
+    @staticmethod
+    def _make_context(stopped: Optional[asyncio.Future] = None) -> MagicMock:
+        """Like the real Context, each ``async_killed_or_stopped()`` call
+        returns a new future; the first one is ``stopped`` when given."""
+        loop = asyncio.get_running_loop()
+        first = [stopped] if stopped is not None else []
         context = MagicMock()
         context.id.return_value = "test-req"
-        context.async_killed_or_stopped.return_value = (
-            asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.side_effect = lambda: (
+            first.pop() if first else loop.create_future()
         )
         return context
 
@@ -3185,7 +3192,7 @@ class TestEmbeddingWorkerHandlerChatInput:
             for i in range(len(conversations))
         ]
 
-    async def _generate(self, handler, request):
+    async def _generate(self, handler, request, context=None):
         tok_params = object()
         with (
             patch(
@@ -3198,7 +3205,10 @@ class TestEmbeddingWorkerHandlerChatInput:
             ),
         ):
             responses = [
-                r async for r in handler.generate(request, self._make_context())
+                r
+                async for r in handler.generate(
+                    request, context or self._make_context()
+                )
             ]
         return responses, tok_params
 
@@ -3297,31 +3307,91 @@ class TestEmbeddingWorkerHandlerChatInput:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    @pytest.mark.parametrize("case", ["text_only_model", "unsupported_modality"])
-    async def test_unsupported_media_is_invalid_argument(self, case):
-        """vLLM's rejection reaches the client as a 400 with its message,
-        instead of a generic "Invalid request" or a 500."""
-        from vllm.exceptions import VLLMValidationError
+    @pytest.mark.parametrize(
+        ("case", "expected_status"),
+        [
+            ("text_only_model", None),
+            ("unsupported_modality", 400),
+            ("media_not_loadable", 422),
+        ],
+    )
+    async def test_vllm_rejection_keeps_its_status_and_message(
+        self, case, expected_status
+    ):
+        """vLLM's rejection reaches the client with the status and message
+        ``vllm serve`` gives, instead of a generic "Invalid request" or a 500.
+        Typed vLLM client errors keep their own status; a media URL that
+        can't be loaded is a 422, not a 400."""
+        from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 
         error = {
-            # vLLM on a text-only model given media.
+            # vLLM on a text-only model given media (a plain ValueError).
             "text_only_model": ValueError("test-model is not a multimodal model"),
-            # vLLM on a model without the modality (not a ValueError).
+            # vLLM on a model without the modality.
             "unsupported_modality": VLLMValidationError(
                 "At most 0 audio(s) may be provided in one prompt.",
                 parameter="audio",
+            ),
+            # vLLM when a media URL returns 404.
+            "media_not_loadable": VLLMUnprocessableEntityError(
+                "Failed to load media from URL", parameter="image_url"
             ),
         }[case]
         handler, encoded = self._make_handler()
         handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
 
-        with pytest.raises(mod.InvalidArgument) as exc_info:
+        expected_type = mod.InvalidArgument if expected_status is None else HttpError
+        with pytest.raises(expected_type) as exc_info:
             await self._generate(
                 handler,
                 {"model": "test-model", "messages": self.AUDIO_CONVERSATION},
             )
+        if expected_status is not None:
+            assert exc_info.value.code == expected_status
         assert str(error) in str(exc_info.value)
         assert exc_info.value.__cause__ is error
+        assert encoded == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("signal", ["request_stopped", "worker_shutdown"])
+    async def test_stop_during_render_cancels_it_and_skips_encoding(self, signal):
+        """A client disconnect or worker shutdown while the media is still
+        being loaded cancels the render instead of leaving it running until
+        it finishes or times out, and nothing is encoded."""
+        handler, encoded = self._make_handler()
+        handler.shutdown_event = asyncio.Event()
+        stopped = asyncio.get_running_loop().create_future()
+        render_started = asyncio.Event()
+        render_cancelled = asyncio.Event()
+
+        async def blocked_render(*_):
+            render_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                render_cancelled.set()
+                raise
+
+        handler.engine_client.renderer.render_chat_async = blocked_render
+        generate = asyncio.create_task(
+            self._generate(
+                handler,
+                {"model": "test-model", "messages": self.IMAGE_CONVERSATION},
+                context=self._make_context(stopped),
+            )
+        )
+        await render_started.wait()
+
+        if signal == "request_stopped":
+            stopped.set_result(True)
+            responses, _ = await generate
+            assert responses == []
+        else:
+            handler.shutdown_event.set()
+            with pytest.raises(mod.EngineShutdown):
+                await generate
+        assert render_cancelled.is_set()
         assert encoded == []
 
 
