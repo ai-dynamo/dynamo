@@ -154,6 +154,15 @@ impl TieredMatchDetails {
             .and_then(|details| details.kv_transfer_candidates.as_ref())
             .or(self.device.kv_transfer_candidates.as_ref())
     }
+
+    /// Moves out the candidates [`Self::kv_transfer_candidates`] returns, for a
+    /// caller that is done with these details.
+    pub fn take_kv_transfer_candidates(&mut self) -> Option<KvTransferCandidates> {
+        self.lower_tier
+            .get_mut(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.take())
+            .or_else(|| self.device.kv_transfer_candidates.take())
+    }
 }
 
 impl From<&TieredMatchDetails> for WireTieredMatchDetails {
@@ -512,6 +521,38 @@ mod tests {
                 .root_workers(LocalBlockHash(11), &projection)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn take_kv_transfer_candidates_moves_what_kv_transfer_candidates_borrows() {
+        let candidates = |hash| KvTransferCandidates {
+            block_hashes: vec![ExternalSequenceBlockHash(hash)],
+            owner_prefix_blocks: Vec::new(),
+            routing_snapshot: None,
+        };
+        // (device, host-pinned details, expected): host-pinned candidates win,
+        // and host-pinned details without any fall back to the device tier.
+        for (device, host_pinned, expected) in [
+            (Some(1), None, Some(1)),
+            (Some(1), Some(None), Some(1)),
+            (None, Some(Some(2)), Some(2)),
+            (Some(1), Some(Some(2)), Some(2)),
+        ] {
+            let mut tiered = TieredMatchDetails::default();
+            tiered.device.kv_transfer_candidates = device.map(candidates);
+            if let Some(host_pinned) = host_pinned {
+                tiered.lower_tier.insert(
+                    StorageTier::HostPinned,
+                    LowerTierMatchDetails {
+                        kv_transfer_candidates: host_pinned.map(candidates),
+                        ..Default::default()
+                    },
+                );
+            }
+            let expected = expected.map(candidates);
+            assert_eq!(tiered.kv_transfer_candidates(), expected.as_ref());
+            assert_eq!(tiered.take_kv_transfer_candidates(), expected);
+        }
     }
 
     #[test]

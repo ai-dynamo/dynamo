@@ -781,11 +781,11 @@ impl SelectionCore {
         // Recorded before `?` so a shared-cache failure is still accounted
         // when the index lookup fails.
         *lookup = Some(timings);
-        let tiered = tiered?;
+        let mut tiered = tiered?;
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
+            .then(|| tiered.take_kv_transfer_candidates())
             .flatten();
         drop(tiered);
         Ok(PreparedSelectionInputs {

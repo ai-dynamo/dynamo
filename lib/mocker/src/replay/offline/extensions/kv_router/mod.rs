@@ -19,7 +19,7 @@ use dynamo_kv_router::indexer::{
 use dynamo_kv_router::kv_hints::{
     KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceChoice,
 };
-use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInputs};
+use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq,
@@ -731,11 +731,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         for mut request in waiting {
             if self.router.acquire_affinity(&mut request)? {
                 if let Some(hashes) = &request.block_hashes {
-                    let tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
+                    let mut tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
                     request.overlap =
                         OverlapAnalysis::new(&self.router.config, self.router.block_size, &tiered)
                             .signals();
-                    request.kv_transfer_candidates = self.router.kv_transfer_candidates(&tiered);
+                    request.kv_transfer_candidates = tiered.take_kv_transfer_candidates();
                 }
                 let effects = self.router.enqueue_or_admit(request, now_ms)?;
                 admissions.extend(effects.admissions);
@@ -835,14 +835,12 @@ impl OfflineReplayRouter {
             .collect();
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector_with_seed(&config, selector_seed)?;
-        // Production's `supports_kv_transfer_chain_retention`, and `Indexer::None` for a startup
-        // policy that reads no KV index (a later retune keeps the index it started with).
-        let inputs = WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector);
-        let kv_transfer_chain_supported = (inputs.contains(WorkerInputs::CACHE)
-            || inputs.contains(WorkerInputs::KV_TRANSFER))
-            && config.use_kv_events
-            && !config.use_remote_indexer
-            && config.router_predicted_ttl_secs.is_none();
+        // As in production: the startup policy reads the KV index (a later retune
+        // keeps the index it started with), and the index retains the chain.
+        let kv_transfer_chain_supported =
+            WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector)
+                .reads_kv_index()
+                && config.supports_kv_transfer_chain_retention();
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -1326,7 +1324,7 @@ impl OfflineReplayRouter {
         let retain_hashes = self.affinity.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
-        let (tiered, token_seq) = match replay_hashes {
+        let (mut tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let local_hashes =
                     crate::loadgen::local_block_hashes(replay_hashes.local_block_hashes);
@@ -1381,7 +1379,8 @@ impl OfflineReplayRouter {
             }
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
-        let kv_transfer_candidates = self.kv_transfer_candidates(&tiered);
+        // Lookups retain candidates only while hints are on.
+        let kv_transfer_candidates = tiered.take_kv_transfer_candidates();
 
         Ok(PendingRequest {
             uuid,
@@ -1402,15 +1401,6 @@ impl OfflineReplayRouter {
             block_hashes,
             kv_transfer_candidates,
         })
-    }
-
-    /// The lookup's KV fetch candidates, kept as production keeps them: only
-    /// while lookups retain the transfer chain.
-    fn kv_transfer_candidates(&self, tiered: &TieredMatchDetails) -> Option<KvTransferCandidates> {
-        self.indexer
-            .retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
-            .flatten()
     }
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
