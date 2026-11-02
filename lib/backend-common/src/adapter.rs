@@ -198,6 +198,13 @@ fn ended_by_engine_cleanup(
     is_cancelled && engine_cleanup.is_cancelled() && !ctx.is_stopped() && !ctx.is_killed()
 }
 
+fn engine_shutdown_error() -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+        .message("worker shut down before the request finished")
+        .build()
+}
+
 /// JSON-shaped wrapper around [`EngineAdapter`] for the `local_endpoint_registry`.
 ///
 /// The runtime's `HealthCheckManager` fires canary requests as
@@ -464,16 +471,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             // so the per-chunk overhead is one timestamp + one Vec push.
             let mut itl_samples_ms: Vec<f64> = Vec::new();
             let mut last_token_at: Option<Instant> = None;
-            while let Some(item) = inner.next().await {
+            let mut shutdown_after: Option<Result<LLMEngineOutput, DynamoError>> = None;
+            loop {
+                let item = match shutdown_after.take() {
+                    Some(item) => item,
+                    None => match inner.next().await {
+                        Some(item) => item,
+                        None => break,
+                    },
+                };
                 chunk_count += 1;
-                let item = match item {
-                    item if ended_by_engine_cleanup(&item, &engine_cleanup, &*stream_ctx) => {
-                        Err(DynamoError::builder()
-                            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                            .message("worker shut down before the request finished")
-                            .build())
+                let item = if ended_by_engine_cleanup(&item, &engine_cleanup, &*stream_ctx) {
+                    match item {
+                        // Forward the chunk's tokens first: the migrated
+                        // continuation resumes from the tokens it has seen.
+                        Ok(mut chunk) if !chunk.token_ids.is_empty() => {
+                            chunk.finish_reason = None;
+                            shutdown_after = Some(Err(engine_shutdown_error()));
+                            Ok(chunk)
+                        }
+                        _ => Err(engine_shutdown_error()),
                     }
-                    item => item,
+                } else {
+                    item
                 };
                 match item {
                     Ok(mut chunk) => {
@@ -1074,9 +1094,11 @@ mod tests {
 
     /// Ends every request as cancelled after one token, as a sidecar engine
     /// does when `cleanup()` tears down its native streams: with a `Cancelled`
-    /// terminal, or with a cancellation error as SGLang's native HTTP path does.
+    /// terminal (with or without a final token), or with a cancellation error
+    /// as SGLang's native HTTP path does.
     struct CancelledAfterTokenEngine {
         as_error: bool,
+        terminal_token: bool,
     }
 
     #[async_trait]
@@ -1095,6 +1117,8 @@ mod tests {
                     .error_type(ErrorType::Backend(BackendError::Cancelled))
                     .message("native request cancelled")
                     .build())
+            } else if self.terminal_token {
+                Ok(LLMEngineOutput::cancelled().with_tokens(vec![12]))
             } else {
                 Ok(LLMEngineOutput::cancelled())
             };
@@ -1123,7 +1147,10 @@ mod tests {
         ] {
             let cleanup = CancellationToken::new();
             let adapter = EngineAdapter::new(
-                Arc::new(CancelledAfterTokenEngine { as_error }),
+                Arc::new(CancelledAfterTokenEngine {
+                    as_error,
+                    terminal_token: false,
+                }),
                 DisaggregationMode::Aggregated,
             )
             .with_engine_cleanup(cleanup.clone());
@@ -1158,6 +1185,40 @@ mod tests {
             }
             assert!(stream.next().await.is_none());
         }
+    }
+
+    /// A cleanup-cancelled terminal that carries tokens forwards them before
+    /// `EngineShutdown`, so the migrated continuation does not lose them.
+    #[tokio::test]
+    async fn adapter_forwards_tokens_of_cleanup_cancelled_terminal() {
+        let cleanup = CancellationToken::new();
+        let adapter = EngineAdapter::new(
+            Arc::new(CancelledAfterTokenEngine {
+                as_error: false,
+                terminal_token: true,
+            }),
+            DisaggregationMode::Aggregated,
+        )
+        .with_engine_cleanup(cleanup.clone());
+        let mut stream = adapter
+            .generate(Context::new(make_request(vec![1])))
+            .await
+            .unwrap();
+        let first = stream.next().await.expect("first chunk");
+        assert_eq!(first.data.expect("token").token_ids, vec![11]);
+
+        cleanup.cancel();
+        let last_tokens = stream.next().await.expect("final tokens");
+        let chunk = last_tokens.data.expect("final tokens chunk");
+        assert_eq!(chunk.token_ids, vec![12]);
+        assert!(chunk.finish_reason.is_none());
+        let terminal = stream.next().await.expect("terminal");
+        let err = terminal.error.expect("EngineShutdown error");
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(stream.next().await.is_none());
     }
 
     // -------------------------------------------------------------------
