@@ -628,21 +628,25 @@ pub(super) fn new_tool_use_id() -> String {
 /// The `tool_use` id a client sees for a backend tool call, derived from the
 /// chat completion id and the backend id so request traces can record the same
 /// id. Backend ids such as `call-1` repeat across requests; the chat completion
-/// id keeps the result unique. A missing id, or a repeat within `issued`, gets
-/// a random id.
+/// id keeps the result unique. A backend id repeated within one response gets
+/// the next derived id, so a trace deriving in the same order gets the same
+/// ids. A missing id gets a random id.
 pub fn tool_use_id(chat_id: &str, backend_id: &str, issued: &mut HashSet<String>) -> String {
-    let id = if chat_id.is_empty() || backend_id.is_empty() {
-        new_tool_use_id()
-    } else {
-        let digest = xxhash_rust::xxh3::xxh3_128(format!("{chat_id}\n{backend_id}").as_bytes());
-        format!("toolu_{digest:032x}")
-    };
-    if issued.insert(id.clone()) {
+    if chat_id.is_empty() || backend_id.is_empty() {
+        let id = new_tool_use_id();
+        issued.insert(id.clone());
         return id;
     }
-    let id = new_tool_use_id();
-    issued.insert(id.clone());
-    id
+    let mut key = format!("{chat_id}\n{backend_id}");
+    let mut repeat = 0u32;
+    loop {
+        let id = format!("toolu_{:032x}", xxhash_rust::xxh3::xxh3_128(key.as_bytes()));
+        if issued.insert(id.clone()) {
+            return id;
+        }
+        repeat += 1;
+        key = format!("{chat_id}\n{backend_id}\n{repeat}");
+    }
 }
 
 /// Decide what an Anthropic `tool_use` block shows for a call whose `arguments` do not
@@ -2883,8 +2887,13 @@ mod anthropic_types_tests {
             id,
             tool_use_id("chatcmpl-r2", "call_1", &mut HashSet::new())
         );
-        // A backend id repeated within one response still gets its own id.
-        assert_ne!(id, tool_use_id("chatcmpl-r1", "call_1", &mut issued));
+        // A backend id repeated within one response gets its own id, and a
+        // trace deriving the same calls in order gets the same ids.
+        let repeated = tool_use_id("chatcmpl-r1", "call_1", &mut issued);
+        assert_ne!(id, repeated);
+        let mut traced = HashSet::new();
+        assert_eq!(id, tool_use_id("chatcmpl-r1", "call_1", &mut traced));
+        assert_eq!(repeated, tool_use_id("chatcmpl-r1", "call_1", &mut traced));
 
         let response = converted_tool_use_response_for(
             dynamo_protocols::types::FinishReason::ToolCalls,
